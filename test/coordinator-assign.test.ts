@@ -22,7 +22,9 @@ import {
   NODE_LIVENESS_WINDOW_MS,
   readPlacement,
   registerNode,
+  retireEnvironment,
   setReplicas,
+  unretireEnvironment,
 } from "../src/core/registry/index.ts";
 import { deleteKey } from "../src/core/registry/cas.ts";
 import { environmentKey, placementKey } from "../src/core/registry/paths.ts";
@@ -270,6 +272,71 @@ describe("placements of environments that are gone", () => {
       placementKey(PROJECT, "staging"),
     ]);
     expect(await readPlacement(clock.ctx, PROJECT, "prod")).not.toBeNull();
+  });
+});
+
+describe("placements of environments that are retired", () => {
+  it("gives a retired environment no nodes, and takes its placement away", async () => {
+    await environmentNamed("prod");
+    const coordinator = coordinatorFor(NODE_A);
+    await coordinator.runOnce();
+    expect(await readPlacement(clock.ctx, PROJECT, "prod")).not.toBeNull();
+
+    await retireEnvironment(clock.ctx, PROJECT, "prod");
+    clock.tick(TTL_MS / 3);
+    await coordinator.runOnce();
+
+    /*
+     * An environment on its way out is served by no node, so it is given none.
+     * The record goes with it: a decision naming nodes that have all stopped
+     * running it is one nothing acts on, and every node would re-read it on
+     * every pass until the reap finally arrived.
+     */
+    expect(await readPlacement(clock.ctx, PROJECT, "prod")).toBeNull();
+    expect(coordinator.status().lastAssignment?.removed).toEqual([placementKey(PROJECT, "prod")]);
+    expect(coordinator.status().lastAssignment?.changed).toEqual([]);
+  });
+
+  it("writes no placement for one that was retired before it was ever placed", async () => {
+    await environmentNamed("prod");
+    await retireEnvironment(clock.ctx, PROJECT, "prod");
+    const coordinator = coordinatorFor(NODE_A);
+
+    await coordinator.runOnce();
+
+    expect(await readPlacement(clock.ctx, PROJECT, "prod")).toBeNull();
+    expect(written.filter((key) => key.startsWith("_scalo/placement/"))).toEqual([]);
+  });
+
+  it("places it again on the next tick after it is taken back", async () => {
+    await environmentNamed("prod");
+    const coordinator = coordinatorFor(NODE_A);
+    await retireEnvironment(clock.ctx, PROJECT, "prod");
+    await coordinator.runOnce();
+    expect(await readPlacement(clock.ctx, PROJECT, "prod")).toBeNull();
+
+    await unretireEnvironment(clock.ctx, PROJECT, "prod");
+    clock.tick(TTL_MS / 3);
+    await coordinator.runOnce();
+
+    /* Decided from the same inputs as before, by a pure function of the
+       environments and the live nodes — so unretiring restores exactly what
+       retiring took away. */
+    expect((await readPlacement(clock.ctx, PROJECT, "prod"))?.nodes).toEqual([NODE_A, NODE_B]);
+  });
+
+  it("leaves the environments beside it entirely alone", async () => {
+    await environmentNamed("prod");
+    await environmentNamed("staging");
+    const coordinator = coordinatorFor(NODE_A);
+    await coordinator.runOnce();
+
+    await retireEnvironment(clock.ctx, PROJECT, "staging");
+    clock.tick(TTL_MS / 3);
+    await coordinator.runOnce();
+
+    expect(await readPlacement(clock.ctx, PROJECT, "staging")).toBeNull();
+    expect((await readPlacement(clock.ctx, PROJECT, "prod"))?.nodes).toEqual([NODE_A, NODE_B]);
   });
 });
 

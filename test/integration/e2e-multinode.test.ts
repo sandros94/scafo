@@ -40,8 +40,12 @@ import type { AgentState } from "../../src/agent/app.ts";
 import type { OperatorKeyFile } from "../../src/cli/commands/keygen.ts";
 import { signNodeToken } from "../../src/core/auth/node-token.ts";
 import {
+  claimDomain,
   createEnvironment,
+  domainKey,
   listNodes,
+  NODE_LIVENESS_WINDOW_MS,
+  placementKey,
   readJson,
   type RegistryContext,
   environmentKey,
@@ -95,6 +99,10 @@ const PREVIEW_IDLE_TTL_S = 3600;
  * it, so the assertion still handles the other outcome.
  */
 const SOLO = "single";
+/** Deployed to both nodes, retired out of service, then force-deleted. */
+const SUNSET = "sunset";
+/** Claimed for {@link SUNSET}, so its deletion has a claim to release too. */
+const SUNSET_DOMAIN = "sunset.example.test";
 
 const NODE_A = "node-a";
 const NODE_B = "node-b";
@@ -123,6 +131,18 @@ const POLL_MS = 500;
  */
 const REASSIGN_DEADLINE_MS = 240_000;
 const REASSIGN_STEP_TIMEOUT_MS = 300_000;
+/**
+ * Ceiling for a reassignment that follows a node being asked to STOP.
+ *
+ * The arithmetic is the whole claim draining makes: the node writes `drainingAt`
+ * before it stops anything, so the coordinator counts it out on its next
+ * assignment tick (a third of the 15s lease TTL) rather than after the 90s
+ * liveness window. What is left is the shutdown itself, that tick, the
+ * survivor's next reconcile pass (5s) and a process start with its readiness
+ * gate. Generous for all of that, and still comfortably inside the window a
+ * crash cannot beat.
+ */
+const GRACEFUL_DRAIN_BUDGET_MS = 60_000;
 
 /** The lease TTL the agent runs with; failover is bounded by a few of these. */
 const LEASE_TTL_MS = 15_000;
@@ -484,6 +504,190 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   );
 
   it(
+    "moves a single-replica environment off a node that was asked to stop, FAST",
+    async () => {
+      /*
+       * The counterpart to the kill test below, and the whole point of draining.
+       * A node that is KILLED keeps its last heartbeat and stays a placement
+       * candidate for the liveness window — 90s in which its environments are
+       * assigned to a process that is already gone. A node asked to stop writes
+       * `drainingAt` before it stops anything else, and the coordinator counts it
+       * out on its very next assignment pass instead.
+       *
+       * `docker stop` rather than `docker kill`: the difference IS the test.
+       */
+      const leaving = soloHolder;
+      const survivor = nodes.find((node) => node.id !== leaving.id) as Node;
+
+      const stoppedAt = Date.now();
+      const stopped = await run(
+        "docker",
+        /* Ample grace, so a slow shutdown is never SIGKILLed halfway through the
+           drain write this test is about. */
+        ["stop", "-t", "30", leaving.agent.getId()],
+        REPO_ROOT,
+        { PATH: env.PATH ?? "" },
+      );
+      expect(stopped.code, stopped.output).toBe(0);
+      leaving.running = false;
+
+      /* Measured from the moment the operator asked, which is what an operator
+         actually waits through: the shutdown itself is part of the window. */
+      await until(
+        `${survivor.id} to take ${SOLO} over and serve it`,
+        REASSIGN_DEADLINE_MS,
+        async () => {
+          const state = await stateOf(survivor);
+          if (placedNodes(state, SOLO)?.includes(survivor.id) !== true) return null;
+          if (!state.processes.some(runsSolo)) return null;
+
+          const answer = await httpGet(survivor.httpPort, "/", { host: soloHost() });
+          return answer.status === 200 && answer.body.includes('"v1"') ? answer : null;
+        },
+      );
+      const drainedMs = Date.now() - stoppedAt;
+
+      /* The bound that says draining did something: a crash CANNOT be noticed
+         before the liveness window has run out, so anything under it is time
+         the graceful path bought back. */
+      expect(drainedMs).toBeLessThan(NODE_LIVENESS_WINDOW_MS);
+      /* And the useful bound: about one assignment tick, one reconcile pass and
+         one process start, rather than "somewhat better than a crash". */
+      expect(drainedMs).toBeLessThan(GRACEFUL_DRAIN_BUDGET_MS);
+
+      /* The node said so itself, rather than being counted out. */
+      const record = await readJson<NodeRecord>(registry, nodeKey(leaving.id));
+      expect(record?.value.drainingAt, "the stopped node never recorded its drain").toBeDefined();
+      expect(record?.value.heartbeatAt).toBeDefined();
+
+      /* Held by reference and filled in as the step goes on; the report is
+         printed from `observed` once every test has run. */
+      const drain: Record<string, unknown> = {
+        stopped: leaving.id,
+        tookOver: survivor.id,
+        ms: drainedMs,
+        livenessWindowMs: NODE_LIVENESS_WINDOW_MS,
+        budgetMs: GRACEFUL_DRAIN_BUDGET_MS,
+        drainingAt: record?.value.drainingAt,
+        heartbeatAt: record?.value.heartbeatAt,
+      };
+      observed.gracefulDrain = drain;
+
+      /* Brought back for the tests that follow, which need two nodes again. The
+         boot rewrites the record wholesale, so the drain flag goes with it and
+         placement gives the node work once more — which is the other half of the
+         feature, and is asserted here rather than assumed. */
+      const restartedAt = Date.now();
+      const started = await run("docker", ["start", leaving.agent.getId()], REPO_ROOT, {
+        PATH: env.PATH ?? "",
+      });
+      expect(started.code, started.output).toBe(0);
+      leaving.running = true;
+
+      const back = await until(
+        `${leaving.id} to be serving again with no drain flag left on it`,
+        DEADLINE_MS,
+        async () => {
+          const node = await readJson<NodeRecord>(registry, nodeKey(leaving.id));
+          if (node === null || node.value.drainingAt !== undefined) return null;
+          const answer = await httpGet(leaving.agentPort, "/v1/health", {});
+          return answer.status === 200 ? node.value : null;
+        },
+      );
+      expect(back.drainingAt).toBeUndefined();
+      drain.restoredMs = Date.now() - restartedAt;
+
+      /* Rendezvous hashing is deterministic, so the fleet settles back to the
+         same decision it made before — and the tests after this one can go on
+         reading `soloHolder` and `soloProcess` as they did. */
+      soloHolder = await until(`${SOLO} to settle on one node again`, DEADLINE_MS, async () => {
+        const states = await Promise.all(nodes.map(async (node) => stateOf(node)));
+        const running = nodes.filter((_, index) => states[index].processes.some(runsSolo));
+        if (running.length !== 1) return null;
+        const named = states.map((state) => placedNodes(state, SOLO));
+        if (named.some((ids) => ids?.length !== 1 || ids[0] !== running[0].id)) return null;
+        return running[0];
+      });
+      soloProcess = (await stateOf(soloHolder)).processes.find(runsSolo) as ProcessStatus;
+      drain.settledBackOn = soloHolder.id;
+    },
+    REASSIGN_STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "retires an environment out of service, then refuses to delete it until it is forced",
+    async () => {
+      expectCleanExit(await runCli(deployArgs(await stageApp("v1"), SUNSET), {}));
+      for (const node of nodes) await untilServes(node, sunsetHost(), "v1");
+      /* A custom domain, so the deletion has a claim to release as well as a
+         record to remove. */
+      await claimDomain(registry, SUNSET_DOMAIN, PROJECT, SUNSET);
+
+      /* Retirement is a plain record update, so it is asked of whichever node
+         the operator happens to have a URL for. */
+      const retiredAt = Date.now();
+      const retired = await runCli(envArgs("retire", SUNSET, nodes[0]), {});
+      expectCleanExit(retired);
+      expect(retired.output).toContain("retired");
+
+      /* It leaves by the same door a reassignment uses: no process, no route,
+         so each Caddy answers the empty 200 it gives any host it has none for. */
+      for (const node of nodes) {
+        await until(`${node.id} to stop serving ${SUNSET}`, DEADLINE_MS, async () => {
+          const state = await stateOf(node);
+          if (state.processes.some(runsSunset)) return null;
+          const answer = await httpGet(node.httpPort, "/", { host: sunsetHost() });
+          return answer.status === 200 && !answer.body.includes('"v1"') ? answer : null;
+        });
+      }
+      const stoppedMs = Date.now() - retiredAt;
+
+      /* And the coordinator takes the placement with it: an environment nothing
+         serves is one no decision should still name nodes for. */
+      await until(`the placement of ${SUNSET} to be removed`, DEADLINE_MS, async () =>
+        (await readJson(registry, placementKey(PROJECT, SUNSET))) === null ? true : null,
+      );
+
+      /*
+       * Asked of the node that is NOT the coordinator, on purpose: the refusal
+       * and the forced deletion both have to survive the hop to whoever holds
+       * the lease — including the `force` in the query, which a forward that
+       * carried only the path would silently drop.
+       */
+      const coordinator = await coordinatorNode();
+      const asked = nodes.find((node) => node.id !== coordinator.id) as Node;
+
+      const refused = await runCli(envArgs("delete", SUNSET, asked), {});
+      expect(refused.code, refused.output).toBe(1);
+      /* The refusal has to name the way forward, not just the rule it enforced. */
+      expect(refused.output).toContain("grace");
+      expect(refused.output).toContain("force");
+      expect(await readJson(registry, environmentKey(PROJECT, SUNSET))).not.toBeNull();
+
+      const forced = await runCli(envArgs("delete", SUNSET, asked, ["--force"]), {});
+      expectCleanExit(forced);
+      expect(forced.output).toContain(environmentKey(PROJECT, SUNSET));
+
+      /* Gone from the bucket, which is the only place it ever existed — record,
+         placement and the claim that named it. */
+      expect(await readJson(registry, environmentKey(PROJECT, SUNSET))).toBeNull();
+      expect(await readJson(registry, placementKey(PROJECT, SUNSET))).toBeNull();
+      expect(await readJson(registry, domainKey(SUNSET_DOMAIN))).toBeNull();
+
+      observed.retirement = {
+        environment: SUNSET,
+        retiredThrough: nodes[0].id,
+        deletedThrough: asked.id,
+        coordinator: coordinator.id,
+        stoppedServingMs: stoppedMs,
+        refusal: refused.output.trim().slice(0, 400),
+        deleted: forced.output.trim().slice(0, 600),
+      };
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
     "hands coordination to the survivor when the coordinator's node dies, and keeps serving",
     async () => {
       const coordinator = await coordinatorNode();
@@ -699,9 +903,35 @@ function soloHost(): string {
   return `${PROJECT}--${SOLO}.${PLATFORM_DOMAIN}`;
 }
 
+function sunsetHost(): string {
+  return `${PROJECT}--${SUNSET}.${PLATFORM_DOMAIN}`;
+}
+
 /** Whether a process on a node is one serving {@link SOLO}. */
 function runsSolo(process: ProcessStatus): boolean {
   return process.state === "running" && process.id.startsWith(`${PROJECT}--${SOLO}--`);
+}
+
+/** Whether a process on a node is one serving {@link SUNSET}. */
+function runsSunset(process: ProcessStatus): boolean {
+  return process.state === "running" && process.id.startsWith(`${PROJECT}--${SUNSET}--`);
+}
+
+/** One `scalo env <action>` run from the host against `node`'s agent API. */
+function envArgs(action: string, environment: string, node: Node, extra: string[] = []): string[] {
+  return [
+    "env",
+    action,
+    "--project",
+    PROJECT,
+    "--env",
+    environment,
+    "--agent",
+    `http://127.0.0.1:${String(node.agentPort)}`,
+    "--key",
+    keyPath,
+    ...extra,
+  ];
 }
 
 /** The nodes a state says an environment was placed on, or null when it has no decision. */

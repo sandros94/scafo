@@ -9,13 +9,16 @@ import {
   createBuild,
   createEnvironment,
   createProject,
+  DEFAULT_RETIREMENT_GRACE_MS,
   executeReap,
   flipAlias,
   getEnvironment,
   type LeaseHandle,
   planReap,
   type ReapOptions,
+  retireEnvironment,
   setSplit,
+  unretireEnvironment,
 } from "../src/core/registry/index.ts";
 import {
   artifactKey,
@@ -261,6 +264,102 @@ describe("executeReap", () => {
     await expect(getEnvironment(clock.ctx, PROJECT, "preview")).resolves.toMatchObject({
       name: "preview",
     });
+    await invariants(store);
+  });
+});
+
+describe("retired environments", () => {
+  it("proposes a long-lived one once its grace has run out, saying that is why", async () => {
+    await retireEnvironment(clock.ctx, PROJECT, "prod");
+    clock.tick(DEFAULT_RETIREMENT_GRACE_MS);
+
+    const plan = await planReap(clock.ctx, opts);
+
+    /* Idleness is never asked about: `prod` is long-lived and would never
+       qualify on its own. Retirement is an explicit order to decommission, and
+       the grace is the whole of the wait it asked for. */
+    const proposed = plan.environments.find((target) => target.env === "prod");
+    expect(proposed?.reason).toContain("retired at");
+    expect(proposed?.reason).toContain("grace");
+  });
+
+  it("proposes an ephemeral one on the same terms, whatever its idle window says", async () => {
+    /* Retirement outranks the idle rule rather than sitting beside it: an
+       ephemeral environment retired and left alone is decommissioned, and the
+       reason recorded against its deletion should say so. */
+    await retireEnvironment(clock.ctx, PROJECT, "preview");
+    activity.set(PROJECT, "preview", new Date(clock.nowMs()));
+    clock.tick(DEFAULT_RETIREMENT_GRACE_MS);
+
+    const plan = await planReap(clock.ctx, opts);
+
+    expect(plan.environments.find((target) => target.env === "preview")?.reason).toContain(
+      "retired at",
+    );
+  });
+
+  it("proposes nothing while the grace still has time on it", async () => {
+    await retireEnvironment(clock.ctx, PROJECT, "prod");
+    clock.tick(DEFAULT_RETIREMENT_GRACE_MS - HOUR_MS);
+
+    const plan = await planReap(clock.ctx, opts);
+
+    expect(plan.environments.map((target) => target.env)).not.toContain("prod");
+  });
+
+  it("never makes an idle ephemeral environment disappear SOONER", async () => {
+    /*
+     * `preview` is already reapable for idleness in this fixture. Retiring it
+     * must not be the thing that deletes it: an operator retires an environment
+     * to be able to take it back, and a reap that ran a minute later would take
+     * that away from them.
+     */
+    expect((await planReap(clock.ctx, opts)).environments.map((t) => t.env)).toEqual(["preview"]);
+
+    await retireEnvironment(clock.ctx, PROJECT, "preview");
+
+    expect((await planReap(clock.ctx, opts)).environments).toEqual([]);
+  });
+
+  it("honours a grace the caller shortened", async () => {
+    await retireEnvironment(clock.ctx, PROJECT, "prod");
+    clock.tick(HOUR_MS * 2);
+
+    const plan = await planReap(clock.ctx, { ...opts, graceMs: HOUR_MS });
+
+    expect(plan.environments.map((target) => target.env)).toContain("prod");
+  });
+
+  it("re-checks retirement against fresh state, sparing one taken back since", async () => {
+    await retireEnvironment(clock.ctx, PROJECT, "prod");
+    clock.tick(DEFAULT_RETIREMENT_GRACE_MS);
+    const plan = await planReap(clock.ctx, opts);
+    expect(plan.environments.map((target) => target.env)).toContain("prod");
+
+    /* The operator changes their mind while the plan is in flight. */
+    await unretireEnvironment(clock.ctx, PROJECT, "prod");
+    const result = await executeReap(clock.ctx, plan, lease, opts);
+
+    expect(result.deleted).not.toContain(environmentKey(PROJECT, "prod"));
+    expect(result.skipped).toContainEqual({
+      target: environmentKey(PROJECT, "prod"),
+      reason: expect.stringContaining("retired past its grace"),
+    });
+    await expect(getEnvironment(clock.ctx, PROJECT, "prod")).resolves.toMatchObject({
+      name: "prod",
+    });
+    await invariants(store);
+  });
+
+  it("carries the deletion out when it is still retired at the second look", async () => {
+    await retireEnvironment(clock.ctx, PROJECT, "prod");
+    clock.tick(DEFAULT_RETIREMENT_GRACE_MS);
+    const plan = await planReap(clock.ctx, opts);
+
+    const result = await executeReap(clock.ctx, plan, lease, opts);
+
+    expect(result.deleted).toContain(environmentKey(PROJECT, "prod"));
+    await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, "prod"), "not-found");
     await invariants(store);
   });
 });

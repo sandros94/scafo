@@ -14,8 +14,11 @@ import {
   createBuild,
   createEnvironment,
   createProject,
+  deletePlacement,
   flipAlias,
   type LeaseHandle,
+  retireEnvironment,
+  unretireEnvironment,
   writePlacement,
 } from "../src/core/registry/index.ts";
 import type { RegistryContext } from "../src/core/registry/context.ts";
@@ -145,6 +148,68 @@ describe("what is left out for reasons other than placement", () => {
        ONTO this node and still contributes nothing, because it has no build. */
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
     expect(state.placements.map((view) => view.env)).toEqual(["fresh"]);
+  });
+
+  it("leaves out a RETIRED environment, however squarely it is placed here", async () => {
+    await writePlacement(registry, PROJECT, "prod", [SELF], lease);
+    await retireEnvironment(registry, PROJECT, "prod");
+
+    const state = await readDesired(registry, { nodeId: SELF });
+
+    /*
+     * It leaves by the same door a reassignment uses: it drops out of the
+     * desired state, the next pass stops whatever runs for it, and because the
+     * routing is rendered from what this node actually runs, its hosts stop
+     * resolving with its processes. Nothing in the route renderer knows what
+     * retirement is.
+     */
+    expect(state.environments).toEqual([]);
+    /* The decision is still reported as long as the record is there — the
+       coordinator drops it on its next pass, and this is the truth until then. */
+    expect(state.placements).toEqual([
+      { project: PROJECT, env: "prod", nodes: [SELF], self: true },
+    ]);
+  });
+
+  it("takes it straight back the moment it is unretired", async () => {
+    await retireEnvironment(registry, PROJECT, "prod");
+    expect((await readDesired(registry, { nodeId: SELF })).environments).toEqual([]);
+
+    await unretireEnvironment(registry, PROJECT, "prod");
+
+    /* Reversibility, seen from the node: nothing was taken away from the
+       environment, so nothing has to be rebuilt to serve it again. */
+    const state = await readDesired(registry, { nodeId: SELF });
+    expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
+    expect(state.environments[0].build.id).toBe(BUILD);
+  });
+
+  it("leaves a retired environment out on every node, not just this one", async () => {
+    await retireEnvironment(registry, PROJECT, "prod");
+
+    for (const nodeId of [SELF, PEER, "node-c"]) {
+      expect((await readDesired(registry, { nodeId })).environments, nodeId).toEqual([]);
+    }
+  });
+
+  it("keeps it out once the coordinator has dropped its placement record too", async () => {
+    /*
+     * The state a retired environment actually settles in, and the one that
+     * reads backwards: the coordinator DELETES the placement of an environment
+     * nothing should serve, and a missing placement record is the fallback that
+     * means "served everywhere". The two together would start a retired
+     * environment on every node in the installation if the retirement check
+     * were not what decides this.
+     */
+    await writePlacement(registry, PROJECT, "prod", [SELF, PEER], lease);
+    await retireEnvironment(registry, PROJECT, "prod");
+    await deletePlacement(registry, PROJECT, "prod", lease);
+
+    for (const nodeId of [SELF, PEER, "node-c"]) {
+      const state = await readDesired(registry, { nodeId });
+      expect(state.environments, nodeId).toEqual([]);
+      expect(state.placements, nodeId).toEqual([]);
+    }
   });
 
   it("reads nothing at all out of an empty registry", async () => {

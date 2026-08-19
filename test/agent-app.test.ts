@@ -11,13 +11,24 @@ import { H3, HTTPError } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { type AgentState, createAgentApp } from "../src/agent/app.ts";
+import { type AgentState, createAgentApp, type EnvironmentRetirement } from "../src/agent/app.ts";
 import type { AgentConfig } from "../src/agent/config.ts";
 import { renderProblem } from "../src/agent/middleware.ts";
 import { signNodeToken } from "../src/core/auth/index.ts";
 import type { ProblemDetails } from "../src/core/error.ts";
 import { ScaloError } from "../src/core/error.ts";
-import { acquireLease, registerNode } from "../src/core/registry/index.ts";
+import {
+  acquireLease,
+  claimDomain,
+  createEnvironment,
+  createProject,
+  deleteKey,
+  environmentKey,
+  getEnvironment,
+  registerNode,
+  retireEnvironment,
+  unretireEnvironment,
+} from "../src/core/registry/index.ts";
 import type { NodeRecord } from "../src/core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
@@ -25,6 +36,9 @@ import { ctxWith, type ManualClock } from "./_helpers.ts";
 
 const NODE_ID = "node-a";
 const VERSION = "0.0.0-test";
+const PROJECT = "app";
+const ENVIRONMENT = "prod";
+const CUSTOM_DOMAIN = "shop.example.com";
 
 /** What the stand-in supervisor reports; the state route must pass it through. */
 const PROCESSES: ProcessStatus[] = [
@@ -181,6 +195,136 @@ describe("GET /v1/state", () => {
   });
 });
 
+describe("POST /v1/environments/:project/:env/retire", () => {
+  it("retires the environment and answers with it, without any lease at all", async () => {
+    await deployable();
+
+    const response = await app.request(`/v1/environments/${PROJECT}/${ENVIRONMENT}/retire`, {
+      method: "POST",
+      headers: await bearer(),
+    });
+    const body = (await response.json()) as EnvironmentRetirement;
+
+    /*
+     * No coordinator runs on this app and none is needed. Retiring is a single
+     * conditional update on one record — nothing two nodes doing it at once
+     * could corrupt — so any node carries it out itself rather than forwarding
+     * it to whoever holds the lease.
+     */
+    expect(response.status).toBe(200);
+    expect(body.environment.retiredAt).toBe(new Date(clock.nowMs()).toISOString());
+    expect(await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).toEqual(body.environment);
+  });
+
+  it("takes it back through the matching route", async () => {
+    await deployable();
+    await retireEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
+
+    const response = await app.request(`/v1/environments/${PROJECT}/${ENVIRONMENT}/unretire`, {
+      method: "POST",
+      headers: await bearer(),
+    });
+    const body = (await response.json()) as EnvironmentRetirement;
+
+    expect(response.status).toBe(200);
+    expect(body.environment.retiredAt).toBeUndefined();
+  });
+
+  it("answers a missing environment as a miss rather than as a retirement", async () => {
+    const response = await app.request(`/v1/environments/${PROJECT}/ghost/retire`, {
+      method: "POST",
+      headers: await bearer(),
+    });
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({ type: "urn:scalo:not-found" });
+  });
+
+  it("refuses both routes to a caller with no token", async () => {
+    await deployable();
+
+    for (const suffix of ["retire", "unretire"]) {
+      const response = await app.request(`/v1/environments/${PROJECT}/${ENVIRONMENT}/${suffix}`, {
+        method: "POST",
+      });
+
+      expect(response.status, suffix).toBe(401);
+      await expect(response.json(), suffix).resolves.toEqual(AUTH_INVALID_PROBLEM);
+    }
+    /* And nothing happened to the environment on the way to being refused. */
+    expect((await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).retiredAt).toBeUndefined();
+  });
+});
+
+describe("GET /v1/ingress/ask", () => {
+  it("answers for a label under a platform domain without reading anything", async () => {
+    /* Deliberately read-free: a platform label is a name this installation
+       serves by shape, whether or not an environment exists behind it. */
+    const response = await app.request(
+      `/v1/ingress/ask?domain=${PROJECT}--${ENVIRONMENT}.apps.test`,
+    );
+
+    expect(response.status).toBe(200);
+  });
+
+  it("answers for a custom domain an environment has claimed", async () => {
+    await deployable();
+    await claimDomain(clock.ctx, CUSTOM_DOMAIN, PROJECT, ENVIRONMENT);
+
+    const response = await app.request(`/v1/ingress/ask?domain=${CUSTOM_DOMAIN}`);
+
+    expect(response.status).toBe(200);
+  });
+
+  it("REFUSES a claim whose environment has been retired", async () => {
+    await deployable();
+    await claimDomain(clock.ctx, CUSTOM_DOMAIN, PROJECT, ENVIRONMENT);
+    await retireEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
+
+    const response = await app.request(`/v1/ingress/ask?domain=${CUSTOM_DOMAIN}`);
+
+    /*
+     * What this endpoint answers decides whether a certificate is issued. A
+     * retired environment is being decommissioned and its routes are already
+     * gone, so a certificate minted for it now would be a fresh public record of
+     * a name that answers nothing — outliving the environment itself.
+     */
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({ type: "urn:scalo:not-found" });
+  });
+
+  it("answers for it again once it is taken back", async () => {
+    await deployable();
+    await claimDomain(clock.ctx, CUSTOM_DOMAIN, PROJECT, ENVIRONMENT);
+    await retireEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
+    await unretireEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
+
+    const response = await app.request(`/v1/ingress/ask?domain=${CUSTOM_DOMAIN}`);
+
+    expect(response.status).toBe(200);
+  });
+
+  it("refuses a claim left behind by an environment that is gone", async () => {
+    await deployable();
+    await claimDomain(clock.ctx, CUSTOM_DOMAIN, PROJECT, ENVIRONMENT);
+    await deleteKey(clock.ctx, environmentKey(PROJECT, ENVIRONMENT));
+
+    /* The half-finished deletion state, and the same answer for the same
+       reason: there is nothing left to serve the certificate for. */
+    const response = await app.request(`/v1/ingress/ask?domain=${CUSTOM_DOMAIN}`);
+
+    expect(response.status).toBe(404);
+  });
+
+  it("refuses a domain nobody claimed, and anything that is not a host", async () => {
+    for (const domain of ["unclaimed.example.com", "not a host", ""]) {
+      const response = await app.request(`/v1/ingress/ask?domain=${encodeURIComponent(domain)}`);
+
+      expect(response.status, domain).toBe(404);
+    }
+  });
+});
+
 describe("routes that do not exist", () => {
   it("answers as a problem document, without pretending it is an auth failure", async () => {
     for (const path of ["/v1/nope", "/", "/v1/state/extra"]) {
@@ -306,4 +450,10 @@ function mint(): Promise<string> {
 
 async function bearer(): Promise<Record<string, string>> {
   return { authorization: `Bearer ${await mint()}` };
+}
+
+/** A project with one environment in it, for the routes that need something to act on. */
+async function deployable(): Promise<void> {
+  await createProject(clock.ctx, { slug: PROJECT });
+  await createEnvironment(clock.ctx, PROJECT, { name: ENVIRONMENT });
 }
