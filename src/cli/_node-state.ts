@@ -7,21 +7,16 @@
  * readable by its owner alone.
  */
 
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { ScaloError } from "../core/error.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
+import { writeSecretFile } from "./_utils.ts";
 
 /** Name of the state file within the state directory. */
 export const NODE_STATE_FILE: string = "node.json";
-
-/** Mode the state file is written with: nothing but its owner may read a private key. */
-export const NODE_STATE_MODE: number = 0o600;
-
-/** Mode a state directory created by the node is given. */
-export const STATE_DIR_MODE: number = 0o700;
 
 /** Who this node is, as persisted between boots. */
 export interface NodeState {
@@ -83,19 +78,7 @@ async function generateNodeState(id: string): Promise<NodeState> {
 }
 
 async function writeNodeState(stateDir: string, path: string, state: NodeState): Promise<void> {
-  /* Only a directory this call created is narrowed: an operator who pointed the
-     node at a directory of their own chose its mode themselves. */
-  const created = await mkdir(stateDir, { recursive: true, mode: STATE_DIR_MODE });
-  if (created !== undefined) await chmod(created, STATE_DIR_MODE);
-
-  await writeFile(path, `${JSON.stringify(state, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: NODE_STATE_MODE,
-  });
-  /* Written first, then narrowed: the mode above only applies to a file this
-     call created, and a private key that briefly existed readable by everyone is
-     a private key that has to be assumed read. */
-  await chmod(path, NODE_STATE_MODE);
+  await writeSecretFile(stateDir, path, `${JSON.stringify(state, null, 2)}\n`);
 }
 
 async function readNodeState(path: string): Promise<NodeState | null> {

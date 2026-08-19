@@ -1,12 +1,40 @@
 /* The runtime bits of the CLI: file reads, the package version, failure output. */
 
-import { readFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { isScaloError } from "../core/error.ts";
 
 /** Directory a node run by root keeps its state in. */
 export const SYSTEM_STATE_DIR: string = "/var/lib/scalo";
+
+/** Mode a file holding key material is written with: nothing but its owner may read one. */
+export const SECRET_FILE_MODE: number = 0o600;
+
+/** Mode a state directory scalo created itself is given. */
+export const STATE_DIR_MODE: number = 0o700;
+
+/**
+ * Writes key material into a state directory, creating the directory when it is
+ * not there, so that neither can be read by anyone but their owner.
+ *
+ * The mode is applied twice on purpose. `writeFile`'s own only applies to a file
+ * this call created, and a private key that briefly existed readable by everyone
+ * is a private key that has to be assumed read; the directory is narrowed only
+ * when this call created it, because an operator who pointed scalo at a
+ * directory of their own chose its mode themselves.
+ */
+export async function writeSecretFile(
+  stateDir: string,
+  path: string,
+  contents: string,
+): Promise<void> {
+  const created = await mkdir(stateDir, { recursive: true, mode: STATE_DIR_MODE });
+  if (created !== undefined) await chmod(created, STATE_DIR_MODE);
+
+  await writeFile(path, contents, { encoding: "utf8", mode: SECRET_FILE_MODE });
+  await chmod(path, SECRET_FILE_MODE);
+}
 
 /** Reads a file as text, or null when it does not exist. */
 export async function readTextFile(path: string): Promise<string | null> {

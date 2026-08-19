@@ -11,7 +11,7 @@ import { ScaloError } from "../core/error.ts";
 import { DEFAULT_PORT_RANGE_START } from "../core/placement/ports.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
 import type { TransportConfig, TransportMode } from "../core/types/transport.ts";
-import { assertHost, isHost } from "../core/utils/host.ts";
+import { assertHost, isHost, parseInterfaceAddress } from "../core/utils/host.ts";
 
 export interface AgentConfig {
   bucket: {
@@ -63,6 +63,30 @@ export interface AgentConfig {
    * for a node that stays on loopback: see {@link TransportConfig}.
    */
   transport?: TransportConfig;
+  /**
+   * Where this node sits on the WireGuard tunnel, when one was configured at
+   * all. Only read when `transport.driver` is `wireguard`; anything configured
+   * here for a node running another transport is ignored.
+   */
+  wireguard?: WireguardConfig;
+}
+
+/**
+ * What an operator stated about this node's WireGuard interface.
+ *
+ * `address` and `endpoint` are both required of a node whose transport is
+ * `wireguard` — the first is what the interface is given and what peers route
+ * to, the second is what peers send its traffic to — but they are optional here
+ * because a half-written pair must be reported as the missing setting it is,
+ * naming the flag and the variable, rather than as a parse failure.
+ */
+export interface WireguardConfig {
+  /** The node's own address on the tunnel, with its prefix length: `10.83.0.1/24`. */
+  address?: string;
+  /** `host:port` peers reach this node's tunnel at: `203.0.113.7:51820`. */
+  endpoint?: string;
+  /** UDP port the interface listens on; {@link DEFAULT_WIREGUARD_PORT} by default. */
+  port: number;
 }
 
 /** How this node gets at the variables its environments are configured with. */
@@ -131,6 +155,9 @@ export const DEFAULT_PROBE_PATH: string = "/";
 /** Address runtime processes bind to when none is configured: loopback only. */
 export const DEFAULT_BIND_HOST: string = "127.0.0.1";
 
+/** UDP port a WireGuard interface listens on when none is configured. */
+export const DEFAULT_WIREGUARD_PORT: number = 51_820;
+
 /** A `host:port` pair, as written for a listener or an advertised address. */
 export interface HostPort {
   host: string;
@@ -150,22 +177,56 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
     file: await readConfigFile(opts),
   };
 
-  const listen = resolve("listen", sources) ?? DEFAULT_LISTEN;
+  const configuredListen = resolve("listen", sources);
   const internalListen = resolve("internalListen", sources);
-  const advertise = resolve("advertise", sources);
+  const configuredAdvertise = resolve("advertise", sources);
   const id = resolve("nodeId", sources);
   const stateDir = resolve("stateDir", sources);
 
   /* Parsed for their side effect: an unusable address must fail the boot, not
      the first request that tries to use it. */
-  parseHostPort(listen, ORIGINS.listen.file);
-  if (internalListen !== undefined) parseHostPort(internalListen, ORIGINS.internalListen.file);
-  if (advertise !== undefined) parseHostPort(advertise, ORIGINS.advertise.file);
+  if (configuredListen !== undefined) parseHostPort(configuredListen, ORIGINS.listen.file);
+  const internalAddress =
+    internalListen === undefined
+      ? undefined
+      : parseHostPort(internalListen, ORIGINS.internalListen.file);
+  if (configuredAdvertise !== undefined) {
+    parseHostPort(configuredAdvertise, ORIGINS.advertise.file);
+  }
   if (id !== undefined) assertNodeId(id);
 
   const ingress = resolveIngress(sources);
   const keyFile = resolve("varsetKeyFile", sources);
   const transport = resolveTransport(sources);
+  const wireguard = resolveWireguard(sources);
+
+  /*
+   * Inside a tunnel, the only address that means anything is the tunnel's. A
+   * node told to run WireGuard therefore puts its whole surface there — the
+   * agent listener, the address it advertises, and the runtime processes —
+   * rather than on loopback no peer can reach or on a wildcard that names no
+   * interface a peer could dial.
+   *
+   * All three remain plain defaults: anything the operator wrote wins. They
+   * move together on purpose, because advertising an address the listener never
+   * bound is a node whose peers are refused by it and told nothing.
+   */
+  const tunnelHost =
+    transport?.driver === "wireguard" && wireguard?.address !== undefined
+      ? (parseInterfaceAddress(wireguard.address)?.host ?? undefined)
+      : undefined;
+
+  const listen =
+    configuredListen ??
+    (tunnelHost === undefined
+      ? DEFAULT_LISTEN
+      : formatHostPort(tunnelHost, parseHostPort(DEFAULT_LISTEN, ORIGINS.listen.file).port));
+  const listenAddress = parseHostPort(listen, ORIGINS.listen.file);
+  const advertise =
+    configuredAdvertise ??
+    (tunnelHost === undefined
+      ? undefined
+      : formatHostPort(tunnelHost, (internalAddress ?? listenAddress).port));
 
   return {
     bucket: {
@@ -182,12 +243,19 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
       binPath: resolve("celldBin", sources) ?? DEFAULT_RUNTIME_BIN,
       portRangeStart: resolvePort("portRangeStart", sources, DEFAULT_PORT_RANGE_START),
       probePath: resolve("probePath", sources) ?? DEFAULT_PROBE_PATH,
-      bindHost: resolveBindHost(sources),
+      bindHost: resolveBindHost(sources) ?? tunnelHost ?? DEFAULT_BIND_HOST,
     },
     ...(ingress === undefined ? {} : { ingress }),
     ...(keyFile === undefined ? {} : { varsets: { keyFile } }),
     ...(transport === undefined ? {} : { transport }),
+    ...(wireguard === undefined ? {} : { wireguard }),
   };
+}
+
+/** Writes `host:port`, bracketing an IPv6 literal the way a URL authority does. */
+export function formatHostPort(host: string, port: number): string {
+  const literal = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  return `${literal}:${String(port)}`;
 }
 
 /**
@@ -298,7 +366,25 @@ const ORIGINS = {
     file: "varsets.keyFile",
   },
   transport: { flag: "transport", env: ["SCALO_TRANSPORT"], file: "transport.driver" },
+  wgAddress: { flag: "wg-address", env: ["SCALO_WG_ADDRESS"], file: "wireguard.address" },
+  wgEndpoint: { flag: "wg-endpoint", env: ["SCALO_WG_ENDPOINT"], file: "wireguard.endpoint" },
+  wgPort: { flag: "wg-port", env: ["SCALO_WG_PORT"], file: "wireguard.port" },
 } satisfies Record<string, Origin>;
+
+/**
+ * How one WireGuard setting is asked for, spelled out in every way it can be
+ * given. What the refusal for a missing one is written from, so an operator
+ * reading it does not have to find the documentation first.
+ */
+export function describeWireguardSetting(setting: "address" | "endpoint" | "port"): string {
+  const origin: Origin =
+    setting === "address"
+      ? ORIGINS.wgAddress
+      : setting === "endpoint"
+        ? ORIGINS.wgEndpoint
+        : ORIGINS.wgPort;
+  return `"${origin.file}" (--${origin.flag}, or ${origin.env.join(" or ")})`;
+}
 
 type Setting = keyof typeof ORIGINS;
 
@@ -354,12 +440,16 @@ function resolvePort(setting: Setting, sources: Sources, fallback: number): numb
 }
 
 /**
- * The address runtime processes bind to. A bare host rather than `host:port`:
- * the ports come from the allocator, and only the interface is configurable.
+ * The address runtime processes bind to, or undefined when the operator named
+ * none. A bare host rather than `host:port`: the ports come from the allocator,
+ * and only the interface is configurable.
+ *
+ * Undefined rather than the default, because the caller has one more thing to
+ * consider first — a node inside a tunnel binds to the tunnel.
  */
-function resolveBindHost(sources: Sources): string {
+function resolveBindHost(sources: Sources): string | undefined {
   const value = resolve("bindHost", sources);
-  if (value === undefined) return DEFAULT_BIND_HOST;
+  if (value === undefined) return undefined;
 
   /* `0.0.0.0` and `::` are not DNS names, but they are the whole point of this
      setting — the wildcards that make a process reachable from another node. */
@@ -433,6 +523,37 @@ function resolveTransport(sources: Sources): TransportConfig | undefined {
     });
   }
   return { driver: driver as TransportMode };
+}
+
+/**
+ * Where this node sits on the tunnel, or undefined when nothing was configured.
+ *
+ * A missing half is left missing rather than refused here: whether it is
+ * required at all depends on the transport, and the refusal that knows the
+ * answer is the one that boots the node. What IS refused is a value that could
+ * never work — an address without a prefix length, an endpoint that is not
+ * `host:port` — because those are typos wherever they were written.
+ */
+function resolveWireguard(sources: Sources): WireguardConfig | undefined {
+  const address = resolve("wgAddress", sources);
+  const endpoint = resolve("wgEndpoint", sources);
+  const port = resolvePort("wgPort", sources, DEFAULT_WIREGUARD_PORT);
+  if (address === undefined && endpoint === undefined) return undefined;
+
+  if (address !== undefined && parseInterfaceAddress(address) === null) {
+    throw new ScaloError("invalid-input", "Invalid configuration value", {
+      detail:
+        `"${ORIGINS.wgAddress.file}" must be this node's tunnel address with its prefix ` +
+        `length, such as "10.83.0.1/24", got ${JSON.stringify(address)}`,
+    });
+  }
+  if (endpoint !== undefined) parseHostPort(endpoint, ORIGINS.wgEndpoint.file);
+
+  return {
+    ...(address === undefined ? {} : { address }),
+    ...(endpoint === undefined ? {} : { endpoint }),
+    port,
+  };
 }
 
 async function readConfigFile(

@@ -5,8 +5,10 @@ import { defineCommand, runMain } from "citty";
 import { readPackageVersion } from "./_utils.ts";
 import { deploy } from "./commands/deploy.ts";
 import { keygen } from "./commands/keygen.ts";
+import { trust } from "./commands/trust.ts";
 import { up } from "./commands/up.ts";
 import { varset } from "./commands/varset.ts";
+import { wg } from "./commands/wg.ts";
 
 const main = defineCommand({
   meta: async () => ({
@@ -14,7 +16,7 @@ const main = defineCommand({
     version: await readPackageVersion(),
     description: "Self-hosted serverless deployment platform for JS apps",
   }),
-  subCommands: { up, keygen, deploy, varset },
+  subCommands: { up, keygen, deploy, varset, trust, wg },
 });
 
 await runMain(main);

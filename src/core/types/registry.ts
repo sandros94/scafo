@@ -41,6 +41,23 @@ export interface CoordinatorLease {
   fence: number;
 }
 
+/**
+ * Where a node sits on the WireGuard tunnel its installation runs on, as it
+ * publishes it for its peers to build their own configuration from.
+ *
+ * Present only on a node whose transport is `wireguard`, and written by that
+ * node itself: the keys are the operator's, generated with the operator's own
+ * `wg`, and scalo never holds the private half in the registry.
+ */
+export interface NodeWireguard {
+  /** X25519 public key, base64 as `wg pubkey` prints it. */
+  publicKey: string;
+  /** `host:port` peers send this node's tunnel traffic to. */
+  endpoint: string;
+  /** The node's own address on the tunnel, with its prefix length: `10.83.0.1/24`. */
+  address: string;
+}
+
 /** A registered node running the agent. Key: `_scalo/nodes/<id>.json`. */
 export interface NodeRecord {
   v: 1;
@@ -50,6 +67,8 @@ export interface NodeRecord {
   addresses: { internal: string; agentPort: number };
   /** Filled in by the node itself once it has probed its own hardware. */
   capacity?: { cores: number; memMb: number; cgroup: boolean; probedAt: string };
+  /** Its place on the tunnel, when the installation runs one. */
+  wireguard?: NodeWireguard;
   capabilities?: Record<string, unknown>;
   labels?: Record<string, string>;
 }

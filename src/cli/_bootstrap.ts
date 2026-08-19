@@ -12,14 +12,23 @@ import type { AgentConfig } from "../agent/config.ts";
 import { advertisedAddress, parseHostPort } from "../agent/config.ts";
 import type { CapacityPlan } from "../core/capacity/compute.ts";
 import { ScaloError } from "../core/error.ts";
+import { readJson, updateJson } from "../core/registry/cas.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
 import { registerNode } from "../core/registry/nodes.ts";
-import type { NodeRecord } from "../core/types/registry.ts";
+import { nodeKey } from "../core/registry/paths.ts";
+import type { NodeRecord, NodeWireguard } from "../core/types/registry.ts";
 import { isLoopbackHost } from "../core/utils/host.ts";
 import { createUns3Store } from "../drivers/store/uns3.ts";
 import { loadOrCreateNodeState, type NodeState } from "./_node-state.ts";
 import { resolveDefaultStateDir } from "./_utils.ts";
 import { readVarsetKeyFile } from "./_varset-key.ts";
+import {
+  readWireguardKeys,
+  resolveWireguardSettings,
+  WG_CONF_FILE,
+  type WireguardOptions,
+  wireguardStateDir,
+} from "./_wireguard.ts";
 
 /** The registry this node reads and writes, as configured. */
 export function createRegistry(config: AgentConfig): RegistryContext {
@@ -87,9 +96,41 @@ export function assertTransportConfigured(config: AgentConfig): void {
     detail:
       `${named} reaches beyond loopback, so node-to-node and operator traffic would cross ` +
       `a network this node has not been told about: set --transport wireguard to tunnel it ` +
-      `(assisted setup lands in a later release), or --transport none to state that the ` +
-      `network is already private and trusted, such as a cloud vRack`,
+      `(then run "scalo wg init" to set the tunnel up), or --transport none to state that ` +
+      `the network is already private and trusted, such as a cloud vRack`,
   });
+}
+
+/**
+ * This node's place on the tunnel as its record publishes it, or undefined when
+ * it runs no tunnel.
+ *
+ * Reads the keys, never makes them: a node whose transport is `wireguard` and
+ * whose keys are not on disk has not had `scalo wg init` run on it, and is
+ * refused with `ScaloError("invalid-input")` saying so. Booting anyway would put
+ * the node on a network the tunnel does not carry, which is the exact thing
+ * `--transport wireguard` was asked to prevent.
+ */
+export async function loadWireguardRecord(
+  config: AgentConfig,
+  opts?: WireguardOptions,
+): Promise<NodeWireguard | undefined> {
+  const settings = resolveWireguardSettings(config, opts);
+  if (settings === undefined) return undefined;
+
+  const stateDir = wireguardStateDir(config, opts);
+  const keys = await readWireguardKeys(stateDir);
+  if (keys === null) {
+    throw new ScaloError("invalid-input", "WireGuard tunnel is not set up", {
+      detail:
+        `this node's transport is "wireguard" but "${stateDir}" holds no tunnel keypair: ` +
+        `run "scalo wg init" on this node to set one up, register it with its peers and ` +
+        `render "${stateDir}/${WG_CONF_FILE}", then bring the interface up before starting ` +
+        `the agent`,
+    });
+  }
+
+  return { publicKey: keys.publicKey, endpoint: settings.endpoint, address: settings.address };
 }
 
 export interface NodeIdentityOptions {
@@ -114,6 +155,13 @@ export interface RegisterNodeOptions {
   config: AgentConfig;
   state: NodeState;
   capacity?: CapacityPlan;
+  /**
+   * Where this node sits on the tunnel, when it runs one. It is published here
+   * because a peer cannot build a route to a node it has not been told the key,
+   * endpoint and address of, and the registry is the only thing the nodes of an
+   * installation share.
+   */
+  wireguard?: NodeWireguard;
 }
 
 /**
@@ -145,10 +193,42 @@ export async function registerThisNode(
             probedAt: opts.capacity.probedAt,
           },
         }),
+    ...(opts.wireguard === undefined ? {} : { wireguard: opts.wireguard }),
   };
 
   await registerNode(registry, record);
   return record;
+}
+
+/**
+ * Publishes where this node sits on the tunnel, leaving the rest of its record
+ * exactly as it stands.
+ *
+ * A narrow update rather than a re-registration, because this is what a command
+ * about the tunnel alone is entitled to change. `registerNode` replaces a record
+ * wholesale from the configuration it is handed, and `scalo wg init` is run from
+ * an operator's shell rather than from the agent's own environment — one run
+ * with a config the agent does not use would otherwise move the node's
+ * advertised address and capacity along with its tunnel details, and nothing
+ * would report it until a peer failed to reach it.
+ *
+ * A node with no record yet is registered outright: `scalo wg init` before the
+ * first `scalo up` is the order the setup instructions ask for.
+ */
+export async function publishWireguard(
+  registry: RegistryContext,
+  opts: RegisterNodeOptions & { wireguard: NodeWireguard },
+): Promise<NodeRecord> {
+  const key = nodeKey(opts.state.id);
+  if ((await readJson<NodeRecord>(registry, key)) === null) {
+    return registerThisNode(registry, opts);
+  }
+
+  const updated = await updateJson<NodeRecord>(registry, key, (current) => ({
+    ...current,
+    wireguard: opts.wireguard,
+  }));
+  return updated.value;
 }
 
 /**

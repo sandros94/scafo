@@ -19,6 +19,7 @@ import {
   createRegistry,
   loadNodeIdentity,
   loadVarsetKey,
+  loadWireguardRecord,
   registerThisNode,
 } from "../_bootstrap.ts";
 import { readPackageVersion, readTextFile, reportFailure } from "../_utils.ts";
@@ -38,6 +39,15 @@ const upArgs: ArgsDef = {
   "internal-listen": { type: "string", description: "host:port for node-to-node traffic" },
   "advertise": { type: "string", description: "host:port other nodes reach this one at" },
   "transport": { type: "string", description: "What carries peer traffic (wireguard, none)" },
+  "wg-address": {
+    type: "string",
+    description: "This node's tunnel address with its prefix length (10.83.0.1/24)",
+  },
+  "wg-endpoint": {
+    type: "string",
+    description: "host:port peers send this node's tunnel traffic to",
+  },
+  "wg-port": { type: "string", description: "UDP port the tunnel interface listens on (51820)" },
   "platform-domains": { type: "string", description: "Comma-separated apex domains to serve" },
   "varset-key-file": { type: "string", description: "File holding the varset encryption key" },
   "celld-bin": { type: "string", description: "Executable that runs an environment" },
@@ -72,6 +82,9 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   /* Checked before anything is written or bound: a node that should not be on
      this network must not have registered itself on it first. */
   assertTransportConfigured(config);
+  /* Same reason, one step further in: a node whose transport is a tunnel it has
+     never been set up on must not register an address its peers cannot reach. */
+  const wireguard = await loadWireguardRecord(config);
 
   const state = await loadNodeIdentity(config);
   const varsetKey = await loadVarsetKey(config);
@@ -84,7 +97,12 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   }
 
   const capacity = await probeCapacity(createNodeHostReader());
-  await registerThisNode(registry, { config, state, capacity });
+  await registerThisNode(registry, {
+    config,
+    state,
+    capacity,
+    ...(wireguard === undefined ? {} : { wireguard }),
+  });
 
   const supervisor = createChildSupervisor();
   supervisor.onExit((status) => {
