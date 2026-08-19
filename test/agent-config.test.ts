@@ -634,6 +634,82 @@ describe("which ingress the node drives", () => {
   });
 });
 
+describe("the Traefik entryPoints the routers attach to", () => {
+  const TRAEFIK_ENV: Record<string, string> = { ...REQUIRED_ENV, SCALO_INGRESS_DRIVER: "traefik" };
+
+  it("reads a comma-separated list from the environment", async () => {
+    const config = await loadAgentConfig({
+      env: { ...TRAEFIK_ENV, SCALO_TRAEFIK_ENTRYPOINTS: "web, websecure" },
+    });
+
+    expect(config.ingress).toEqual({ driver: "traefik", entryPoints: ["web", "websecure"] });
+  });
+
+  it("lets a flag override what the environment names", async () => {
+    const config = await loadAgentConfig({
+      env: { ...TRAEFIK_ENV, SCALO_TRAEFIK_ENTRYPOINTS: "web" },
+      flags: { "traefik-entrypoints": "websecure" },
+    });
+
+    expect(config.ingress).toEqual({ driver: "traefik", entryPoints: ["websecure"] });
+  });
+
+  it("reads the array the file carries, which is what the text parses into", async () => {
+    const config = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(
+        CONFIG_PATH,
+        JSON.stringify({ ingress: { driver: "traefik", entryPoints: ["websecure"] } }),
+      ),
+      env: REQUIRED_ENV,
+    });
+
+    expect(config.ingress).toEqual({ driver: "traefik", entryPoints: ["websecure"] });
+  });
+
+  it("leaves them absent when nothing names any, so the driver's default applies", async () => {
+    const config = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCALO_INGRESS_DRIVER: "traefik" },
+    });
+
+    expect(config.ingress?.entryPoints).toBeUndefined();
+  });
+
+  it("refuses a list that names nothing, because Traefik reads it as everything", async () => {
+    /* Routers with no entryPoints attach to EVERY entryPoint Traefik has —
+       including a TLS listener scalo holds no certificate for — so a mistyped
+       list must fail the boot rather than claim the whole surface. */
+    const error = await rejectionOf(() =>
+      loadAgentConfig({
+        env: { ...REQUIRED_ENV, SCALO_INGRESS_DRIVER: "traefik", SCALO_TRAEFIK_ENTRYPOINTS: " , " },
+      }),
+    );
+
+    expect(error.code).toBe("invalid-input");
+    expect(error.detail).toContain("ingress.entryPoints");
+  });
+
+  it("REFUSES them alongside Caddy, which has no entryPoints to attach to", async () => {
+    /* The mirror of the Caddy-setting refusal: an operator who wrote a Traefik
+       setting under Caddy has misread which ingress applies, and dropping it
+       silently leaves a node routing through one they did not select. */
+    for (const env of [
+      { SCALO_TRAEFIK_ENTRYPOINTS: "websecure" },
+      {
+        SCALO_INGRESS_DRIVER: "caddy",
+        SCALO_CADDY_ADMIN: "http://127.0.0.1:2019",
+        SCALO_TRAEFIK_ENTRYPOINTS: "websecure",
+      },
+    ]) {
+      const error = await rejectionOf(() => loadAgentConfig({ env: { ...REQUIRED_ENV, ...env } }));
+
+      expect(error.code).toBe("invalid-input");
+      expect(error.detail).toContain("caddy");
+      expect(error.detail).toContain("websecure");
+    }
+  });
+});
+
 /** A reader that resolves the given text for one path, and null for every other. */
 function fileAt(path: string, text: string): (asked: string) => Promise<string | null> {
   return async (asked: string): Promise<string | null> => (asked === path ? text : null);
