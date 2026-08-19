@@ -27,6 +27,7 @@ import { environmentKey } from "../src/core/registry/paths.ts";
 import { createProject } from "../src/core/registry/projects.ts";
 import { importVarsetKey, putVarset, sealVarset } from "../src/core/registry/varsets.ts";
 import type { PlainVarset } from "../src/core/types/registry.ts";
+import type { IngressDesired, IngressDriver } from "../src/core/types/ingress.ts";
 import type { ProbeOptions, RuntimeDriver, RuntimeProcess } from "../src/core/types/runtime.ts";
 import type { RuntimeSpecInput } from "../src/core/types/runtime.ts";
 import type { CasStore, StoredObject } from "../src/core/types/store.ts";
@@ -149,6 +150,76 @@ describe("one pass over a node that runs nothing yet", () => {
       failures: [],
       processes: [],
     });
+  });
+});
+
+describe("publishing what the node serves", () => {
+  it("hands the ingress the routing of what the pass left ready", async () => {
+    const applied: IngressDesired[] = [];
+    const world = await seededWorld({
+      ingress: { apply: (d) => (applied.push(d), Promise.resolve()) },
+    });
+
+    await world.reconciler.runOnce();
+
+    /* One pass: the process was started and passed its gate, so it is routable
+       under the environment's label and under its build's own hash. */
+    expect(applied).toHaveLength(1);
+    expect(applied[0]?.routes.map((route) => route.host)).toEqual([
+      `${PROJECT}--${BUILD_ONE}.apps.test`,
+      `${PROJECT}--${ENVIRONMENT}.apps.test`,
+    ]);
+    expect(applied[0]?.routes[0]?.backend).toEqual({
+      project: PROJECT,
+      env: ENVIRONMENT,
+      build: BUILD_ONE,
+      port: PORT_RANGE_START,
+    });
+  });
+
+  it("routes nothing to a process that never passed its gate", async () => {
+    const applied: IngressDesired[] = [];
+    const world = await seededWorld({
+      ingress: { apply: (d) => (applied.push(d), Promise.resolve()) },
+    });
+    world.driver.gate = (): Promise<boolean> => Promise.resolve(false);
+
+    await world.reconciler.runOnce();
+
+    expect(applied[0]?.routes).toEqual([]);
+  });
+
+  it("records an ingress it could not reach, and finishes the pass anyway", async () => {
+    const world = await seededWorld({
+      ingress: {
+        apply: () =>
+          Promise.reject(new ScaloError("capability-missing", "Ingress could not be configured")),
+      },
+    });
+
+    const plan = await world.reconciler.runOnce();
+    const status = world.reconciler.status();
+
+    /* The pass did its whole job: an ingress outside the node must never be
+       able to stop the node reconciling itself. */
+    expect(plan.map((action) => action.type)).toEqual(["activate", "start", "await-ready"]);
+    expect(world.supervisor.started).toHaveLength(1);
+    expect(status.processes[0]?.ready).toBe(true);
+    expect(status.failures).toEqual([
+      {
+        at: expect.any(String),
+        subject: "ingress",
+        detail: expect.stringContaining("Ingress could not be configured"),
+      },
+    ]);
+  });
+
+  it("asks nothing of an ingress the node does not have", async () => {
+    const world = await seededWorld();
+
+    await world.reconciler.runOnce();
+
+    expect(world.reconciler.status().failures).toEqual([]);
   });
 });
 
@@ -380,6 +451,8 @@ interface WorldOptions {
   holdVarsetKey?: boolean;
   capacity?: CapacityPlan;
   intervalMs?: number;
+  /** Where the node publishes what it serves; absent leaves it publishing nowhere. */
+  ingress?: IngressDriver;
 }
 
 interface World {
@@ -419,6 +492,7 @@ async function seededWorld(opts?: WorldOptions): Promise<World> {
   const agent = agentContext(ctx, supervisor, {
     ...(varsetKey === undefined ? {} : { varsetKey }),
     ...(opts?.capacity === undefined ? {} : { capacity: opts.capacity }),
+    ...(opts?.ingress === undefined ? {} : { ingress: opts.ingress }),
   });
 
   return {
@@ -435,6 +509,7 @@ async function seededWorld(opts?: WorldOptions): Promise<World> {
 interface AgentOptions {
   varsetKey?: CryptoKey;
   capacity?: CapacityPlan;
+  ingress?: IngressDriver;
 }
 
 /** Everything the loop acts through, with this node's configuration. */
@@ -460,6 +535,7 @@ function agentContext(
   const agent: AgentContext = { config, registry, supervisor, version: "0.0.0-test" };
   if (opts?.varsetKey !== undefined) agent.varsetKey = opts.varsetKey;
   if (opts?.capacity !== undefined) agent.capacity = opts.capacity;
+  if (opts?.ingress !== undefined) agent.ingress = opts.ingress;
   return agent;
 }
 
