@@ -40,6 +40,9 @@ const ENVIRONMENT = "prod";
 const BUILD_ONE = "1111aaaa";
 const BUILD_TWO = "2222bbbb";
 
+/** A second environment, for the cases about what one environment's failure costs the others. */
+const OTHER = "staging";
+
 /** First loopback port pair of this node's range. */
 const PORT_RANGE_START = 42_000;
 
@@ -234,15 +237,23 @@ describe("what the registry says is wanted", () => {
     expect(world.supervisor.started).toEqual([]);
   });
 
-  it("starts a process without configuration when this node cannot open the varset", async () => {
-    /* Distributing the varset key to nodes is not implemented yet, so a node
-       without one serves the environment with no variables set rather than
-       refusing to serve it at all. */
+  it("refuses to start an environment whose varset this node holds no key for", async () => {
+    /* A process started without the variables its environment is configured with
+       would come up, pass its gate and serve requests against whatever its code
+       falls back to — a misconfiguration nothing reports. */
     const world = await seededWorld({ varset: true });
 
     await world.reconciler.runOnce();
+    const status = world.reconciler.status();
 
-    expect(world.driver.specs[0].vars).toBeNull();
+    expect(world.supervisor.started).toEqual([]);
+    expect(status.failures).toHaveLength(1);
+    expect(status.failures[0]).toMatchObject({
+      action: "start",
+      subject: `${PROJECT}/${ENVIRONMENT}`,
+    });
+    /* Actionable: an operator reading the node's status learns what to hand it. */
+    expect(status.failures[0].detail).toContain("varset-key-file");
   });
 
   it("opens the varset when this node holds its key", async () => {
@@ -251,6 +262,45 @@ describe("what the registry says is wanted", () => {
     await world.reconciler.runOnce();
 
     expect(world.driver.specs[0].vars).toEqual(VARSET);
+  });
+
+  it("records the environment it cannot decrypt and serves every other one", async () => {
+    const world = await seededWorld({
+      varset: true,
+      wrongVarsetKey: true,
+      otherEnvironment: OTHER,
+    });
+
+    await world.reconciler.runOnce();
+    const status = world.reconciler.status();
+
+    /* One environment's key problem is that environment's alone: the pass runs
+       to the end and the rest of the node is served. */
+    expect(world.supervisor.started.map((spec) => spec.id)).toEqual([
+      formatProcessId({ project: PROJECT, env: OTHER, build: BUILD_ONE }),
+    ]);
+    expect(status.failures).toHaveLength(1);
+    expect(status.failures[0]).toMatchObject({
+      action: "start",
+      subject: `${PROJECT}/${ENVIRONMENT}`,
+    });
+    expect(status.failures[0].detail).toContain("decrypted");
+  });
+
+  it("leaves the process an environment already has running when its key stops working", async () => {
+    const world = await seededWorld({ varset: true, holdVarsetKey: true, otherBuild: BUILD_TWO });
+    await world.reconciler.runOnce();
+    /* The key is rotated out from under the node, and a new build is flipped to. */
+    world.agent.varsetKey = await randomVarsetKey();
+    await flipAlias(world.registry, PROJECT, ENVIRONMENT, BUILD_TWO);
+
+    await world.reconciler.runOnce();
+    const status = world.reconciler.status();
+
+    expect(world.supervisor.started.map((spec) => spec.id)).toEqual([processIdOf(BUILD_ONE)]);
+    expect(world.supervisor.stopped).toEqual([]);
+    expect(status.processes.map((process) => process.processId)).toEqual([processIdOf(BUILD_ONE)]);
+    expect(status.failures[0]?.detail).toContain("decrypted");
   });
 });
 
@@ -449,6 +499,10 @@ interface WorldOptions {
   varset?: boolean;
   /** Whether this node holds the key that opens it. */
   holdVarsetKey?: boolean;
+  /** Whether this node holds a key, but not the one the varset was sealed with. */
+  wrongVarsetKey?: boolean;
+  /** A second environment of the same project, serving the same build with no varset. */
+  otherEnvironment?: string;
   capacity?: CapacityPlan;
   intervalMs?: number;
   /** Where the node publishes what it serves; absent leaves it publishing nowhere. */
@@ -457,6 +511,8 @@ interface WorldOptions {
 
 interface World {
   registry: RegistryContext;
+  /** What the loop acts through; a case may take this node's key away mid-run. */
+  agent: AgentContext;
   supervisor: FakeSupervisor;
   driver: FakeDriver;
   reconciler: Reconciler;
@@ -486,6 +542,13 @@ async function seededWorld(opts?: WorldOptions): Promise<World> {
     await setEnvironmentVarset(ctx, PROJECT, ENVIRONMENT, sealed.id);
     if (opts.holdVarsetKey === true) varsetKey = key;
   }
+  /* A key of this node's own, which opens nothing that was sealed above. */
+  if (opts?.wrongVarsetKey === true) varsetKey = await randomVarsetKey();
+
+  if (opts?.otherEnvironment !== undefined) {
+    await createEnvironment(ctx, PROJECT, { name: opts.otherEnvironment });
+    await flipAlias(ctx, PROJECT, opts.otherEnvironment, build);
+  }
 
   const supervisor = fakeSupervisor();
   const driver = fakeDriver();
@@ -497,6 +560,7 @@ async function seededWorld(opts?: WorldOptions): Promise<World> {
 
   return {
     registry: ctx,
+    agent,
     supervisor,
     driver,
     reconciler: createReconciler(agent, driver, {
@@ -532,7 +596,13 @@ function agentContext(
     runtime: { binPath: "celld", portRangeStart: PORT_RANGE_START, probePath: "/" },
   };
 
-  const agent: AgentContext = { config, registry, supervisor, version: "0.0.0-test" };
+  const agent: AgentContext = {
+    config,
+    nodeId: "node-a",
+    registry,
+    supervisor,
+    version: "0.0.0-test",
+  };
   if (opts?.varsetKey !== undefined) agent.varsetKey = opts.varsetKey;
   if (opts?.capacity !== undefined) agent.capacity = opts.capacity;
   if (opts?.ingress !== undefined) agent.ingress = opts.ingress;
@@ -703,6 +773,10 @@ function deferred<T>(): Deferred<T> {
     resolve = settle;
   });
   return { promise, resolve };
+}
+
+function randomVarsetKey(): Promise<CryptoKey> {
+  return importVarsetKey(crypto.getRandomValues(new Uint8Array(32)));
 }
 
 function sleep(ms: number): Promise<void> {

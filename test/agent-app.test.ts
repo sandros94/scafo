@@ -57,6 +57,7 @@ beforeEach(async () => {
 
   app = createAgentApp({
     config: agentConfig(),
+    nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
     version: VERSION,
@@ -159,6 +160,7 @@ describe("GET /v1/state", () => {
     const token = await mint();
     const other = createAgentApp({
       config: agentConfig(),
+      nodeId: NODE_ID,
       registry: clock.ctx,
       supervisor: fakeSupervisor(),
       version: VERSION,

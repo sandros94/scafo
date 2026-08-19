@@ -102,6 +102,7 @@ beforeEach(async () => {
 
   agent = {
     config: agentConfig(),
+    nodeId: OPERATOR,
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
     version: "0.0.0-test",

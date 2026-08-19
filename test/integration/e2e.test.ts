@@ -181,6 +181,14 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         SCALO_S3_SECRET_KEY: SECRET_KEY,
         SCALO_S3_REGION: REGION,
         SCALO_NODE_ID: NODE_ID,
+        /* The listener below binds every interface, which the agent refuses
+           without being told what network that is. Inside a container of its
+           own, on a private docker network, it is the trusted-network case. */
+        SCALO_TRANSPORT: "none",
+        /* Container-local, and explicitly so: the working directory is this
+           repository bind-mounted at /work, and the node's identity must not be
+           written into a checkout. */
+        SCALO_STATE_DIR: "/var/lib/scalo",
         SCALO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
         SCALO_CADDY_ADMIN: `http://127.0.0.1:${String(CADDY_ADMIN_PORT)}`,
         /* Peers reach a single node on loopback; without this the advertised

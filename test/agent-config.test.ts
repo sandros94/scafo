@@ -120,7 +120,7 @@ describe("source precedence", () => {
 
     expect(config.bucket.region).toBe(DEFAULT_REGION);
     expect(config.node.listen).toBe(DEFAULT_LISTEN);
-    expect(config.node.id).toMatch(/^node-[0-9a-f]{8}$/);
+    expect(config.node.id).toBeUndefined();
   });
 });
 
@@ -407,26 +407,46 @@ describe("node identity and defaults", () => {
     expect(config.bucket.prefix).toBeUndefined();
   });
 
-  it("invents a node id when none is configured, and a different one each time", async () => {
-    const ids = new Set<string>();
+  it("invents no node id, leaving the one the node persisted to stand", async () => {
+    /* An id is half of an identity, the key that speaks for it being the other:
+       inventing one here would hand a node a different identity on every boot,
+       so an unconfigured id is left unset and the node's state directory
+       supplies it. */
+    const config = await loadAgentConfig({ env: REQUIRED_ENV });
 
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const config = await loadAgentConfig({ env: REQUIRED_ENV });
-
-      expect(config.node.id).toMatch(/^node-[0-9a-f]{8}$/);
-      ids.add(config.node.id);
-    }
-
-    /* A generated id is not an identity to keep: it is fresh on every load. */
-    expect(ids.size).toBe(5);
+    expect(config.node.id).toBeUndefined();
+    expect(config.node.stateDir).toBeUndefined();
   });
 
-  it("keeps a configured node id instead of inventing one", async () => {
+  it("keeps a configured node id, which pins the identity the node keeps", async () => {
     const config = await loadAgentConfig({
       env: { ...REQUIRED_ENV, SCALO_NODE_ID: "node_west-1" },
     });
 
     expect(config.node.id).toBe("node_west-1");
+  });
+
+  it("takes the state directory from a flag, the environment or the file", async () => {
+    const fromFlag = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCALO_STATE_DIR: "/from/env" },
+      flags: { "state-dir": "/from/flag" },
+    });
+    const fromEnv = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ node: { stateDir: "/from/file" } })),
+      env: { ...REQUIRED_ENV, SCALO_STATE_DIR: "/from/env" },
+    });
+    const fromFile = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ node: { stateDir: "/from/file" } })),
+      env: REQUIRED_ENV,
+    });
+
+    expect([fromFlag.node.stateDir, fromEnv.node.stateDir, fromFile.node.stateDir]).toEqual([
+      "/from/flag",
+      "/from/env",
+      "/from/file",
+    ]);
   });
 
   it("refuses a node id that could not address a registry record", async () => {
