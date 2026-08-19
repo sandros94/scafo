@@ -18,6 +18,7 @@ export default defineBuildConfig({
         "./src/drivers/runtime/celld",
         "./src/drivers/supervisor/child",
         "./src/drivers/ingress/caddy",
+        "./src/drivers/ingress/traefik",
         "./src/drivers/deploy/celld",
         "./src/drivers/archive/tar-zst",
       ],

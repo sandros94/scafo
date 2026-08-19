@@ -13,6 +13,7 @@ import { createDeployService } from "../../agent/deploys.ts";
 import { createCelldDeployRunner } from "../../drivers/deploy/celld.ts";
 import { createNodeHostReader } from "../../drivers/host/node.ts";
 import { createCaddyDriver } from "../../drivers/ingress/caddy.ts";
+import { createTraefikDriver } from "../../drivers/ingress/traefik.ts";
 import { createCelldDriver } from "../../drivers/runtime/celld.ts";
 import { createChildSupervisor } from "../../drivers/supervisor/child.ts";
 import {
@@ -56,7 +57,7 @@ const upArgs: ArgsDef = {
   "port-range-start": { type: "string", description: "First port runtime processes use" },
   "bind-host": { type: "string", description: "Address runtime processes bind their listeners to" },
   "probe-path": { type: "string", description: "Path the application readiness probe requests" },
-  "ingress-driver": { type: "string", description: "Ingress this node drives (caddy)" },
+  "ingress-driver": { type: "string", description: "Ingress this node drives (caddy, traefik)" },
   "caddy-admin": { type: "string", description: "Base URL of the Caddy admin API" },
   "caddy-server": { type: "string", description: "Caddy server the node writes its routes into" },
 };
@@ -131,6 +132,15 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
        them to itself, which is a legitimate way to run one and not a warning
        worth repeating on every reconcile pass. */
     console.log("scalo: no ingress configured, nothing on this node will be routed to");
+  } else if (ingress.driver === "traefik") {
+    agent.ingress = createTraefikDriver();
+    /* Worth saying once, because nothing else on this node will: an ingress that
+       polls and was never pointed at the agent stays silent rather than failing,
+       and the node looks like it is routing when nothing is reading it. */
+    console.log(
+      `scalo: ingress "traefik" reads this node's routing from ` +
+        `/v1/ingress/traefik on ${config.node.listen}; point its http provider there`,
+    );
   } else {
     agent.ingress = createCaddyDriver({
       adminUrl: ingress.adminUrl,

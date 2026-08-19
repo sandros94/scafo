@@ -95,15 +95,30 @@ export interface VarsetsConfig {
   keyFile: string;
 }
 
-/** Which ingress a node drives, and how it is reached. */
+/**
+ * Which ingress a node drives, and how it is reached.
+ *
+ * The two implemented ingresses are reached in opposite directions, which is why
+ * only one of them has settings here. `caddy` is PUSHED: the node calls its admin
+ * API, so it must be told where that is. `traefik` PULLS: the node renders its
+ * routing and serves it at `/v1/ingress/traefik`, and it is the operator's
+ * Traefik that is configured with the address — in Traefik's own static
+ * configuration, which scalo neither writes nor reads.
+ */
 export interface IngressConfig {
-  /** The only ingress implemented; anything else fails the boot. */
-  driver: "caddy";
-  /** Base URL of the ingress admin API; the driver's own default applies when absent. */
+  /** Which ingress this node drives; anything else fails the boot. */
+  driver: IngressDriverName;
+  /** Base URL of the Caddy admin API; the driver's own default applies when absent. */
   adminUrl?: string;
-  /** Server within the ingress configuration this node writes its routes into. */
+  /** Caddy server this node writes its routes into. */
   serverName?: string;
 }
+
+/** Every ingress a node can drive. */
+export type IngressDriverName = "caddy" | "traefik";
+
+/** The ingresses that can be configured, in the order a refusal lists them. */
+const INGRESS_DRIVERS: IngressDriverName[] = ["caddy", "traefik"];
 
 /** Every runtime setting, with the defaults already applied. */
 export interface RuntimeConfig {
@@ -481,9 +496,18 @@ function resolvePlatformDomains(sources: Sources): string[] {
 /**
  * The ingress this node drives, or undefined when it drives none.
  *
- * Naming an admin API is enough to ask for one: there is a single driver, so
- * spelling it out as well would be ceremony. Configuring nothing but a server
- * name leaves the ingress off, because nothing says where to reach it.
+ * Naming a Caddy admin API is enough to ask for Caddy: it was the only driver
+ * when the setting was introduced, and a configuration that already worked must
+ * go on working. Every other ingress is asked for by name. Configuring nothing
+ * but a server name leaves the ingress off, because nothing says where to reach
+ * it.
+ *
+ * A Caddy setting given alongside another driver is REFUSED rather than ignored.
+ * The two ingresses are configured from opposite ends — Caddy is told where its
+ * admin API is, Traefik is told nothing here because it is the one doing the
+ * asking — so an operator who wrote both has misread which of them applies, and
+ * silently dropping half of what they wrote leaves a node routing through an
+ * ingress they did not think they had selected.
  */
 function resolveIngress(sources: Sources): IngressConfig | undefined {
   const driver = resolve("ingressDriver", sources);
@@ -491,14 +515,36 @@ function resolveIngress(sources: Sources): IngressConfig | undefined {
   const serverName = resolve("caddyServer", sources);
 
   if (driver === undefined && adminUrl === undefined) return undefined;
-  if (driver !== undefined && driver !== "caddy") {
+  if (driver !== undefined && !(INGRESS_DRIVERS as string[]).includes(driver)) {
     throw new ScaloError("invalid-input", "Invalid configuration value", {
-      detail: `"${ORIGINS.ingressDriver.file}" must be "caddy", got ${JSON.stringify(driver)}`,
+      detail:
+        `"${ORIGINS.ingressDriver.file}" must be one of ` +
+        `${INGRESS_DRIVERS.map((name) => `"${name}"`).join(", ")}, got ${JSON.stringify(driver)}`,
     });
   }
 
+  const selected: IngressDriverName = (driver as IngressDriverName | undefined) ?? "caddy";
+  if (selected !== "caddy") {
+    const caddyOnly: Array<[Origin, string | undefined]> = [
+      [ORIGINS.caddyAdmin, adminUrl],
+      [ORIGINS.caddyServer, serverName],
+    ];
+    const written = caddyOnly.filter(([, value]) => value !== undefined);
+    if (written.length > 0) {
+      const named = written
+        .map(([origin, value]) => `"${origin.file}" (--${origin.flag}) = ${JSON.stringify(value)}`)
+        .join(" and ");
+      throw new ScaloError("invalid-input", "Conflicting ingress configuration", {
+        detail:
+          `${named} configures Caddy, but "${ORIGINS.ingressDriver.file}" selects ` +
+          `"${selected}", which has no admin API this node calls — it reads the routing the ` +
+          `node publishes instead. Drop the Caddy setting, or select "caddy"`,
+      });
+    }
+  }
+
   return {
-    driver: "caddy",
+    driver: selected,
     ...(adminUrl === undefined ? {} : { adminUrl }),
     ...(serverName === undefined ? {} : { serverName }),
   };

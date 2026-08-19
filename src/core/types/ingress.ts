@@ -32,3 +32,22 @@ export interface IngressDriver {
    */
   apply(desired: IngressDesired): Promise<void>;
 }
+
+/**
+ * An ingress that is READ rather than written to: `apply` renders its
+ * configuration and caches it, and the ingress itself polls the agent for it.
+ *
+ * The distinction is the ingress's own, not scalo's. An ingress with an admin
+ * API (Caddy) is converged by calling it, and `apply` is where the work happens.
+ * An ingress configured by a provider it polls (Traefik's `http` provider) can
+ * only be told anything by being asked, so the node has to publish what it would
+ * otherwise have pushed — which is what {@link snapshot} is for, and why the
+ * agent serves a route per such ingress.
+ *
+ * `unknown` because the document's shape belongs to the ingress that reads it;
+ * the agent only ever hands it back as JSON.
+ */
+export interface PullingIngressDriver extends IngressDriver {
+  /** The configuration as of the last {@link IngressDriver.apply}. */
+  snapshot(): unknown;
+}

@@ -23,6 +23,7 @@ import type { ProcessStatus, Supervisor } from "../core/types/supervisor.ts";
 import { isHost } from "../core/utils/host.ts";
 import { parseHostLabel } from "../core/utils/slug.ts";
 import { deleteEnvironmentRequest } from "./_environments.ts";
+import { isPullingIngress } from "./_ingress.ts";
 import {
   type DeployVerifiers,
   readAliasRequest,
@@ -138,8 +139,9 @@ export interface AliasResult {
 
 /**
  * Builds the agent app. Every route answers failures as RFC 9457 problem
- * documents, and every route but health and the ingress ask requires a node,
- * operator or workload token.
+ * documents, and every route but health and the two ingress-facing ones — the
+ * on-demand-TLS ask and the configuration a pulled ingress polls — requires a
+ * node, operator or workload token.
  */
 export function createAgentApp(agent: AgentContext): H3 {
   /* One verifier of each kind for the whole app, never one per request: the node
@@ -187,6 +189,38 @@ export function createAgentApp(agent: AgentContext): H3 {
     throw new ScaloError("not-found", "Host is not served here", {
       detail: `"${domain}" is neither a claimed domain nor a label under a platform domain`,
     });
+  });
+
+  /*
+   * What a pulled ingress reads its whole routing from — Traefik's `http`
+   * provider polls exactly this, every couple of seconds.
+   *
+   * Unauthenticated, on the same reading as the ask endpoint above: what it
+   * discloses is which hosts this node serves and on which loopback ports, both
+   * of which are already public — the hosts by being resolvable, the ports by
+   * being reachable only from the machine the ingress runs on. It holds no key
+   * and grants nothing. The stance is also forced: Traefik's http provider can
+   * be given static headers and nothing else, so any credential here would be a
+   * fixed secret sitting in the ingress's own configuration file, which buys no
+   * more than leaving it off. A node that needs the API closed closes it at the
+   * listener, where `node.listen` already puts it on loopback by default.
+   *
+   * 404 rather than an empty document when this node drives no pulled ingress:
+   * an empty document is a legitimate answer meaning "this node serves
+   * nothing", and an ingress polling the wrong node must be able to tell the
+   * two apart. Traefik keeps its last configuration when a poll fails, so the
+   * mistake costs the operator a log line rather than an outage.
+   */
+  app.get("/v1/ingress/traefik", (): unknown => {
+    const ingress = agent.ingress;
+    if (ingress === undefined || !isPullingIngress(ingress)) {
+      throw new ScaloError("not-found", "This node publishes no ingress configuration", {
+        detail:
+          `node "${agent.nodeId}" drives no ingress that reads its routing from the agent; ` +
+          `set "ingress.driver" to "traefik" on the node this ingress polls`,
+      });
+    }
+    return ingress.snapshot();
   });
 
   app.get(

@@ -39,7 +39,7 @@ export interface CaddyDriverOptions {
 }
 
 /** One route as this driver writes it; Caddy keeps every field verbatim. */
-interface ScaloRoute {
+export interface CaddyRoute {
   "@id": string;
   "match": Array<{ host: string[] }>;
   "handle": Array<{ handler: "reverse_proxy"; upstreams: Array<{ dial: string }> }>;
@@ -130,10 +130,8 @@ export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
         if (typeof id === "string" && id.startsWith(ROUTE_ID_PREFIX)) owned.set(id, route);
       }
 
-      const wanted = new Map<string, ScaloRoute>();
-      for (const { host, backend } of desired.routes) {
-        wanted.set(routeId(host), routeFor(host, backend));
-      }
+      const wanted = new Map<string, CaddyRoute>();
+      for (const route of renderCaddyRoutes(desired)) wanted.set(route["@id"], route);
 
       /* Routes are put in place before stale ones are taken away, so a host that
          moves between backends is never briefly served by neither. */
@@ -189,7 +187,19 @@ export function routeId(host: string): string {
   return `${ROUTE_ID_PREFIX}${host}`;
 }
 
-function routeFor(host: string, backend: IngressBackend): ScaloRoute {
+/**
+ * The routes this driver wants Caddy to hold for `desired`, in the order the
+ * routing states them.
+ *
+ * Pure, and separated from the conversation with the admin API so that what this
+ * driver MEANS by a routing can be compared against what another ingress driver
+ * means by the same one — which is what `test/ingress-parity.test.ts` does.
+ */
+export function renderCaddyRoutes(desired: IngressDesired): CaddyRoute[] {
+  return desired.routes.map(({ host, backend }) => routeFor(host, backend));
+}
+
+function routeFor(host: string, backend: IngressBackend): CaddyRoute {
   return {
     "@id": routeId(host),
     "match": [{ host: [host] }],
@@ -212,7 +222,7 @@ function routeFor(host: string, backend: IngressBackend): ScaloRoute {
  * stores and may carry more than it was given, and a route that differs only in
  * something nobody here set would otherwise be rewritten on every single pass.
  */
-function sameRoute(current: Record<string, unknown>, wanted: ScaloRoute): boolean {
+function sameRoute(current: Record<string, unknown>, wanted: CaddyRoute): boolean {
   const projection = (route: Record<string, unknown>): string =>
     stableStringify({ match: route.match, handle: route.handle, terminal: route.terminal });
 

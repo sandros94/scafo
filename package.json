@@ -71,6 +71,10 @@
       "types": "./dist/drivers/ingress/caddy.d.mts",
       "default": "./dist/drivers/ingress/caddy.mjs"
     },
+    "./drivers/ingress/traefik": {
+      "types": "./dist/drivers/ingress/traefik.d.mts",
+      "default": "./dist/drivers/ingress/traefik.mjs"
+    },
     "./drivers/deploy/celld": {
       "types": "./dist/drivers/deploy/celld.d.mts",
       "default": "./dist/drivers/deploy/celld.mjs"
