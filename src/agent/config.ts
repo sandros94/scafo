@@ -12,6 +12,7 @@ import { DEFAULT_PORT_RANGE_START } from "../core/placement/ports.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
 import type { TransportConfig, TransportMode } from "../core/types/transport.ts";
 import { assertHost, isHost, parseInterfaceAddress } from "../core/utils/host.ts";
+import { assertLabels, parseLabels } from "../core/utils/labels.ts";
 
 export interface AgentConfig {
   bucket: {
@@ -42,6 +43,17 @@ export interface AgentConfig {
      * default for the user it runs as.
      */
     stateDir?: string;
+    /**
+     * What this node IS, as the operator describes it: `region=eu-west-1`,
+     * `tier=fast`, `gpu=a100`. An environment's node selector is matched against
+     * these, and nothing else reads them.
+     *
+     * BOOT CONFIGURATION: they are written into the node's record on every
+     * registration, which replaces that record wholesale, so this file is the
+     * single source of truth for them and a label taken out of it is gone from
+     * the fleet's view of this node on the next start.
+     */
+    labels?: Record<string, string>;
   };
   /** Apex domains the platform serves wildcard subdomains under. */
   platformDomains: string[];
@@ -197,6 +209,7 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
   const configuredAdvertise = resolve("advertise", sources);
   const id = resolve("nodeId", sources);
   const stateDir = resolve("stateDir", sources);
+  const labels = resolveNodeLabels(sources);
 
   /* Parsed for their side effect: an unusable address must fail the boot, not
      the first request that tries to use it. */
@@ -252,7 +265,14 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
       accessKey: required("accessKey", sources),
       secretKey: required("secretKey", sources),
     },
-    node: { id, listen, internalListen, advertise, stateDir },
+    node: {
+      id,
+      listen,
+      internalListen,
+      advertise,
+      stateDir,
+      ...(labels === undefined ? {} : { labels }),
+    },
     platformDomains: resolvePlatformDomains(sources),
     runtime: {
       binPath: resolve("celldBin", sources) ?? DEFAULT_RUNTIME_BIN,
@@ -355,6 +375,7 @@ const ORIGINS = {
   },
   advertise: { flag: "advertise", env: ["SCALO_ADVERTISE"], file: "node.advertise" },
   stateDir: { flag: "state-dir", env: ["SCALO_STATE_DIR"], file: "node.stateDir" },
+  nodeLabels: { flag: "node-labels", env: ["SCALO_NODE_LABELS"], file: "node.labels" },
   platformDomains: {
     flag: "platform-domains",
     env: ["SCALO_PLATFORM_DOMAINS"],
@@ -476,6 +497,28 @@ function resolveBindHost(sources: Sources): string | undefined {
     });
   }
   return value;
+}
+
+/**
+ * What this node says it is, or undefined when the operator said nothing.
+ *
+ * Two spellings, because the sources can carry two shapes: a flag and an
+ * environment variable can only hold text, so they are written `k=v,k2=v2`,
+ * while the config file holds the object that text parses into. The inline form
+ * wins whole rather than merging with the file's — labels describe one machine,
+ * and a set half-stated in two places is one nobody can read off either.
+ */
+function resolveNodeLabels(sources: Sources): Record<string, string> | undefined {
+  const origin: Origin = ORIGINS.nodeLabels;
+
+  const inline = flagOrEnv(origin, sources);
+  if (inline !== undefined) return parseLabels(inline, `"${origin.file}"`);
+
+  const value = fileValue(sources.file, origin.file);
+  if (value === undefined || value === null) return undefined;
+
+  assertLabels(value, `"${origin.file}"`);
+  return { ...value };
 }
 
 function resolvePlatformDomains(sources: Sources): string[] {

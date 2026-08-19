@@ -38,6 +38,10 @@ const upArgs: ArgsDef = {
   "secret-key": { type: "string", description: "Bucket secret access key" },
   "node-id": { type: "string", description: "Id this node registers under" },
   "state-dir": { type: "string", description: "Directory this node keeps its identity in" },
+  "node-labels": {
+    type: "string",
+    description: "What this node is, for environments to select on (region=eu-west-1,tier=fast)",
+  },
   "listen": { type: "string", description: "host:port the agent API binds to" },
   "internal-listen": { type: "string", description: "host:port for node-to-node traffic" },
   "advertise": { type: "string", description: "host:port other nodes reach this one at" },

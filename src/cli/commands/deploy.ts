@@ -4,6 +4,7 @@ import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import type { DeployStatus } from "../../agent/deploys.ts";
 import { ScaloError } from "../../core/error.ts";
 import { parseReplicas } from "../../core/placement/replicas.ts";
+import { parseLabels } from "../../core/utils/labels.ts";
 import { packDirectory } from "../../drivers/archive/tar-zst.ts";
 import { DEFAULT_KEY_PATH } from "./keygen.ts";
 import { agentBaseUrl, agentRequest, type Authorize, operatorSigner } from "../_agent.ts";
@@ -29,6 +30,10 @@ const deployArgs: ArgsDef = {
   "replicas": {
     type: "string",
     description: "How many nodes serve this environment: a whole number, or all",
+  },
+  "node-selector": {
+    type: "string",
+    description: "Labels a node must carry to serve this environment (region=eu-west-1,tier=fast)",
   },
   "key": { type: "string", description: `Operator key file to sign with (${DEFAULT_KEY_PATH})` },
   "token": {
@@ -64,6 +69,9 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
   /* Read before the directory is packed, so a malformed flag costs nothing. */
   const wantedReplicas = text(flags.replicas);
   const replicas = wantedReplicas === undefined ? undefined : parseReplicas(wantedReplicas);
+  const wantedSelector = text(flags["node-selector"]);
+  const nodeSelector =
+    wantedSelector === undefined ? undefined : parseLabels(wantedSelector, "--node-selector");
 
   console.log(`scalo: packing ${dir}`);
   const artifact = await packDirectory(dir);
@@ -74,9 +82,11 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
     runtimeConfigurable: flags["runtime-configurable"] === true,
     flip: flags.flip === true,
     ...(text(flags.script) === undefined ? {} : { script: text(flags.script) }),
-    /* Only when it was asked for: a deploy that names no replica count must
-       leave whatever the environment already carries exactly as it is. */
+    /* Only when they were asked for: a deploy that names no replica count and no
+       selector must leave whatever the environment already carries exactly as it
+       is. Neither flag can lift a constraint — that is `scalo env selector`. */
     ...(replicas === undefined ? {} : { replicas }),
+    ...(nodeSelector === undefined ? {} : { nodeSelector }),
   };
 
   const body = new FormData();

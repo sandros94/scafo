@@ -5,8 +5,9 @@ import type { NodeIdentity, NodeVerifier } from "../core/auth/node-token.ts";
 import type { OidcIdentity, OidcVerifier } from "../core/auth/oidc.ts";
 import { isScaloError, ScaloError } from "../core/error.ts";
 import { assertReplicas } from "../core/placement/replicas.ts";
+import { assertSelector } from "../core/placement/selector.ts";
 import { assertId } from "../core/registry/paths.ts";
-import type { BuildSource } from "../core/types/registry.ts";
+import type { BuildSource, NodeSelector } from "../core/types/registry.ts";
 import { assertSlug } from "../core/utils/slug.ts";
 import type { DeployMeta } from "./deploys.ts";
 import { bearerToken } from "./middleware.ts";
@@ -29,6 +30,12 @@ export interface DeployVerifiers {
 export interface DeployRequest {
   meta: DeployMeta;
   artifact: Uint8Array;
+}
+
+/** What `POST /v1/environments/:project/:env/selector` is asked to set. */
+export interface SelectorRequest {
+  /** Labels a node must carry to serve the environment; null clears the constraint. */
+  selector: NodeSelector | null;
 }
 
 /** What `POST /v1/aliases` is asked to do. */
@@ -140,6 +147,27 @@ export async function readDeployRequest(event: H3Event): Promise<DeployRequest> 
   return { meta: parseMeta(meta), artifact: new Uint8Array(await artifact.arrayBuffer()) };
 }
 
+/**
+ * Reads the JSON body of a node-selector change: `{"selector": {...}}` to
+ * constrain the environment, `{"selector": null}` to lift the constraint.
+ *
+ * The two are spelled differently because they mean different things, and a
+ * MISSING `selector` is neither — it is a request that forgot to say what it
+ * wanted, and clearing a constraint is far too consequential to be what an
+ * omission defaults to.
+ */
+export async function readSelectorRequest(event: H3Event): Promise<SelectorRequest> {
+  const body = asObject(await readJsonBody(event), "the body");
+
+  const selector = body.selector;
+  if (selector === null) return { selector: null };
+  if (selector === undefined) {
+    throw invalid(`"selector" must be given: an object of labels, or null to clear it`);
+  }
+  assertSelector(selector);
+  return { selector };
+}
+
 /** Reads the JSON body of an alias change. */
 export async function readAliasRequest(event: H3Event): Promise<AliasRequest> {
   const body = asObject(await readJsonBody(event), "the body");
@@ -185,6 +213,14 @@ function parseMeta(raw: string): DeployMeta {
   if (body.replicas !== undefined && body.replicas !== null) {
     assertReplicas(body.replicas);
     meta.replicas = body.replicas;
+  }
+
+  /* Read the same way, and for the same reason: a pipeline that never mentions a
+     selector must not lift one an operator set. Clearing it is `scalo env
+     selector --clear`, which says so out loud. */
+  if (body.nodeSelector !== undefined && body.nodeSelector !== null) {
+    assertSelector(body.nodeSelector);
+    meta.nodeSelector = body.nodeSelector;
   }
 
   const buildId = text(body, "buildId");

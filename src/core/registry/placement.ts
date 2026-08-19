@@ -1,7 +1,7 @@
 /*
- * Replica placement, as the registry holds it: how many nodes an environment
- * asks for (`setReplicas`), and which nodes the coordinator gave it (the
- * placement records).
+ * Placement, as the registry holds it: what an environment asks for — how many
+ * nodes (`setReplicas`) and which nodes it may use at all (`setNodeSelector`) —
+ * and which nodes the coordinator gave it (the placement records).
  *
  * A placement record is written by the coordinator alone and read by every node.
  * Its ABSENCE is a meaningful state and never an error: it says nothing has been
@@ -10,8 +10,14 @@
  */
 
 import { ScaloError } from "../error.ts";
-import type { EnvironmentRecord, PlacementRecord, ReplicaCount } from "../types/registry.ts";
+import type {
+  EnvironmentRecord,
+  NodeSelector,
+  PlacementRecord,
+  ReplicaCount,
+} from "../types/registry.ts";
 import { assertReplicas } from "../placement/replicas.ts";
+import { assertSelector } from "../placement/selector.ts";
 import { deepEqual, isCasConflict, namesFromKeys } from "./_shared.ts";
 import { createJson, deleteKey, putJson, readJson, updateJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
@@ -164,6 +170,37 @@ export async function setReplicas(
     ctx,
     environmentKey(project, env),
     (current) => ({ ...current, replicas }),
+  );
+  return updated.value;
+}
+
+/**
+ * States which nodes may serve an environment, by the labels they must carry.
+ * Passing null clears the constraint, putting every live node back in scope.
+ *
+ * Validated before anything is written, so a mistyped label never becomes a
+ * constraint no node satisfies. Takes effect on the coordinator's next
+ * assignment pass, for the same reason {@link setReplicas} does: this states the
+ * intent, and which nodes it lands on stays the coordinator's to decide.
+ */
+export async function setNodeSelector(
+  ctx: RegistryContext,
+  project: string,
+  env: string,
+  selector: NodeSelector | null,
+): Promise<EnvironmentRecord> {
+  if (selector !== null) assertSelector(selector);
+
+  const updated = await updateJson<EnvironmentRecord>(
+    ctx,
+    environmentKey(project, env),
+    (current) => {
+      /* Cleared by REMOVING the field rather than by storing an empty one: the
+         readers ask whether an environment carries a selector at all, and the
+         run-everywhere fallback turns on that question. */
+      const { nodeSelector: _cleared, ...rest } = current;
+      return selector === null ? rest : { ...rest, nodeSelector: { ...selector } };
+    },
   );
   return updated.value;
 }

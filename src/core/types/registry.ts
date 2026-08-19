@@ -17,6 +17,18 @@ export type PlacementStrategy = "isolate" | "dense" | "auto";
 export type ReplicaCount = number | "all";
 
 /**
+ * Labels a node must carry for an environment to be allowed to run on it.
+ *
+ * AND semantics and exact values: a node is eligible when its own labels contain
+ * EVERY entry of the selector with that entry's value. There are no operators
+ * and no globs in v1 — a selector should mean one thing to whoever writes it and
+ * to whoever debugs it a year later — and richer expressions are a compatible
+ * later extension, because every selector expressible today keeps meaning
+ * exactly this.
+ */
+export type NodeSelector = Record<string, string>;
+
+/**
  * Non-fatal advisory returned alongside a successful operation. Warnings never
  * abort a call; `code` is the stable contract, `detail` is human-facing.
  */
@@ -93,6 +105,15 @@ export interface NodeRecord {
   /** Its place on the tunnel, when the installation runs one. */
   wireguard?: NodeWireguard;
   capabilities?: Record<string, unknown>;
+  /**
+   * What an operator said this node IS — its region, its hardware, its provider
+   * — and what an environment's {@link NodeSelector} is matched against.
+   *
+   * BOOT CONFIGURATION, not runtime state: the node writes these from its own
+   * configuration on every registration, and registration replaces the record
+   * wholesale, so a label removed from the configuration is gone from the record
+   * on the next start. Nothing else ever writes them.
+   */
   labels?: Record<string, string>;
 }
 
@@ -187,6 +208,15 @@ export interface EnvironmentRecord {
    * what a reader resolves rather than assumes.
    */
   replicas?: ReplicaCount;
+  /**
+   * Which nodes may serve this environment at all. Absent leaves it
+   * unconstrained, which is every live node.
+   *
+   * It narrows the CANDIDATES the coordinator picks replicas from, so it and
+   * {@link EnvironmentRecord.replicas} compose rather than compete: `"all"` with
+   * a selector means every MATCHING node.
+   */
+  nodeSelector?: NodeSelector;
   /**
    * When the environment was retired: the first of the two steps that
    * decommission a long-lived environment.

@@ -11,6 +11,7 @@
 import { ScaloError } from "../core/error.ts";
 import { assignNodes } from "../core/placement/rendezvous.ts";
 import { resolveReplicas } from "../core/placement/replicas.ts";
+import { describeSelector, eligibleNodes } from "../core/placement/selector.ts";
 import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { listEnvironments } from "../core/registry/environments.ts";
@@ -24,7 +25,25 @@ import {
   writePlacement,
 } from "../core/registry/placement.ts";
 import { listProjects } from "../core/registry/projects.ts";
-import type { EnvironmentRecord } from "../core/types/registry.ts";
+import type { EnvironmentRecord, NodeRecord, NodeSelector } from "../core/types/registry.ts";
+
+/**
+ * Why one environment could not be placed on a pass, as a stable code.
+ *
+ * `placement-unavailable` — no live node was eligible to run it. Today that is
+ * always a selector no live node satisfies: an empty FLEET refuses the whole
+ * pass instead, before any environment is considered.
+ */
+export type AssignmentFailureReason = "placement-unavailable";
+
+/** One environment a pass could decide nothing for, and why. */
+export interface AssignmentFailure {
+  /** `<project>/<env>`. */
+  target: string;
+  reason: AssignmentFailureReason;
+  /** What an operator has to act on, naming the constraint that went unsatisfied. */
+  detail: string;
+}
 
 /** What one assignment pass decided. */
 export interface AssignmentResult {
@@ -39,6 +58,12 @@ export interface AssignmentResult {
   removed: string[];
   /** Environments whose placement was left exactly as it was, and why. */
   skipped: Array<{ target: string; reason: PlacementOutcome }>;
+  /**
+   * Environments the pass could NOT place, whose previous placement — if they
+   * had one — is left standing untouched. This is the operator's only sign that
+   * a constraint has gone unsatisfiable, so it is reported rather than logged.
+   */
+  unplaced: AssignmentFailure[];
 }
 
 export interface AssignmentOptions {
@@ -57,6 +82,12 @@ export interface AssignmentOptions {
  * runs, and the installation would take itself down over a hiccup. Leaving the
  * last decision standing keeps whatever is running, running.
  *
+ * The same reasoning applies one environment at a time to a node SELECTOR no
+ * live node satisfies, and there it is reported rather than thrown: that
+ * environment is left with the placement it already had, every other environment
+ * in the pass is decided normally, and the failure is answered in
+ * {@link AssignmentResult.unplaced}.
+ *
  * Throws `ScaloError("lease-lost")` when the lease goes while it works; the
  * caller stops being the coordinator at that point.
  */
@@ -67,9 +98,13 @@ export async function runAssignment(
 ): Promise<AssignmentResult> {
   const now = nowDate(ctx);
   const window = opts?.livenessWindowMs;
-  const live = (await listNodeRecords(ctx))
-    .filter((record) => isNodeLive(record, now, window === undefined ? {} : { windowMs: window }))
-    .map((record) => record.id);
+  /* Kept as RECORDS rather than reduced to ids here: an environment's selector
+     is matched against the labels an operator set on a node, and only the record
+     carries them. */
+  const fleet: NodeRecord[] = (await listNodeRecords(ctx)).filter((record) =>
+    isNodeLive(record, now, window === undefined ? {} : { windowMs: window }),
+  );
+  const live = fleet.map((record) => record.id);
 
   if (live.length === 0) {
     throw new ScaloError("placement-unavailable", "No node is live", {
@@ -81,7 +116,13 @@ export async function runAssignment(
     });
   }
 
-  const result: AssignmentResult = { live, changed: [], removed: [], skipped: [] };
+  const result: AssignmentResult = {
+    live,
+    changed: [],
+    removed: [],
+    skipped: [],
+    unplaced: [],
+  };
 
   for (const project of await listProjects(ctx)) {
     const [names, placements] = await Promise.all([
@@ -109,10 +150,48 @@ export async function runAssignment(
       served.add(name);
 
       const target = `${project}/${name}`;
+      const selector = found.value.nodeSelector;
+      /* The selector narrows the CANDIDATES, and rendezvous then picks replicas
+         of those — in that order, so the two compose instead of competing:
+         `replicas: "all"` under a selector means every MATCHING node, and a
+         count means that many OF the matching ones. */
+      const candidates = eligibleNodes(fleet, selector).map((record) => record.id);
+
+      if (candidates.length === 0) {
+        /*
+         * ZERO ELIGIBLE CANDIDATES: WRITE NOTHING, DELETE NOTHING.
+         *
+         * The environment stays in `served` above, so the sweep at the end of
+         * this project leaves its placement exactly where it is, and no empty
+         * decision is written over it either. A STALE-BUT-SERVING placement
+         * beats an outage: the two alternatives are an empty node list, which
+         * stops the environment on every node still running it, and no record at
+         * all, which — because a selector-bearing environment has no
+         * run-everywhere fallback — stops it just as dead. Neither is a decision
+         * an unsatisfiable constraint has earned the right to make.
+         *
+         * The far likelier causes are a node that has not come back yet, a
+         * typo'd label and a fleet mid-relabelling, none of which should take an
+         * application down. So the failure is REPORTED instead: it reaches the
+         * operator through the coordinator's status and `/v1/state`, naming the
+         * environment and the selector nothing satisfied.
+         */
+        result.unplaced.push({
+          target,
+          reason: "placement-unavailable",
+          detail:
+            `${describeWhy(target, selector)}, so its last placement is left exactly as it ` +
+            `stands: writing an empty decision — or removing the record — would stop the ` +
+            `environment on every node still serving it, over what is far more likely a node ` +
+            `that is missing or mislabelled than an environment that should stop`,
+        });
+        continue;
+      }
+
       const nodes = await assignNodes({
         project,
         env: name,
-        nodes: live,
+        nodes: candidates,
         replicas: resolveReplicas(found.value),
       });
 
@@ -145,6 +224,20 @@ export async function runAssignment(
   }
 
   return result;
+}
+
+/**
+ * Why nothing could be given an environment, named so the operator can act on
+ * it. A selector is the only way to get here — an empty FLEET refuses the whole
+ * pass long before — but the unconstrained wording is kept honest rather than
+ * assumed away.
+ */
+function describeWhy(target: string, selector: NodeSelector | undefined): string {
+  if (selector === undefined) return `no live node can serve "${target}"`;
+  return (
+    `no live node carries every label of "${describeSelector(selector)}", ` +
+    `which "${target}" selects`
+  );
 }
 
 /** Both are sorted — `assignNodes` sorts what it chooses and the record stores it sorted. */

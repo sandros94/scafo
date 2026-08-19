@@ -2,9 +2,11 @@
 
 import { ScaloError } from "../error.ts";
 import { assertReplicas } from "../placement/replicas.ts";
+import { assertSelector } from "../placement/selector.ts";
 import type {
   BuildRecord,
   EnvironmentRecord,
+  NodeSelector,
   PlacementStrategy,
   ReplicaCount,
   ScaloWarning,
@@ -29,6 +31,11 @@ export interface CreateEnvironmentInput {
    * this setting existed keeps doing.
    */
   replicas?: ReplicaCount;
+  /**
+   * Which nodes may serve it, by the labels they carry. Left absent it runs
+   * unconstrained, on whichever live nodes the coordinator picks.
+   */
+  nodeSelector?: NodeSelector;
 }
 
 /** An environment after a change, with any advisories the change raised. */
@@ -52,6 +59,7 @@ export async function createEnvironment(
 ): Promise<EnvironmentRecord> {
   await getProject(ctx, project);
   if (input.replicas !== undefined) assertReplicas(input.replicas);
+  if (input.nodeSelector !== undefined) assertSelector(input.nodeSelector);
 
   const key = environmentKey(project, input.name);
   const record: EnvironmentRecord = {
@@ -68,6 +76,7 @@ export async function createEnvironment(
   if (input.varset !== undefined) record.varset = input.varset;
   if (input.idleTtlS !== undefined) record.idleTtlS = input.idleTtlS;
   if (input.replicas !== undefined) record.replicas = input.replicas;
+  if (input.nodeSelector !== undefined) record.nodeSelector = { ...input.nodeSelector };
 
   try {
     await createJson(ctx, key, record);
@@ -219,8 +228,8 @@ export async function setEnvironmentVarset(
 }
 
 /* Set at creation and never rewritten, so they identify the record. Everything
-   else (alias, split, domains, varset, placement, idleTtlS, replicas) is mutable
-   state and must not break create-retry idempotency. */
+   else (alias, split, domains, varset, placement, idleTtlS, replicas,
+   nodeSelector) is mutable state and must not break create-retry idempotency. */
 function identity(
   record: EnvironmentRecord,
 ): Pick<EnvironmentRecord, "v" | "name" | "prefix" | "ephemeral"> {

@@ -11,11 +11,14 @@
  */
 
 import { ScaloError } from "../core/error.ts";
+import { describeSelector } from "../core/placement/selector.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
 import { acquireLease, type LeaseHandle, releaseLease } from "../core/registry/lease.ts";
+import { setNodeSelector } from "../core/registry/placement.ts";
 import { deleteEnvironment } from "../core/registry/reaper.ts";
 import { retireEnvironment, unretireEnvironment } from "../core/registry/retirement.ts";
-import type { EnvironmentRecord } from "../core/types/registry.ts";
+import type { EnvironmentRecord, NodeSelector } from "../core/types/registry.ts";
+import { parseLabels } from "../core/utils/labels.ts";
 import { assertSlug } from "../core/utils/slug.ts";
 import { type AgentCallOptions, agentRequest, type Authorize } from "./_agent.ts";
 
@@ -39,6 +42,8 @@ export interface EnvironmentOps {
   readonly via: string;
   retire(target: EnvironmentTarget): Promise<EnvironmentRecord>;
   unretire(target: EnvironmentTarget): Promise<EnvironmentRecord>;
+  /** Constrains which nodes may serve the environment; null lifts the constraint. */
+  setSelector(target: EnvironmentTarget, selector: NodeSelector | null): Promise<EnvironmentRecord>;
   /** Answers the store keys that were removed. */
   delete(target: EnvironmentTarget, opts?: DeleteOptions): Promise<string[]>;
 }
@@ -89,6 +94,17 @@ export function agentOps(opts: AgentOptions): EnvironmentOps {
     retire: (target) => retirement(target, "/retire"),
     unretire: (target) => retirement(target, "/unretire"),
 
+    async setSelector(target, selector): Promise<EnvironmentRecord> {
+      const answer = await agentRequest(at(target, "/selector"), await opts.authorize(), {
+        ...call("POST"),
+        headers: { "content-type": "application/json" },
+        /* `null` is spelled out rather than omitted: the node refuses a body
+           that says nothing, because clearing a constraint must be stated. */
+        body: JSON.stringify({ selector }),
+      });
+      return ((await answer.json()) as { environment: EnvironmentRecord }).environment;
+    },
+
     async delete(target, deleteOpts): Promise<string[]> {
       const query = deleteOpts?.force === true ? "?force=1" : "";
       const answer = await agentRequest(at(target, query), await opts.authorize(), call("DELETE"));
@@ -130,6 +146,8 @@ export function directOps(registry: RegistryContext, opts?: DirectOptions): Envi
     via: "the registry bucket",
     retire: (target) => retireEnvironment(registry, target.project, target.env),
     unretire: (target) => unretireEnvironment(registry, target.project, target.env),
+    setSelector: (target, selector) =>
+      setNodeSelector(registry, target.project, target.env, selector),
 
     async delete(target, deleteOpts): Promise<string[]> {
       const lease = await takeLease(registry, nodeId, target);
@@ -163,6 +181,65 @@ export function describeRetirement(
     `scalo: ${name} is retired as of ${environment.retiredAt}; every node stops serving it on ` +
     `its next pass, "scalo env unretire" puts it straight back, and it can be deleted once ` +
     `its grace has run out`
+  );
+}
+
+/** The two ways `scalo env selector` can be told what to do. */
+export interface SelectorFlags {
+  /** Labels written `k=v,k2=v2`, or undefined when `--set` was not given. */
+  set: string | undefined;
+  /** Whether `--clear` was given. */
+  clear: boolean;
+}
+
+/**
+ * The selector an invocation states: the labels of `--set`, or null for
+ * `--clear`.
+ *
+ * Exactly one of them, and `ScaloError("invalid-input")` otherwise. They are
+ * opposite intentions, so a command carrying BOTH says nothing about which was
+ * meant; and NEITHER is refused rather than read as "clear", because an
+ * accidental `scalo env selector` that lifted a constraint would move an
+ * application across a fleet without anyone asking it to.
+ */
+export function readSelectorFlags(flags: SelectorFlags): NodeSelector | null {
+  if (flags.set !== undefined && flags.clear) {
+    throw new ScaloError("invalid-input", "Conflicting arguments", {
+      detail: `--set "${flags.set}" and --clear ask for opposite things; pass one of them`,
+    });
+  }
+  if (flags.clear) return null;
+  if (flags.set !== undefined) return parseLabels(flags.set, "--set");
+
+  throw new ScaloError("invalid-input", "Missing required argument", {
+    detail:
+      `pass --set "key=value,key2=value2" to choose which nodes may serve it, ` +
+      `or --clear to let it run on every node again`,
+  });
+}
+
+/**
+ * How a selector change reads on the terminal, naming what happens next: the
+ * decision is the coordinator's, and it is taken on its next assignment pass
+ * rather than by the command that stated the intent.
+ */
+export function describeSelectorChange(
+  target: EnvironmentTarget,
+  environment: EnvironmentRecord,
+): string {
+  const name = `"${target.project}/${target.env}"`;
+  const selector = environment.nodeSelector;
+
+  if (selector === undefined) {
+    return (
+      `scalo: ${name} selects no nodes any more; the coordinator places it over the whole ` +
+      `fleet again on its next assignment pass`
+    );
+  }
+  return (
+    `scalo: ${name} runs only on nodes labelled ${describeSelector(selector)}; the coordinator ` +
+    `places it on the next assignment pass, and reports the environment as unplaced — leaving ` +
+    `whatever serves it now running — if no live node carries them`
   );
 }
 

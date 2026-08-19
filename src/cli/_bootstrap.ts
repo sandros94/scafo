@@ -177,6 +177,13 @@ export interface RegisterNodeOptions {
  * Registering counts as the node's first heartbeat, so it is eligible for work
  * from the moment it exists rather than from its first refresh a heartbeat
  * interval later.
+ *
+ * The node's LABELS are written here for the same reason, and REPLACED here for
+ * a sharper one: they are boot configuration rather than runtime state, so the
+ * configuration this node started with is the whole truth about them. A label
+ * taken out of that configuration is gone from the record the moment the node
+ * restarts, which is what makes relabelling a machine a matter of editing its
+ * config and restarting it rather than of finding whatever wrote the old value.
  */
 export async function registerThisNode(
   registry: RegistryContext,
@@ -200,6 +207,7 @@ export async function registerThisNode(
           },
         }),
     ...(opts.wireguard === undefined ? {} : { wireguard: opts.wireguard }),
+    ...(opts.config.node.labels === undefined ? {} : { labels: { ...opts.config.node.labels } }),
   };
 
   await registerNode(registry, record);

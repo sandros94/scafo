@@ -18,9 +18,11 @@ import { createRegistry } from "../_bootstrap.ts";
 import {
   agentOps,
   describeRetirement,
+  describeSelectorChange,
   directOps,
   type EnvironmentOps,
   type EnvironmentTarget,
+  readSelectorFlags,
 } from "../_environments.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
 import { DEFAULT_KEY_PATH } from "./keygen.ts";
@@ -55,6 +57,15 @@ const deleteArgs: ArgsDef = {
     type: "boolean",
     description: "Delete whatever state it is in, skipping the ephemeral and grace requirements",
   },
+};
+
+const selectorArgs: ArgsDef = {
+  ...targetArgs,
+  set: {
+    type: "string",
+    description: "Labels a node must carry to serve it (region=eu-west-1,tier=fast)",
+  },
+  clear: { type: "boolean", description: "Let it run on every node again" },
 };
 
 const retire: CommandDef = defineCommand({
@@ -93,9 +104,21 @@ const remove: CommandDef = defineCommand({
   },
 });
 
+const selector: CommandDef = defineCommand({
+  meta: { name: "selector", description: "Choose which nodes may serve an environment" },
+  args: selectorArgs,
+  async run({ args }): Promise<void> {
+    try {
+      await runSelector(args as Record<string, unknown>);
+    } catch (error) {
+      reportFailure(error);
+    }
+  },
+});
+
 export const env: CommandDef = defineCommand({
-  meta: { name: "env", description: "Retire, restore and delete environments" },
-  subCommands: { retire, unretire, delete: remove },
+  meta: { name: "env", description: "Retire, restore, target and delete environments" },
+  subCommands: { retire, unretire, selector, delete: remove },
 });
 
 async function runRetire(flags: Record<string, unknown>): Promise<void> {
@@ -119,6 +142,15 @@ async function runUnretire(flags: Record<string, unknown>): Promise<void> {
     `scalo: "${target.project}/${target.env}" is no longer retired; the nodes that should ` +
       `serve it start it again on their next pass`,
   );
+}
+
+async function runSelector(flags: Record<string, unknown>): Promise<void> {
+  const target = environmentTarget(flags);
+  /* Read before anything is contacted, so a malformed label costs no request. */
+  const wanted = readSelectorFlags({ set: text(flags.set), clear: flags.clear === true });
+  const ops = await opsFor(flags);
+
+  console.log(describeSelectorChange(target, await ops.setSelector(target, wanted)));
 }
 
 async function runDelete(flags: Record<string, unknown>): Promise<void> {

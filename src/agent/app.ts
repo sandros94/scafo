@@ -10,6 +10,7 @@ import { checkDomain } from "../core/registry/domains.ts";
 import { flipAlias, rollbackAlias } from "../core/registry/environments.ts";
 import { isLeaseExpired } from "../core/registry/lease.ts";
 import { coordinatorKey, environmentKey, nodeKey } from "../core/registry/paths.ts";
+import { setNodeSelector } from "../core/registry/placement.ts";
 import { retireEnvironment, unretireEnvironment } from "../core/registry/retirement.ts";
 import type { CapacityPlan } from "../core/capacity/compute.ts";
 import type { IngressDriver } from "../core/types/ingress.ts";
@@ -22,12 +23,14 @@ import type {
 import type { ProcessStatus, Supervisor } from "../core/types/supervisor.ts";
 import { isHost } from "../core/utils/host.ts";
 import { parseHostLabel } from "../core/utils/slug.ts";
+import type { AssignmentFailure } from "./_assign.ts";
 import { deleteEnvironmentRequest } from "./_environments.ts";
 import { isPullingIngress } from "./_ingress.ts";
 import {
   type DeployVerifiers,
   readAliasRequest,
   readDeployRequest,
+  readSelectorRequest,
   tryNodeToken,
   verifyCaller,
   verifyWorkload,
@@ -93,6 +96,17 @@ export interface CoordinatorView {
   fence: number;
   /** True when the node answering is the one coordinating. */
   self: boolean;
+  /**
+   * Environments the last assignment pass could decide nothing for, each naming
+   * the constraint that went unsatisfied. Absent when there were none.
+   *
+   * Only ever reported by the node that RAN the pass — the one saying `self` —
+   * because it is that node's account of what it just did, not a fact in the
+   * registry. This is where an environment whose selector no live node satisfies
+   * becomes visible: nothing else changes, precisely because the pass refuses to
+   * take a serving environment down over an unsatisfiable constraint.
+   */
+  unplaced?: AssignmentFailure[];
 }
 
 /** Body of `GET /v1/state`: what this node believes about itself right now. */
@@ -126,7 +140,7 @@ export interface EnvironmentDeleted {
   deleted: string[];
 }
 
-/** Body of the retire and unretire routes: the environment as it now stands. */
+/** Body of the retire, unretire and selector routes: the environment as it now stands. */
 export interface EnvironmentRetirement {
   environment: EnvironmentRecord;
 }
@@ -271,6 +285,27 @@ export function createAgentApp(agent: AgentContext): H3 {
   );
 
   /*
+   * Which nodes an environment may run on, set or cleared. A plain CAS update on
+   * one record, so ANY node carries it out itself, exactly as retirement does.
+   *
+   * It states an intent and nothing more: the coordinator decides which of the
+   * matching nodes actually get it, on its next assignment pass. A selector no
+   * live node satisfies is therefore accepted here and reported there — refusing
+   * it would mean an operator could not label a node they are about to add.
+   */
+  app.post(
+    "/v1/environments/:project/:env/selector",
+    async (event): Promise<EnvironmentRetirement> => {
+      const request = await readSelectorRequest(event);
+      const [project, name] = target(event);
+      return {
+        environment: await setNodeSelector(agent.registry, project, name, request.selector),
+      };
+    },
+    { middleware: [authenticated] },
+  );
+
+  /*
    * Deleting is lease-gated, so only the coordinator can carry it out — but any
    * node accepts the request and forwards it there, because which node holds the
    * lease is this installation's business rather than the operator's.
@@ -352,10 +387,17 @@ function coordinatorView(
 ): CoordinatorView | null {
   if (lease === null || isLeaseExpired(lease, nowDate(agent.registry))) return null;
 
+  const status = agent.coordinator?.status();
+  const self = status?.holding === true && lease.node === agent.nodeId;
+  /* Only from the node that made them, and only while there are any: a settled
+     installation says nothing here rather than saying "nothing went wrong". */
+  const unplaced = self ? (status?.lastAssignment?.unplaced ?? []) : [];
+
   return {
     node: lease.node,
     fence: lease.fence,
-    self: agent.coordinator?.status().holding === true && lease.node === agent.nodeId,
+    self,
+    ...(unplaced.length === 0 ? {} : { unplaced: unplaced.map((entry) => ({ ...entry })) }),
   };
 }
 

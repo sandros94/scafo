@@ -3,12 +3,19 @@
 import { ScaloError } from "../core/error.ts";
 import type { DesiredEnvironment } from "../core/placement/reconcile.ts";
 import { getBuild } from "../core/registry/builds.ts";
+import { readJson } from "../core/registry/cas.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
-import { getEnvironment, listEnvironments } from "../core/registry/environments.ts";
+import { listEnvironments } from "../core/registry/environments.ts";
+import { environmentKey } from "../core/registry/paths.ts";
 import { listPlacements } from "../core/registry/placement.ts";
 import { listProjects } from "../core/registry/projects.ts";
 import { getVarsetEnvelope, openVarset } from "../core/registry/varsets.ts";
-import type { PlacementRecord, PlainVarset } from "../core/types/registry.ts";
+import type {
+  EnvironmentRecord,
+  NodeSelector,
+  PlacementRecord,
+  PlainVarset,
+} from "../core/types/registry.ts";
 
 /** One environment's placement as this node reads it. */
 export interface PlacementView {
@@ -18,6 +25,15 @@ export interface PlacementView {
   nodes: string[];
   /** True when this node is one of them. */
   self: boolean;
+  /**
+   * The labels the environment requires of a node, when it requires any.
+   *
+   * Reported beside the decision rather than instead of it, so an operator
+   * looking at a placement that surprises them sees the CONSTRAINT and the
+   * outcome together — a decision naming one node reads very differently when
+   * the environment asked for exactly one kind of node.
+   */
+  selector?: NodeSelector;
 }
 
 /** What one read of the registry told this node. */
@@ -26,8 +42,10 @@ export interface DesiredState {
   environments: DesiredEnvironment[];
   /**
    * The placement decisions this node read, one per environment that HAS one.
-   * An environment missing from this list has not been placed by any
-   * coordinator yet, and is served everywhere.
+   *
+   * An environment missing from this list has not been placed by any coordinator
+   * yet — which means it is served everywhere, unless it carries a node selector
+   * and is therefore waiting to be placed. See {@link readDesired}.
    */
   placements: PlacementView[];
 }
@@ -46,15 +64,27 @@ export interface DesiredState {
  * them. Nothing in the route renderer knows what retirement is, and nothing in
  * it needs to.
  *
- * MISSING PLACEMENT RECORD → THE ENVIRONMENT IS INCLUDED. This fallback is the
- * safety line the whole feature hangs from, and it is deliberate rather than
- * lenient. No coordinator has decided anything yet during a bootstrap, on a
- * single-node installation, and throughout a rolling upgrade from a build that
- * never wrote these records — and in every one of those the right answer is the
- * one scalo gave before placement existed: serve it here. Reading a missing
- * record as "not mine" instead would take an entire installation off the air the
- * first time it upgraded, and would leave a fresh one serving nothing at all
- * until its first coordinator tick.
+ * MISSING PLACEMENT RECORD → THE ENVIRONMENT IS INCLUDED, UNLESS IT CARRIES A
+ * NODE SELECTOR. Both halves of that are deliberate, and they point in opposite
+ * directions on purpose.
+ *
+ * The FALLBACK is the safety line the whole feature hangs from. No coordinator
+ * has decided anything yet during a bootstrap, on a single-node installation, or
+ * throughout a rolling upgrade from a build that never wrote these records — and
+ * in every one of those the right answer is the one scalo gave before placement
+ * existed: serve it here. Reading a missing record as "not mine" instead would
+ * take an entire installation off the air the first time it upgraded, and would
+ * leave a fresh one serving nothing at all until its first coordinator tick.
+ *
+ * The EXCEPTION is what a selector means. A selector is an explicit constraint —
+ * the operator has said which nodes may run this — and the fallback exists to
+ * preserve behaviour nobody ever stated. Running a selector-bearing environment
+ * on an arbitrary node just because no coordinator has decided yet would violate
+ * exactly what was asked for, and on the widest possible set of nodes: every one
+ * of them, including all the ones the selector excludes. So a selector without a
+ * decision waits for the coordinator, and the cost of waiting is a few seconds
+ * of nothing running — against, in the other reading, an application placed on
+ * hardware it was explicitly kept off.
  */
 export async function readDesired(
   registry: RegistryContext,
@@ -109,9 +139,9 @@ async function readProject(
   project: string,
   nodeId: string,
 ): Promise<DesiredState> {
-  /* One listing for the whole project rather than a read per environment: the
-     environments nobody has decided about cost nothing, and the ones that have
-     been decided are read once each. */
+  /* One listing of each kind for the whole project, rather than two reads per
+     environment: only the environments that HAVE a decision cost a placement
+     read at all. */
   const [names, placements] = await Promise.all([
     listEnvironments(registry, project),
     listPlacements(registry, project),
@@ -120,6 +150,15 @@ async function readProject(
   const state: DesiredState = { environments: [], placements: [] };
 
   for (const name of names) {
+    /* Read once and used for every question this loop asks: whether the
+       environment constrains where it runs, what its placement view should
+       report, and what there is to serve. */
+    const found = await readJson<EnvironmentRecord>(registry, environmentKey(project, name));
+    /* Deleted between the listing and the read: the next pass sees neither it
+       nor its placement, and nothing here has to pretend it was there. */
+    if (found === null) continue;
+    const environment = found.value;
+
     const placement = placements.get(name);
     if (placement !== undefined) {
       state.placements.push({
@@ -127,27 +166,39 @@ async function readProject(
         env: name,
         nodes: [...placement.nodes],
         self: placement.nodes.includes(nodeId),
+        ...(environment.nodeSelector === undefined
+          ? {}
+          : { selector: { ...environment.nodeSelector } }),
       });
     }
-    if (!servedHere(placement, nodeId)) continue;
+    if (!servedHere(placement, environment, nodeId)) continue;
 
-    const wanted = await resolveEnvironment(registry, project, name);
+    const wanted = await resolveEnvironment(registry, project, environment);
     if (wanted !== null) state.environments.push(wanted);
   }
   return state;
 }
 
-/** See {@link readDesired}: no record at all means every node serves it. */
-function servedHere(placement: PlacementRecord | undefined, nodeId: string): boolean {
-  return placement === undefined || placement.nodes.includes(nodeId);
+/**
+ * See {@link readDesired}. A decision, once there is one, is the whole answer.
+ * Without one the environment runs everywhere — UNLESS it carries a selector, in
+ * which case running it here before the coordinator has chosen would break the
+ * one thing the operator asked for.
+ */
+function servedHere(
+  placement: PlacementRecord | undefined,
+  environment: EnvironmentRecord,
+  nodeId: string,
+): boolean {
+  if (placement !== undefined) return placement.nodes.includes(nodeId);
+  return environment.nodeSelector === undefined;
 }
 
 async function resolveEnvironment(
   registry: RegistryContext,
   project: string,
-  name: string,
+  env: EnvironmentRecord,
 ): Promise<DesiredEnvironment | null> {
-  const env = await getEnvironment(registry, project, name);
   /*
    * On its way out: an environment an operator has retired is served nowhere,
    * from the next pass on. It still HAS a build — retirement is reversible, and

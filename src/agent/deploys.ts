@@ -11,10 +11,15 @@ import { isScaloError } from "../core/error.ts";
 import { createBuild } from "../core/registry/builds.ts";
 import { createEnvironment, flipAlias, getEnvironment } from "../core/registry/environments.ts";
 import { fleetPrefix } from "../core/registry/paths.ts";
-import { setReplicas } from "../core/registry/placement.ts";
+import { setNodeSelector, setReplicas } from "../core/registry/placement.ts";
 import { createProject } from "../core/registry/projects.ts";
 import type { DeployRunner } from "../core/types/deploy.ts";
-import type { BuildSource, ReplicaCount, ScaloWarning } from "../core/types/registry.ts";
+import type {
+  BuildSource,
+  NodeSelector,
+  ReplicaCount,
+  ScaloWarning,
+} from "../core/types/registry.ts";
 import type { AgentContext } from "./app.ts";
 
 /** How long a flipped deploy waits to be observed serving traffic. */
@@ -74,6 +79,12 @@ export interface DeployMeta {
    * placement, and an environment that already exists keeps what it has.
    */
   replicas?: ReplicaCount;
+  /**
+   * Which nodes may serve the environment, by the labels they carry. Absent says
+   * nothing about placement, and an environment that already exists keeps the
+   * selector it has.
+   */
+  nodeSelector?: NodeSelector;
   source?: BuildSource;
 }
 
@@ -235,7 +246,10 @@ export function createDeployService(
          the registry refuses is the caller's mistake and must be answered as
          one, not buried in a status it has to poll for. */
       await createProject(agent.registry, { slug: meta.project });
-      await ensureEnvironment(agent, meta.project, meta.environment, meta.replicas);
+      await ensureEnvironment(agent, meta.project, meta.environment, {
+        ...(meta.replicas === undefined ? {} : { replicas: meta.replicas }),
+        ...(meta.nodeSelector === undefined ? {} : { nodeSelector: meta.nodeSelector }),
+      });
 
       const id = randomDeployId();
       const accepted: DeployStatus = {
@@ -279,17 +293,18 @@ export function createDeployService(
  * that opinion. Two deploys racing to create one environment still both end in
  * `createEnvironment`, which is idempotent for matching settings.
  *
- * `replicas` is the one setting a deploy may state about an environment that
- * already exists, and only when it was asked for explicitly: how many nodes
- * serve an environment is an operational decision, and a deploy that silently
- * rewrote it would move an application off nodes because someone re-ran a
- * pipeline with a stale flag.
+ * The two PLACEMENT settings — `replicas` and `nodeSelector` — are the only ones
+ * a deploy may state about an environment that already exists, and only when
+ * they were asked for explicitly: where and how widely an application runs is an
+ * operational decision, and a deploy that silently rewrote it would move that
+ * application because someone re-ran a pipeline with a stale flag. Neither can
+ * be CLEARED here for the same reason; that takes a command that says so.
  */
 async function ensureEnvironment(
   agent: AgentContext,
   project: string,
   environment: string,
-  replicas?: ReplicaCount,
+  wanted: { replicas?: ReplicaCount; nodeSelector?: NodeSelector },
 ): Promise<void> {
   let exists = true;
   try {
@@ -300,13 +315,15 @@ async function ensureEnvironment(
   }
 
   if (!exists) {
-    await createEnvironment(agent.registry, project, {
-      name: environment,
-      ...(replicas === undefined ? {} : { replicas }),
-    });
+    await createEnvironment(agent.registry, project, { name: environment, ...wanted });
     return;
   }
-  if (replicas !== undefined) await setReplicas(agent.registry, project, environment, replicas);
+  if (wanted.replicas !== undefined) {
+    await setReplicas(agent.registry, project, environment, wanted.replicas);
+  }
+  if (wanted.nodeSelector !== undefined) {
+    await setNodeSelector(agent.registry, project, environment, wanted.nodeSelector);
+  }
 }
 
 /** Drops the oldest deploys once more than `keep` are remembered. */
