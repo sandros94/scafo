@@ -25,6 +25,8 @@ interface AdminCall {
   method: string;
   url: string;
   body?: unknown;
+  /** What the call presented itself as; Caddy refuses one it does not allow. */
+  origin: string | null;
 }
 
 /** A route the operator wrote; the driver must never so much as read it. */
@@ -67,6 +69,24 @@ describe("converging an empty server", () => {
     ]);
     /* Appended to the array, not written over it. */
     expect(calls[1]?.url).toBe(ROUTES_URL);
+  });
+
+  /*
+   * Caddy's admin API applies its cross-origin check to anything that looks
+   * like a browser, and every `fetch` does: the runtime attaches
+   * `Sec-Fetch-Mode: cors` and a caller cannot unset it. Without an `Origin`
+   * Caddy allows, a real admin API answers 403 and the node publishes no
+   * routing at all — so the header is load-bearing, not decoration.
+   */
+  it("presents the admin API's own origin on every call it makes", async () => {
+    await driver.apply(desired([[HOST, 42_000]]));
+    await driver.apply(desired([[HOST, 42_010]]));
+    await driver.apply(desired([]));
+
+    expect(methods()).toEqual(["GET", "POST", "GET", "PATCH", "GET", "DELETE"]);
+    expect(calls.map((call) => call.origin)).toEqual(
+      Array(calls.length).fill("http://caddy.test:2019"),
+    );
   });
 
   it("treats a server with no routes key as having none", async () => {
@@ -210,7 +230,8 @@ function admin(input: RequestInfo | URL, init?: RequestInit): Promise<Response> 
   const method = init?.method ?? "GET";
   /* The driver only ever sends a JSON string; anything else is not its call. */
   const body: unknown = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
-  calls.push({ method, url, ...(body === undefined ? {} : { body }) });
+  const origin = new Headers(init?.headers).get("origin");
+  calls.push({ method, url, origin, ...(body === undefined ? {} : { body }) });
 
   const forced = status.get(`${method} ${url}`);
   if (forced !== undefined) return answer(forced);

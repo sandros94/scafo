@@ -62,15 +62,31 @@ export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
 
   const routesUrl = `${admin}/config/apps/http/servers/${encodeURIComponent(server)}/routes`;
   const idUrl = (id: string): string => `${admin}/id/${encodeURIComponent(id)}`;
+  const origin = originOf(admin);
 
   async function call(method: string, url: string, body?: unknown): Promise<Response> {
     let response: Response;
     try {
       response = await fetchFn(url, {
         method,
-        ...(body === undefined
-          ? {}
-          : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+        headers: {
+          /*
+           * Caddy's admin API refuses a call it takes for a browser's, and
+           * `fetch` announces every request as one: it attaches
+           * `Sec-Fetch-Mode: cors`, which is a forbidden header name a caller
+           * cannot unset. Caddy then applies its cross-origin check and answers
+           * 403 unless the call also carries an `Origin` it allows. Naming this
+           * driver's own admin origin is what satisfies it — an admin API on
+           * loopback, where Caddy puts it by default, allows exactly that.
+           *
+           * An operator who moves the admin listener off loopback must list the
+           * origin in Caddy's `admin.origins`, which Caddy requires of any
+           * client reaching it there.
+           */
+          origin,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
     } catch (error) {
       throw adminFailed(method, url, "could not be reached", error);
@@ -148,6 +164,24 @@ export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
       }
     },
   };
+}
+
+/**
+ * Origin of the admin API, which every call to it presents as its own.
+ *
+ * Throws `ScaloError("invalid-input")` when the configured admin URL is not a
+ * URL: an ingress that cannot be addressed must fail the node's boot, not the
+ * first reconcile pass that tries to publish a route through it.
+ */
+function originOf(adminUrl: string): string {
+  try {
+    return new URL(adminUrl).origin;
+  } catch (error) {
+    throw new ScaloError("invalid-input", "Ingress admin URL is not a URL", {
+      detail: `"${adminUrl}" is not the base URL of a Caddy admin API`,
+      cause: error,
+    });
+  }
 }
 
 /** The `@id` the route for `host` is addressed by. */
