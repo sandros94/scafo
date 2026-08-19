@@ -1,0 +1,446 @@
+/*
+ * Agent configuration: which source wins for a setting, what a malformed value
+ * costs, and what the loader supplies when nothing configures it.
+ *
+ * Every input is injected — the file reader, the environment and the flags — so
+ * the suite reads no file, no environment variable and no command line.
+ */
+
+import { describe, expect, it } from "vitest";
+import {
+  DEFAULT_CONFIG_PATHS,
+  DEFAULT_LISTEN,
+  DEFAULT_REGION,
+  loadAgentConfig,
+  parseHostPort,
+} from "../src/agent/config.ts";
+import { rejectionOf, rejectsWith } from "./_helpers.ts";
+
+/** The four settings with no default; every case starts from these. */
+const REQUIRED_ENV: Record<string, string> = {
+  SCALO_S3_ENDPOINT: "http://store.test:9000",
+  SCALO_S3_BUCKET: "registry",
+  SCALO_S3_ACCESS_KEY: "key",
+  SCALO_S3_SECRET_KEY: "secret",
+};
+
+const CONFIG_PATH = "/etc/scalo/scalo.config.jsonc";
+
+describe("source precedence", () => {
+  it("lets a flag override both the environment and the file", async () => {
+    const config = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ bucket: { bucket: "from-file" } })),
+      env: { ...REQUIRED_ENV, SCALO_S3_BUCKET: "from-env" },
+      flags: { bucket: "from-flag" },
+    });
+
+    expect(config.bucket.bucket).toBe("from-flag");
+  });
+
+  it("lets the environment override the file", async () => {
+    const config = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ bucket: { bucket: "from-file" } })),
+      env: { ...REQUIRED_ENV, SCALO_S3_BUCKET: "from-env" },
+    });
+
+    expect(config.bucket.bucket).toBe("from-env");
+  });
+
+  it("falls back to the file when neither a flag nor the environment carries the setting", async () => {
+    const file = {
+      bucket: {
+        endpoint: "http://file.test:9000",
+        bucket: "from-file",
+        accessKey: "file-key",
+        secretKey: "file-secret",
+        prefix: "shared/",
+      },
+      node: { id: "node-from-file", listen: "0.0.0.0:7500" },
+    };
+
+    const config = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify(file)),
+    });
+
+    expect(config.bucket).toEqual({
+      endpoint: "http://file.test:9000",
+      region: DEFAULT_REGION,
+      bucket: "from-file",
+      prefix: "shared/",
+      accessKey: "file-key",
+      secretKey: "file-secret",
+    });
+    expect(config.node).toMatchObject({ id: "node-from-file", listen: "0.0.0.0:7500" });
+  });
+
+  it("prefers a SCALO variable to the generic name accepted beside it", async () => {
+    const config = await loadAgentConfig({
+      env: {
+        ...REQUIRED_ENV,
+        S3_ENDPOINT: "http://generic.test:9000",
+        AWS_ACCESS_KEY_ID: "generic-key",
+        AWS_SECRET_ACCESS_KEY: "generic-secret",
+      },
+    });
+
+    expect(config.bucket).toMatchObject({
+      endpoint: "http://store.test:9000",
+      accessKey: "key",
+      secretKey: "secret",
+    });
+  });
+
+  it("accepts the generic bucket variables when no SCALO name is set", async () => {
+    const config = await loadAgentConfig({
+      env: {
+        S3_ENDPOINT: "http://generic.test:9000",
+        SCALO_S3_BUCKET: "registry",
+        AWS_ACCESS_KEY_ID: "generic-key",
+        AWS_SECRET_ACCESS_KEY: "generic-secret",
+        AWS_REGION: "eu-west-1",
+      },
+    });
+
+    expect(config.bucket).toMatchObject({
+      endpoint: "http://generic.test:9000",
+      region: "eu-west-1",
+      accessKey: "generic-key",
+      secretKey: "generic-secret",
+    });
+  });
+
+  it("treats a blank value as unset, whichever source wrote it", async () => {
+    const config = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCALO_S3_REGION: "   ", SCALO_NODE_ID: "" },
+      flags: { listen: "  " },
+    });
+
+    expect(config.bucket.region).toBe(DEFAULT_REGION);
+    expect(config.node.listen).toBe(DEFAULT_LISTEN);
+    expect(config.node.id).toMatch(/^node-[0-9a-f]{8}$/);
+  });
+});
+
+describe("reading the config file", () => {
+  it("parses a file written with line and block comments", async () => {
+    const jsonc = `{
+  // where the registry lives
+  "bucket": {
+    "endpoint": "http://store.test:9000",
+    "bucket": "registry",
+    /* credentials for that bucket */
+    "accessKey": "key",
+    "secretKey": "secret"
+  },
+  "platformDomains": ["apps.test"]
+}`;
+
+    const config = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, jsonc),
+    });
+
+    expect(config.bucket.endpoint).toBe("http://store.test:9000");
+    expect(config.platformDomains).toEqual(["apps.test"]);
+  });
+
+  it("accepts a file with trailing commas, as JSONC allows", async () => {
+    const jsonc = `{
+  "bucket": {
+    "endpoint": "http://store.test:9000",
+    "bucket": "registry",
+    "accessKey": "key",
+    "secretKey": "secret",
+  },
+}`;
+
+    const config = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, jsonc),
+    });
+
+    expect(config.bucket.endpoint).toBe("http://store.test:9000");
+    expect(config.bucket.bucket).toBe("registry");
+  });
+
+  it("refuses a malformed file instead of ignoring it", async () => {
+    const error = await rejectsWith(
+      () =>
+        loadAgentConfig({
+          configPath: CONFIG_PATH,
+          readFile: fileAt(CONFIG_PATH, "{ this is not json at all"),
+          /* Complete on their own: a tolerated syntax error would load silently. */
+          env: REQUIRED_ENV,
+        }),
+      "invalid-input",
+    );
+
+    expect(error.message).toContain("JSONC");
+    expect(error.detail).toContain(CONFIG_PATH);
+  });
+
+  it("refuses a file that does not hold an object of settings", async () => {
+    const error = await rejectsWith(
+      () =>
+        loadAgentConfig({
+          configPath: CONFIG_PATH,
+          readFile: fileAt(CONFIG_PATH, '["not", "settings"]'),
+          env: REQUIRED_ENV,
+        }),
+      "invalid-input",
+    );
+
+    expect(error.message).toContain("object");
+  });
+
+  it("refuses a named file that is not there", async () => {
+    const error = await rejectsWith(
+      () =>
+        loadAgentConfig({
+          configPath: CONFIG_PATH,
+          readFile: async (): Promise<null> => null,
+          env: REQUIRED_ENV,
+        }),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain(CONFIG_PATH);
+  });
+
+  it("tolerates an absent default file when the other sources are complete", async () => {
+    const asked: string[] = [];
+
+    const config = await loadAgentConfig({
+      readFile: async (path: string): Promise<null> => {
+        asked.push(path);
+        return null;
+      },
+      env: REQUIRED_ENV,
+    });
+
+    expect(asked).toEqual(DEFAULT_CONFIG_PATHS);
+    expect(config.bucket.bucket).toBe("registry");
+  });
+
+  it("stops at the first default path that can be read", async () => {
+    const [, second = ""] = DEFAULT_CONFIG_PATHS;
+
+    const config = await loadAgentConfig({
+      readFile: fileAt(second, JSON.stringify({ bucket: { bucket: "from-second-path" } })),
+      env: { ...REQUIRED_ENV, SCALO_S3_BUCKET: undefined },
+    });
+
+    expect(config.bucket.bucket).toBe("from-second-path");
+  });
+});
+
+describe("required settings", () => {
+  it("names the file key, the environment variables and the flag that could supply it", async () => {
+    const error = await rejectsWith(() => loadAgentConfig({ env: {} }), "invalid-input");
+
+    for (const source of ["bucket.endpoint", "SCALO_S3_ENDPOINT", "S3_ENDPOINT", "--endpoint"]) {
+      expect(error.detail, `error detail should mention ${source}`).toContain(source);
+    }
+  });
+
+  it("reports every required setting the same way", async () => {
+    const cases: [string, string[]][] = [
+      ["SCALO_S3_ENDPOINT", ["bucket.endpoint", "--endpoint"]],
+      ["SCALO_S3_BUCKET", ["bucket.bucket", "--bucket"]],
+      ["SCALO_S3_ACCESS_KEY", ["bucket.accessKey", "--access-key"]],
+      ["SCALO_S3_SECRET_KEY", ["bucket.secretKey", "--secret-key"]],
+    ];
+
+    for (const [missing, mentions] of cases) {
+      const env = { ...REQUIRED_ENV, [missing]: undefined };
+      const error = await rejectsWith(() => loadAgentConfig({ env }), "invalid-input");
+
+      for (const mention of mentions) {
+        expect(error.detail, `without ${missing}`).toContain(mention);
+      }
+    }
+  });
+});
+
+describe("addresses", () => {
+  it("keeps a valid host:port exactly as it was written", async () => {
+    const config = await loadAgentConfig({
+      env: {
+        ...REQUIRED_ENV,
+        SCALO_LISTEN: "0.0.0.0:7400",
+        SCALO_INTERNAL_LISTEN: "10.0.0.4:7401",
+        SCALO_ADVERTISE: "node4.internal:7401",
+      },
+    });
+
+    expect(config.node).toMatchObject({
+      listen: "0.0.0.0:7400",
+      internalListen: "10.0.0.4:7401",
+      advertise: "node4.internal:7401",
+    });
+  });
+
+  it("refuses an unusable address at boot rather than at first use", async () => {
+    const invalid = [
+      "store.test",
+      "store.test:",
+      "store.test:0",
+      "store.test:99999",
+      "store.test:abc",
+      ":7400",
+      "STORE.test:7400",
+      "::1:7400",
+    ];
+    /* Every address setting is checked, and each names itself in the failure. */
+    const settings: [string, string][] = [
+      ["SCALO_LISTEN", "node.listen"],
+      ["SCALO_INTERNAL_LISTEN", "node.internalListen"],
+      ["SCALO_ADVERTISE", "node.advertise"],
+    ];
+
+    for (const value of invalid) {
+      for (const [variable, field] of settings) {
+        const error = await rejectsWith(
+          () => loadAgentConfig({ env: { ...REQUIRED_ENV, [variable]: value } }),
+          "invalid-input",
+        );
+
+        expect(error.detail, `${variable}=${value}`).toContain(field);
+      }
+    }
+  });
+
+  it("quotes the address it could not parse back to the operator", async () => {
+    const error = await rejectsWith(
+      () => loadAgentConfig({ env: { ...REQUIRED_ENV, SCALO_LISTEN: "store.test" } }),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain('got "store.test"');
+  });
+
+  it("splits a host:port pair, bracketing an IPv6 literal the way a URL does", () => {
+    expect(parseHostPort("127.0.0.1:7400", "node.listen")).toEqual({
+      host: "127.0.0.1",
+      port: 7400,
+    });
+    expect(parseHostPort("node4.internal:65535", "node.advertise")).toEqual({
+      host: "node4.internal",
+      port: 65_535,
+    });
+    expect(parseHostPort("[::1]:7400", "node.listen")).toEqual({ host: "::1", port: 7400 });
+  });
+
+  it("names the field it was asked about when an address is rejected", async () => {
+    const error = await rejectionOf(async () => parseHostPort("nonsense", "node.advertise"));
+
+    expect(error.code).toBe("invalid-input");
+    expect(error.detail).toContain("node.advertise");
+  });
+});
+
+describe("platform domains", () => {
+  it("splits a comma-separated list, ignoring the spacing around it", async () => {
+    const config = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCALO_PLATFORM_DOMAINS: " apps.test, edge.example.com ,," },
+    });
+
+    expect(config.platformDomains).toEqual(["apps.test", "edge.example.com"]);
+  });
+
+  it("reads a list written as an array in the config file", async () => {
+    const config = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ platformDomains: ["apps.test"] })),
+      env: REQUIRED_ENV,
+    });
+
+    expect(config.platformDomains).toEqual(["apps.test"]);
+  });
+
+  it("refuses the whole list when any one host is malformed", async () => {
+    const error = await rejectionOf(() =>
+      loadAgentConfig({
+        env: { ...REQUIRED_ENV, SCALO_PLATFORM_DOMAINS: "apps.test,NOT A HOST" },
+      }),
+    );
+
+    /* A malformed host is reported as the invalid name it is, not as generic input. */
+    expect(error.code).toBe("invalid-slug");
+    expect(error.detail).toContain("NOT A HOST");
+  });
+
+  it("refuses a file list that is not an array of strings", async () => {
+    const error = await rejectsWith(
+      () =>
+        loadAgentConfig({
+          configPath: CONFIG_PATH,
+          readFile: fileAt(CONFIG_PATH, JSON.stringify({ platformDomains: [1, 2] })),
+          env: REQUIRED_ENV,
+        }),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("platformDomains");
+  });
+
+  it("serves no wildcard domains until one is configured", async () => {
+    const config = await loadAgentConfig({ env: REQUIRED_ENV });
+
+    expect(config.platformDomains).toEqual([]);
+  });
+});
+
+describe("node identity and defaults", () => {
+  it("falls back to a loopback listener, the default signing region and no extra addresses", async () => {
+    const config = await loadAgentConfig({ env: REQUIRED_ENV });
+
+    expect(config.bucket.region).toBe(DEFAULT_REGION);
+    expect(config.bucket.region).toBe("us-east-1");
+    expect(config.node.listen).toBe(DEFAULT_LISTEN);
+    expect(config.node.listen).toBe("127.0.0.1:7400");
+    expect(config.node.internalListen).toBeUndefined();
+    expect(config.node.advertise).toBeUndefined();
+    expect(config.bucket.prefix).toBeUndefined();
+  });
+
+  it("invents a node id when none is configured, and a different one each time", async () => {
+    const ids = new Set<string>();
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const config = await loadAgentConfig({ env: REQUIRED_ENV });
+
+      expect(config.node.id).toMatch(/^node-[0-9a-f]{8}$/);
+      ids.add(config.node.id);
+    }
+
+    /* A generated id is not an identity to keep: it is fresh on every load. */
+    expect(ids.size).toBe(5);
+  });
+
+  it("keeps a configured node id instead of inventing one", async () => {
+    const config = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCALO_NODE_ID: "node_west-1" },
+    });
+
+    expect(config.node.id).toBe("node_west-1");
+  });
+
+  it("refuses a node id that could not address a registry record", async () => {
+    for (const id of ["NODE-1", "node/1", "node 1", "node.1", "n".repeat(129)]) {
+      const error = await rejectionOf(() =>
+        loadAgentConfig({ env: { ...REQUIRED_ENV, SCALO_NODE_ID: id } }),
+      );
+
+      expect(error.code, `for node id "${id}"`).toBe("invalid-slug");
+    }
+  });
+});
+
+/** A reader that resolves the given text for one path, and null for every other. */
+function fileAt(path: string, text: string): (asked: string) => Promise<string | null> {
+  return async (asked: string): Promise<string | null> => (asked === path ? text : null);
+}

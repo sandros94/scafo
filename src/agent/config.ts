@@ -237,7 +237,7 @@ async function readConfigFile(
     if (text === null) continue;
 
     const errors: JSONCParseError[] = [];
-    const parsed: unknown = parseJSONC(text, { errors });
+    const parsed: unknown = parseJSONC(text, { errors, allowTrailingComma: true });
     const failure = errors[0];
     if (failure !== undefined) {
       throw new ScaloError("invalid-input", "Config file is not valid JSONC", {
