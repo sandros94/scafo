@@ -1,7 +1,7 @@
 /* The agent's HTTP API: what a node exposes to its peers and to operators. */
 
 import { H3 } from "h3";
-import { createNodeVerifier } from "../core/auth/node-token.ts";
+import { createNodeVerifier, type NodeSigningKey } from "../core/auth/node-token.ts";
 import { createOidcVerifier } from "../core/auth/oidc.ts";
 import { ScaloError } from "../core/error.ts";
 import { readJson } from "../core/registry/cas.ts";
@@ -36,11 +36,22 @@ import type { Reconciler, ReconcileStatus } from "./reconcile.ts";
 /** Everything the HTTP layer serves from; assembled once while the node boots. */
 export interface AgentContext {
   config: AgentConfig;
+  /**
+   * Id this node answers as and is registered under. It comes from the node's
+   * persistent state rather than from the configuration, which only pins it.
+   */
+  nodeId: string;
   registry: RegistryContext;
   supervisor: Supervisor;
   /** Build of the agent, reported by `GET /v1/health`. */
   version: string;
-  /** Opens the environments' sealed varsets; without it they start unconfigured. */
+  /**
+   * Private half of this node's identity, when it holds one: what signs the node
+   * tokens its calls to other nodes carry. Its public half is what the registry
+   * files under {@link AgentContext.nodeId}.
+   */
+  signingKey?: NodeSigningKey;
+  /** Opens the environments' sealed varsets; without it they cannot be served. */
   varsetKey?: CryptoKey;
   /** What this node probed about its own hardware; bounds the processes it starts. */
   capacity?: CapacityPlan;
@@ -113,7 +124,7 @@ export function createAgentApp(agent: AgentContext): H3 {
   app.get("/v1/health", (): AgentHealth => ({
     ok: true,
     version: agent.version,
-    node: agent.config.node.id,
+    node: agent.nodeId,
   }));
 
   /*
@@ -134,7 +145,7 @@ export function createAgentApp(agent: AgentContext): H3 {
     "/v1/state",
     async (): Promise<AgentState> => {
       const [node, lease] = await Promise.all([
-        readJson<NodeRecord>(agent.registry, nodeKey(agent.config.node.id)),
+        readJson<NodeRecord>(agent.registry, nodeKey(agent.nodeId)),
         readJson<CoordinatorLease>(agent.registry, coordinatorKey()),
       ]);
       const reconcile = agent.reconciler?.status();

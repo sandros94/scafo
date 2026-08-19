@@ -50,7 +50,7 @@ When a task involves design decisions, ambiguity, or changes to the project visi
 - `scalo/drivers/ingress/caddy` — `IngressDriver` converging an operator-run Caddy through its admin API
 - `scalo/drivers/deploy/celld` — `DeployRunner` unpacking an artifact and publishing it with the celld CLI
 - `scalo/drivers/archive/tar-zst` — the `.tar.zst` artifact format, packed by the client and unpacked by the agent
-- `scalo` (bin) — the CLI; `scalo up` boots a node agent, `scalo keygen` mints an operator key, `scalo deploy` uploads a build
+- `scalo` (bin) — the CLI; `scalo up` boots a node agent, `scalo keygen` mints an operator key, `scalo deploy` uploads a build, `scalo varset` seals an environment's variables
 
 ### Source layout
 
@@ -66,6 +66,7 @@ src/
       runtime.ts          # RuntimeDriver seam: RuntimeProcess, RuntimeSpecInput, ProbeOptions
       ingress.ts          # IngressDriver seam: IngressDesired, IngressBackend
       deploy.ts           # DeployRunner seam: DeployRunInput, DeployTarget
+      transport.ts        # transport seam: TransportMode, TransportConfig
       index.ts            # type barrel
     utils/
       slug.ts             # slug validation, host-label format/parse
@@ -129,7 +130,12 @@ src/
       up.ts               # `scalo up`: register the node and serve the agent
       keygen.ts           # `scalo keygen`: mint (and register) an operator key
       deploy.ts           # `scalo deploy`: pack a directory, upload it, follow the deploy
-    _utils.ts             # internal: file reads, package version, failure output
+      varset.ts           # `scalo varset`: seal a variable file, list what an environment carries
+    _bootstrap.ts         # internal: the steps between reading the config and serving
+    _node-state.ts        # internal: the identity a node keeps across restarts
+    _varset.ts            # internal: dotenv parsing, sealing, describing without leaking
+    _varset-key.ts        # internal: the varset key file and the three forms it comes in
+    _utils.ts             # internal: file reads, state dir default, version, failure output
   drivers/
     store/
       uns3.ts             # createUns3Store()
@@ -164,6 +170,9 @@ src/
 - **Idle eviction stays off, permanently.** In celld 0.2.1, evicting a cell because it has been idle corrupts that cell's replication chain in the bucket — writes already acknowledged to the client roll back the next time the cell is restored. The runtime disables idle eviction when its variable is simply absent, so the celld driver never sets `CELLD_IDLE_EVICT_S`, refuses (`ScaloError("invalid-input")`) any caller that passes it in `extraEnv`, and strips it from the environment a process would otherwise inherit. This is a data-safety rule, not a tuning preference: it stays until the upstream fix lands and is verified.
 - **Routing follows readiness, never intent.** `renderRoutes` is pure and takes only what a node actually has running: an environment is reachable at `<project>--<env>.<domain>` (plus `<project>.<domain>` for `production`, plus any custom domain claimed for it) solely when a process serving its alias build has passed its readiness gate, and every ready process is separately reachable at `<project>--<build>.<domain>` so a build stays inspectable for as long as it runs. Hosts whose label would exceed the DNS limit are skipped rather than thrown over — one unnameable environment must not take a node's whole routing with it. The reconcile loop renders this after every pass and hands it to `IngressDriver.apply`, whose failures are recorded in the pass status and never abort it: an ingress that cannot be reached must not stop a node reconciling itself.
 - **A deploy is accepted, then carried out.** `POST /v1/deploys` takes multipart `meta` + `artifact`, ensures the project and environment exist, answers `202` with a `Location`, and does the rest in the background: publish the artifact through `DeployRunner` (unpack, run the builder, read back the runtime's version id), record an immutable build, and — when the upload asked to flip — move the alias and watch the reconcile loop until a process serving that build is ready. Exactly three states are final (`deployed`, `routed`, `failed`), so a client polls until it reaches one. Missing the routing deadline is a warning and never an error: the build exists and the loop keeps trying. Deploy status is soft state held in memory, so a restarted agent forgets deploys in flight while the registry remembers everything they had already committed.
+- **A node is its keypair, and it keeps it.** The id a node registers under and the Ed25519 pair that speaks for it live together in `<stateDir>/node.json`, written `0600` in a directory created `0700`, and are generated only on the first boot. The record in the registry is rewritten on every boot because it is derived state, but the identity behind it is not: a node that regenerated its key would leave a stale public key in the registry and have every token it signs rejected for reasons nothing on it explains. A state file that cannot be read as an identity therefore refuses the boot rather than being replaced — deleting it is a deliberate act — and the configuration only ever _pins_ an id, which replaces the identity outright when it changes.
+- **An unclassified network is refused, not assumed.** Every address a node exposes carries traffic that commands it. As soon as the agent listener, the internal listener or the advertised address reaches past loopback, `scalo up` refuses to boot until `transport.driver` says which network that is: `wireguard` to tunnel it, `none` to state that it is already private and trusted. There is no default, because the safe-looking one silently exposes a node and the other refuses working setups. A loopback-only node crosses nothing and needs neither.
+- **An environment is served with its variables or not at all.** A node opens its environments' varsets with one AES-256 key, read from a file the operator configures. An environment whose varset this node cannot open — no key, the wrong key, an altered envelope — is recorded as a failure of that one environment and keeps whatever process it already had; the pass carries on and every other environment is served. Starting it unconfigured would come up, pass its readiness gate and serve requests against whatever the code falls back to, which is a misconfiguration nothing reports.
 - **Two ways in, one way out.** The deploy-facing routes accept either an operator's node token or a project's workload OIDC token. The node token is tried first because it needs nothing but the header; only when it fails as authentication is the bearer offered to the trust policy of the project the request names. A caller that fails both gets the single `auth-invalid` problem document every other rejection uses — it cannot learn which half it failed, nor whether the project exists. The one distinguishable outcome is `trust-mismatch`, which is authorization: a token trusted for one project can never deploy or flip another.
 
 ## Code Conventions

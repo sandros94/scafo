@@ -1,5 +1,6 @@
 /* Internal: what the registry says this node should be serving. */
 
+import { ScaloError } from "../core/error.ts";
 import type { DesiredEnvironment } from "../core/placement/reconcile.ts";
 import { getBuild } from "../core/registry/builds.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
@@ -32,16 +33,15 @@ export async function readDesired(registry: RegistryContext): Promise<DesiredEnv
 }
 
 /**
- * Opens the varset an environment points at.
+ * Opens the varset an environment points at, or null when it points at none.
  *
- * Returns null when the environment has none, and equally when this node does
- * not hold the key that would open it: a process then starts without the
- * environment's configuration rather than not starting at all.
- *
- * TODO: distributing the varset key to nodes is not implemented, so a node
- * without one silently serves an environment with no variables set. Until keys
- * are distributed, an environment that needs its varset must run on a node the
- * operator handed the key to.
+ * Throws rather than answering null when the environment has one this node
+ * cannot open — no key at all, the wrong key, or an envelope that will not
+ * decrypt. A process started without the variables its environment is
+ * configured with is a silent misconfiguration: it would come up, pass its
+ * readiness gate and serve requests against whatever defaults its code falls
+ * back to. The caller records the failure against that one environment and
+ * leaves whatever already serves it running.
  */
 export async function openEnvironmentVars(
   registry: RegistryContext,
@@ -49,7 +49,16 @@ export async function openEnvironmentVars(
   key?: CryptoKey,
 ): Promise<PlainVarset | null> {
   const varsetId = wanted.varsetId;
-  if (varsetId === undefined || key === undefined) return null;
+  if (varsetId === undefined) return null;
+
+  if (key === undefined) {
+    throw new ScaloError("invalid-varset", "No key for this environment's variables", {
+      detail:
+        `"${wanted.project}/${wanted.env.name}" is configured with varset "${varsetId}", ` +
+        `which this node holds no key for: point "varsets.keyFile" at the key file, ` +
+        `set SCALO_VARSET_KEY_FILE, or pass --varset-key-file`,
+    });
+  }
 
   const envelope = await getVarsetEnvelope(registry, wanted.project, varsetId);
   return openVarset(envelope, key);

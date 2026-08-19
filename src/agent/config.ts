@@ -10,6 +10,7 @@ import { type JSONCParseError, parseJSONC } from "confbox";
 import { ScaloError } from "../core/error.ts";
 import { DEFAULT_PORT_RANGE_START } from "../core/placement/ports.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
+import type { TransportConfig, TransportMode } from "../core/types/transport.ts";
 import { assertHost, isHost } from "../core/utils/host.ts";
 
 export interface AgentConfig {
@@ -23,13 +24,24 @@ export interface AgentConfig {
     secretKey: string;
   };
   node: {
-    id: string;
+    /**
+     * Id this node registers under, when the operator pins one. Absent leaves it
+     * to the node's persistent state, which generates an id on first boot and
+     * keeps it thereafter — pinning a different one replaces that identity.
+     */
+    id?: string;
     /** `host:port` the agent API binds to. */
     listen: string;
     /** `host:port` reserved for node-to-node traffic, when it is separate. */
     internalListen?: string;
     /** `host:port` other nodes should reach this one at, when it differs from the listener. */
     advertise?: string;
+    /**
+     * Directory holding what this node must remember across restarts — its
+     * identity above all. Absent means the caller decides: the CLI resolves a
+     * default for the user it runs as.
+     */
+    stateDir?: string;
   };
   /** Apex domains the platform serves wildcard subdomains under. */
   platformDomains: string[];
@@ -40,6 +52,23 @@ export interface AgentConfig {
    * the processes still run and are simply not reachable from outside the node.
    */
   ingress?: IngressConfig;
+  /**
+   * Where this node reads the key that opens its environments' sealed variable
+   * sets. Absent means it holds none, and may only serve environments that point
+   * at no varset at all.
+   */
+  varsets?: VarsetsConfig;
+  /**
+   * What carries traffic between this node and its peers. Absent is only legal
+   * for a node that stays on loopback: see {@link TransportConfig}.
+   */
+  transport?: TransportConfig;
+}
+
+/** How this node gets at the variables its environments are configured with. */
+export interface VarsetsConfig {
+  /** File holding the 32-byte AES-256 key, raw or as base64url or hex text. */
+  keyFile: string;
 }
 
 /** Which ingress a node drives, and how it is reached. */
@@ -110,16 +139,19 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
   const listen = resolve("listen", sources) ?? DEFAULT_LISTEN;
   const internalListen = resolve("internalListen", sources);
   const advertise = resolve("advertise", sources);
-  const id = resolve("nodeId", sources) ?? randomNodeId();
+  const id = resolve("nodeId", sources);
+  const stateDir = resolve("stateDir", sources);
 
   /* Parsed for their side effect: an unusable address must fail the boot, not
      the first request that tries to use it. */
   parseHostPort(listen, ORIGINS.listen.file);
   if (internalListen !== undefined) parseHostPort(internalListen, ORIGINS.internalListen.file);
   if (advertise !== undefined) parseHostPort(advertise, ORIGINS.advertise.file);
-  assertNodeId(id);
+  if (id !== undefined) assertNodeId(id);
 
   const ingress = resolveIngress(sources);
+  const keyFile = resolve("varsetKeyFile", sources);
+  const transport = resolveTransport(sources);
 
   return {
     bucket: {
@@ -130,7 +162,7 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
       accessKey: required("accessKey", sources),
       secretKey: required("secretKey", sources),
     },
-    node: { id, listen, internalListen, advertise },
+    node: { id, listen, internalListen, advertise, stateDir },
     platformDomains: resolvePlatformDomains(sources),
     runtime: {
       binPath: resolve("celldBin", sources) ?? DEFAULT_RUNTIME_BIN,
@@ -138,6 +170,8 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
       probePath: resolve("probePath", sources) ?? DEFAULT_PROBE_PATH,
     },
     ...(ingress === undefined ? {} : { ingress }),
+    ...(keyFile === undefined ? {} : { varsets: { keyFile } }),
+    ...(transport === undefined ? {} : { transport }),
   };
 }
 
@@ -222,6 +256,7 @@ const ORIGINS = {
     file: "node.internalListen",
   },
   advertise: { flag: "advertise", env: ["SCALO_ADVERTISE"], file: "node.advertise" },
+  stateDir: { flag: "state-dir", env: ["SCALO_STATE_DIR"], file: "node.stateDir" },
   platformDomains: {
     flag: "platform-domains",
     env: ["SCALO_PLATFORM_DOMAINS"],
@@ -241,6 +276,12 @@ const ORIGINS = {
   },
   caddyAdmin: { flag: "caddy-admin", env: ["SCALO_CADDY_ADMIN"], file: "ingress.adminUrl" },
   caddyServer: { flag: "caddy-server", env: ["SCALO_CADDY_SERVER"], file: "ingress.serverName" },
+  varsetKeyFile: {
+    flag: "varset-key-file",
+    env: ["SCALO_VARSET_KEY_FILE"],
+    file: "varsets.keyFile",
+  },
+  transport: { flag: "transport", env: ["SCALO_TRANSPORT"], file: "transport.driver" },
 } satisfies Record<string, Origin>;
 
 type Setting = keyof typeof ORIGINS;
@@ -337,6 +378,27 @@ function resolveIngress(sources: Sources): IngressConfig | undefined {
   };
 }
 
+/**
+ * The transport this node runs, or undefined when the operator has said nothing.
+ *
+ * Undefined is a distinct answer, not a default: a node whose addresses reach
+ * beyond loopback refuses to boot until it is told which network it is on.
+ */
+function resolveTransport(sources: Sources): TransportConfig | undefined {
+  const driver = resolve("transport", sources);
+  if (driver === undefined) return undefined;
+
+  const modes: TransportMode[] = ["wireguard", "none"];
+  if (!(modes as string[]).includes(driver)) {
+    throw new ScaloError("invalid-input", "Invalid configuration value", {
+      detail:
+        `"${ORIGINS.transport.file}" must be one of ${modes.map((m) => `"${m}"`).join(", ")}, ` +
+        `got ${JSON.stringify(driver)}`,
+    });
+  }
+  return { driver: driver as TransportMode };
+}
+
 async function readConfigFile(
   opts: LoadConfigOptions | undefined,
 ): Promise<Record<string, unknown> | undefined> {
@@ -400,12 +462,4 @@ function text(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed === "" ? undefined : trimmed;
-}
-
-function randomNodeId(): string {
-  let hex = "";
-  for (const byte of crypto.getRandomValues(new Uint8Array(4))) {
-    hex += byte.toString(16).padStart(2, "0");
-  }
-  return `node-${hex}`;
 }

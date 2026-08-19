@@ -95,6 +95,12 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       project: entry.project,
       env: entry.env,
       build: entry.build,
+      /* Throws when this environment has variables this node cannot open, which
+         takes the start with it: the failure is recorded against this one
+         environment, every other environment of the pass carries on, and this
+         one keeps whatever process it already had. Starting it without its
+         configuration would be a silent misconfiguration — the process would
+         come up and serve requests against whatever its code defaults to. */
       vars: await openEnvironmentVars(agent.registry, entry, agent.varsetKey),
       ports: action.ports,
       node: {

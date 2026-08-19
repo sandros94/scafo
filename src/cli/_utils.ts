@@ -1,7 +1,12 @@
 /* The runtime bits of the CLI: file reads, the package version, failure output. */
 
 import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { isAbsolute, join } from "node:path";
 import { isScaloError } from "../core/error.ts";
+
+/** Directory a node run by root keeps its state in. */
+export const SYSTEM_STATE_DIR: string = "/var/lib/scalo";
 
 /** Reads a file as text, or null when it does not exist. */
 export async function readTextFile(path: string): Promise<string | null> {
@@ -11,6 +16,26 @@ export async function readTextFile(path: string): Promise<string | null> {
     if ((error as { code?: string }).code === "ENOENT") return null;
     throw error;
   }
+}
+
+/**
+ * Where a node keeps its state when the configuration names no directory:
+ * {@link SYSTEM_STATE_DIR} for root, `$XDG_STATE_HOME/scalo` for a user who has
+ * one, and `~/.local/state/scalo` otherwise.
+ *
+ * Always an absolute path, and never derived from the working directory — a node
+ * is launched from wherever the operator happened to be standing, and an
+ * identity written there would be a different identity on the next boot. A
+ * relative `XDG_STATE_HOME` is ignored for the same reason.
+ */
+export function resolveDefaultStateDir(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  if (process.getuid?.() === 0) return SYSTEM_STATE_DIR;
+
+  const xdg = env.XDG_STATE_HOME?.trim();
+  if (xdg !== undefined && xdg !== "" && isAbsolute(xdg)) return join(xdg, "scalo");
+  return join(homedir(), ".local", "state", "scalo");
 }
 
 /**

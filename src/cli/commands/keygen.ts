@@ -2,14 +2,13 @@
 
 import { chmod, writeFile } from "node:fs/promises";
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
-import { S3Client } from "uns3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { loadAgentConfig } from "../../agent/config.ts";
 import { assertNodeId } from "../../core/registry/paths.ts";
 import { registerNode } from "../../core/registry/nodes.ts";
 import type { NodeRecord } from "../../core/types/registry.ts";
-import { createUns3Store } from "../../drivers/store/uns3.ts";
+import { createRegistry } from "../_bootstrap.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
 
 /** Where the key is written when the caller names no file. */
@@ -93,27 +92,13 @@ async function register(flags: Record<string, unknown>, file: OperatorKeyFile): 
     readFile: readTextFile,
   });
 
-  const store = createUns3Store(
-    new S3Client({
-      endpoint: config.bucket.endpoint,
-      region: config.bucket.region,
-      credentials: {
-        accessKeyId: config.bucket.accessKey,
-        secretAccessKey: config.bucket.secretKey,
-      },
-      bucketStyle: "path",
-      defaultBucket: config.bucket.bucket,
-    }),
-    { bucket: config.bucket.bucket, prefix: config.bucket.prefix },
-  );
-
   const record: NodeRecord = {
     v: 1,
     id: file.id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: file.publicKey.x },
     addresses: { internal: "operator", agentPort: 0 },
   };
-  await registerNode({ store }, record);
+  await registerNode(createRegistry(config), record);
 }
 
 function randomOperatorId(): string {

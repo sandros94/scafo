@@ -18,6 +18,24 @@ export function isHost(s: string): boolean {
   return s.split(".").every((label) => HOST_LABEL_RE.test(label));
 }
 
+/**
+ * Whether a listener bound to `host`, or an address advertised as `host`, stays
+ * on the machine itself: `localhost`, anything in `127.0.0.0/8`, or the IPv6
+ * loopback, written bare or bracketed.
+ *
+ * Everything else counts as reachable from elsewhere, including the wildcards
+ * `0.0.0.0` and `::` — they bind every interface the machine has, loopback being
+ * only one of them.
+ */
+export function isLoopbackHost(host: string): boolean {
+  const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  const address = bare.toLowerCase();
+
+  if (address === "localhost" || address === "::1" || address === "0:0:0:0:0:0:0:1") return true;
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(address);
+  return ipv4 !== null && Number(ipv4[1]) === 127;
+}
+
 /** Throws `ScaloError("invalid-slug")` when `s` is not a valid host. */
 export function assertHost(s: string): void {
   if (!isHost(s)) {
