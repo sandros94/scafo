@@ -3,6 +3,7 @@
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import type { AgentContext } from "../../agent/app.ts";
 import { loadAgentConfig } from "../../agent/config.ts";
+import { createCoordinator } from "../../agent/coordinator.ts";
 import { createReconciler, runtimeBaseEnv } from "../../agent/reconcile.ts";
 import { startAgent } from "../../agent/serve.ts";
 import { probeCapacity } from "../../core/capacity/reader.ts";
@@ -40,7 +41,8 @@ const upArgs: ArgsDef = {
   "platform-domains": { type: "string", description: "Comma-separated apex domains to serve" },
   "varset-key-file": { type: "string", description: "File holding the varset encryption key" },
   "celld-bin": { type: "string", description: "Executable that runs an environment" },
-  "port-range-start": { type: "string", description: "First loopback port runtime processes use" },
+  "port-range-start": { type: "string", description: "First port runtime processes use" },
+  "bind-host": { type: "string", description: "Address runtime processes bind their listeners to" },
   "probe-path": { type: "string", description: "Path the application readiness probe requests" },
   "ingress-driver": { type: "string", description: "Ingress this node drives (caddy)" },
   "caddy-admin": { type: "string", description: "Base URL of the Caddy admin API" },
@@ -129,12 +131,23 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   const reconciler = createReconciler(agent, driver, { baseEnv });
   agent.reconciler = reconciler;
 
+  /* Every node runs one and competes for the same lease; all but one of them
+     stay candidates, and the loser takes over the moment the holder stops
+     renewing. */
+  const coordinator = createCoordinator(agent);
+  agent.coordinator = coordinator;
+
   const server = await startAgent(agent);
   console.log(`scalo ${version} listening on ${server.url} as node "${state.id}"`);
   reconciler.start();
+  coordinator.start();
 
   await untilSignalled(async () => {
-    /* Stopped first: a pass that started while the node was shutting down would
+    /* Given up first, and awaited: releasing the lease lets the next node take
+       it at once instead of waiting out the TTL, and a coordinator still running
+       would keep deleting on behalf of a node that is leaving. */
+    await coordinator.stop();
+    /* Stopped next: a pass that started while the node was shutting down would
        start processes this shutdown is about to leave behind. */
     reconciler.stop();
     await server.close();

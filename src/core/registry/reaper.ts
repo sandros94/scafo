@@ -2,7 +2,7 @@
 
 import { ScaloError } from "../error.ts";
 import type { BuildRecord, DomainClaim, EnvironmentRecord } from "../types/registry.ts";
-import { deleteKey, readJson } from "./cas.ts";
+import { deleteKey, readJson, requireJson } from "./cas.ts";
 import { nowDate, type RegistryContext } from "./context.ts";
 import { listBuilds } from "./builds.ts";
 import { releaseDomain } from "./domains.ts";
@@ -116,28 +116,9 @@ export async function executeReap(
       continue;
     }
 
-    /* Claims and fleet state go first, the environment record last: a crash
-       mid-run leaves the environment in place, so the next plan picks it up
-       again and the reap self-repairs. Deleting the record first would orphan
-       its claims forever — planReap only ever iterates existing environments. */
-    for (const host of found.value.domains) {
-      const claimKey = domainKey(host);
-      const claim = await readJson<DomainClaim>(ctx, claimKey);
-      if (claim === null) continue;
-      if (claim.value.project !== target.project || claim.value.environment !== target.env) {
-        continue;
-      }
-      await releaseDomain(ctx, host);
-      result.deleted.push(claimKey);
-    }
-
-    for (const fleetKey of await ctx.store.list(`${fleetPrefix(target.project, target.env)}/`)) {
-      await deleteKey(ctx, fleetKey);
-      result.deleted.push(fleetKey);
-    }
-
-    await deleteKey(ctx, key);
-    result.deleted.push(key);
+    result.deleted.push(
+      ...(await purgeEnvironment(ctx, target.project, found.value, () => assertLease(ctx, lease))),
+    );
   }
 
   const maxAgeMs = opts?.buildRetention?.maxAgeMs;
@@ -172,6 +153,92 @@ export async function executeReap(
   /* TODO: varsets are shared by builds and environments, so reaping them needs
      reference counting across both. They are deliberately left untouched. */
   return result;
+}
+
+/**
+ * Deletes one environment on an operator's explicit order, under the coordinator
+ * lease. This is the reaper's machinery run against a named target instead of a
+ * plan, so the deletion order and the fencing are the same; what it does NOT do
+ * is ask whether the environment is idle. The order to delete is the decision,
+ * and an environment nothing has called in months is precisely the one an
+ * operator deletes by hand.
+ *
+ * Refuses a non-ephemeral environment with `ScaloError("invalid-input")` at
+ * status 409: a long-lived environment is the one name that outlives every build
+ * it ever served, and nothing here can tell a deliberate request from a typo in
+ * a path. Marking it ephemeral first is a separate, auditable act.
+ *
+ * The lease is verified before every destructive step, so a coordinator that has
+ * been superseded mid-run stops rather than racing the node that replaced it —
+ * the partial deletion it leaves is the same self-repairing state a crash leaves.
+ *
+ * Throws `ScaloError("not-found")` when there is no such environment, and
+ * `ScaloError("lease-lost")` once the lease is gone.
+ */
+export async function deleteEnvironment(
+  ctx: RegistryContext,
+  project: string,
+  env: string,
+  lease: LeaseHandle,
+): Promise<{ deleted: string[] }> {
+  const found = await requireJson<EnvironmentRecord>(ctx, environmentKey(project, env));
+
+  if (!found.value.ephemeral) {
+    throw new ScaloError("invalid-input", "Environment is not ephemeral", {
+      status: 409,
+      detail:
+        `"${project}/${env}" is not ephemeral, and deleting an environment through this call ` +
+        `requires it to be: a non-ephemeral environment is deleted only after it has been ` +
+        `marked ephemeral, so the decision to discard it is made once and on its own`,
+    });
+  }
+
+  const deleted = await purgeEnvironment(ctx, project, found.value, () => assertLease(ctx, lease));
+  return { deleted };
+}
+
+/**
+ * Deletes one environment's records in the only safe order: the domain claims
+ * that name it, then its fleet state, then the environment record itself.
+ * `guard` runs before every destructive step and aborts the rest by throwing.
+ *
+ * A run cut short — by a crash or by a lost lease — therefore leaves the
+ * environment record in place, so the next pass finds it again and the deletion
+ * self-repairs. Deleting the record first would orphan its claims forever:
+ * nothing iterates an environment that no longer exists.
+ */
+async function purgeEnvironment(
+  ctx: RegistryContext,
+  project: string,
+  environment: EnvironmentRecord,
+  guard: () => Promise<void>,
+): Promise<string[]> {
+  const deleted: string[] = [];
+
+  for (const host of environment.domains) {
+    const claimKey = domainKey(host);
+    const claim = await readJson<DomainClaim>(ctx, claimKey);
+    if (claim === null) continue;
+    /* Only claims still naming this environment: one that has moved on belongs
+       to whoever took it over, and releasing it would strand them. */
+    if (claim.value.project !== project || claim.value.environment !== environment.name) continue;
+
+    await guard();
+    await releaseDomain(ctx, host);
+    deleted.push(claimKey);
+  }
+
+  for (const fleetKey of await ctx.store.list(`${fleetPrefix(project, environment.name)}/`)) {
+    await guard();
+    await deleteKey(ctx, fleetKey);
+    deleted.push(fleetKey);
+  }
+
+  const key = environmentKey(project, environment.name);
+  await guard();
+  await deleteKey(ctx, key);
+  deleted.push(key);
+  return deleted;
 }
 
 async function readEnvironments(

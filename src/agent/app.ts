@@ -5,9 +5,10 @@ import { createNodeVerifier, type NodeSigningKey } from "../core/auth/node-token
 import { createOidcVerifier } from "../core/auth/oidc.ts";
 import { ScaloError } from "../core/error.ts";
 import { readJson } from "../core/registry/cas.ts";
-import type { RegistryContext } from "../core/registry/context.ts";
+import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { checkDomain } from "../core/registry/domains.ts";
 import { flipAlias, rollbackAlias } from "../core/registry/environments.ts";
+import { isLeaseExpired } from "../core/registry/lease.ts";
 import { coordinatorKey, nodeKey } from "../core/registry/paths.ts";
 import type { CapacityPlan } from "../core/capacity/compute.ts";
 import type { IngressDriver } from "../core/types/ingress.ts";
@@ -20,6 +21,7 @@ import type {
 import type { ProcessStatus, Supervisor } from "../core/types/supervisor.ts";
 import { isHost } from "../core/utils/host.ts";
 import { parseHostLabel } from "../core/utils/slug.ts";
+import { deleteEnvironmentRequest } from "./_environments.ts";
 import {
   type DeployVerifiers,
   readAliasRequest,
@@ -29,6 +31,7 @@ import {
   verifyWorkload,
 } from "./_intake.ts";
 import type { AgentConfig } from "./config.ts";
+import type { Coordinator } from "./coordinator.ts";
 import type { DeployService, DeployStatus } from "./deploys.ts";
 import { renderProblem, requireNodeToken } from "./middleware.ts";
 import type { Reconciler, ReconcileStatus } from "./reconcile.ts";
@@ -58,6 +61,13 @@ export interface AgentContext {
   /** The reconcile loop, when this node runs one. */
   reconciler?: Reconciler;
   /**
+   * The coordinator loop, when this node runs one. A node without it never
+   * carries out lease-gated work itself, and forwards it to whoever does.
+   */
+  coordinator?: Coordinator;
+  /** How this node calls its peers; defaults to the global `fetch`. */
+  fetchFn?: typeof fetch;
+  /**
    * Where the node publishes what it serves. Without one the processes still
    * run and are simply not reachable from outside the node.
    */
@@ -73,15 +83,37 @@ export interface AgentHealth {
   node: string;
 }
 
+/** Who is coordinating right now, as `GET /v1/state` reports it. */
+export interface CoordinatorView {
+  /** Id of the node holding the lease. */
+  node: string;
+  /** Fencing token of the lease it holds; it only ever increases. */
+  fence: number;
+  /** True when the node answering is the one coordinating. */
+  self: boolean;
+}
+
 /** Body of `GET /v1/state`: what this node believes about itself right now. */
 export interface AgentState {
   /** This node's registry record; null until it has registered. */
   node: NodeRecord | null;
   /** Holder of the coordinator lease, whoever it is; null when nobody holds one. */
   lease: CoordinatorLease | null;
+  /**
+   * The lease read as an election: null while nobody coordinates, which includes
+   * a lease left behind by a node that is gone and whose TTL has run out.
+   * {@link AgentState.lease} reports that record as it stands; this reports what
+   * it still means.
+   */
+  coordinator: CoordinatorView | null;
   processes: ProcessStatus[];
   /** Last pass of the reconcile loop; absent on a node that runs no loop. */
   reconcile?: ReconcileStatus;
+}
+
+/** Body of `DELETE /v1/environments/:project/:env`: the store keys it removed. */
+export interface EnvironmentDeleted {
+  deleted: string[];
 }
 
 /** Body of `POST /v1/aliases`: the environment as it now stands. */
@@ -152,10 +184,22 @@ export function createAgentApp(agent: AgentContext): H3 {
       return {
         node: node?.value ?? null,
         lease: lease?.value ?? null,
+        coordinator: coordinatorView(agent, lease?.value ?? null),
         processes: agent.supervisor.list(),
         ...(reconcile === undefined ? {} : { reconcile }),
       };
     },
+    { middleware: [authenticated] },
+  );
+
+  /*
+   * Deleting is lease-gated, so only the coordinator can carry it out — but any
+   * node accepts the request and forwards it there, because which node holds the
+   * lease is this installation's business rather than the operator's.
+   */
+  app.delete(
+    "/v1/environments/:project/:env",
+    (event): Promise<Response | EnvironmentDeleted> => deleteEnvironmentRequest(agent, event),
     { middleware: [authenticated] },
   );
 
@@ -213,6 +257,25 @@ export function createAgentApp(agent: AgentContext): H3 {
 /** Where the status of a deploy is polled. */
 export function deployLocation(id: string): string {
   return `/v1/deploys/${id}`;
+}
+
+/**
+ * The lease as an election. `self` takes the coordinator loop's own word for it
+ * rather than comparing ids alone: the loop holds the ETag that fences its
+ * writes, and a node whose renewal was refused has already stopped coordinating
+ * while the record it was refused over still names it.
+ */
+function coordinatorView(
+  agent: AgentContext,
+  lease: CoordinatorLease | null,
+): CoordinatorView | null {
+  if (lease === null || isLeaseExpired(lease, nowDate(agent.registry))) return null;
+
+  return {
+    node: lease.node,
+    fence: lease.fence,
+    self: agent.coordinator?.status().holding === true && lease.node === agent.nodeId,
+  };
 }
 
 /**
