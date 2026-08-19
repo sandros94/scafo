@@ -1,0 +1,17 @@
+allowBuilds:
+  "@parcel/watcher": false
+  cpu-features: false
+  protobufjs: false
+  simple-git-hooks: true
+  ssh2: false
+  uns3: false
+
+ignoredBuiltDependencies:
+  - "@parcel/watcher"
+  - cpu-features
+  - protobufjs
+  - ssh2
+  - uns3
+
+onlyBuiltDependencies:
+  - simple-git-hooks

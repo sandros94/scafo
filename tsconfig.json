@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "strict": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": false,
+    "forceConsistentCasingInFileNames": true,
+    "noImplicitAny": true,
+    "noImplicitOverride": true,
+    "noEmit": true,
+    "composite": true,
+    "isolatedDeclarations": true,
+    "allowImportingTsExtensions": true,
+    "lib": ["ESNext", "DOM"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "playground/**/*.ts"],
+  "exclude": ["node_modules", "dist", "docs"]
+}

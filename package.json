@@ -1,0 +1,97 @@
+{
+  "name": "scalo",
+  "version": "0.0.0",
+  "description": "Self-hosted serverless deployment platform for JS apps",
+  "license": "Apache-2.0",
+  "author": {
+    "name": "Sandro Circi",
+    "email": "sandro.circi@digitoolmedia.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sandros94/scalo.git"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.mjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "default": "./dist/index.mjs"
+    },
+    "./registry": {
+      "types": "./dist/core/registry/index.d.mts",
+      "default": "./dist/core/registry/index.mjs"
+    },
+    "./auth": {
+      "types": "./dist/core/auth/index.d.mts",
+      "default": "./dist/core/auth/index.mjs"
+    },
+    "./capacity": {
+      "types": "./dist/core/capacity/index.d.mts",
+      "default": "./dist/core/capacity/index.mjs"
+    },
+    "./drivers/host/node": {
+      "types": "./dist/drivers/host/node.d.mts",
+      "default": "./dist/drivers/host/node.mjs"
+    },
+    "./drivers/store/uns3": {
+      "types": "./dist/drivers/store/uns3.d.mts",
+      "default": "./dist/drivers/store/uns3.mjs"
+    },
+    "./drivers/store/memory": {
+      "types": "./dist/drivers/store/memory.d.mts",
+      "default": "./dist/drivers/store/memory.mjs"
+    }
+  },
+  "scripts": {
+    "build": "obuild",
+    "dev": "bun --watch ./playground/main.ts",
+    "dev:prepare": "obuild --stub && pnpm simple-git-hooks",
+    "lint": "oxlint . && oxfmt --check .",
+    "fmt": "automd && oxlint --fix . && oxfmt .",
+    "prepack": "pnpm build",
+    "test": "vitest run --slowTestThreshold=1000",
+    "test:coverage": "vitest run --coverage --slowTestThreshold=1000",
+    "typecheck": "tsc --noEmit",
+    "bench": "vitest bench --run"
+  },
+  "dependencies": {
+    "unjwt": "^0.7.3",
+    "uns3": "^0.0.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "@vitest/coverage-v8": "^4.1.10",
+    "automd": "^0.4.3",
+    "obuild": "^0.4.38",
+    "oxfmt": "^0.63.0",
+    "oxlint": "^1.78.0",
+    "oxlint-tsgolint": "^7.0.2001",
+    "simple-git-hooks": "^2.13.1",
+    "testcontainers": "^12.1.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "simple-git-hooks": {
+    "pre-commit": "pnpm build --stub && pnpm lint && pnpm typecheck"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "11.18.0",
+      "onFail": "download"
+    },
+    "runtime": {
+      "name": "node",
+      "version": ">=24.17.0",
+      "onFail": "error"
+    }
+  },
+  "packageManager": "pnpm@11.18.0"
+}
