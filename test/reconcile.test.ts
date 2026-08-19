@@ -197,8 +197,16 @@ describe("an environment the registry no longer lists", () => {
     const plan = planReconcile({ desired: [], actual: [second, first], ports });
 
     expect(plan).toEqual([
-      { type: "stop", processId: first.processId, reason: "environment is no longer deployed" },
-      { type: "stop", processId: second.processId, reason: "environment is no longer deployed" },
+      {
+        type: "stop",
+        processId: first.processId,
+        reason: "environment is no longer served by this node",
+      },
+      {
+        type: "stop",
+        processId: second.processId,
+        reason: "environment is no longer served by this node",
+      },
     ]);
     expect(ports.calls).toBe(0);
   });
@@ -223,7 +231,11 @@ describe("an environment the registry no longer lists", () => {
         ports: { public: PORT_START, internal: PORT_START + 1 },
       },
       { type: "await-ready", processId: `shop--prod--${BUILD_TWO}` },
-      { type: "stop", processId: stranger.processId, reason: "environment is no longer deployed" },
+      {
+        type: "stop",
+        processId: stranger.processId,
+        reason: "environment is no longer served by this node",
+      },
     ]);
     expect(phasesOf(plan)).toEqual(["activate", "start", "await-ready", "stop"]);
   });
@@ -239,7 +251,11 @@ describe("an environment the registry no longer lists", () => {
     });
 
     expect(plan).toEqual([
-      { type: "stop", processId: dropped.processId, reason: "environment is no longer deployed" },
+      {
+        type: "stop",
+        processId: dropped.processId,
+        reason: "environment is no longer served by this node",
+      },
     ]);
   });
 });
@@ -467,7 +483,7 @@ function stopVerdict(
     (entry) => entry.project === stopped.project && entry.env.name === stopped.env,
   );
   if (wanted === undefined) {
-    return action.reason === "environment is no longer deployed"
+    return action.reason === "environment is no longer served by this node"
       ? SAFE
       : `"${action.processId}" serves no wanted environment but was stopped as "${action.reason}"`;
   }

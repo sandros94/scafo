@@ -23,7 +23,9 @@ import {
   flipAlias,
   setEnvironmentVarset,
 } from "../src/core/registry/environments.ts";
+import { acquireLease } from "../src/core/registry/lease.ts";
 import { environmentKey } from "../src/core/registry/paths.ts";
+import { writePlacement } from "../src/core/registry/placement.ts";
 import { createProject } from "../src/core/registry/projects.ts";
 import { importVarsetKey, putVarset, sealVarset } from "../src/core/registry/varsets.ts";
 import type { PlainVarset } from "../src/core/types/registry.ts";
@@ -51,9 +53,20 @@ const BASE_ENV = { PATH: "/usr/bin:/bin" };
 
 const STARTED_AT = "2026-01-01T00:00:00.000Z";
 
+/** The node the seeded world is; the other is one it shares an installation with. */
+const THIS_NODE = "node-a";
+const ANOTHER_NODE = "node-b";
+
 /** Id of the process that serves the seeded environment at a given build. */
 function processIdOf(build: string): string {
   return formatProcessId({ project: PROJECT, env: ENVIRONMENT, build });
+}
+
+/** Records a coordinator's decision about who serves the seeded environment. */
+async function placeOn(registry: RegistryContext, nodes: string[]): Promise<void> {
+  const lease = await acquireLease(registry, "coordinator");
+  if (lease === null) throw new Error("the fixture could not take the coordinator lease");
+  await writePlacement(registry, PROJECT, ENVIRONMENT, nodes, lease);
 }
 
 describe("one pass over a node that runs nothing yet", () => {
@@ -155,6 +168,7 @@ describe("one pass over a node that runs nothing yet", () => {
       lastActions: [],
       failures: [],
       processes: [],
+      placements: [],
     });
   });
 });
@@ -410,13 +424,92 @@ describe("an environment that is taken out of the registry", () => {
       {
         type: "stop",
         processId: processIdOf(BUILD_ONE),
-        reason: "environment is no longer deployed",
+        reason: "environment is no longer served by this node",
       },
     ]);
     expect(world.supervisor.stopped).toEqual([
       { id: processIdOf(BUILD_ONE), graceMs: world.driver.stopGraceMs },
     ]);
     expect(world.reconciler.status().processes).toEqual([]);
+  });
+});
+
+describe("an environment placed on particular nodes", () => {
+  it("starts the one this node was assigned", async () => {
+    const world = await seededWorld();
+    await placeOn(world.registry, [THIS_NODE, ANOTHER_NODE]);
+
+    const plan = await world.reconciler.runOnce();
+
+    expect(plan.map((action) => action.type)).toEqual(["activate", "start", "await-ready"]);
+    expect(world.supervisor.started[0].id).toBe(processIdOf(BUILD_ONE));
+    expect(world.reconciler.status().placements).toEqual([
+      { project: PROJECT, env: ENVIRONMENT, nodes: [THIS_NODE, ANOTHER_NODE], self: true },
+    ]);
+  });
+
+  it("starts nothing for one placed entirely on other nodes", async () => {
+    const world = await seededWorld();
+    await placeOn(world.registry, [ANOTHER_NODE]);
+
+    const plan = await world.reconciler.runOnce();
+
+    expect(plan).toEqual([]);
+    expect(world.supervisor.started).toEqual([]);
+    expect(world.driver.activations).toEqual([]);
+    expect(world.reconciler.status().placements[0]).toMatchObject({ self: false });
+  });
+
+  it("stops what it already runs once the environment is placed elsewhere", async () => {
+    const world = await seededWorld();
+    await world.reconciler.runOnce();
+    expect(world.supervisor.started).toHaveLength(1);
+
+    /* The reassignment: the coordinator gave this environment to another node,
+       and the node that had it stops its process. The receiving node starts its
+       own on its own pass — neither node waits for the other. */
+    await placeOn(world.registry, [ANOTHER_NODE]);
+    const plan = await world.reconciler.runOnce();
+
+    expect(plan).toEqual([
+      {
+        type: "stop",
+        processId: processIdOf(BUILD_ONE),
+        reason: "environment is no longer served by this node",
+      },
+    ]);
+    expect(world.supervisor.stopped).toEqual([
+      { id: processIdOf(BUILD_ONE), graceMs: world.driver.stopGraceMs },
+    ]);
+    expect(world.reconciler.status().processes).toEqual([]);
+  });
+
+  it("keeps serving one it is still named in", async () => {
+    const world = await seededWorld();
+    await world.reconciler.runOnce();
+
+    await placeOn(world.registry, [THIS_NODE]);
+    const plan = await world.reconciler.runOnce();
+
+    expect(plan).toEqual([]);
+    expect(world.supervisor.stopped).toEqual([]);
+    expect(world.reconciler.status().processes).toHaveLength(1);
+  });
+
+  it("stops routing to an environment it no longer serves", async () => {
+    const applied: IngressDesired[] = [];
+    const world = await seededWorld({
+      ingress: { apply: (d) => (applied.push(d), Promise.resolve()) },
+    });
+    await world.reconciler.runOnce();
+    expect(applied[0]?.routes).not.toEqual([]);
+
+    await placeOn(world.registry, [ANOTHER_NODE]);
+    await world.reconciler.runOnce();
+
+    /* Traffic must stop arriving here before this node stops answering it: an
+       ingress still pointing at a stopped process is a 502 per request. */
+    expect(applied.at(-1)?.routes).toEqual([]);
   });
 });
 

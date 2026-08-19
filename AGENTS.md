@@ -24,7 +24,7 @@ When a task involves design decisions, ambiguity, or changes to the project visi
 - **Build:** `pnpm build` (uses obuild/rolldown)
 - **Test:** `pnpm test` (vitest; the integration suite auto-starts an S3 store container via testcontainers — needs docker. `SCALO_TEST_STORE=seaweedfs|rustfs` picks the store, default seaweedfs; set `S3_ENDPOINT`/`S3_ACCESS_KEY`/`S3_SECRET_KEY`/`S3_BUCKET` to target an external store instead)
 - **Single test file:** `pnpm vitest run test/utils.test.ts`
-- **End-to-end, two nodes:** `SCALO_E2E=1 pnpm vitest run test/integration/e2e-multinode.test.ts` (same images, same flag). One bucket, two Caddy+agent pairs on the docker bridge: both serve the same environment, a durable object stays single-owner across them, exactly one node holds the coordinator lease, an ephemeral environment is deleted through the node that is _not_ the coordinator, and killing the coordinator's container hands the lease to the survivor. Needs `SCALO_BIND_HOST` past loopback — see the runtime-listener rule below
+- **End-to-end, two nodes:** `SCALO_E2E=1 pnpm vitest run test/integration/e2e-multinode.test.ts` (same images, same flag). One bucket, two Caddy+agent pairs on the docker bridge: both serve the same environment, a durable object stays single-owner across them, exactly one node holds the coordinator lease, an ephemeral environment is deleted through the node that is _not_ the coordinator, an environment scaled to `replicas: 1` ends up on exactly one node while the other stops serving it, and killing the coordinator's container hands the lease to the survivor — which then either takes the single-replica environment over or keeps serving it untouched, depending on which node placement had given it to. Needs `SCALO_BIND_HOST` past loopback — see the runtime-listener rule below
 - **End-to-end:** `SCALO_E2E=1 pnpm vitest run test/integration/e2e.test.ts` (skipped without the flag, so `pnpm test` stays fast). Drives the whole single-node loop against real infrastructure — SeaweedFS, a Caddy the agent converges through its admin API, celld running the builds, and the built CLI — through `scalo keygen --register`, two `scalo deploy --flip` runs and a rollback, asserting what each build serves through Caddy at every step. It then plays the CI-shaped path against a stub OIDC issuer container (`test/integration/_stub-issuer.ts`): `scalo trust set`, then a `scalo deploy --token` into a new environment with NO operator key and NO bucket credential on the calling side, and a token from an untrusted subject that must fail with `trust-mismatch`. Needs docker, the images `chrislusf/seaweedfs:4.42`, `caddy:2` and `node:24-slim`, and a local `scalo-v13-probe` image carrying node 24, celld and esbuild
 - **Type check:** `pnpm typecheck` (uses `tsc` from TypeScript 7)
 - **Lint:** `pnpm lint` (oxlint + oxfmt --check)
@@ -41,7 +41,7 @@ When a task involves design decisions, ambiguity, or changes to the project visi
 - `scalo/registry` — registry operations: keys, CAS document helpers, coordinator lease, projects, builds, environments, varsets, nodes, trust, domains, reaper
 - `scalo/auth` — node/operator EdDSA tokens and workload OIDC verification
 - `scalo/capacity` — cgroup v2 parsing and the capacity planning formulas
-- `scalo/placement` — the pure reconcile planner, the pure route renderer, the process-id convention and the port allocator
+- `scalo/placement` — the pure reconcile planner, the pure route renderer, the process-id convention, the port allocator, and the rendezvous hashing and replica-count rules that decide which nodes serve an environment
 - `scalo/agent` — the node agent: configuration loading, the HTTP API and its listener, the reconcile loop, deploy intake
 - `scalo/drivers/store/uns3` — `CasStore` backed by an S3-compatible bucket via [`uns3`](https://github.com/sandros94/uns3)
 - `scalo/drivers/store/memory` — in-process `CasStore` with identical CAS semantics, for tests and local development
@@ -51,7 +51,7 @@ When a task involves design decisions, ambiguity, or changes to the project visi
 - `scalo/drivers/ingress/caddy` — `IngressDriver` converging an operator-run Caddy through its admin API
 - `scalo/drivers/deploy/celld` — `DeployRunner` unpacking an artifact and publishing it with the celld CLI
 - `scalo/drivers/archive/tar-zst` — the `.tar.zst` artifact format, packed by the client and unpacked by the agent
-- `scalo` (bin) — the CLI; `scalo up` boots a node agent, `scalo keygen` mints an operator key, `scalo deploy` uploads a build, `scalo varset` seals an environment's variables, `scalo trust` says which CI issuers may deploy a project, `scalo wg` sets this node up on the WireGuard tunnel
+- `scalo` (bin) — the CLI; `scalo up` boots a node agent, `scalo keygen` mints an operator key, `scalo deploy` uploads a build (`--replicas <n|all>` states how many nodes serve the environment), `scalo varset` seals an environment's variables, `scalo trust` says which CI issuers may deploy a project, `scalo wg` sets this node up on the WireGuard tunnel
 
 ### Source layout
 
@@ -86,8 +86,9 @@ src/
       projects.ts         # create/get/list/update
       builds.ts           # create/get/list — immutable, reaper-only deletion
       environments.ts     # create/get/list, alias flip + rollback, splits, varset
+      placement.ts        # setReplicas, and the coordinator's placement records
       varsets.ts          # AES-256-GCM seal/open, content-addressed envelopes
-      nodes.ts            # node registration, lease-gated removal
+      nodes.ts            # node registration, heartbeat, liveness, lease-gated removal
       trust.ts            # OIDC deploy policy + subject matching
       domains.ts          # custom domain claims (Caddy on-demand-TLS ask)
       reaper.ts           # plan/execute lease-gated GC, and operator-ordered deletion
@@ -111,6 +112,8 @@ src/
       ids.ts              # `project--env--build` process-id convention (format/parse)
       ports.ts            # loopback port-pair allocator over a configured range
       reconcile.ts        # planReconcile: desired + actual -> ordered actions (pure)
+      rendezvous.ts       # assignNodes: environment + live nodes -> the nodes serving it (pure)
+      replicas.ts         # how many nodes an environment asks for, and the defaults (pure)
       routes.ts           # renderRoutes: environments + ready processes -> hosts (pure)
       index.ts            # barrel
   agent/
@@ -119,10 +122,12 @@ src/
     app.ts                # createAgentApp: AgentContext and the HTTP routes
     serve.ts              # startAgent: binds the app to config.node.listen
     reconcile.ts          # createReconciler: the loop, its status, one pass at a time
-    coordinator.ts        # createCoordinator: the lease loop, its fence, the lease-gated reap
+    coordinator.ts        # createCoordinator: the lease loop, its fence, assignment and the reap
+    heartbeat.ts          # createHeartbeat: this node saying it is still there, every 30s
     deploys.ts            # createDeployService: accept an artifact, publish it, watch it land
+    _assign.ts            # internal: the coordinator deciding which nodes serve what
     _execute.ts           # internal: carries out one plan (activate/start/gate/stop)
-    _desired.ts           # internal: desired state read out of the registry
+    _desired.ts           # internal: desired state read out of the registry, filtered to this node
     _ingress.ts           # internal: renders the routing after a pass and applies it
     _environments.ts      # internal: environment deletion, and the hop to the coordinator
     _intake.ts            # internal: dual-token auth, multipart and JSON request reading
@@ -186,6 +191,8 @@ src/
 - **An environment is served with its variables or not at all.** A node opens its environments' varsets with one AES-256 key, read from a file the operator configures. An environment whose varset this node cannot open — no key, the wrong key, an altered envelope — is recorded as a failure of that one environment and keeps whatever process it already had; the pass carries on and every other environment is served. Starting it unconfigured would come up, pass its readiness gate and serve requests against whatever the code falls back to, which is a misconfiguration nothing reports.
 - **Key material is the operator's, never scalo's.** A WireGuard identity is an X25519 keypair, and there is no scalar multiplication on the web-crypto surface every runtime shares. So scalo computes none: `scalo wg init` reads `<stateDir>/wg-private.key` if it is there, shells out to `wg genkey` if it is not, and refuses with the exact command to run if there is neither — the public half likewise, from a file beside it or from `wg pubkey`. Both halves are then persisted `0600`, so a node that has been set up boots on a host that never had wireguard-tools. Bringing the interface up is the operator's step too, because it needs a kernel module and NET_ADMIN: scalo renders `wg0.conf` from the registry's own peer list — every node publishes its key, endpoint and address in its record — prints `wg-quick up`, and stops. A peer's `AllowedIPs` is its own address alone (`/32`, `/128`), never the subnet its record names, because a peer allowed the whole subnet claims every other node's route. Assisted, never magical: an amateur curve implementation inside an operator's private network is a worse outcome than an error message.
 - **A tunnelled node lives at its tunnel address.** When `transport.driver` is `wireguard`, `runtime.bindHost` and the advertised address both default to the node's own WireGuard address rather than to loopback or to whatever wildcard the listener bound — inside a tunnel those are the only addresses a peer can actually dial. Explicit configuration still wins. The tunnel's own settings are required in that mode and refused for by name; configured on a node running another transport they are reported as ignored rather than quietly kept.
+- **An environment runs on the nodes it was given, and everywhere until it is given any.** Each environment declares how many nodes should serve it (`replicas`: a whole number, or `"all"`), the coordinator decides WHICH nodes by rendezvous hashing over the live ones — `sha256("<project>/<env>\n<nodeId>")`, highest scores win — and writes that to `_scalo/placement/<project>/<env>.json` under its own fence, only when the decision changed. Each node then serves an environment only when the record names it. The defaults preserve exactly what scalo did before placement existed: long-lived environments resolve to `"all"`, ephemeral previews to `1`, and a single-node installation cannot tell the difference. The load-bearing rule is the missing record: **an environment with no placement object is served by every node**, because that is the state of a bootstrap, of a fresh installation, and of every node running a build that predates these records — reading it as "not mine" would take an installation off the air the first time it upgraded. Rendezvous hashing is chosen for stability rather than balance: a node joining or dying only moves the environments that node was involved in, so nothing else restarts.
+- **A coordinator that cannot see the fleet decides nothing.** Placement counts a node live while its `heartbeatAt` — refreshed every 30s, stamped at registration, stopped on shutdown — is younger than three intervals, falling back to `capacity.probedAt` for a record written by a node too old to beat. When NO node is live the assignment pass REFUSES (`placement-unavailable`) and writes nothing at all, because an unreachable bucket, a jumped clock and a fleet mid-restart all read as an empty node list, and the decision that follows from an empty list is "nothing is served anywhere" — every node would stop every process it runs over a hiccup. The last decision standing keeps whatever is running, running. The same fence that gates the reap gates this: a decision recorded at a higher fence belongs to the coordinator that superseded this one and is never overwritten, and a lost CAS is skipped rather than retried, because the winner is another coordinator.
 - **Two ways in, one way out.** The deploy-facing routes accept either an operator's node token or a project's workload OIDC token. The node token is tried first because it needs nothing but the header; only when it fails as authentication is the bearer offered to the trust policy of the project the request names. A caller that fails both gets the single `auth-invalid` problem document every other rejection uses — it cannot learn which half it failed, nor whether the project exists. The one distinguishable outcome is `trust-mismatch`, which is authorization: a token trusted for one project can never deploy or flip another.
 
 ## Code Conventions

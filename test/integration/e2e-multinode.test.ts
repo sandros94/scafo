@@ -46,8 +46,10 @@ import {
   type RegistryContext,
   environmentKey,
   nodeKey,
+  setReplicas,
 } from "../../src/core/registry/index.ts";
 import type { NodeRecord } from "../../src/core/types/registry.ts";
+import type { ProcessStatus } from "../../src/core/types/supervisor.ts";
 import { createUns3Store } from "../../src/drivers/store/uns3.ts";
 
 const env = process.env;
@@ -81,6 +83,18 @@ const ENVIRONMENT = "production";
 const PREVIEW = "preview";
 /** Long enough that only the explicit deletion ever removes it. */
 const PREVIEW_IDLE_TTL_S = 3600;
+/**
+ * Scaled down to a single node, then carried through the coordinator's death.
+ *
+ * The NAME is load-bearing, and only for how much this suite proves: rendezvous
+ * hashing is deterministic, so `app/single` over these two node ids always lands
+ * on node-a — which is the node that boots first, therefore usually wins the
+ * coordinator lease, and is therefore the one the kill step kills. That makes
+ * the interesting branch the usual one: the environment has to be MOVED to a
+ * node that was not running it. Neither the name nor the boot order guarantees
+ * it, so the assertion still handles the other outcome.
+ */
+const SOLO = "single";
 
 const NODE_A = "node-a";
 const NODE_B = "node-b";
@@ -97,6 +111,18 @@ const DEADLINE_MS = 120_000;
 const BOOT_DEADLINE_MS = 60_000;
 const STORE_DEADLINE_MS = 120_000;
 const POLL_MS = 500;
+/**
+ * Ceiling for a reassignment that follows a node DYING.
+ *
+ * Longer than the others on purpose, and the arithmetic is the design: a killed
+ * node keeps its last heartbeat, and stays live for three heartbeat intervals
+ * (90s) after it. Only then may the coordinator hand its environments to anyone
+ * — counting a node out sooner would move work off nodes that are merely slow.
+ * So this covers that window, the coordinator tick that follows it, and the
+ * reconcile pass and process start after that.
+ */
+const REASSIGN_DEADLINE_MS = 240_000;
+const REASSIGN_STEP_TIMEOUT_MS = 300_000;
 
 /** The lease TTL the agent runs with; failover is bounded by a few of these. */
 const LEASE_TTL_MS = 15_000;
@@ -127,6 +153,10 @@ let registry: RegistryContext;
 let keyPath: string;
 let operatorKey: OperatorKeyFile;
 let buildV1: string;
+/** The one node placement gave {@link SOLO} to; which one is not this test's to pick. */
+let soloHolder: Node;
+/** Its process there, so a survivor that kept it can be shown never to have restarted. */
+let soloProcess: ProcessStatus;
 
 const tmpDirs: string[] = [];
 /** Raw observations the report is written from; printed once at the end. */
@@ -331,7 +361,16 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         ephemeral: true,
         idleTtlS: PREVIEW_IDLE_TTL_S,
       });
-      expectCleanExit(await runCli(deployArgs(await stageApp("v1"), PREVIEW), {}));
+      /*
+       * `--replicas all` because an ephemeral environment otherwise defaults to
+       * ONE node, and this step is about the proxied delete rather than about
+       * placement: the node the deletion is asked of has to be one that actually
+       * runs a process for it. It also puts the flag itself through the CLI
+       * against an environment that already exists.
+       */
+      expectCleanExit(
+        await runCli(deployArgs(await stageApp("v1"), PREVIEW, ["--replicas", "all"]), {}),
+      );
 
       const coordinator = await coordinatorNode();
       const asked = nodes.find((node) => node.id !== coordinator.id) as Node;
@@ -374,6 +413,72 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         });
       }
       observed.previewReapedMs = Date.now() - reapedAt;
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "runs an environment scaled to one replica on exactly one node, and takes it off the other",
+    async () => {
+      /* Deployed to every node first — a long-lived environment defaults to
+         "all" — so what follows is a scale DOWN of something already running,
+         which is the case that has to take a process away from a node. */
+      expectCleanExit(await runCli(deployArgs(await stageApp("v1"), SOLO), {}));
+      for (const node of nodes) await untilServes(node, soloHost(), "v1");
+
+      const scaledAt = Date.now();
+      await setReplicas(registry, PROJECT, SOLO, 1);
+
+      /*
+       * Which node keeps it is rendezvous hashing's decision and not this
+       * test's, so both branches are written for. What IS asserted is that the
+       * two nodes agree: one placement, naming one node, and that node is the
+       * only one with a process.
+       */
+      const holder = await until(
+        `exactly one node to be left running ${SOLO}`,
+        DEADLINE_MS,
+        async () => {
+          const states = await Promise.all(nodes.map(async (node) => stateOf(node)));
+          const running = nodes.filter((_, index) => states[index].processes.some(runsSolo));
+          if (running.length !== 1) return null;
+
+          const named = states.map((state) => placedNodes(state, SOLO));
+          if (named.some((nodes) => nodes?.length !== 1)) return null;
+          if (new Set(named.map((nodes) => nodes?.[0])).size !== 1) return null;
+          return named[0]?.[0] === running[0].id ? running[0] : null;
+        },
+      );
+      const unassigned = nodes.find((node) => node.id !== holder.id) as Node;
+
+      /* The node it was placed on serves it through its own ingress. */
+      const served = await untilServes(holder, soloHost(), "v1");
+      expect(JSON.parse(served.body).version).toBe("v1");
+
+      /* And the other one stops: no process, and no route, so its Caddy answers
+         the empty 200 it gives any host it has no route for. */
+      const empty = await until(
+        `${unassigned.id} to stop answering for ${SOLO}`,
+        DEADLINE_MS,
+        async () => {
+          const state = await stateOf(unassigned);
+          if (state.processes.some(runsSolo)) return null;
+          const answer = await httpGet(unassigned.httpPort, "/", { host: soloHost() });
+          return answer.status === 200 && !answer.body.includes('"v1"') ? answer : null;
+        },
+      );
+      expect(empty.status).toBe(200);
+      expect(empty.body).not.toContain('"v1"');
+      expect(placedNodes(await stateOf(unassigned), SOLO)).toEqual([holder.id]);
+
+      soloHolder = holder;
+      soloProcess = (await stateOf(holder)).processes.find(runsSolo) as ProcessStatus;
+      observed.replicasOne = {
+        heldBy: holder.id,
+        unassigned: unassigned.id,
+        scaledDownMs: Date.now() - scaledAt,
+        unassignedAnswer: { status: empty.status, body: empty.body.slice(0, 120) },
+      };
     },
     STEP_TIMEOUT_MS,
   );
@@ -444,6 +549,70 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expect(JSON.parse(answer.body).version).toBe("v1");
     },
     STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "carries the single-replica environment through the death of whichever node held it",
+    async () => {
+      const survivor = nodes.find((node) => node.running) as Node;
+      /* Which node rendezvous hashing gave it to is not this suite's to choose,
+         so both outcomes are waited for by the same probe and told apart by one
+         fact at the end. */
+      const killedHeldIt = soloHolder.id !== survivor.id;
+      const startedAt = Date.now();
+
+      /*
+       * Nothing about a takeover is instant, and that is the design: a killed
+       * node keeps its last heartbeat and stays live for three heartbeat
+       * intervals, because counting a node out is what moves work away from it
+       * and a node that is merely slow must survive that. Once it does fall out,
+       * the survivor — the coordinator by then — decides again over the fleet it
+       * can actually see. When the survivor already held it, the same probe
+       * passes immediately and nothing moved at all.
+       */
+      const settled = await until(
+        `${survivor.id} to be the placed node for ${SOLO} and to be serving it`,
+        REASSIGN_DEADLINE_MS,
+        async () => {
+          const state = await stateOf(survivor);
+          if (placedNodes(state, SOLO)?.includes(survivor.id) !== true) return null;
+          if (!state.processes.some(runsSolo)) return null;
+
+          const answer = await httpGet(survivor.httpPort, "/", { host: soloHost() });
+          if (answer.status !== 200 || !answer.body.includes('"v1"')) return null;
+          return { state, answer };
+        },
+      );
+      const process = settled.state.processes.find(runsSolo) as ProcessStatus;
+      const restarted = process.startedAt !== soloProcess.startedAt;
+
+      expect(placedNodes(settled.state, SOLO)).toEqual([survivor.id]);
+      expect(JSON.parse(settled.answer.body).version).toBe("v1");
+      expect(process.id).toBe(soloProcess.id);
+      expect(process.state).toBe("running");
+      /*
+       * The one fact the two branches disagree on, asserted as one. If the dead
+       * node held it, this process is a new one the survivor started after the
+       * reassignment. If the survivor held it all along, it is the SAME process
+       * it started before the kill — never stopped, never restarted, which is
+       * what "kept serving uninterrupted" has to mean.
+       */
+      expect(restarted).toBe(killedHeldIt);
+
+      observed.soloAfterKill = {
+        branch: killedHeldIt
+          ? "the killed node held it, and the survivor took it over"
+          : "the survivor held it, and kept serving it uninterrupted",
+        heldBefore: soloHolder.id,
+        survivor: survivor.id,
+        restarted,
+        ms: Date.now() - startedAt,
+        deadlineMs: REASSIGN_DEADLINE_MS,
+        process: { id: process.id, pid: process.pid, startedAt: process.startedAt },
+        processBefore: { pid: soloProcess.pid, startedAt: soloProcess.startedAt },
+      };
+    },
+    REASSIGN_STEP_TIMEOUT_MS,
   );
 });
 
@@ -526,6 +695,21 @@ function previewHost(): string {
   return `${PROJECT}--${PREVIEW}.${PLATFORM_DOMAIN}`;
 }
 
+function soloHost(): string {
+  return `${PROJECT}--${SOLO}.${PLATFORM_DOMAIN}`;
+}
+
+/** Whether a process on a node is one serving {@link SOLO}. */
+function runsSolo(process: ProcessStatus): boolean {
+  return process.state === "running" && process.id.startsWith(`${PROJECT}--${SOLO}--`);
+}
+
+/** The nodes a state says an environment was placed on, or null when it has no decision. */
+function placedNodes(state: AgentState, env: string): string[] | null {
+  const placed = state.placements.find((view) => view.project === PROJECT && view.env === env);
+  return placed?.nodes ?? null;
+}
+
 /** What one node currently believes about itself, as an authenticated caller sees it. */
 async function stateOf(node: Node): Promise<AgentState> {
   const answer = await httpGet(node.agentPort, "/v1/state", {
@@ -561,7 +745,7 @@ function countOf(body: string): number | null {
 }
 
 /** The flags one deploy of the fixture is run with, from the host through node-a. */
-function deployArgs(dir: string, environment: string): string[] {
+function deployArgs(dir: string, environment: string, extra: string[] = []): string[] {
   return [
     "deploy",
     dir,
@@ -575,6 +759,7 @@ function deployArgs(dir: string, environment: string): string[] {
     "--runtime-configurable",
     "--key",
     keyPath,
+    ...extra,
   ];
 }
 

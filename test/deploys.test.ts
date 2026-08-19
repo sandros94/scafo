@@ -232,6 +232,8 @@ describe("what an upload must carry", () => {
       { environment: "UPPER" },
       { buildId: "nothex" },
       { flip: "yes" },
+      { replicas: 0 },
+      { replicas: "every" },
     ];
 
     for (const patch of bad) {
@@ -289,6 +291,46 @@ describe("what happens to an accepted deploy", () => {
     await expect(getEnvironment(clock.ctx, PROJECT, "preview")).resolves.toMatchObject({
       ephemeral: true,
       idleTtlS: 900,
+    });
+  });
+
+  it("creates the environment with the replica count the upload asked for", async () => {
+    const id = (await responseId(
+      await upload(await operatorToken(), { ...meta(), environment: "fresh", replicas: 1 }),
+    )) as string;
+
+    await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
+    await expect(getEnvironment(clock.ctx, PROJECT, "fresh")).resolves.toMatchObject({
+      replicas: 1,
+    });
+  });
+
+  it("restates the replica count of an environment that already exists", async () => {
+    await createEnvironment(clock.ctx, PROJECT, { name: "scaled", replicas: 3 });
+
+    const id = (await responseId(
+      await upload(await operatorToken(), { ...meta(), environment: "scaled", replicas: "all" }),
+    )) as string;
+
+    await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
+    await expect(getEnvironment(clock.ctx, PROJECT, "scaled")).resolves.toMatchObject({
+      replicas: "all",
+    });
+  });
+
+  it("leaves the replica count alone when the upload names none", async () => {
+    /* How many nodes serve an environment is an operational decision. A deploy
+       that silently rewrote it would move an application off nodes because
+       somebody re-ran a pipeline that never mentioned placement. */
+    await createEnvironment(clock.ctx, PROJECT, { name: "scaled", replicas: 2 });
+
+    const id = (await responseId(
+      await upload(await operatorToken(), { ...meta(), environment: "scaled" }),
+    )) as string;
+
+    await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
+    await expect(getEnvironment(clock.ctx, PROJECT, "scaled")).resolves.toMatchObject({
+      replicas: 2,
     });
   });
 
@@ -485,6 +527,7 @@ function fakeReconciler(): Reconciler {
       lastActions: [],
       failures: [],
       processes: running,
+      placements: [],
     }),
   };
 }

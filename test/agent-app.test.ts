@@ -89,6 +89,9 @@ describe("GET /v1/state", () => {
       /* The same fact read as an election: no lease, so nobody coordinates. */
       coordinator: null,
       processes: PROCESSES,
+      /* No coordinator has placed anything, which is exactly the state in which
+         every node serves every environment. */
+      placements: [],
     });
   });
 
