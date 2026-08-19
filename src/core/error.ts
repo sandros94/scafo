@@ -75,7 +75,7 @@ export class ScaloError extends Error {
   /** Serializes the error into an RFC 9457 `application/problem+json` body. */
   toProblem(): ProblemDetails {
     const problem: ProblemDetails = {
-      type: `urn:scalo:${this.code}`,
+      type: `${PROBLEM_TYPE_PREFIX}${this.code}`,
       title: this.message,
       status: this.status,
     };
@@ -84,7 +84,48 @@ export class ScaloError extends Error {
   }
 }
 
+/** Prefix every problem document's `type` carries. */
+export const PROBLEM_TYPE_PREFIX: string = "urn:scalo:";
+
 /** Narrows an unknown thrown value to {@link ScaloError}. */
 export function isScaloError(err: unknown): err is ScaloError {
   return err instanceof ScaloError;
+}
+
+/**
+ * Reads a problem document back into the failure it was rendered from — the
+ * inverse of {@link ScaloError.toProblem}, for a client holding one answer from
+ * another process.
+ *
+ * The code is the contract, and it has to survive the wire: a caller that
+ * re-labelled every failure answer with a code of its own would report a
+ * `trust-mismatch` — the one rejection that is authorization rather than
+ * authentication, and the only one a CI job can act on — as something else
+ * entirely. A `type` this build does not know becomes `fallback`, because a
+ * newer node naming a code this one has never heard of is a real thing and not
+ * worth crashing over.
+ *
+ * Every field is checked rather than trusted. The type says what a scalo node
+ * answers with, but what arrives may have come from a proxy, a load balancer or
+ * an error page, and a client that threw a `TypeError` over one of those would
+ * report the wrong failure entirely.
+ */
+export function fromProblem(
+  problem: ProblemDetails,
+  fallback: ScaloErrorCode = "invalid-input",
+): ScaloError {
+  const type = typeof problem.type === "string" ? problem.type : "";
+  const named = type.startsWith(PROBLEM_TYPE_PREFIX) ? type.slice(PROBLEM_TYPE_PREFIX.length) : "";
+  /* `hasOwn` rather than `in`: the document comes off the wire, and `in` would
+     take "constructor" or "toString" for a code and hand back a status that is
+     a function. */
+  const code = Object.hasOwn(DEFAULT_STATUS, named) ? (named as ScaloErrorCode) : fallback;
+
+  const title = typeof problem.title === "string" ? problem.title : "Request failed";
+  const status = Number.isInteger(problem.status) ? problem.status : DEFAULT_STATUS[code];
+
+  return new ScaloError(code, title, {
+    status,
+    ...(typeof problem.detail === "string" ? { detail: problem.detail } : {}),
+  });
 }

@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import type { DeployStatus } from "../../agent/deploys.ts";
 import { signNodeToken } from "../../core/auth/node-token.ts";
-import { ScaloError } from "../../core/error.ts";
+import { fromProblem, ScaloError } from "../../core/error.ts";
 import type { ProblemDetails } from "../../core/error.ts";
 import { packDirectory } from "../../drivers/archive/tar-zst.ts";
 import type { OperatorKeyFile } from "./keygen.ts";
@@ -129,7 +129,20 @@ async function signer(path: string): Promise<() => Promise<string>> {
   return () => signNodeToken(file.privateKey, file.id);
 }
 
-/** One call to the agent, with a failure answer turned back into the failure it describes. */
+/**
+ * One call to the agent, with a failure answer turned back into the failure it
+ * describes.
+ *
+ * The problem document's own code is kept rather than replaced. It is the stable
+ * half of the contract, and a CI job acts on it: `trust-mismatch` says the token
+ * is fine and the project does not admit it — a policy to fix — while
+ * `auth-invalid` says the token itself did not hold up. Flattening both into one
+ * code here would hand the caller the one thing the API is careful to keep
+ * distinguishable, already thrown away.
+ *
+ * An answer that carries no problem document at all is only an HTTP status, so
+ * it becomes the generic failure it is.
+ */
 async function request(url: string, token: string, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers);
   headers.set("authorization", `Bearer ${token}`);
@@ -137,11 +150,18 @@ async function request(url: string, token: string, init?: RequestInit): Promise<
   const response = await fetch(url, { ...init, headers });
   if (response.ok) return response;
 
-  const problem = (await response.json().catch(() => null)) as ProblemDetails | null;
-  throw new ScaloError("invalid-input", problem?.title ?? `Agent answered ${response.status}`, {
-    status: response.status,
-    detail: problem?.detail ?? `${init?.method ?? "GET"} ${url}`,
-  });
+  /* Whatever answered may not have been a node at all — a proxy, a gateway, an
+     error page — so the body is only used when it looks like a problem
+     document, and is otherwise the bare status it really is. */
+  const body: unknown = await response.json().catch(() => null);
+  const problem = body as Partial<ProblemDetails> | null;
+  if (typeof problem?.type !== "string" || typeof problem.title !== "string") {
+    throw new ScaloError("invalid-input", `Agent answered ${String(response.status)}`, {
+      status: response.status,
+      detail: `${init?.method ?? "GET"} ${url}`,
+    });
+  }
+  throw fromProblem({ ...(problem as ProblemDetails), status: response.status });
 }
 
 function text(value: unknown): string | undefined {
