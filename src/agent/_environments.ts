@@ -20,6 +20,24 @@ import type { AgentContext, EnvironmentDeleted } from "./app.ts";
 export const PROXIED_HEADER: string = "x-scalo-proxied";
 
 /**
+ * Whether the request asked for a forced deletion, which bypasses both the
+ * ephemeral and the retirement-grace requirement.
+ *
+ * Only `force=1` and `force=true` count, and anything else — a typo, a `yes`, an
+ * empty value — reads as NOT forced. That direction is the safe one: a caller
+ * who meant to force and was not understood gets the refusal, which says exactly
+ * how to proceed, rather than the deletion they could not undo.
+ *
+ * The grace itself is deliberately not settable over the wire. An operator who
+ * wants to shorten it is asking for the deletion to happen now, and `force` is
+ * that request stated plainly.
+ */
+export function forceRequested(event: H3Event): boolean {
+  const asked = event.url.searchParams.get("force")?.toLowerCase();
+  return asked === "1" || asked === "true";
+}
+
+/**
  * Deletes an environment, wherever the coordinator happens to be.
  *
  * Deleting is lease-gated — S3 has no conditional delete, so the lease is the
@@ -38,6 +56,7 @@ export async function deleteEnvironmentRequest(
 ): Promise<Response | EnvironmentDeleted> {
   const project = event.context.params?.project ?? "";
   const env = event.context.params?.env ?? "";
+  const force = forceRequested(event);
   const coordinator = agent.coordinator;
 
   let lease = await currentLease(agent);
@@ -51,7 +70,7 @@ export async function deleteEnvironmentRequest(
 
   const handle = coordinator?.handle() ?? null;
   if (handle !== null && lease?.node === agent.nodeId) {
-    return deleteEnvironment(agent.registry, project, env, handle);
+    return deleteEnvironment(agent.registry, project, env, handle, { force });
   }
 
   if (lease === null) {
@@ -108,7 +127,12 @@ async function forwardToCoordinator(
   const host = record.addresses.internal;
   /* An IPv6 literal is only a URL authority once it is bracketed. */
   const authority = host.includes(":") ? `[${host}]` : host;
-  const url = `http://${authority}:${String(record.addresses.agentPort)}${event.url.pathname}`;
+  /* Path AND query: the query is where `force` is, and a hop that dropped it
+     would turn a deletion the operator forced into a refusal from a node they
+     never addressed — or, worse if the default ever inverted, the reverse. What
+     the coordinator carries out has to be the request that was made. */
+  const target = `${event.url.pathname}${event.url.search}`;
+  const url = `http://${authority}:${String(record.addresses.agentPort)}${target}`;
 
   /*
    * A FRESH token, signed by this node for itself. The caller's token is never

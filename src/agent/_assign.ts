@@ -32,7 +32,10 @@ export interface AssignmentResult {
   live: string[];
   /** Environments whose placement was rewritten. */
   changed: Array<{ target: string; nodes: string[] }>;
-  /** Placement objects removed because the environment they name is gone. */
+  /**
+   * Placement objects removed because nothing should be serving what they name:
+   * the environment is gone, or it has been retired.
+   */
   removed: string[];
   /** Environments whose placement was left exactly as it was, and why. */
   skipped: Array<{ target: string; reason: PlacementOutcome }>;
@@ -86,11 +89,24 @@ export async function runAssignment(
       listPlacements(ctx, project),
     ]);
 
+    /* The environments that still ask to be served somewhere. What is NOT in
+       here by the end of the loop has its placement removed below, whether it
+       was never in the listing or dropped out of contention while reading it. */
+    const served = new Set<string>();
+
     for (const name of names) {
       const found = await readJson<EnvironmentRecord>(ctx, environmentKey(project, name));
       /* Deleted between the listing and the read: the pass that deleted it takes
          its placement with it, and the next tick sees neither. */
       if (found === null) continue;
+
+      /* Retired: an environment on its way out is served by no node, so it is
+         given none. Its placement record goes with it — a record naming nodes
+         that have all stopped running it is a decision nothing acts on, and
+         leaving it behind would have every node re-read it every pass until the
+         reap. Unretiring restores it on the next tick, from the same inputs. */
+      if (found.value.retiredAt !== undefined) continue;
+      served.add(name);
 
       const target = `${project}/${name}`;
       const nodes = await assignNodes({
@@ -116,13 +132,13 @@ export async function runAssignment(
       else result.skipped.push({ target, reason: write.outcome });
     }
 
-    /* What is left in the map has no environment to belong to. Deleting it here
+    /* What is left in the map has no environment left to serve. Deleting it here
        covers the environment that went away without anyone asking — a reap this
-       coordinator did not run, an operator deleting through another node — while
-       an explicit deletion has already cleaned up after itself. */
-    const known = new Set(names);
+       coordinator did not run, an operator deleting through another node — and
+       the retired one above, while an explicit deletion has already cleaned up
+       after itself. */
     for (const env of [...placements.keys()].sort()) {
-      if (known.has(env)) continue;
+      if (served.has(env)) continue;
       const removed = await deletePlacement(ctx, project, env, lease);
       if (removed !== null) result.removed.push(removed);
     }

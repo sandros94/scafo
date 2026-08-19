@@ -11,12 +11,13 @@ import { S3Client } from "uns3";
 import type { AgentConfig } from "../agent/config.ts";
 import { advertisedAddress, parseHostPort } from "../agent/config.ts";
 import type { CapacityPlan } from "../core/capacity/compute.ts";
-import { ScaloError } from "../core/error.ts";
+import { isScaloError, ScaloError } from "../core/error.ts";
 import { readJson, updateJson } from "../core/registry/cas.ts";
 import { nowIso, type RegistryContext } from "../core/registry/context.ts";
-import { registerNode } from "../core/registry/nodes.ts";
+import { drainNode, registerNode } from "../core/registry/nodes.ts";
 import { nodeKey } from "../core/registry/paths.ts";
 import type { NodeRecord, NodeWireguard } from "../core/types/registry.ts";
+import { withRetry } from "../core/utils/backoff.ts";
 import { isLoopbackHost } from "../core/utils/host.ts";
 import { createUns3Store } from "../drivers/store/uns3.ts";
 import { loadOrCreateNodeState, type NodeState } from "./_node-state.ts";
@@ -205,6 +206,64 @@ export async function registerThisNode(
   return record;
 }
 
+export interface DrainOptions {
+  /** Tries, including the first. Defaults to {@link DRAIN_ATTEMPTS}. */
+  attempts?: number;
+  log?: (message: string) => void;
+  /** Injectable for deterministic tests. Defaults to `setTimeout`. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** Tries a draining node gives the bucket before it stops waiting and leaves anyway. */
+export const DRAIN_ATTEMPTS: number = 3;
+
+/**
+ * Says this node is on its way out, as the first step of a graceful shutdown.
+ *
+ * It is worth doing first, and worth doing at all, because of what the
+ * alternative costs: an agent that simply stops is indistinguishable from one
+ * that crashed, and a crash is only noticed once the node's heartbeat has aged
+ * past the liveness window — ninety seconds during which the coordinator still
+ * counts it among the nodes it hands work to, and its single-replica
+ * environments are placed on a process that is already gone. A node that writes
+ * this down is counted out on the coordinator's very next assignment pass.
+ *
+ * BEST EFFORT, and NEVER throws: the node is leaving either way, and a bucket
+ * that cannot be reached must not be able to hold a shutdown open. Retries are
+ * bounded and brief for the same reason — what they buy back is a few seconds of
+ * misplacement, which is not worth an init system's patience. Failing all of it,
+ * the fleet falls back to exactly the behaviour it had before draining existed.
+ *
+ * Answers the timestamp it wrote, or null when it could not write one.
+ */
+export async function drainThisNode(
+  registry: RegistryContext,
+  nodeId: string,
+  opts?: DrainOptions,
+): Promise<string | null> {
+  const log = opts?.log ?? ((message: string): void => console.log(message));
+
+  try {
+    const at = await withRetry(() => drainNode(registry, nodeId), {
+      attempts: opts?.attempts ?? DRAIN_ATTEMPTS,
+      baseMs: 100,
+      /* Anything, not just a CAS conflict: a heartbeat racing this write is what
+         `updateJson` already retries on its own, and what is left here is the
+         unreachable bucket — the case a shutdown gets one or two quick tries at. */
+      isRetryable: () => true,
+      ...(opts?.sleep === undefined ? {} : { sleep: opts.sleep }),
+    });
+    log(`scalo: node "${nodeId}" is draining, placement will stop giving it work`);
+    return at;
+  } catch (error) {
+    log(
+      `scalo: node "${nodeId}" could not be marked as draining (${describe(error)}); ` +
+        `the fleet will count it out after the liveness window instead`,
+    );
+    return null;
+  }
+}
+
 /**
  * Publishes where this node sits on the tunnel, leaving the rest of its record
  * exactly as it stands.
@@ -244,4 +303,12 @@ export async function publishWireguard(
 export async function loadVarsetKey(config: AgentConfig): Promise<CryptoKey | undefined> {
   const keyFile = config.varsets?.keyFile;
   return keyFile === undefined ? undefined : readVarsetKeyFile(keyFile);
+}
+
+/** The specifics a scalo failure carries are the useful half; keep both. */
+function describe(error: unknown): string {
+  if (isScaloError(error)) {
+    return error.detail === undefined ? error.message : `${error.message}: ${error.detail}`;
+  }
+  return error instanceof Error ? error.message : String(error);
 }

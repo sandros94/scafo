@@ -7,6 +7,7 @@ import type {
   EnvironmentRecord,
   PlacementRecord,
 } from "../types/registry.ts";
+import { formatDuration } from "./_shared.ts";
 import { deleteKey, readJson, requireJson } from "./cas.ts";
 import { nowDate, type RegistryContext } from "./context.ts";
 import { listBuilds } from "./builds.ts";
@@ -15,13 +16,19 @@ import { listEnvironments } from "./environments.ts";
 import { type LeaseHandle, verifyLease } from "./lease.ts";
 import { buildKey, domainKey, environmentKey, fleetPrefix, placementKey } from "./paths.ts";
 import { listProjects } from "./projects.ts";
+import {
+  assertDeletable,
+  DEFAULT_RETIREMENT_GRACE_MS,
+  type RetirementOptions,
+  retirementState,
+} from "./retirement.ts";
 
 /** Where last-request timestamps come from; the registry itself does not track them. */
 export interface ActivitySource {
   lastActiveAt(project: string, env: string): Promise<Date | null>;
 }
 
-export interface ReapOptions {
+export interface ReapOptions extends RetirementOptions {
   activity?: ActivitySource;
   /** Without `maxAgeMs` no build is ever a candidate. */
   buildRetention?: { maxAgeMs?: number };
@@ -39,15 +46,30 @@ export interface ReapResult {
   skipped: Array<{ target: string; reason: string }>;
 }
 
+/** What {@link deleteEnvironment} is allowed to act on; see {@link assertDeletable}. */
+export interface DeleteEnvironmentOptions extends RetirementOptions {
+  /**
+   * Deletes the environment whatever state it is in, skipping BOTH the ephemeral
+   * and the retirement-grace requirement. The escape hatch for an operator who
+   * has already made the decision the two steps exist to slow down — a preview
+   * fleet gone wrong, an environment created by a typo — and the one path that
+   * discards a long-lived environment in a single call.
+   */
+  force?: boolean;
+}
+
 /**
  * Lists what is currently reapable. The plan is advisory: {@link executeReap}
  * re-checks every item against fresh state before deleting anything.
  *
- * An environment qualifies only when it is ephemeral, has an `idleTtlS`, and has
- * been idle for longer. Non-ephemeral environments are never candidates. A build
- * qualifies only when no environment of its project references it — through an
- * alias, the alias's previous build, or any split leg — and it is older than the
- * configured retention.
+ * An environment qualifies two ways. It is RETIRED and its grace has run out —
+ * whether or not it is ephemeral, because retirement is an explicit order to
+ * decommission and the grace is the whole of the wait it asked for. Or it is
+ * ephemeral, has an `idleTtlS`, and has been idle for longer. A non-ephemeral
+ * environment nobody retired is never a candidate. A build qualifies only when
+ * no environment of its project references it — through an alias, the alias's
+ * previous build, or any split leg — and it is older than the configured
+ * retention.
  */
 export async function planReap(ctx: RegistryContext, opts?: ReapOptions): Promise<ReapPlan> {
   const plan: ReapPlan = { environments: [], builds: [] };
@@ -58,7 +80,7 @@ export async function planReap(ctx: RegistryContext, opts?: ReapOptions): Promis
     const environments = await readEnvironments(ctx, project);
 
     for (const environment of environments) {
-      const reason = await idleReason(ctx, project, environment, now, opts?.activity);
+      const reason = await reapReason(ctx, project, environment, now, opts);
       if (reason !== null) plan.environments.push({ project, env: environment.name, reason });
     }
 
@@ -114,10 +136,17 @@ export async function executeReap(
       continue;
     }
 
+    /* Re-checked against fresh state, retirement included: an environment
+       unretired between the plan and this step is one an operator has taken back
+       into service, and it must survive the run that was already going to
+       delete it. */
     const now = nowDate(ctx).getTime();
-    const reason = await idleReason(ctx, target.project, found.value, now, opts?.activity);
+    const reason = await reapReason(ctx, target.project, found.value, now, opts);
     if (reason === null) {
-      result.skipped.push({ target: key, reason: "environment is no longer idle" });
+      result.skipped.push({
+        target: key,
+        reason: "environment is no longer idle, nor retired past its grace",
+      });
       continue;
     }
 
@@ -168,10 +197,13 @@ export async function executeReap(
  * and an environment nothing has called in months is precisely the one an
  * operator deletes by hand.
  *
- * Refuses a non-ephemeral environment with `ScaloError("invalid-input")` at
- * status 409: a long-lived environment is the one name that outlives every build
- * it ever served, and nothing here can tell a deliberate request from a typo in
- * a path. Marking it ephemeral first is a separate, auditable act.
+ * Which environments it will act on is {@link assertDeletable}'s to decide:
+ * ephemeral ones, ones retired for longer than the grace, and — bypassing both —
+ * ones the caller has explicitly forced. Anything else is refused with
+ * `ScaloError("invalid-input")` at status 409, and the refusal names the route
+ * that applies rather than only the rule that was broken: a long-lived
+ * environment is the one name that outlives every build it ever served, and
+ * nothing here can tell a deliberate request from a typo in a path.
  *
  * The lease is verified before every destructive step, so a coordinator that has
  * been superseded mid-run stops rather than racing the node that replaced it —
@@ -185,18 +217,10 @@ export async function deleteEnvironment(
   project: string,
   env: string,
   lease: LeaseHandle,
+  opts?: DeleteEnvironmentOptions,
 ): Promise<{ deleted: string[] }> {
   const found = await requireJson<EnvironmentRecord>(ctx, environmentKey(project, env));
-
-  if (!found.value.ephemeral) {
-    throw new ScaloError("invalid-input", "Environment is not ephemeral", {
-      status: 409,
-      detail:
-        `"${project}/${env}" is not ephemeral, and deleting an environment through this call ` +
-        `requires it to be: a non-ephemeral environment is deleted only after it has been ` +
-        `marked ephemeral, so the decision to discard it is made once and on its own`,
-    });
-  }
+  assertDeletable(ctx, project, found.value, opts);
 
   const deleted = await purgeEnvironment(ctx, project, found.value, () => assertLease(ctx, lease));
   return { deleted };
@@ -279,6 +303,34 @@ function referencedBuilds(environments: EnvironmentRecord[]): Set<string> {
     for (const entry of environment.split ?? []) referenced.add(entry.build);
   }
   return referenced;
+}
+
+/**
+ * Why this environment may be reaped, or null when it may not. Retirement is
+ * asked first because it is an explicit order and idleness is an inference: an
+ * environment that is both retired and idle is being decommissioned, and the
+ * reason recorded against its deletion should say so.
+ */
+async function reapReason(
+  ctx: RegistryContext,
+  project: string,
+  environment: EnvironmentRecord,
+  now: number,
+  opts?: ReapOptions,
+): Promise<string | null> {
+  const retired = retirementState(environment, new Date(now), opts);
+  if (retired?.expired === true) {
+    return (
+      `retired at ${retired.retiredAt}, ${formatDuration(retired.elapsedMs)} ago, ` +
+      `past its ${formatDuration(opts?.graceMs ?? DEFAULT_RETIREMENT_GRACE_MS)} grace`
+    );
+  }
+  /* Retired but still within the grace: an operator may yet take it back, so
+     nothing reaps it — not even when it is also an idle ephemeral one, because
+     retiring an environment must never make it disappear SOONER. */
+  if (retired !== null) return null;
+
+  return idleReason(ctx, project, environment, now, opts?.activity);
 }
 
 async function idleReason(

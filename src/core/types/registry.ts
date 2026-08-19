@@ -80,6 +80,16 @@ export interface NodeRecord {
    * back to `capacity.probedAt`.
    */
   heartbeatAt?: string;
+  /**
+   * When the node's agent said it is on its way out, written by the node itself
+   * as the first step of a graceful shutdown.
+   *
+   * A node carrying it is NOT live for placement however fresh its heartbeat is,
+   * so the coordinator hands its environments elsewhere on the next assignment
+   * pass instead of waiting out the liveness window a crash costs. Registration
+   * clears it, because a node that has started again serves again.
+   */
+  drainingAt?: string;
   /** Its place on the tunnel, when the installation runs one. */
   wireguard?: NodeWireguard;
   capabilities?: Record<string, unknown>;
@@ -177,6 +187,17 @@ export interface EnvironmentRecord {
    * what a reader resolves rather than assumes.
    */
   replicas?: ReplicaCount;
+  /**
+   * When the environment was retired: the first of the two steps that
+   * decommission a long-lived environment.
+   *
+   * A retired environment stops being served — no node runs a process for it, no
+   * route names it, no certificate is issued for its domains — and becomes
+   * deletable once it has carried this for longer than the grace period. It is
+   * reversible until then: clearing it puts the environment straight back into
+   * service.
+   */
+  retiredAt?: string;
   createdAt: string;
 }
 

@@ -40,7 +40,11 @@ export interface DesiredState {
  * yet, so there is nothing to run for it. So is one whose placement record names
  * other nodes: that is a reassignment taking effect, and the caller stops
  * whatever it still runs for it while the nodes named pick it up on their own
- * passes.
+ * passes. And so is a RETIRED one, which leaves by the same door: it drops out
+ * of this state, the next pass stops its processes, and because the routing is
+ * rendered from what this node actually runs, its hosts stop resolving with
+ * them. Nothing in the route renderer knows what retirement is, and nothing in
+ * it needs to.
  *
  * MISSING PLACEMENT RECORD → THE ENVIRONMENT IS INCLUDED. This fallback is the
  * safety line the whole feature hangs from, and it is deliberate rather than
@@ -144,6 +148,20 @@ async function resolveEnvironment(
   name: string,
 ): Promise<DesiredEnvironment | null> {
   const env = await getEnvironment(registry, project, name);
+  /*
+   * On its way out: an environment an operator has retired is served nowhere,
+   * from the next pass on. It still HAS a build — retirement is reversible, and
+   * unretiring it must bring it straight back — so what stops it is this line
+   * rather than anything having been taken away from it.
+   *
+   * LOAD-BEARING, and in the opposite direction to how it reads. The coordinator
+   * DELETES the placement record of a retired environment, and a missing
+   * placement record means "served everywhere" (see {@link readDesired}). Drop
+   * this check and retiring an environment would not stop it — it would start it
+   * on every node in the installation.
+   */
+  if (env.retiredAt !== undefined) return null;
+
   const aliased = env.alias?.build;
   if (aliased === undefined) return null;
 

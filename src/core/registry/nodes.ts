@@ -21,6 +21,10 @@ export const NODE_LIVENESS_WINDOW_MS: number = 3 * NODE_HEARTBEAT_INTERVAL_MS;
 /**
  * Registers or refreshes a node: nodes re-register on every start, so the record
  * is replaced wholesale. The id addresses the record and cannot change.
+ *
+ * Replacing it wholesale is also what un-drains a node: a record left behind by
+ * a graceful shutdown carries `drainingAt`, and the boot that overwrites it puts
+ * the node back in service. A node that has started is a node that serves.
  */
 export async function registerNode(ctx: RegistryContext, record: NodeRecord): Promise<NodeRecord> {
   const key = nodeKey(record.id);
@@ -86,8 +90,29 @@ export async function heartbeatNode(ctx: RegistryContext, id: string): Promise<s
 }
 
 /**
- * Whether `record` counts as live for placement: its last sign of life is newer
- * than {@link NODE_LIVENESS_WINDOW_MS}.
+ * Says this node is leaving, so placement stops counting it among the nodes it
+ * hands work to. Touches `drainingAt` and NOTHING else.
+ *
+ * The first step of a graceful shutdown, and the whole reason one is worth
+ * taking: an agent that simply stopped would look exactly like a crash, and a
+ * crash is only noticed once the liveness window has run out — a minute and a
+ * half in which its environments are served by a process that is already gone.
+ * A node that says it is leaving is counted out on the coordinator's very next
+ * assignment pass instead.
+ *
+ * Throws `ScaloError("not-found")` when the node has no record, for the same
+ * reason {@link heartbeatNode} does: this states something ABOUT a record, and
+ * cannot bring one into being.
+ */
+export async function drainNode(ctx: RegistryContext, id: string): Promise<string> {
+  const at = nowIso(ctx);
+  await updateJson<NodeRecord>(ctx, nodeKey(id), (current) => ({ ...current, drainingAt: at }));
+  return at;
+}
+
+/**
+ * Whether `record` counts as live for placement: it is not draining, and its
+ * last sign of life is newer than {@link NODE_LIVENESS_WINDOW_MS}.
  *
  * `heartbeatAt` is that sign; `capacity.probedAt` stands in for a record written
  * by a node too old to refresh one, so a rolling upgrade does not read the fleet
@@ -95,9 +120,17 @@ export async function heartbeatNode(ctx: RegistryContext, id: string): Promise<s
  * node was last seen, and guessing "recently" would hand environments to a node
  * that may be years gone.
  *
+ * `drainingAt` outranks all of it. A node on its way out has usually just
+ * beaten — it is stopping in an orderly fashion, not failing — so judging it by
+ * its heartbeat alone would keep it a placement candidate for the whole liveness
+ * window after it stopped serving. Its own word about where it is going is
+ * better evidence than the timestamp of the last thing it did.
+ *
  * Pure, so the caller decides what "now" is.
  */
 export function isNodeLive(record: NodeRecord, now: Date, opts?: { windowMs?: number }): boolean {
+  if (record.drainingAt !== undefined) return false;
+
   const seenAt = record.heartbeatAt ?? record.capacity?.probedAt;
   if (seenAt === undefined) return false;
 

@@ -18,6 +18,7 @@ import { createChildSupervisor } from "../../drivers/supervisor/child.ts";
 import {
   assertTransportConfigured,
   createRegistry,
+  drainThisNode,
   loadNodeIdentity,
   loadVarsetKey,
   loadWireguardRecord,
@@ -167,8 +168,19 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   heartbeat.start();
 
   await untilSignalled(async () => {
-    /* Stopped first: a node on its way out must stop saying it is available, so
-       the coordinator stops counting it among the nodes it hands work to. */
+    /*
+     * Written FIRST, before anything is stopped: this is what tells placement
+     * the node is leaving rather than dying, and every millisecond it is late is
+     * a millisecond an environment is still assigned to a node that is going
+     * away. A heartbeat that lands between this write and the stop below cannot
+     * undo it — a beat touches its own field and nothing else.
+     *
+     * Best effort by construction: it never throws, so a bucket that cannot be
+     * reached delays the shutdown briefly and changes nothing else.
+     */
+    await drainThisNode(registry, state.id);
+    /* Stopped next: a node on its way out must stop saying it is available, so
+       nothing keeps refreshing the record placement is about to stop reading. */
     heartbeat.stop();
     /* Given up next, and awaited: releasing the lease lets the next node take
        it at once instead of waiting out the TTL, and a coordinator still running

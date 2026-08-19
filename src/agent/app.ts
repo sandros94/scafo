@@ -1,6 +1,6 @@
 /* The agent's HTTP API: what a node exposes to its peers and to operators. */
 
-import { H3 } from "h3";
+import { H3, type H3Event } from "h3";
 import { createNodeVerifier, type NodeSigningKey } from "../core/auth/node-token.ts";
 import { createOidcVerifier } from "../core/auth/oidc.ts";
 import { ScaloError } from "../core/error.ts";
@@ -9,7 +9,8 @@ import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { checkDomain } from "../core/registry/domains.ts";
 import { flipAlias, rollbackAlias } from "../core/registry/environments.ts";
 import { isLeaseExpired } from "../core/registry/lease.ts";
-import { coordinatorKey, nodeKey } from "../core/registry/paths.ts";
+import { coordinatorKey, environmentKey, nodeKey } from "../core/registry/paths.ts";
+import { retireEnvironment, unretireEnvironment } from "../core/registry/retirement.ts";
 import type { CapacityPlan } from "../core/capacity/compute.ts";
 import type { IngressDriver } from "../core/types/ingress.ts";
 import type {
@@ -124,6 +125,11 @@ export interface EnvironmentDeleted {
   deleted: string[];
 }
 
+/** Body of the retire and unretire routes: the environment as it now stands. */
+export interface EnvironmentRetirement {
+  environment: EnvironmentRecord;
+}
+
 /** Body of `POST /v1/aliases`: the environment as it now stands. */
 export interface AliasResult {
   environment: EnvironmentRecord;
@@ -158,8 +164,10 @@ export function createAgentApp(agent: AgentContext): H3 {
    * Unauthenticated on purpose: an ingress or an init system has to be able to
    * poll it without holding a key.
    *
-   * TODO: report the node's draining state here once shutdown is implemented, so
-   * traffic stops being routed to a node on its way out.
+   * TODO: a node on its way out records `drainingAt` in its registry record,
+   * which is what takes it out of placement, but says nothing here. An external
+   * load balancer polling this route still sends it traffic until the process is
+   * gone; reporting the state would let one drain connections first.
    */
   app.get("/v1/health", (): AgentHealth => ({
     ok: true,
@@ -204,9 +212,37 @@ export function createAgentApp(agent: AgentContext): H3 {
   );
 
   /*
+   * Retiring is a plain CAS update on one record, so ANY node carries it out
+   * itself: unlike a deletion there is nothing here that two nodes doing it at
+   * once could corrupt, and no lease to wait for or forward to. The environment
+   * stops being served on every node's next pass, which is the same machinery a
+   * reassignment goes through.
+   */
+  app.post(
+    "/v1/environments/:project/:env/retire",
+    async (event): Promise<EnvironmentRetirement> => ({
+      environment: await retireEnvironment(agent.registry, ...target(event)),
+    }),
+    { middleware: [authenticated] },
+  );
+
+  /* The way back, for as long as the grace runs: a retirement is a decision an
+     operator must be able to take back with one call rather than with a restore. */
+  app.post(
+    "/v1/environments/:project/:env/unretire",
+    async (event): Promise<EnvironmentRetirement> => ({
+      environment: await unretireEnvironment(agent.registry, ...target(event)),
+    }),
+    { middleware: [authenticated] },
+  );
+
+  /*
    * Deleting is lease-gated, so only the coordinator can carry it out — but any
    * node accepts the request and forwards it there, because which node holds the
    * lease is this installation's business rather than the operator's.
+   *
+   * `?force=1` skips both the ephemeral and the retirement-grace requirement;
+   * without it a long-lived environment is refused with the route that applies.
    */
   app.delete(
     "/v1/environments/:project/:env",
@@ -291,11 +327,20 @@ function coordinatorView(
 
 /**
  * Whether this installation answers for `host`: a label under one of its
- * platform domains, or a custom domain some environment has claimed.
+ * platform domains, or a custom domain some environment has claimed and is still
+ * being served under.
  *
  * The platform domains are checked first, so the common case costs no bucket
  * read. A host that is not a host at all is simply not served, rather than an
  * error — the caller is an ingress asking about whatever arrived on the wire.
+ *
+ * A claim is followed by ONE more read, of the environment holding it, and the
+ * reason is what this endpoint is for: the answer decides whether a certificate
+ * is issued. A retired environment is being decommissioned and its routes are
+ * already gone, so a certificate minted for it now would be a fresh public
+ * record of a name that answers nothing — with a lifetime outlasting the
+ * environment itself. An environment that is gone entirely reads the same way,
+ * which also covers the claim a half-finished deletion left behind.
  */
 async function servesHost(agent: AgentContext, host: string): Promise<boolean> {
   if (!isHost(host)) return false;
@@ -305,7 +350,20 @@ async function servesHost(agent: AgentContext, host: string): Promise<boolean> {
     if (!host.endsWith(suffix)) continue;
     if (parseHostLabel(host.slice(0, -suffix.length)) !== null) return true;
   }
-  return (await checkDomain(agent.registry, host)) !== null;
+
+  const claim = await checkDomain(agent.registry, host);
+  if (claim === null) return false;
+
+  const environment = await readJson<EnvironmentRecord>(
+    agent.registry,
+    environmentKey(claim.project, claim.environment),
+  );
+  return environment !== null && environment.value.retiredAt === undefined;
+}
+
+/** The `:project` and `:env` a route was matched on, as a positional pair. */
+function target(event: H3Event): [project: string, env: string] {
+  return [event.context.params?.project ?? "", event.context.params?.env ?? ""];
 }
 
 function deployService(agent: AgentContext): DeployService {

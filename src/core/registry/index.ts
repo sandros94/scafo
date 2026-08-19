@@ -6,6 +6,7 @@ export * from "./meta.ts";
 export * from "./projects.ts";
 export * from "./builds.ts";
 export * from "./environments.ts";
+export * from "./retirement.ts";
 export * from "./placement.ts";
 export * from "./varsets.ts";
 export * from "./nodes.ts";
