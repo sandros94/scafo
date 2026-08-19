@@ -12,7 +12,10 @@ import type { RegistryContext } from "../../core/registry/context.ts";
 import { initRegistry, readMeta } from "../../core/registry/meta.ts";
 import { registerNode } from "../../core/registry/nodes.ts";
 import type { NodeRecord } from "../../core/types/registry.ts";
+import { createDeployService } from "../../agent/deploys.ts";
+import { createCelldDeployRunner } from "../../drivers/deploy/celld.ts";
 import { createNodeHostReader } from "../../drivers/host/node.ts";
+import { createCaddyDriver } from "../../drivers/ingress/caddy.ts";
 import { createCelldDriver } from "../../drivers/runtime/celld.ts";
 import { createUns3Store } from "../../drivers/store/uns3.ts";
 import { createChildSupervisor } from "../../drivers/supervisor/child.ts";
@@ -35,6 +38,9 @@ const upArgs: ArgsDef = {
   "celld-bin": { type: "string", description: "Executable that runs an environment" },
   "port-range-start": { type: "string", description: "First loopback port runtime processes use" },
   "probe-path": { type: "string", description: "Path the application readiness probe requests" },
+  "ingress-driver": { type: "string", description: "Ingress this node drives (caddy)" },
+  "caddy-admin": { type: "string", description: "Base URL of the Caddy admin API" },
+  "caddy-server": { type: "string", description: "Caddy server the node writes its routes into" },
 };
 
 export const up: CommandDef = defineCommand({
@@ -106,11 +112,30 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   const version = await readPackageVersion();
   const agent: AgentContext = { config, registry, supervisor, version, capacity };
 
+  const ingress = config.ingress;
+  if (ingress === undefined) {
+    /* Said once, at boot: a node with no ingress runs its processes and keeps
+       them to itself, which is a legitimate way to run one and not a warning
+       worth repeating on every reconcile pass. */
+    console.log("scalo: no ingress configured, nothing on this node will be routed to");
+  } else {
+    agent.ingress = createCaddyDriver({
+      adminUrl: ingress.adminUrl,
+      serverName: ingress.serverName,
+    });
+  }
+
+  const baseEnv = runtimeBaseEnv(process.env);
+  agent.deploys = createDeployService(
+    agent,
+    createCelldDeployRunner({ binPath: config.runtime.binPath, baseEnv }),
+  );
+
   /* The driver writes deployment pointers through the same store the registry
      uses, so a configured key prefix applies to fleets exactly as it does to
      records. */
   const driver = createCelldDriver({ binPath: config.runtime.binPath, store: registry.store });
-  const reconciler = createReconciler(agent, driver, { baseEnv: runtimeBaseEnv(process.env) });
+  const reconciler = createReconciler(agent, driver, { baseEnv });
   agent.reconciler = reconciler;
 
   const server = await startAgent(agent);
