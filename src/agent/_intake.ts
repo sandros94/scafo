@@ -4,6 +4,7 @@ import type { H3Event } from "h3";
 import type { NodeIdentity, NodeVerifier } from "../core/auth/node-token.ts";
 import type { OidcIdentity, OidcVerifier } from "../core/auth/oidc.ts";
 import { isScaloError, ScaloError } from "../core/error.ts";
+import { assertReplicas } from "../core/placement/replicas.ts";
 import { assertId } from "../core/registry/paths.ts";
 import type { BuildSource } from "../core/types/registry.ts";
 import { assertSlug } from "../core/utils/slug.ts";
@@ -178,6 +179,13 @@ function parseMeta(raw: string): DeployMeta {
     runtimeConfigurable,
     flip: flag(body, "flip") ?? false,
   };
+
+  /* Absent means "say nothing about placement", which is not the same as saying
+     "all": the environment keeps whatever it already carries. */
+  if (body.replicas !== undefined && body.replicas !== null) {
+    assertReplicas(body.replicas);
+    meta.replicas = body.replicas;
+  }
 
   const buildId = text(body, "buildId");
   if (buildId !== undefined) {

@@ -1,10 +1,12 @@
 /* Environments and the pointers that steer traffic: alias flips, rollbacks, splits. */
 
 import { ScaloError } from "../error.ts";
+import { assertReplicas } from "../placement/replicas.ts";
 import type {
   BuildRecord,
   EnvironmentRecord,
   PlacementStrategy,
+  ReplicaCount,
   ScaloWarning,
   SplitEntry,
   VarsetEnvelope,
@@ -21,6 +23,12 @@ export interface CreateEnvironmentInput {
   ephemeral?: boolean;
   varset?: string;
   idleTtlS?: number;
+  /**
+   * How many nodes should serve it. Left absent the environment takes the
+   * default its kind implies, which is what every environment created before
+   * this setting existed keeps doing.
+   */
+  replicas?: ReplicaCount;
 }
 
 /** An environment after a change, with any advisories the change raised. */
@@ -43,6 +51,7 @@ export async function createEnvironment(
   input: CreateEnvironmentInput,
 ): Promise<EnvironmentRecord> {
   await getProject(ctx, project);
+  if (input.replicas !== undefined) assertReplicas(input.replicas);
 
   const key = environmentKey(project, input.name);
   const record: EnvironmentRecord = {
@@ -58,6 +67,7 @@ export async function createEnvironment(
   };
   if (input.varset !== undefined) record.varset = input.varset;
   if (input.idleTtlS !== undefined) record.idleTtlS = input.idleTtlS;
+  if (input.replicas !== undefined) record.replicas = input.replicas;
 
   try {
     await createJson(ctx, key, record);
@@ -209,8 +219,8 @@ export async function setEnvironmentVarset(
 }
 
 /* Set at creation and never rewritten, so they identify the record. Everything
-   else (alias, split, domains, varset, placement, idleTtlS) is mutable state and
-   must not break create-retry idempotency. */
+   else (alias, split, domains, varset, placement, idleTtlS, replicas) is mutable
+   state and must not break create-retry idempotency. */
 function identity(
   record: EnvironmentRecord,
 ): Pick<EnvironmentRecord, "v" | "name" | "prefix" | "ephemeral"> {

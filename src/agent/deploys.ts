@@ -11,9 +11,10 @@ import { isScaloError } from "../core/error.ts";
 import { createBuild } from "../core/registry/builds.ts";
 import { createEnvironment, flipAlias, getEnvironment } from "../core/registry/environments.ts";
 import { fleetPrefix } from "../core/registry/paths.ts";
+import { setReplicas } from "../core/registry/placement.ts";
 import { createProject } from "../core/registry/projects.ts";
 import type { DeployRunner } from "../core/types/deploy.ts";
-import type { BuildSource, ScaloWarning } from "../core/types/registry.ts";
+import type { BuildSource, ReplicaCount, ScaloWarning } from "../core/types/registry.ts";
 import type { AgentContext } from "./app.ts";
 
 /** How long a flipped deploy waits to be observed serving traffic. */
@@ -68,6 +69,11 @@ export interface DeployMeta {
   builtWithVarset?: string;
   /** Whether the environment's alias should be pointed at the new build. */
   flip: boolean;
+  /**
+   * How many nodes should serve the environment. Absent says nothing about
+   * placement, and an environment that already exists keeps what it has.
+   */
+  replicas?: ReplicaCount;
   source?: BuildSource;
 }
 
@@ -229,7 +235,7 @@ export function createDeployService(
          the registry refuses is the caller's mistake and must be answered as
          one, not buried in a status it has to poll for. */
       await createProject(agent.registry, { slug: meta.project });
-      await ensureEnvironment(agent, meta.project, meta.environment);
+      await ensureEnvironment(agent, meta.project, meta.environment, meta.replicas);
 
       const id = randomDeployId();
       const accepted: DeployStatus = {
@@ -272,19 +278,35 @@ export function createDeployService(
  * Reading first and creating only what is missing is the same intent without
  * that opinion. Two deploys racing to create one environment still both end in
  * `createEnvironment`, which is idempotent for matching settings.
+ *
+ * `replicas` is the one setting a deploy may state about an environment that
+ * already exists, and only when it was asked for explicitly: how many nodes
+ * serve an environment is an operational decision, and a deploy that silently
+ * rewrote it would move an application off nodes because someone re-ran a
+ * pipeline with a stale flag.
  */
 async function ensureEnvironment(
   agent: AgentContext,
   project: string,
   environment: string,
+  replicas?: ReplicaCount,
 ): Promise<void> {
+  let exists = true;
   try {
     await getEnvironment(agent.registry, project, environment);
-    return;
   } catch (error) {
     if (!isScaloError(error) || error.code !== "not-found") throw error;
+    exists = false;
   }
-  await createEnvironment(agent.registry, project, { name: environment });
+
+  if (!exists) {
+    await createEnvironment(agent.registry, project, {
+      name: environment,
+      ...(replicas === undefined ? {} : { replicas }),
+    });
+    return;
+  }
+  if (replicas !== undefined) await setReplicas(agent.registry, project, environment, replicas);
 }
 
 /** Drops the oldest deploys once more than `keep` are remembered. */

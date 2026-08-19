@@ -9,11 +9,12 @@
 import { createPortAllocator } from "../core/placement/ports.ts";
 import { planReconcile, type ReconcileAction } from "../core/placement/reconcile.ts";
 import type { ProbeOptions, RuntimeDriver, RuntimeProcess } from "../core/types/runtime.ts";
-import { readDesired } from "./_desired.ts";
+import { type PlacementView, readDesired } from "./_desired.ts";
 import { createExecutor, failureOf, type ReconcileFailure } from "./_execute.ts";
 import { applyIngress } from "./_ingress.ts";
 import type { AgentContext } from "./app.ts";
 
+export type { PlacementView } from "./_desired.ts";
 export type { ReconcileFailure } from "./_execute.ts";
 
 /** Time between two passes of the loop when none is configured. */
@@ -34,6 +35,12 @@ export interface ReconcileStatus {
   failures: ReconcileFailure[];
   /** Runtime processes this node believes it is running. */
   processes: RuntimeProcess[];
+  /**
+   * Placement decisions the last pass read, including the environments this node
+   * is NOT one of the nodes for. An environment missing from this list has none,
+   * and is therefore served here.
+   */
+  placements: PlacementView[];
 }
 
 /** The loop, and the handle to run it once or on a timer. */
@@ -90,6 +97,7 @@ export function createReconciler(
   let lastRunAt: string | null = null;
   let lastActions: ReconcileAction[] = [];
   let failures: ReconcileFailure[] = [];
+  let lastPlacements: PlacementView[] = [];
 
   async function runOnce(): Promise<ReconcileAction[]> {
     /* Passes must not overlap: two of them would plan against the same gap and
@@ -99,8 +107,14 @@ export function createReconciler(
 
     const pending: ReconcileFailure[] = [];
     let plan: ReconcileAction[] = [];
+    let placements: PlacementView[] = [];
     try {
-      const desired = await readDesired(agent.registry);
+      /* Filtered to this node: an environment placed on other nodes is not
+         desired here, and what still runs for it is planned for a stop. */
+      const state = await readDesired(agent.registry, { nodeId: agent.nodeId });
+      const desired = state.environments;
+      placements = state.placements;
+
       const actual = executor.currentProcesses();
       plan = planReconcile({
         desired,
@@ -136,6 +150,9 @@ export function createReconciler(
     } finally {
       lastActions = plan;
       failures = pending;
+      /* What THIS pass read, so a registry it could not read reports nothing
+         rather than a decision that may since have moved. */
+      lastPlacements = placements;
       lastRunAt = new Date().toISOString();
       inFlight = false;
     }
@@ -167,6 +184,7 @@ export function createReconciler(
         lastActions: [...lastActions],
         failures: [...failures],
         processes: [...known.values()].map((process) => ({ ...process })),
+        placements: lastPlacements.map((view) => ({ ...view, nodes: [...view.nodes] })),
       };
     },
   };

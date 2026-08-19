@@ -11,6 +11,12 @@
 export type PlacementStrategy = "isolate" | "dense" | "auto";
 
 /**
+ * How many nodes serve one environment: a whole number of at least 1, or `"all"`
+ * for every node that is live at the moment the decision is made.
+ */
+export type ReplicaCount = number | "all";
+
+/**
  * Non-fatal advisory returned alongside a successful operation. Warnings never
  * abort a call; `code` is the stable contract, `detail` is human-facing.
  */
@@ -67,6 +73,13 @@ export interface NodeRecord {
   addresses: { internal: string; agentPort: number };
   /** Filled in by the node itself once it has probed its own hardware. */
   capacity?: { cores: number; memMb: number; cgroup: boolean; probedAt: string };
+  /**
+   * Last time the node's agent said it is still there, refreshed on its own
+   * timer. This is the liveness signal placement decides from; a record without
+   * it was written by a node that never refreshed one, and liveness then falls
+   * back to `capacity.probedAt`.
+   */
+  heartbeatAt?: string;
   /** Its place on the tunnel, when the installation runs one. */
   wireguard?: NodeWireguard;
   capabilities?: Record<string, unknown>;
@@ -158,7 +171,34 @@ export interface EnvironmentRecord {
   /** Ephemeral environments are reaped once idle for `idleTtlS`. */
   ephemeral: boolean;
   idleTtlS?: number;
+  /**
+   * How many nodes serve this environment. Absent means the default its kind
+   * implies — `"all"` when it is long-lived, `1` when it is ephemeral — which is
+   * what a reader resolves rather than assumes.
+   */
+  replicas?: ReplicaCount;
   createdAt: string;
+}
+
+/**
+ * Which nodes serve one environment, as the coordinator last decided it.
+ * Key: `_scalo/placement/<project>/<env>.json`.
+ *
+ * The ABSENCE of this record is meaningful and is not an error: it says no
+ * coordinator has decided yet, and every node then serves the environment. See
+ * the node-side reader for why that fallback is the safe one.
+ */
+export interface PlacementRecord {
+  v: 1;
+  /** Ids of the nodes that should run this environment, lexicographically sorted. */
+  nodes: string[];
+  decidedAt: string;
+  /**
+   * Fence of the coordinator lease the decision was made under. A coordinator
+   * never overwrites a decision made at a HIGHER fence than its own: that
+   * decision belongs to the node that superseded it.
+   */
+  fence: number;
 }
 
 /** An OIDC issuer allowed to deploy, restricted to specific subjects. */

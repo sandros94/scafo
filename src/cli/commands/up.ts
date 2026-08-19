@@ -4,6 +4,7 @@ import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import type { AgentContext } from "../../agent/app.ts";
 import { loadAgentConfig } from "../../agent/config.ts";
 import { createCoordinator } from "../../agent/coordinator.ts";
+import { createHeartbeat } from "../../agent/heartbeat.ts";
 import { createReconciler, runtimeBaseEnv } from "../../agent/reconcile.ts";
 import { startAgent } from "../../agent/serve.ts";
 import { probeCapacity } from "../../core/capacity/reader.ts";
@@ -155,13 +156,21 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   const coordinator = createCoordinator(agent);
   agent.coordinator = coordinator;
 
+  /* What tells the coordinator this node is still there. Without it the node is
+     counted out after three intervals and its environments go elsewhere. */
+  const heartbeat = createHeartbeat(agent);
+
   const server = await startAgent(agent);
   console.log(`scalo ${version} listening on ${server.url} as node "${state.id}"`);
   reconciler.start();
   coordinator.start();
+  heartbeat.start();
 
   await untilSignalled(async () => {
-    /* Given up first, and awaited: releasing the lease lets the next node take
+    /* Stopped first: a node on its way out must stop saying it is available, so
+       the coordinator stops counting it among the nodes it hands work to. */
+    heartbeat.stop();
+    /* Given up next, and awaited: releasing the lease lets the next node take
        it at once instead of waiting out the TTL, and a coordinator still running
        would keep deleting on behalf of a node that is leaving. */
     await coordinator.stop();

@@ -1,6 +1,6 @@
 /*
  * The coordinator loop: the one node that runs the work the registry can only
- * have one writer for.
+ * have one writer for — assigning environments to nodes, and reaping.
  *
  * There is no consensus protocol behind this — the lease in the bucket is the
  * whole election. A node takes it when it is free, renews it while it holds it,
@@ -24,6 +24,7 @@ import {
   type ReapOptions,
 } from "../core/registry/reaper.ts";
 import type { CoordinatorLease } from "../core/types/registry.ts";
+import { type AssignmentResult, runAssignment } from "./_assign.ts";
 import type { AgentContext } from "./app.ts";
 
 /** Time between two reaps when none is configured. */
@@ -39,6 +40,12 @@ export interface CoordinatorStatus {
   lastReapAt: string | null;
   /** Why the last reap failed; null when it went through. The lease is kept either way. */
   lastReapFailure: string | null;
+  /** ISO time the last assignment pass finished; null before the first. */
+  lastAssignAt: string | null;
+  /** What that pass decided; null before the first one, or when it refused. */
+  lastAssignment: AssignmentResult | null;
+  /** Why the last assignment did nothing; null when it went through. */
+  lastAssignFailure: string | null;
 }
 
 /** The loop, and the handle to run it once or on a timer. */
@@ -50,7 +57,10 @@ export interface Coordinator {
    * nothing, because the TTL expires the lease anyway.
    */
   stop(): Promise<void>;
-  /** Runs one iteration: take or renew the lease, then reap when a reap is due. */
+  /**
+   * Runs one iteration: take or renew the lease, assign every environment to
+   * the nodes that should serve it, then reap when a reap is due.
+   */
   runOnce(): Promise<void>;
   status(): CoordinatorStatus;
   /**
@@ -74,6 +84,8 @@ export interface CoordinatorOptions {
   buildRetentionMs?: number;
   /** Where the reaper reads last-request times; absent falls back to record timestamps. */
   activity?: ActivitySource;
+  /** How long a node counts as live for placement; defaults to three heartbeats. */
+  livenessWindowMs?: number;
 }
 
 /**
@@ -89,6 +101,8 @@ export function createCoordinator(agent: AgentContext, opts?: CoordinatorOptions
      bucket before the lease this node holds is allowed to go stale under it. */
   const tickMs = Math.max(1, Math.floor(ttlMs / 3));
   const reapIntervalMs = opts?.reapIntervalMs ?? DEFAULT_REAP_INTERVAL_MS;
+  const assignOptions =
+    opts?.livenessWindowMs === undefined ? {} : { livenessWindowMs: opts.livenessWindowMs };
   const reapOptions: ReapOptions = {
     ...(opts?.activity === undefined ? {} : { activity: opts.activity }),
     ...(opts?.buildRetentionMs === undefined
@@ -104,6 +118,9 @@ export function createCoordinator(agent: AgentContext, opts?: CoordinatorOptions
   let lastReapMs: number | null = null;
   let lastReapAt: string | null = null;
   let lastReapFailure: string | null = null;
+  let lastAssignAt: string | null = null;
+  let lastAssignment: AssignmentResult | null = null;
+  let lastAssignFailure: string | null = null;
 
   /** Drops to candidate. Nothing lease-gated may run again until it is retaken. */
   function drop(lease: LeaseHandle): void {
@@ -139,6 +156,27 @@ export function createCoordinator(agent: AgentContext, opts?: CoordinatorOptions
     }
   }
 
+  /**
+   * Decides which nodes serve what, every tick this node holds the lease.
+   *
+   * Not on the reap's interval: a reap is housekeeping that can wait a minute,
+   * while an assignment is what puts an environment back on a node after the one
+   * running it went away. A failure is recorded and the lease kept — the last
+   * decision stands, and the nodes keep serving what it gave them.
+   */
+  async function assign(lease: LeaseHandle): Promise<void> {
+    try {
+      lastAssignment = await runAssignment(agent.registry, lease, assignOptions);
+      lastAssignFailure = null;
+    } catch (error) {
+      if (isScaloError(error) && error.code === "lease-lost") drop(lease);
+      lastAssignment = null;
+      lastAssignFailure = describe(error);
+    } finally {
+      lastAssignAt = new Date().toISOString();
+    }
+  }
+
   async function reap(lease: LeaseHandle): Promise<void> {
     try {
       const plan = await planReap(agent.registry, reapOptions);
@@ -167,6 +205,13 @@ export function createCoordinator(agent: AgentContext, opts?: CoordinatorOptions
 
       const lease = held;
       if (lease === null) return;
+
+      await assign(lease);
+      /* The same fencing rule the renewal obeys: an assignment that found the
+         lease gone has already dropped this node to candidate, and nothing
+         lease-gated may follow it on this tick. */
+      if (held === null) return;
+
       if (lastReapMs !== null && nowDate(agent.registry).getTime() - lastReapMs < reapIntervalMs) {
         return;
       }
@@ -210,6 +255,9 @@ export function createCoordinator(agent: AgentContext, opts?: CoordinatorOptions
         lease: held === null ? null : { ...held.lease },
         lastReapAt,
         lastReapFailure,
+        lastAssignAt,
+        lastAssignment: lastAssignment === null ? null : { ...lastAssignment },
+        lastAssignFailure,
       };
     },
 

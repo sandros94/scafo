@@ -117,7 +117,12 @@ export function planReconcile(input: ReconcileInput): ReconcileAction[] {
       stops.push({
         type: "stop",
         processId: process.processId,
-        reason: "environment is no longer deployed",
+        /* Two things reach here and the wording covers both: an environment that
+           was undeployed, and one that is still deployed but has been placed on
+           other nodes. The planner cannot tell them apart — desired state is
+           already filtered to this node when it arrives — and claiming the first
+           would send an operator looking for a deletion that never happened. */
+        reason: "environment is no longer served by this node",
       });
     }
   }

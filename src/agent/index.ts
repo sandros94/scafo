@@ -4,4 +4,5 @@ export * from "./app.ts";
 export * from "./serve.ts";
 export * from "./reconcile.ts";
 export * from "./coordinator.ts";
+export * from "./heartbeat.ts";
 export * from "./deploys.ts";

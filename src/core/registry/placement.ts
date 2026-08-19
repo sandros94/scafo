@@ -1,0 +1,169 @@
+/*
+ * Replica placement, as the registry holds it: how many nodes an environment
+ * asks for (`setReplicas`), and which nodes the coordinator gave it (the
+ * placement records).
+ *
+ * A placement record is written by the coordinator alone and read by every node.
+ * Its ABSENCE is a meaningful state and never an error: it says nothing has been
+ * decided for that environment yet, and readers fall back to serving it
+ * everywhere.
+ */
+
+import { ScaloError } from "../error.ts";
+import type { EnvironmentRecord, PlacementRecord, ReplicaCount } from "../types/registry.ts";
+import { assertReplicas } from "../placement/replicas.ts";
+import { deepEqual, isCasConflict, namesFromKeys } from "./_shared.ts";
+import { createJson, deleteKey, putJson, readJson, updateJson } from "./cas.ts";
+import { nowIso, type RegistryContext } from "./context.ts";
+import { type LeaseHandle, verifyLease } from "./lease.ts";
+import { environmentKey, placementKey, placementPrefix } from "./paths.ts";
+
+/**
+ * What one {@link writePlacement} did. Three of the four outcomes write nothing,
+ * and each says something different about why:
+ *
+ * - `written` — the decision changed and now stands.
+ * - `unchanged` — the decision was already this one. Rewriting it would churn
+ *   the object, its ETag and every reader's view for no change at all.
+ * - `cas-conflict` — another writer got there first. The next pass re-reads.
+ * - `stale` — the stored decision carries a HIGHER fence than the lease this
+ *   write was made under, so it belongs to a coordinator that superseded this
+ *   one. Overwriting it would undo the decision of the node now in charge.
+ */
+export type PlacementOutcome = "written" | "unchanged" | "cas-conflict" | "stale";
+
+export interface PlacementWrite {
+  outcome: PlacementOutcome;
+  /** The record as it stands afterwards; null only when there is none to report. */
+  record: PlacementRecord | null;
+}
+
+/** The placement of one environment, or null when none has been decided. */
+export async function readPlacement(
+  ctx: RegistryContext,
+  project: string,
+  env: string,
+): Promise<PlacementRecord | null> {
+  const found = await readJson<PlacementRecord>(ctx, placementKey(project, env));
+  return found?.value ?? null;
+}
+
+/**
+ * Every placement decision of one project, keyed by environment name.
+ *
+ * One listing plus a read per DECIDED environment, rather than a read per
+ * environment that exists: the environments nobody has decided about — which is
+ * all of them until a coordinator runs — cost nothing here.
+ */
+export async function listPlacements(
+  ctx: RegistryContext,
+  project: string,
+): Promise<Map<string, PlacementRecord>> {
+  const prefix = placementPrefix(project);
+  const placements = new Map<string, PlacementRecord>();
+
+  for (const env of namesFromKeys(await ctx.store.list(prefix), prefix)) {
+    const found = await readJson<PlacementRecord>(ctx, `${prefix}${env}.json`);
+    if (found !== null) placements.set(env, found.value);
+  }
+  return placements;
+}
+
+/**
+ * Records which nodes serve `env`, under the coordinator's own fence.
+ *
+ * Conditional on what was read: a create when nothing was there, an `If-Match`
+ * when something was. A losing write is NOT retried — the winner is another
+ * coordinator, and the loser re-reads on its next tick rather than arguing.
+ *
+ * Never called with an empty `nodes` by a caller that simply found no live node:
+ * "nobody serves this" is a decision no fleet-wide outage is entitled to make.
+ */
+export async function writePlacement(
+  ctx: RegistryContext,
+  project: string,
+  env: string,
+  nodes: string[],
+  lease: LeaseHandle,
+): Promise<PlacementWrite> {
+  const key = placementKey(project, env);
+  const current = await readJson<PlacementRecord>(ctx, key);
+  /* Sorted here rather than trusted from the caller: the order carries no
+     meaning, and two callers naming the same nodes differently must not read as
+     two different decisions and rewrite the record at each other forever. */
+  const decided = [...nodes].sort();
+
+  if (current !== null) {
+    if (deepEqual(current.value.nodes, decided)) {
+      return { outcome: "unchanged", record: current.value };
+    }
+    if (current.value.fence > lease.lease.fence) {
+      return { outcome: "stale", record: current.value };
+    }
+  }
+
+  const record: PlacementRecord = {
+    v: 1,
+    nodes: decided,
+    decidedAt: nowIso(ctx),
+    fence: lease.lease.fence,
+  };
+
+  try {
+    if (current === null) await createJson(ctx, key, record);
+    else await putJson(ctx, key, record, { ifMatch: current.etag });
+  } catch (error) {
+    if (isCasConflict(error)) return { outcome: "cas-conflict", record: current?.value ?? null };
+    throw error;
+  }
+  return { outcome: "written", record };
+}
+
+/**
+ * Removes the placement of an environment that is gone.
+ *
+ * Lease-gated for the reason every delete in this registry is: S3 has no
+ * conditional delete, so the lease is the only thing keeping two deleters apart.
+ * Answers the key it removed, or null when there was nothing to remove.
+ */
+export async function deletePlacement(
+  ctx: RegistryContext,
+  project: string,
+  env: string,
+  lease: LeaseHandle,
+): Promise<string | null> {
+  const key = placementKey(project, env);
+  if ((await readJson<PlacementRecord>(ctx, key)) === null) return null;
+
+  if (!(await verifyLease(ctx, lease))) {
+    throw new ScaloError("lease-lost", "Coordinator lease is no longer held", {
+      detail: `refusing to remove the placement of "${project}/${env}"`,
+    });
+  }
+  await deleteKey(ctx, key);
+  return key;
+}
+
+/**
+ * Sets how many nodes serve an environment. `"all"` or a whole number of at
+ * least 1; anything else is `ScaloError("invalid-input")`.
+ *
+ * Takes effect on the coordinator's next assignment pass rather than here: this
+ * states the intent, and which nodes it lands on stays the coordinator's to
+ * decide.
+ */
+export async function setReplicas(
+  ctx: RegistryContext,
+  project: string,
+  env: string,
+  replicas: ReplicaCount,
+): Promise<EnvironmentRecord> {
+  assertReplicas(replicas);
+
+  const updated = await updateJson<EnvironmentRecord>(
+    ctx,
+    environmentKey(project, env),
+    (current) => ({ ...current, replicas }),
+  );
+  return updated.value;
+}

@@ -54,6 +54,21 @@ export function nodeKey(id: string): string {
   return `${nodesPrefix()}${id}.json`;
 }
 
+/**
+ * Prefix the placement decisions of one project live under. Listed once per
+ * project rather than fetched per environment: an environment with no decision
+ * yet has no object at all, and a listing says so without a read each.
+ */
+export function placementPrefix(project: string): string {
+  assertSlug(project);
+  return `${ROOT}/placement/${project}/`;
+}
+
+export function placementKey(project: string, env: string): string {
+  assertSlug(env);
+  return `${placementPrefix(project)}${env}.json`;
+}
+
 export function domainsPrefix(): string {
   return `${ROOT}/domains/`;
 }

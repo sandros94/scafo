@@ -6,6 +6,7 @@ import type { DeployStatus } from "../../agent/deploys.ts";
 import { signNodeToken } from "../../core/auth/node-token.ts";
 import { fromProblem, ScaloError } from "../../core/error.ts";
 import type { ProblemDetails } from "../../core/error.ts";
+import { parseReplicas } from "../../core/placement/replicas.ts";
 import { packDirectory } from "../../drivers/archive/tar-zst.ts";
 import type { OperatorKeyFile } from "./keygen.ts";
 import { DEFAULT_KEY_PATH } from "./keygen.ts";
@@ -27,6 +28,10 @@ const deployArgs: ArgsDef = {
   "runtime-configurable": {
     type: "boolean",
     description: "The build reads its configuration at runtime, not at build time",
+  },
+  "replicas": {
+    type: "string",
+    description: "How many nodes serve this environment: a whole number, or all",
   },
   "key": { type: "string", description: `Operator key file to sign with (${DEFAULT_KEY_PATH})` },
   "token": {
@@ -58,6 +63,10 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
   const mint = fixed === undefined ? await signer(text(flags.key) ?? DEFAULT_KEY_PATH) : null;
   const authorize = async (): Promise<string> => fixed ?? (await (mint as () => Promise<string>)());
 
+  /* Read before the directory is packed, so a malformed flag costs nothing. */
+  const wantedReplicas = text(flags.replicas);
+  const replicas = wantedReplicas === undefined ? undefined : parseReplicas(wantedReplicas);
+
   console.log(`scalo: packing ${dir}`);
   const artifact = await packDirectory(dir);
 
@@ -67,6 +76,9 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
     runtimeConfigurable: flags["runtime-configurable"] === true,
     flip: flags.flip === true,
     ...(text(flags.script) === undefined ? {} : { script: text(flags.script) }),
+    /* Only when it was asked for: a deploy that names no replica count must
+       leave whatever the environment already carries exactly as it is. */
+    ...(replicas === undefined ? {} : { replicas }),
   };
 
   const body = new FormData();

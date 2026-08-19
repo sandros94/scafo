@@ -1,14 +1,19 @@
 /* Garbage collection: what is safe to delete, and the lease-gated deletion itself. */
 
 import { ScaloError } from "../error.ts";
-import type { BuildRecord, DomainClaim, EnvironmentRecord } from "../types/registry.ts";
+import type {
+  BuildRecord,
+  DomainClaim,
+  EnvironmentRecord,
+  PlacementRecord,
+} from "../types/registry.ts";
 import { deleteKey, readJson, requireJson } from "./cas.ts";
 import { nowDate, type RegistryContext } from "./context.ts";
 import { listBuilds } from "./builds.ts";
 import { releaseDomain } from "./domains.ts";
 import { listEnvironments } from "./environments.ts";
 import { type LeaseHandle, verifyLease } from "./lease.ts";
-import { buildKey, domainKey, environmentKey, fleetPrefix } from "./paths.ts";
+import { buildKey, domainKey, environmentKey, fleetPrefix, placementKey } from "./paths.ts";
 import { listProjects } from "./projects.ts";
 
 /** Where last-request timestamps come from; the registry itself does not track them. */
@@ -199,8 +204,9 @@ export async function deleteEnvironment(
 
 /**
  * Deletes one environment's records in the only safe order: the domain claims
- * that name it, then its fleet state, then the environment record itself.
- * `guard` runs before every destructive step and aborts the rest by throwing.
+ * that name it, then its fleet state, then its placement decision, then the
+ * environment record itself. `guard` runs before every destructive step and
+ * aborts the rest by throwing.
  *
  * A run cut short — by a crash or by a lost lease — therefore leaves the
  * environment record in place, so the next pass finds it again and the deletion
@@ -232,6 +238,16 @@ async function purgeEnvironment(
     await guard();
     await deleteKey(ctx, fleetKey);
     deleted.push(fleetKey);
+  }
+
+  /* Before the record, because it points AT the record: a placement left behind
+     names an environment that is gone, and the only thing that would ever have
+     cleaned it up is the coordinator noticing the same absence a tick later. */
+  const placement = placementKey(project, environment.name);
+  if ((await readJson<PlacementRecord>(ctx, placement)) !== null) {
+    await guard();
+    await deleteKey(ctx, placement);
+    deleted.push(placement);
   }
 
   const key = environmentKey(project, environment.name);

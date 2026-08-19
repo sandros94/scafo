@@ -13,7 +13,7 @@ import { advertisedAddress, parseHostPort } from "../agent/config.ts";
 import type { CapacityPlan } from "../core/capacity/compute.ts";
 import { ScaloError } from "../core/error.ts";
 import { readJson, updateJson } from "../core/registry/cas.ts";
-import type { RegistryContext } from "../core/registry/context.ts";
+import { nowIso, type RegistryContext } from "../core/registry/context.ts";
 import { registerNode } from "../core/registry/nodes.ts";
 import { nodeKey } from "../core/registry/paths.ts";
 import type { NodeRecord, NodeWireguard } from "../core/types/registry.ts";
@@ -172,6 +172,10 @@ export interface RegisterNodeOptions {
  * must be able to state the truth again — and the identity it is filed under
  * comes from the node's own state directory, so re-registering never takes over
  * another node's entry.
+ *
+ * Registering counts as the node's first heartbeat, so it is eligible for work
+ * from the moment it exists rather than from its first refresh a heartbeat
+ * interval later.
  */
 export async function registerThisNode(
   registry: RegistryContext,
@@ -183,6 +187,7 @@ export async function registerThisNode(
     id: opts.state.id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: opts.state.publicKey.x },
     addresses: { internal: reachable.host, agentPort: reachable.port },
+    heartbeatAt: nowIso(registry),
     ...(opts.capacity === undefined
       ? {}
       : {

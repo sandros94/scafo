@@ -34,7 +34,7 @@ import type { AgentConfig } from "./config.ts";
 import type { Coordinator } from "./coordinator.ts";
 import type { DeployService, DeployStatus } from "./deploys.ts";
 import { renderProblem, requireNodeToken } from "./middleware.ts";
-import type { Reconciler, ReconcileStatus } from "./reconcile.ts";
+import type { PlacementView, Reconciler, ReconcileStatus } from "./reconcile.ts";
 
 /** Everything the HTTP layer serves from; assembled once while the node boots. */
 export interface AgentContext {
@@ -107,6 +107,14 @@ export interface AgentState {
    */
   coordinator: CoordinatorView | null;
   processes: ProcessStatus[];
+  /**
+   * Which nodes serve each environment this node has read a decision for, and
+   * whether this node is one of them. Empty on a node that runs no reconcile
+   * loop, and — the case worth reading carefully — on an installation where no
+   * coordinator has decided anything yet, which is when every node serves
+   * everything.
+   */
+  placements: PlacementView[];
   /** Last pass of the reconcile loop; absent on a node that runs no loop. */
   reconcile?: ReconcileStatus;
 }
@@ -186,6 +194,9 @@ export function createAgentApp(agent: AgentContext): H3 {
         lease: lease?.value ?? null,
         coordinator: coordinatorView(agent, lease?.value ?? null),
         processes: agent.supervisor.list(),
+        /* From the reads the reconcile pass already made, rather than a second
+           trip to the bucket for state this node has just been told. */
+        placements: reconcile?.placements ?? [],
         ...(reconcile === undefined ? {} : { reconcile }),
       };
     },
