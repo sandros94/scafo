@@ -9,7 +9,7 @@
 
 import { isScaloError } from "../core/error.ts";
 import { createBuild } from "../core/registry/builds.ts";
-import { createEnvironment, flipAlias } from "../core/registry/environments.ts";
+import { createEnvironment, flipAlias, getEnvironment } from "../core/registry/environments.ts";
 import { fleetPrefix } from "../core/registry/paths.ts";
 import { createProject } from "../core/registry/projects.ts";
 import type { DeployRunner } from "../core/types/deploy.ts";
@@ -229,7 +229,7 @@ export function createDeployService(
          the registry refuses is the caller's mistake and must be answered as
          one, not buried in a status it has to poll for. */
       await createProject(agent.registry, { slug: meta.project });
-      await createEnvironment(agent.registry, meta.project, { name: meta.environment });
+      await ensureEnvironment(agent, meta.project, meta.environment);
 
       const id = randomDeployId();
       const accepted: DeployStatus = {
@@ -258,6 +258,33 @@ export function createDeployService(
       return status === undefined ? null : snapshot(status);
     },
   };
+}
+
+/**
+ * The environment a deploy names, created when it is not there yet.
+ *
+ * A deploy asks for an environment to EXIST; it says nothing about how that
+ * environment is configured. Creating one outright would say something:
+ * `ephemeral` is part of an environment's identity and defaults to false, so a
+ * deploy aimed at a preview environment that was created ephemeral would be
+ * refused for disagreeing about a setting the deploy never expressed.
+ *
+ * Reading first and creating only what is missing is the same intent without
+ * that opinion. Two deploys racing to create one environment still both end in
+ * `createEnvironment`, which is idempotent for matching settings.
+ */
+async function ensureEnvironment(
+  agent: AgentContext,
+  project: string,
+  environment: string,
+): Promise<void> {
+  try {
+    await getEnvironment(agent.registry, project, environment);
+    return;
+  } catch (error) {
+    if (!isScaloError(error) || error.code !== "not-found") throw error;
+  }
+  await createEnvironment(agent.registry, project, { name: environment });
 }
 
 /** Drops the oldest deploys once more than `keep` are remembered. */
