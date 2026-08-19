@@ -1,0 +1,23 @@
+{
+  "admin": {
+    "listen": "0.0.0.0:2019",
+    "origins": ["127.0.0.1:2019", "localhost:2019", "0.0.0.0:2019"]
+  },
+  "apps": {
+    "http": {
+      "servers": {
+        "scalo": {
+          "listen": [":80"],
+          "routes": [
+            {
+              "@id": "operator_authored",
+              "match": [{ "host": ["operator.test"] }],
+              "handle": [{ "handler": "static_response", "status_code": 200, "body": "operator" }],
+              "terminal": true
+            }
+          ]
+        }
+      }
+    }
+  }
+}

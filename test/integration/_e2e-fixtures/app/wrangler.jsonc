@@ -1,0 +1,8 @@
+{
+  /* The end-to-end fixture application. `name` is rewritten by the deploy runner
+     to the script name scalo recorded, so its value here is only a placeholder. */
+  "name": "app",
+  "main": "index.js",
+  "compatibility_date": "2025-01-01",
+  "vars": { "APP_VERSION": "v1" },
+}

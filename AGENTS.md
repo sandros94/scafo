@@ -24,6 +24,7 @@ When a task involves design decisions, ambiguity, or changes to the project visi
 - **Build:** `pnpm build` (uses obuild/rolldown)
 - **Test:** `pnpm test` (vitest; the integration suite auto-starts an S3 store container via testcontainers — needs docker. `SCALO_TEST_STORE=seaweedfs|rustfs` picks the store, default seaweedfs; set `S3_ENDPOINT`/`S3_ACCESS_KEY`/`S3_SECRET_KEY`/`S3_BUCKET` to target an external store instead)
 - **Single test file:** `pnpm vitest run test/utils.test.ts`
+- **End-to-end:** `SCALO_E2E=1 pnpm vitest run test/integration/e2e.test.ts` (skipped without the flag, so `pnpm test` stays fast). Drives the whole single-node loop against real infrastructure — SeaweedFS, a Caddy the agent converges through its admin API, celld running the builds, and the built CLI — through `scalo keygen --register`, two `scalo deploy --flip` runs and a rollback, asserting what each build serves through Caddy at every step. Needs docker, the images `chrislusf/seaweedfs:4.42` and `caddy:2`, and a local `scalo-v13-probe` image carrying node 24, celld and esbuild
 - **Type check:** `pnpm typecheck` (uses `tsc` from TypeScript 7)
 - **Lint:** `pnpm lint` (oxlint + oxfmt --check)
 - **Format:** `pnpm fmt` (automd + oxlint --fix + oxfmt)
