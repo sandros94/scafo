@@ -8,6 +8,7 @@ import { parseLabels } from "../../core/utils/labels.ts";
 import { packDirectory } from "../../drivers/archive/tar-zst.ts";
 import { DEFAULT_KEY_PATH } from "./keygen.ts";
 import { agentBaseUrl, agentRequest, type Authorize, operatorSigner } from "../_agent.ts";
+import { agentOps, describeSplitChange } from "../_environments.ts";
 import { reportFailure } from "../_utils.ts";
 
 /** Time between two looks at a deploy's status. */
@@ -23,6 +24,11 @@ const deployArgs: ArgsDef = {
   "env": { type: "string", description: "Environment to deploy into (production)" },
   "script": { type: "string", description: "Name the runtime files the app under" },
   "flip": { type: "boolean", description: "Point the environment's alias at the new build" },
+  "canary": {
+    type: "string",
+    description:
+      "Send this percent of the environment's traffic to the new build, without flipping",
+  },
   "runtime-configurable": {
     type: "boolean",
     description: "The build reads its configuration at runtime, not at build time",
@@ -72,6 +78,7 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
   const wantedSelector = text(flags["node-selector"]);
   const nodeSelector =
     wantedSelector === undefined ? undefined : parseLabels(wantedSelector, "--node-selector");
+  const canary = readCanaryFlag(flags);
 
   console.log(`scalo: packing ${dir}`);
   const artifact = await packDirectory(dir);
@@ -80,6 +87,8 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
     project,
     environment,
     runtimeConfigurable: flags["runtime-configurable"] === true,
+    /* A canary is the opposite of a flip and the two are refused together, so
+       this is already false whenever one was asked for. */
     flip: flags.flip === true,
     ...(text(flags.script) === undefined ? {} : { script: text(flags.script) }),
     /* Only when they were asked for: a deploy that names no replica count and no
@@ -101,22 +110,42 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
   const location = accepted.headers.get("location") ?? `/v1/deploys/${status.id}`;
 
   console.log(`scalo: deploy ${status.id} ${status.state}`);
-  await watch(new URL(location, `${agent}/`).href, authorize, status.state);
+  const settled = await watch(new URL(location, `${agent}/`).href, authorize, status);
+  if (canary === undefined) return;
+
+  const build = settled.build;
+  if (build === undefined) {
+    throw new ScaloError("invalid-input", "Nothing to send the canary traffic to", {
+      detail: `deploy ${settled.id} settled as "${settled.state}" without recording a build`,
+    });
+  }
+
+  /*
+   * The environment's own traffic is divided only AFTER the build exists, and
+   * the node weighs it against whatever the alias points at right then. A first
+   * deploy has no alias to weigh against and is refused there, naming --flip:
+   * an application's first build goes into service outright, and there is no
+   * such thing as easing traffic onto the only thing that serves it.
+   */
+  const target = { project, env: environment };
+  const record = await agentOps({ url: agent, authorize }).canary(target, {
+    build,
+    weight: canary,
+  });
+  console.log(describeSplitChange(target, record));
 }
 
 /** Polls a deploy, printing each state it moves into, until it settles. */
-async function watch(url: string, authorize: Authorize, from: string): Promise<void> {
+async function watch(url: string, authorize: Authorize, from: DeployStatus): Promise<DeployStatus> {
   let last = from;
 
   for (;;) {
-    if (SETTLED.includes(last)) break;
+    if (SETTLED.includes(last.state)) return last;
     await delay(DEFAULT_POLL_MS);
 
     const status = (await (await agentRequest(url, await authorize())).json()) as DeployStatus;
-    if (status.state !== last) {
-      last = status.state;
-      console.log(`scalo: deploy ${status.id} ${status.state}`);
-    }
+    if (status.state !== last.state) console.log(`scalo: deploy ${status.id} ${status.state}`);
+    last = status;
     if (!SETTLED.includes(status.state)) continue;
 
     for (const warning of status.warnings)
@@ -125,8 +154,36 @@ async function watch(url: string, authorize: Authorize, from: string): Promise<v
       throw new ScaloError("invalid-input", "Deploy failed", { detail: status.detail });
     }
     if (status.build !== undefined) console.log(`scalo: build ${status.build}`);
-    break;
+    return status;
   }
+}
+
+/**
+ * The percent `--canary` asks for, or undefined when it was not given.
+ *
+ * REFUSED ALONGSIDE `--flip`, because they are opposite intentions: a flip makes
+ * the new build the whole of what the environment serves, a canary deliberately
+ * leaves the current one serving most of it. A command carrying both says
+ * nothing about which was meant. The RANGE is the registry's to judge, so the
+ * refusal reads the same however the split was set.
+ */
+function readCanaryFlag(flags: Record<string, unknown>): number | undefined {
+  const stated = text(flags.canary);
+  if (stated === undefined) return undefined;
+
+  if (flags.flip === true) {
+    throw new ScaloError("invalid-input", "Conflicting arguments", {
+      detail:
+        `--flip puts the new build in front of all of this environment's traffic and ` +
+        `--canary ${stated} puts it in front of some; pass one of them`,
+    });
+  }
+  if (!/^\d+$/.test(stated)) {
+    throw new ScaloError("invalid-input", "Invalid canary weight", {
+      detail: `--canary "${stated}" must be a whole number of percent, such as --canary 10`,
+    });
+  }
+  return Number(stated);
 }
 
 function text(value: unknown): string | undefined {

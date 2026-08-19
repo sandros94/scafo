@@ -7,7 +7,7 @@ import { ScaloError } from "../core/error.ts";
 import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { checkDomain } from "../core/registry/domains.ts";
-import { flipAlias, rollbackAlias } from "../core/registry/environments.ts";
+import { canarySplit, flipAlias, rollbackAlias, setSplit } from "../core/registry/environments.ts";
 import { isLeaseExpired } from "../core/registry/lease.ts";
 import { coordinatorKey, environmentKey, nodeKey } from "../core/registry/paths.ts";
 import { setNodeSelector } from "../core/registry/placement.ts";
@@ -31,6 +31,7 @@ import {
   readAliasRequest,
   readDeployRequest,
   readSelectorRequest,
+  readSplitRequest,
   tryNodeToken,
   verifyCaller,
   verifyWorkload,
@@ -140,8 +141,8 @@ export interface EnvironmentDeleted {
   deleted: string[];
 }
 
-/** Body of the retire, unretire and selector routes: the environment as it now stands. */
-export interface EnvironmentRetirement {
+/** Body of the retire, unretire, selector and split routes: the environment as it now stands. */
+export interface EnvironmentResult {
   environment: EnvironmentRecord;
 }
 
@@ -268,7 +269,7 @@ export function createAgentApp(agent: AgentContext): H3 {
    */
   app.post(
     "/v1/environments/:project/:env/retire",
-    async (event): Promise<EnvironmentRetirement> => ({
+    async (event): Promise<EnvironmentResult> => ({
       environment: await retireEnvironment(agent.registry, ...target(event)),
     }),
     { middleware: [authenticated] },
@@ -278,7 +279,7 @@ export function createAgentApp(agent: AgentContext): H3 {
      operator must be able to take back with one call rather than with a restore. */
   app.post(
     "/v1/environments/:project/:env/unretire",
-    async (event): Promise<EnvironmentRetirement> => ({
+    async (event): Promise<EnvironmentResult> => ({
       environment: await unretireEnvironment(agent.registry, ...target(event)),
     }),
     { middleware: [authenticated] },
@@ -295,7 +296,7 @@ export function createAgentApp(agent: AgentContext): H3 {
    */
   app.post(
     "/v1/environments/:project/:env/selector",
-    async (event): Promise<EnvironmentRetirement> => {
+    async (event): Promise<EnvironmentResult> => {
       const request = await readSelectorRequest(event);
       const [project, name] = target(event);
       return {
@@ -304,6 +305,33 @@ export function createAgentApp(agent: AgentContext): H3 {
     },
     { middleware: [authenticated] },
   );
+
+  /*
+   * How an environment's traffic is divided between its builds, set or cleared.
+   * A plain CAS update on one record, like the two above, and it states an
+   * intent the same way: the nodes serving the environment start the legs it
+   * names on their next passes, and the routing follows as each becomes ready.
+   *
+   * Authenticated like `POST /v1/aliases` rather than like the selector — with a
+   * WORKLOAD token accepted for the project in the path — because a split is the
+   * same kind of act as a flip: it moves an application's live traffic between
+   * that application's own builds, which is what a project's CI is trusted to do
+   * for its own project and for no other.
+   */
+  app.post("/v1/environments/:project/:env/split", async (event): Promise<EnvironmentResult> => {
+    const [project, name] = target(event);
+    /* Before the body is read: the project is in the path, so there is nothing
+         to learn from the request first. */
+    await verifyCaller(verifiers, event, project);
+
+    const request = await readSplitRequest(event);
+    return {
+      environment:
+        request.kind === "canary"
+          ? await canarySplit(agent.registry, project, name, request.canary)
+          : await setSplit(agent.registry, project, name, request.split),
+    };
+  });
 
   /*
    * Deleting is lease-gated, so only the coordinator can carry it out — but any

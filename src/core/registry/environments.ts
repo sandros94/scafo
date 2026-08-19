@@ -124,11 +124,18 @@ export async function flipAlias(
 ): Promise<EnvironmentUpdate> {
   const build = await requireJson<BuildRecord>(ctx, buildKey(project, buildId));
 
+  /* What the flip took away, captured from the write that took it: a flip is a
+     full cutover, and an operator who was running a split has to be told that
+     this ended it. Held rather than re-read because the last run of the mutator
+     is the one that landed. */
+  const replaced: { split: SplitEntry[] | null } = { split: null };
+
   const updated = await updateJson<EnvironmentRecord>(
     ctx,
     environmentKey(project, env),
     (current) => {
       const previous = current.alias?.build;
+      replaced.split = current.split;
       return {
         ...current,
         alias: {
@@ -141,7 +148,13 @@ export async function flipAlias(
     },
   );
 
-  return { environment: updated.value, warnings: varsetWarnings(updated.value, build.value) };
+  return {
+    environment: updated.value,
+    warnings: [
+      ...splitClearedWarnings(replaced.split, buildId),
+      ...varsetWarnings(updated.value, build.value),
+    ],
+  };
 }
 
 /**
@@ -201,6 +214,74 @@ export async function setSplit(
   return updated.value;
 }
 
+/** What {@link canarySplit} is asked to put in front of the alias. */
+export interface CanaryInput {
+  /** Build the canary share is given to; must exist and must not be the alias. */
+  build: string;
+  /** Whole number from 1 to 99 — the share the canary takes, the alias keeps the rest. */
+  weight: number;
+}
+
+/**
+ * Splits traffic between the build the alias points at and a new one: the canary
+ * takes `weight`, the alias keeps `100 - weight`, and the alias itself does not
+ * move. Promoting the canary is an ordinary {@link flipAlias}, which clears the
+ * split; abandoning it is {@link setSplit} with null.
+ *
+ * The alias is read and the split written in ONE conditional update, so a canary
+ * can never be weighed against an alias that has since been flipped.
+ *
+ * Throws `ScaloError("invalid-input")` when the environment has no alias yet —
+ * there is nothing to hold the other side of the split, and the first build of
+ * an environment is deployed with a flip rather than eased in — and when the
+ * canary build is the one the alias already names.
+ */
+export async function canarySplit(
+  ctx: RegistryContext,
+  project: string,
+  env: string,
+  input: CanaryInput,
+): Promise<EnvironmentRecord> {
+  if (!Number.isInteger(input.weight) || input.weight < 1 || input.weight > 99) {
+    throw new ScaloError("invalid-input", "Invalid canary weight", {
+      detail:
+        `a canary takes a whole number from 1 to 99 percent of the traffic, leaving the rest ` +
+        `to the alias, got ${String(input.weight)}`,
+    });
+  }
+  await requireJson<BuildRecord>(ctx, buildKey(project, input.build));
+
+  const updated = await updateJson<EnvironmentRecord>(
+    ctx,
+    environmentKey(project, env),
+    (current) => {
+      const alias = current.alias;
+      if (alias === null) {
+        throw new ScaloError("invalid-input", "Environment has no alias to split against", {
+          detail:
+            `"${project}/${env}" has never been flipped, so there is no build to weigh a canary ` +
+            `against; deploy this build with --flip to put it into service outright`,
+        });
+      }
+      if (alias.build === input.build) {
+        throw new ScaloError("invalid-input", "Canary is already the alias", {
+          detail:
+            `"${project}/${env}" already points at build "${input.build}", so splitting it ` +
+            `against itself would change nothing`,
+        });
+      }
+
+      const entries: SplitEntry[] = [
+        { build: alias.build, weight: 100 - input.weight },
+        { build: input.build, weight: input.weight },
+      ];
+      assertSplit(entries);
+      return { ...current, split: entries };
+    },
+  );
+  return updated.value;
+}
+
 /**
  * Points the environment at an existing varset. Warns when the build currently
  * serving traffic cannot pick the new values up without a rebuild.
@@ -234,6 +315,28 @@ function identity(
   record: EnvironmentRecord,
 ): Pick<EnvironmentRecord, "v" | "name" | "prefix" | "ephemeral"> {
   return { v: record.v, name: record.name, prefix: record.prefix, ephemeral: record.ephemeral };
+}
+
+/**
+ * What a flip that ended a split has to say for itself.
+ *
+ * A flip is a FULL CUTOVER, and an operator running 90/10 who flips to settle it
+ * has just also stopped serving the other leg — which is usually exactly what
+ * they meant, and is worth stating either way because nothing else in the answer
+ * mentions the split that was there a moment ago.
+ */
+function splitClearedWarnings(split: SplitEntry[] | null, buildId: string): ScaloWarning[] {
+  if (split === null || split.length === 0) return [];
+
+  const legs = split.map((entry) => `"${entry.build}" at ${String(entry.weight)}%`).join(", ");
+  return [
+    {
+      code: "split-cleared",
+      detail:
+        `the traffic split over ${legs} is cleared: build "${buildId}" now takes all of this ` +
+        `environment's traffic, and the legs it does not name are stopped once it is ready`,
+    },
+  ];
 }
 
 function varsetWarnings(environment: EnvironmentRecord, build: BuildRecord): ScaloWarning[] {

@@ -13,11 +13,12 @@
 import { ScaloError } from "../core/error.ts";
 import { describeSelector } from "../core/placement/selector.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
+import { type CanaryInput, canarySplit, setSplit } from "../core/registry/environments.ts";
 import { acquireLease, type LeaseHandle, releaseLease } from "../core/registry/lease.ts";
 import { setNodeSelector } from "../core/registry/placement.ts";
 import { deleteEnvironment } from "../core/registry/reaper.ts";
 import { retireEnvironment, unretireEnvironment } from "../core/registry/retirement.ts";
-import type { EnvironmentRecord, NodeSelector } from "../core/types/registry.ts";
+import type { EnvironmentRecord, NodeSelector, SplitEntry } from "../core/types/registry.ts";
 import { parseLabels } from "../core/utils/labels.ts";
 import { assertSlug } from "../core/utils/slug.ts";
 import { type AgentCallOptions, agentRequest, type Authorize } from "./_agent.ts";
@@ -36,7 +37,7 @@ export interface DeleteOptions {
   force?: boolean;
 }
 
-/** What the three subcommands do, whichever way they reach the installation. */
+/** What the subcommands do, whichever way they reach the installation. */
 export interface EnvironmentOps {
   /** How the operator is acting, as the command's own output names it. */
   readonly via: string;
@@ -44,6 +45,10 @@ export interface EnvironmentOps {
   unretire(target: EnvironmentTarget): Promise<EnvironmentRecord>;
   /** Constrains which nodes may serve the environment; null lifts the constraint. */
   setSelector(target: EnvironmentTarget, selector: NodeSelector | null): Promise<EnvironmentRecord>;
+  /** Weights the environment's traffic over several builds; null clears the split. */
+  setSplit(target: EnvironmentTarget, split: SplitEntry[] | null): Promise<EnvironmentRecord>;
+  /** Weighs one build against whatever the alias currently points at. */
+  canary(target: EnvironmentTarget, canary: CanaryInput): Promise<EnvironmentRecord>;
   /** Answers the store keys that were removed. */
   delete(target: EnvironmentTarget, opts?: DeleteOptions): Promise<string[]>;
 }
@@ -89,6 +94,18 @@ export function agentOps(opts: AgentOptions): EnvironmentOps {
     return ((await answer.json()) as { environment: EnvironmentRecord }).environment;
   };
 
+  const stateSplit = async (
+    target: EnvironmentTarget,
+    body: { split: SplitEntry[] | null } | { canary: CanaryInput },
+  ): Promise<EnvironmentRecord> => {
+    const answer = await agentRequest(at(target, "/split"), await opts.authorize(), {
+      ...call("POST"),
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return ((await answer.json()) as { environment: EnvironmentRecord }).environment;
+  };
+
   return {
     via: opts.url,
     retire: (target) => retirement(target, "/retire"),
@@ -104,6 +121,10 @@ export function agentOps(opts: AgentOptions): EnvironmentOps {
       });
       return ((await answer.json()) as { environment: EnvironmentRecord }).environment;
     },
+
+    /* Same shape, same reason: clearing a split has to be said, never implied. */
+    setSplit: (target, split) => stateSplit(target, { split }),
+    canary: (target, canary) => stateSplit(target, { canary }),
 
     async delete(target, deleteOpts): Promise<string[]> {
       const query = deleteOpts?.force === true ? "?force=1" : "";
@@ -148,6 +169,8 @@ export function directOps(registry: RegistryContext, opts?: DirectOptions): Envi
     unretire: (target) => unretireEnvironment(registry, target.project, target.env),
     setSelector: (target, selector) =>
       setNodeSelector(registry, target.project, target.env, selector),
+    setSplit: (target, split) => setSplit(registry, target.project, target.env, split),
+    canary: (target, canary) => canarySplit(registry, target.project, target.env, canary),
 
     async delete(target, deleteOpts): Promise<string[]> {
       const lease = await takeLease(registry, nodeId, target);
@@ -241,6 +264,103 @@ export function describeSelectorChange(
     `places it on the next assignment pass, and reports the environment as unplaced — leaving ` +
     `whatever serves it now running — if no live node carries them`
   );
+}
+
+/** The two ways `scalo env split` can be told what to do. */
+export interface SplitFlags {
+  /** Legs written `build=weight,build2=weight2`, or undefined when `--set` was not given. */
+  set: string | undefined;
+  /** Whether `--clear` was given. */
+  clear: boolean;
+}
+
+/**
+ * The split an invocation states: the legs of `--set`, or null for `--clear`.
+ *
+ * Exactly one of them, on the same reading as {@link readSelectorFlags}: BOTH
+ * says nothing about which was meant, and NEITHER is refused rather than read as
+ * "clear", because an accidental `scalo env split` that collapsed a canary onto
+ * the alias would move an application's whole traffic without anyone asking.
+ *
+ * Only the SHAPE is checked here — `build=weight` pairs over whole numbers. What
+ * the weights must add up to, how many legs a split needs and whether the builds
+ * exist are the registry's, so the refusal an operator reads is the same one
+ * they would get writing to the bucket themselves.
+ *
+ * ORDER IS KEPT as it was written: the legs reach the planner and the ingress in
+ * this order, and two nodes rendering the same split must weight it identically.
+ */
+export function readSplitFlags(flags: SplitFlags): SplitEntry[] | null {
+  if (flags.set !== undefined && flags.clear) {
+    throw new ScaloError("invalid-input", "Conflicting arguments", {
+      detail: `--set "${flags.set}" and --clear ask for opposite things; pass one of them`,
+    });
+  }
+  if (flags.clear) return null;
+  if (flags.set !== undefined) return parseSplit(flags.set, "--set");
+
+  throw new ScaloError("invalid-input", "Missing required argument", {
+    detail:
+      `pass --set "build=weight,build2=weight2" to weight this environment's traffic over ` +
+      `its builds, or --clear to serve the alias build alone again`,
+  });
+}
+
+/** How a split change reads on the terminal, naming what happens next. */
+export function describeSplitChange(
+  target: EnvironmentTarget,
+  environment: EnvironmentRecord,
+): string {
+  const name = `"${target.project}/${target.env}"`;
+  const split = environment.split;
+
+  if (split === null || split.length === 0) {
+    const build = environment.alias?.build;
+    const serving = build === undefined ? "nothing yet" : `build "${build}"`;
+    return (
+      `scalo: ${name} splits its traffic no more; it serves ${serving} alone, and the nodes ` +
+      `serving it stop every other leg on their next pass`
+    );
+  }
+  return (
+    `scalo: ${name} splits its traffic ${describeSplit(split)}; the nodes serving it start ` +
+    `every leg on their next pass, and each takes its share once it has passed its readiness ` +
+    `gate — until then its share goes to the legs that are ready`
+  );
+}
+
+/** A split as an operator wrote it: `"a" 90%, "b" 10%`. */
+export function describeSplit(split: SplitEntry[]): string {
+  return split.map((leg) => `"${leg.build}" ${String(leg.weight)}%`).join(", ");
+}
+
+/** `build=weight,build2=weight2`, in the order it was written. */
+function parseSplit(stated: string, flag: string): SplitEntry[] {
+  const malformed = (detail: string): ScaloError =>
+    new ScaloError("invalid-input", "Malformed traffic split", { detail });
+
+  const entries: SplitEntry[] = [];
+  for (const part of stated.split(",")) {
+    const pair = part.trim();
+    if (pair === "") continue;
+
+    const at = pair.indexOf("=");
+    if (at < 1) {
+      throw malformed(`${flag} "${stated}" must be written "build=weight,build2=weight2"`);
+    }
+
+    const weight = pair.slice(at + 1).trim();
+    if (!/^\d+$/.test(weight)) {
+      throw malformed(
+        `${flag} gives build "${pair.slice(0, at).trim()}" the weight "${weight}", which is ` +
+          `not a whole number of percent`,
+      );
+    }
+    entries.push({ build: pair.slice(0, at).trim(), weight: Number(weight) });
+  }
+
+  if (entries.length === 0) throw malformed(`${flag} "${stated}" names no builds at all`);
+  return entries;
 }
 
 async function takeLease(

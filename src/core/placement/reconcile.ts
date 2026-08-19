@@ -8,14 +8,37 @@
 
 import type { BuildRecord, EnvironmentRecord } from "../types/registry.ts";
 import type { RuntimeProcess } from "../types/runtime.ts";
-import { formatProcessId } from "./ids.ts";
 
-/** One environment as the registry wants it served, with its alias build resolved. */
+/** One build an environment should have a process for, and why. */
+export interface DesiredBuild {
+  build: BuildRecord;
+  /** `alias` for the environment's primary pointer, `split` for a weighted leg. */
+  role: "alias" | "split";
+}
+
+/** One environment as the registry wants it served, with its builds resolved. */
 export interface DesiredEnvironment {
   project: string;
   env: EnvironmentRecord;
-  /** Build the environment's alias points at. */
-  build: BuildRecord;
+  /**
+   * Every build this environment needs a process for, in the order the registry
+   * states them: the alias build FIRST — it is always present, because the alias
+   * stays the primary pointer whether or not a split is active — then each split
+   * leg the alias does not already name.
+   *
+   * Never empty: an environment whose alias was never flipped has nothing to
+   * serve and is not desired at all.
+   */
+  builds: DesiredBuild[];
+  /**
+   * Build ids of legs whose record could not be read, when there are any.
+   *
+   * A leg nothing could be resolved for is still a leg the registry asked for,
+   * so it counts as UNPROVEN and holds back the stops of its environment — see
+   * {@link planReconcile}. It cannot be started, and the reader that failed to
+   * resolve it records why.
+   */
+  unresolved?: string[];
   varsetId?: string;
 }
 
@@ -33,9 +56,13 @@ export interface ReconcileInput {
 
 /** One step towards desired state. */
 export type ReconcileAction =
-  | { type: "activate"; project: string; env: string; build: string }
+  /**
+   * Bring one build into service: point the fleet at it, start a process, and
+   * gate that process — as ONE indivisible, ordered step. See
+   * {@link planReconcile} for why it may not be taken apart.
+   */
   | {
-      type: "start";
+      type: "rollout";
       project: string;
       env: string;
       build: string;
@@ -47,20 +74,37 @@ export type ReconcileAction =
 /**
  * Plans this node's next move.
  *
- * The one rule worth stating outright: a process that still serves an
- * environment is never planned for a stop until a replacement for that
- * environment is running AND has passed its readiness gate. A blue-green flip
- * that stopped the old process first would drop every request the new one
- * cannot answer yet, and a new process that never becomes ready would leave the
- * environment with nothing serving at all.
+ * THE FLEET POINTER IS ONE POINTER, AND A PROCESS READS IT ONCE — AT STARTUP.
+ * An environment serving two builds at once (a traffic split) therefore needs
+ * its activations and its starts STRICTLY PAIRED AND SEQUENCED, one build at a
+ * time: activate A, start A, gate A, only then activate B. A plan that activated
+ * every build first and started them afterwards would leave the pointer naming
+ * whichever build was activated LAST, and every process started under it — all
+ * of them, including the one meant to serve A — would load that one build. The
+ * split would exist in the registry and in the routing, and both legs would run
+ * the same code.
  *
- * Actions come back in execution order: activations, then starts, then the
- * readiness gates, then stops.
+ * That is what {@link ReconcileAction} `rollout` is: the pairing, expressed as a
+ * single action the executor cannot interleave. A restart of a crashed leg goes
+ * through the same action, so the pointer flips to that leg for the length of
+ * its start and lands wherever the last rollout of the pass left it — which is
+ * correct, because nothing reads it again until the next process starts. Single
+ * build or twelve, an environment is rolled out the same way: one code path, and
+ * no case where the phasing is only correct by accident.
+ *
+ * THE OTHER RULE, unchanged in substance and generalized in reach: a process
+ * that still serves an environment is never planned for a stop until EVERY build
+ * that environment is wanted at has a process that has passed its readiness
+ * gate. Never reduce serving capacity while any desired leg is still proving
+ * itself. A blue-green flip that stopped the old process first would drop every
+ * request the new one cannot answer yet; a split that retired the outgoing build
+ * before its incoming leg was ready would do the same to that leg's share.
+ *
+ * Actions come back in execution order: each environment's legs in registry
+ * order (alias first, then the split as it is written), then every stop.
  */
 export function planReconcile(input: ReconcileInput): ReconcileAction[] {
-  const activations: ReconcileAction[] = [];
-  const starts: ReconcileAction[] = [];
-  const gates: ReconcileAction[] = [];
+  const moves: ReconcileAction[] = [];
   const stops: ReconcileAction[] = [];
 
   const running = byEnvironment(input.actual);
@@ -71,7 +115,6 @@ export function planReconcile(input: ReconcileInput): ReconcileAction[] {
   for (const wanted of desired) {
     const project = wanted.project;
     const env = wanted.env.name;
-    const build = wanted.build.id;
 
     /* Taken out of the map as it is handled: what is left over at the end runs
        for an environment the registry no longer lists. */
@@ -79,36 +122,39 @@ export function planReconcile(input: ReconcileInput): ReconcileAction[] {
     const processes = running.get(key) ?? [];
     running.delete(key);
 
-    const serving = processes.filter((process) => process.build === build);
-    const superseded = processes.filter((process) => process.build !== build);
+    const legs = wanted.builds.map((entry) => entry.build.id);
+    let proven = (wanted.unresolved ?? []).length === 0;
 
-    if (serving.length === 0) {
-      /* Nothing runs this build yet: point the fleet at it, then start a process
-         that will load it. Anything serving an older build keeps running until
-         the newcomer is ready. */
-      activations.push({ type: "activate", project, env, build });
-      starts.push({ type: "start", project, env, build, ports: input.ports.nextPorts() });
-      gates.push({ type: "await-ready", processId: formatProcessId({ project, env, build }) });
-      continue;
-    }
+    for (const build of legs) {
+      const serving = processes.filter((process) => process.build === build);
 
-    if (!serving.some((process) => process.ready)) {
-      /* The replacement exists but has not proven itself. Gate it, and leave
-         every other process alone for now. */
-      for (const process of serving) {
-        gates.push({ type: "await-ready", processId: process.processId });
+      if (serving.length === 0) {
+        /* Nothing runs this build yet. Pointing the fleet at it and starting the
+           process that loads it are one action, for the reason above. Anything
+           serving another build keeps running until every leg is ready. */
+        moves.push({ type: "rollout", project, env, build, ports: input.ports.nextPorts() });
+        proven = false;
+        continue;
       }
-      continue;
+
+      if (!serving.some((process) => process.ready)) {
+        /* The leg exists but has not proven itself. Gate it, and leave every
+           other process alone for now. */
+        for (const process of serving) {
+          moves.push({ type: "await-ready", processId: process.processId });
+        }
+        proven = false;
+      }
     }
 
-    /* The environment is served by the build it should be: retire the rest.
-       This is what completes a blue-green flip, and equally a rollback. */
-    for (const process of superseded) {
-      stops.push({
-        type: "stop",
-        processId: process.processId,
-        reason: `superseded by build "${build}"`,
-      });
+    if (!proven) continue;
+
+    /* Every build the environment is wanted at is served and ready: retire the
+       rest. This is what completes a blue-green flip, a rollback, and the
+       removal of a split leg alike. */
+    for (const process of processes) {
+      if (legs.includes(process.build)) continue;
+      stops.push({ type: "stop", processId: process.processId, reason: supersededBy(legs) });
     }
   }
 
@@ -127,7 +173,13 @@ export function planReconcile(input: ReconcileInput): ReconcileAction[] {
     }
   }
 
-  return [...activations, ...starts, ...gates, ...stops];
+  return [...moves, ...stops];
+}
+
+/** Why a process was retired, naming what serves its environment instead. */
+function supersededBy(legs: string[]): string {
+  const names = legs.map((build) => `"${build}"`).join(", ");
+  return legs.length === 1 ? `superseded by build ${names}` : `superseded by builds ${names}`;
 }
 
 /** Groups running processes by the environment they serve, each group sorted by id. */

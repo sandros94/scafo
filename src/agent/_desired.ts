@@ -1,7 +1,7 @@
 /* Internal: what the registry says THIS node should be serving. */
 
-import { ScaloError } from "../core/error.ts";
-import type { DesiredEnvironment } from "../core/placement/reconcile.ts";
+import { isScaloError, ScaloError } from "../core/error.ts";
+import type { DesiredBuild, DesiredEnvironment } from "../core/placement/reconcile.ts";
 import { getBuild } from "../core/registry/builds.ts";
 import { readJson } from "../core/registry/cas.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
@@ -36,9 +36,16 @@ export interface PlacementView {
   selector?: NodeSelector;
 }
 
+/** Something one read could not resolve, recorded against the environment it concerns. */
+export interface DesiredFailure {
+  /** `project/environment`. */
+  subject: string;
+  detail: string;
+}
+
 /** What one read of the registry told this node. */
 export interface DesiredState {
-  /** Environments this node should serve, with their alias build resolved. */
+  /** Environments this node should serve, with their builds resolved. */
   environments: DesiredEnvironment[];
   /**
    * The placement decisions this node read, one per environment that HAS one.
@@ -48,11 +55,18 @@ export interface DesiredState {
    * and is therefore waiting to be placed. See {@link readDesired}.
    */
   placements: PlacementView[];
+  /**
+   * Environments that were read but could not be fully resolved, each naming
+   * what was missing. The environment is still desired — see
+   * {@link readDesired} — so this reports a gap rather than a removal.
+   */
+  failures: DesiredFailure[];
 }
 
 /**
- * Every environment this node has something to serve for, with the build its
- * alias points at already resolved.
+ * Every environment this node has something to serve for, with the builds it
+ * should run already resolved: the one its alias points at, plus every leg of
+ * its traffic split.
  *
  * An environment whose alias was never flipped is left out — it has no build
  * yet, so there is nothing to run for it. So is one whose placement record names
@@ -98,6 +112,7 @@ export async function readDesired(
   return {
     environments: perProject.flatMap((entry) => entry.environments),
     placements: perProject.flatMap((entry) => entry.placements),
+    failures: perProject.flatMap((entry) => entry.failures),
   };
 }
 
@@ -147,7 +162,7 @@ async function readProject(
     listPlacements(registry, project),
   ]);
 
-  const state: DesiredState = { environments: [], placements: [] };
+  const state: DesiredState = { environments: [], placements: [], failures: [] };
 
   for (const name of names) {
     /* Read once and used for every question this loop asks: whether the
@@ -173,7 +188,7 @@ async function readProject(
     }
     if (!servedHere(placement, environment, nodeId)) continue;
 
-    const wanted = await resolveEnvironment(registry, project, environment);
+    const wanted = await resolveEnvironment(registry, project, environment, state.failures);
     if (wanted !== null) state.environments.push(wanted);
   }
   return state;
@@ -194,10 +209,30 @@ function servedHere(
   return environment.nodeSelector === undefined;
 }
 
+/**
+ * One environment's builds: the alias, then every split leg it does not already
+ * name. Null when the environment has nothing to serve at all.
+ *
+ * A SPLIT LEG WHOSE BUILD RECORD IS GONE is recorded against the environment and
+ * left in {@link DesiredEnvironment.unresolved} rather than dropped quietly. The
+ * planner counts it as an unproven leg, which holds back every stop for that
+ * environment: whatever it is running now — including the leg that vanished —
+ * keeps running. Silently dropping it would instead retire that leg the moment
+ * the others were ready, and hand its share of the traffic to them, over a
+ * build the operator never withdrew. The reaper refuses to delete a build any
+ * split references, so this is a corrupted or raced registry rather than the
+ * ordinary way a leg goes away; the ordinary way is `scalo env split --clear`.
+ *
+ * The ALIAS build is not treated that way and must not be: it is the whole of
+ * what the environment serves when there is no split, so a missing one is not a
+ * gap in an environment, it is an environment nothing can be planned for. It
+ * raises, the pass records it and plans nothing at all, and nothing is stopped.
+ */
 async function resolveEnvironment(
   registry: RegistryContext,
   project: string,
   env: EnvironmentRecord,
+  failures: DesiredFailure[],
 ): Promise<DesiredEnvironment | null> {
   /*
    * On its way out: an environment an operator has retired is served nowhere,
@@ -216,10 +251,34 @@ async function resolveEnvironment(
   const aliased = env.alias?.build;
   if (aliased === undefined) return null;
 
+  const builds: DesiredBuild[] = [
+    { build: await getBuild(registry, project, aliased), role: "alias" },
+  ];
+  const unresolved: string[] = [];
+
+  for (const entry of env.split ?? []) {
+    if (builds.some((leg) => leg.build.id === entry.build)) continue;
+
+    try {
+      builds.push({ build: await getBuild(registry, project, entry.build), role: "split" });
+    } catch (error) {
+      if (!isScaloError(error) || error.code !== "not-found") throw error;
+      unresolved.push(entry.build);
+      failures.push({
+        subject: `${project}/${env.name}`,
+        detail:
+          `build "${entry.build}" is a leg of this environment's traffic split but has no ` +
+          `record in the registry, so it cannot be started; nothing this environment runs ` +
+          `is stopped while a leg is unresolved`,
+      });
+    }
+  }
+
   return {
     project,
     env,
-    build: await getBuild(registry, project, aliased),
+    builds,
+    ...(unresolved.length === 0 ? {} : { unresolved }),
     varsetId: env.varset,
   };
 }

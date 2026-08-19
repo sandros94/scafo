@@ -114,6 +114,12 @@ export function createReconciler(
       const state = await readDesired(agent.registry, { nodeId: agent.nodeId });
       const desired = state.environments;
       placements = state.placements;
+      /* Gaps in what could be resolved, reported beside the actions rather than
+         instead of them: the environments they concern are still planned for,
+         minus whatever went missing. */
+      for (const failure of state.failures) {
+        pending.push({ at: new Date().toISOString(), ...failure });
+      }
 
       const actual = executor.currentProcesses();
       plan = planReconcile({

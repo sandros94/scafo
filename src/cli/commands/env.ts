@@ -1,6 +1,6 @@
 /*
- * `scalo env`: taking an environment out of service, putting it back, and
- * deleting it once it is really meant to go.
+ * `scalo env`: taking an environment out of service, putting it back, dividing
+ * its traffic between its builds, and deleting it once it is really meant to go.
  *
  * Retiring and deleting are two commands rather than one because they are two
  * decisions. Retirement stops an environment being served and is reversible for
@@ -19,10 +19,12 @@ import {
   agentOps,
   describeRetirement,
   describeSelectorChange,
+  describeSplitChange,
   directOps,
   type EnvironmentOps,
   type EnvironmentTarget,
   readSelectorFlags,
+  readSplitFlags,
 } from "../_environments.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
 import { DEFAULT_KEY_PATH } from "./keygen.ts";
@@ -66,6 +68,15 @@ const selectorArgs: ArgsDef = {
     description: "Labels a node must carry to serve it (region=eu-west-1,tier=fast)",
   },
   clear: { type: "boolean", description: "Let it run on every node again" },
+};
+
+const splitArgs: ArgsDef = {
+  ...targetArgs,
+  set: {
+    type: "string",
+    description: "How its traffic divides over its builds (buildA=90,buildB=10)",
+  },
+  clear: { type: "boolean", description: "Serve the build the alias points at alone again" },
 };
 
 const retire: CommandDef = defineCommand({
@@ -116,9 +127,21 @@ const selector: CommandDef = defineCommand({
   },
 });
 
+const split: CommandDef = defineCommand({
+  meta: { name: "split", description: "Weight an environment's traffic over several builds" },
+  args: splitArgs,
+  async run({ args }): Promise<void> {
+    try {
+      await runSplit(args as Record<string, unknown>);
+    } catch (error) {
+      reportFailure(error);
+    }
+  },
+});
+
 export const env: CommandDef = defineCommand({
-  meta: { name: "env", description: "Retire, restore, target and delete environments" },
-  subCommands: { retire, unretire, selector, delete: remove },
+  meta: { name: "env", description: "Retire, restore, target, split and delete environments" },
+  subCommands: { retire, unretire, selector, split, delete: remove },
 });
 
 async function runRetire(flags: Record<string, unknown>): Promise<void> {
@@ -151,6 +174,15 @@ async function runSelector(flags: Record<string, unknown>): Promise<void> {
   const ops = await opsFor(flags);
 
   console.log(describeSelectorChange(target, await ops.setSelector(target, wanted)));
+}
+
+async function runSplit(flags: Record<string, unknown>): Promise<void> {
+  const target = environmentTarget(flags);
+  /* Read before anything is contacted, so a malformed leg costs no request. */
+  const wanted = readSplitFlags({ set: text(flags.set), clear: flags.clear === true });
+  const ops = await opsFor(flags);
+
+  console.log(describeSplitChange(target, await ops.setSplit(target, wanted)));
 }
 
 async function runDelete(flags: Record<string, unknown>): Promise<void> {

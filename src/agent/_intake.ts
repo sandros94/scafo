@@ -6,8 +6,9 @@ import type { OidcIdentity, OidcVerifier } from "../core/auth/oidc.ts";
 import { isScaloError, ScaloError } from "../core/error.ts";
 import { assertReplicas } from "../core/placement/replicas.ts";
 import { assertSelector } from "../core/placement/selector.ts";
+import type { CanaryInput } from "../core/registry/environments.ts";
 import { assertId } from "../core/registry/paths.ts";
-import type { BuildSource, NodeSelector } from "../core/types/registry.ts";
+import type { BuildSource, NodeSelector, SplitEntry } from "../core/types/registry.ts";
 import { assertSlug } from "../core/utils/slug.ts";
 import type { DeployMeta } from "./deploys.ts";
 import { bearerToken } from "./middleware.ts";
@@ -37,6 +38,15 @@ export interface SelectorRequest {
   /** Labels a node must carry to serve the environment; null clears the constraint. */
   selector: NodeSelector | null;
 }
+
+/**
+ * What `POST /v1/environments/:project/:env/split` is asked to do: state the
+ * legs outright, or state a canary and let the registry weigh it against
+ * whatever the alias currently points at.
+ */
+export type SplitRequest =
+  | { kind: "set"; split: SplitEntry[] | null }
+  | { kind: "canary"; canary: CanaryInput };
 
 /** What `POST /v1/aliases` is asked to do. */
 export interface AliasRequest {
@@ -168,6 +178,53 @@ export async function readSelectorRequest(event: H3Event): Promise<SelectorReque
   return { selector };
 }
 
+/**
+ * Reads the JSON body of a traffic-split change: `{"split": [{"build": …,
+ * "weight": …}, …]}` to weight the legs, `{"split": null}` to clear them, or
+ * `{"canary": {"build": …, "weight": …}}` to weigh one build against the alias.
+ *
+ * Only the SHAPE is checked here — that the parts are there and are of the right
+ * kind. What the numbers must add up to belongs to the registry, so an operator
+ * reading a refusal gets the same wording whether they went through a node or
+ * wrote to the bucket themselves.
+ *
+ * A body stating BOTH, or neither, is refused: they are two ways of saying what
+ * the split should be, and a request carrying both says nothing about which was
+ * meant. A MISSING `split` is not read as "clear", for the reason the selector
+ * route does not either — undoing a split is far too consequential to be what an
+ * omission defaults to.
+ */
+export async function readSplitRequest(event: H3Event): Promise<SplitRequest> {
+  const body = asObject(await readJsonBody(event), "the body");
+
+  const stated = "split" in body;
+  const canary = body.canary;
+  if (stated && canary !== undefined && canary !== null) {
+    throw invalid(`"split" and "canary" ask for opposite things; give one of them`);
+  }
+
+  if (canary !== undefined && canary !== null) {
+    const raw = asObject(canary, `"canary"`);
+    const build = text(raw, "build", true);
+    assertId(build);
+    if (typeof raw.weight !== "number") throw invalid(`"canary.weight" must be a number`);
+    return { kind: "canary", canary: { build, weight: raw.weight } };
+  }
+
+  if (!stated) {
+    throw invalid(
+      `"split" must be given: the legs to weight, or null to clear them — or "canary" ` +
+        `to weigh one build against the alias`,
+    );
+  }
+
+  const split = body.split;
+  if (split === null) return { kind: "set", split: null };
+  if (!Array.isArray(split)) throw invalid(`"split" must be an array of legs, or null`);
+
+  return { kind: "set", split: split.map((entry, at) => readSplitEntry(entry, at)) };
+}
+
 /** Reads the JSON body of an alias change. */
 export async function readAliasRequest(event: H3Event): Promise<AliasRequest> {
   const body = asObject(await readJsonBody(event), "the body");
@@ -183,6 +240,18 @@ export async function readAliasRequest(event: H3Event): Promise<AliasRequest> {
   const build = text(body, "build", true);
   assertId(build);
   return { project, environment, build, rollback };
+}
+
+/** One leg of a stated split, checked for shape alone. */
+function readSplitEntry(value: unknown, at: number): SplitEntry {
+  const raw = asObject(value, `"split[${String(at)}]"`);
+
+  const build = text(raw, "build", true);
+  assertId(build);
+  if (typeof raw.weight !== "number") {
+    throw invalid(`"split[${String(at)}].weight" must be a number`);
+  }
+  return { build, weight: raw.weight };
 }
 
 function parseMeta(raw: string): DeployMeta {

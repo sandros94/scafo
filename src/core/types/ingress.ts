@@ -14,13 +14,35 @@ export interface IngressBackend {
   port: number;
 }
 
+/** One backend of a host, and the share of that host's traffic it takes. */
+export interface WeightedBackend {
+  backend: IngressBackend;
+  /**
+   * Whole number of at least 1. The weights of ONE host always sum to 100, so a
+   * driver may write them out as percentages without rescaling, and a host with
+   * a single backend always carries 100.
+   */
+  weight: number;
+}
+
+/** One host and everything that answers on it. */
+export interface IngressRoute {
+  host: string;
+  /**
+   * Backends in the order the routing states them — the environment's alias leg
+   * first, then its split legs — never empty. A driver that load-balances by
+   * position must keep this order, because that is what the weights line up with.
+   */
+  backends: WeightedBackend[];
+}
+
 /** The whole of the routing an ingress should present for this node. */
 export interface IngressDesired {
   /**
-   * Host to backend, sorted by host. Hosts are fully qualified: a host label
+   * Host to backends, sorted by host. Hosts are fully qualified: a host label
    * under one of the platform domains, or a custom domain an environment claimed.
    */
-  routes: Array<{ host: string; backend: IngressBackend }>;
+  routes: IngressRoute[];
 }
 
 /** Routes public traffic to the processes a node runs. */

@@ -7,7 +7,7 @@
  */
 
 import { isScaloError } from "../error.ts";
-import type { IngressBackend, IngressDesired } from "../types/ingress.ts";
+import type { IngressBackend, IngressDesired, WeightedBackend } from "../types/ingress.ts";
 import type { EnvironmentRecord } from "../types/registry.ts";
 import type { RuntimeProcess } from "../types/runtime.ts";
 import { formatHostLabel } from "../utils/slug.ts";
@@ -17,6 +17,9 @@ import { formatHostLabel } from "../utils/slug.ts";
  * other environment is only reachable under its own label.
  */
 export const APEX_ENVIRONMENT: string = "production";
+
+/** What the weights of one host sum to, whatever the split says. */
+export const FULL_WEIGHT: number = 100;
 
 /** A custom domain and the environment that claimed it. */
 export interface RouteClaim {
@@ -28,7 +31,10 @@ export interface RouteClaim {
 export interface RenderRoutesInput {
   /** Apex domains the platform serves wildcard subdomains under. */
   platformDomains: string[];
-  /** Every environment the node serves, with the record that names its alias. */
+  /**
+   * Every environment the node serves, with the record that names its alias and,
+   * when it has one, its traffic split.
+   */
   environments: Array<{ project: string; env: EnvironmentRecord }>;
   /** Processes running on this node right now; only ready ones are routable. */
   processes: RuntimeProcess[];
@@ -41,16 +47,25 @@ export interface RenderRoutesInput {
  * Three kinds of host are emitted, in descending precedence when two of them
  * would answer on the same name:
  *
- * 1. `<project>--<env>.<domain>` for each environment whose alias build has a
- *    ready process, plus `<project>.<domain>` when that environment is
+ * 1. `<project>--<env>.<domain>` for each environment that has something ready
+ *    to serve it, plus `<project>.<domain>` when that environment is
  *    {@link APEX_ENVIRONMENT}.
  * 2. `<project>--<build>.<domain>` for every ready process, whichever build it
  *    serves. A build stays reachable under its own hash for as long as a process
- *    runs it, which is what makes a superseded build inspectable during a flip.
- * 3. Each claimed custom domain whose environment has a ready alias process.
+ *    runs it, which is what makes a superseded build inspectable during a flip
+ *    and either leg of a split addressable on its own.
+ * 3. Each claimed custom domain whose environment has something ready.
  *
  * A process that has not passed its readiness gate is never routed: sending it
  * traffic is exactly what the gate exists to prevent.
+ *
+ * WHAT AN ENVIRONMENT'S OWN HOSTS RESOLVE TO is the alias build alone while the
+ * environment carries no split, and the SPLIT LEGS — weighted as the registry
+ * states them — while it carries one. The alias is untouched by a split and
+ * stays the primary pointer, so a build it names that is not itself a leg keeps
+ * running and stays reachable under its own hash; it simply takes none of the
+ * environment's traffic until the split is cleared. Build-hash hosts are never
+ * weighted: they name one build and reach it.
  */
 export function renderRoutes(input: RenderRoutesInput): IngressDesired {
   /* Sorted so that two ready processes serving the same build — which a retried
@@ -59,57 +74,130 @@ export function renderRoutes(input: RenderRoutesInput): IngressDesired {
     .filter((process) => process.ready)
     .sort((a, b) => compare(a.processId, b.processId));
 
-  const routes = new Map<string, IngressBackend>();
+  const routes = new Map<string, WeightedBackend[]>();
   /* Precedence is "first writer wins", so the kinds are emitted in order and a
      later one never steals a host an earlier one already answers on. */
-  const add = (host: string | null, backend: IngressBackend | undefined): void => {
-    if (host === null || backend === undefined || routes.has(host)) return;
-    routes.set(host, backend);
+  const add = (host: string | null, backends: WeightedBackend[] | undefined): void => {
+    if (host === null || backends === undefined || backends.length === 0) return;
+    if (routes.has(host)) return;
+    routes.set(host, backends);
   };
 
   const environments = [...input.environments].sort((a, b) =>
     compare(`${a.project}/${a.env.name}`, `${b.project}/${b.env.name}`),
   );
 
-  /* The backend an environment's alias resolves to, shared by its own label, its
-     apex host when it has one, and every custom domain claimed for it. */
-  const aliased = new Map<string, IngressBackend>();
+  /* What an environment's own hosts resolve to, shared by its label, its apex
+     host when it has one, and every custom domain claimed for it. */
+  const served = new Map<string, WeightedBackend[]>();
   for (const { project, env } of environments) {
-    const build = env.alias?.build;
-    if (build === undefined) continue;
-
-    const serving = ready.find(
-      (process) =>
-        process.project === project && process.env === env.name && process.build === build,
-    );
-    if (serving !== undefined) aliased.set(placement(project, env.name), backendOf(serving));
+    const backends = servingLegs(project, env, ready);
+    if (backends.length > 0) served.set(placement(project, env.name), backends);
   }
 
   for (const { project, env } of environments) {
-    const backend = aliased.get(placement(project, env.name));
-    if (backend === undefined) continue;
+    const backends = served.get(placement(project, env.name));
+    if (backends === undefined) continue;
 
     for (const domain of input.platformDomains) {
-      add(hostUnder(domain, project, env.name), backend);
-      if (env.name === APEX_ENVIRONMENT) add(hostUnder(domain, project), backend);
+      add(hostUnder(domain, project, env.name), backends);
+      if (env.name === APEX_ENVIRONMENT) add(hostUnder(domain, project), backends);
     }
   }
 
   for (const process of ready) {
     for (const domain of input.platformDomains) {
-      add(hostUnder(domain, process.project, process.build), backendOf(process));
+      add(hostUnder(domain, process.project, process.build), [
+        { backend: backendOf(process), weight: FULL_WEIGHT },
+      ]);
     }
   }
 
   for (const claim of [...input.claims].sort((a, b) => compare(a.host, b.host))) {
-    add(claim.host, aliased.get(placement(claim.project, claim.environment)));
+    add(claim.host, served.get(placement(claim.project, claim.environment)));
   }
 
   return {
     routes: [...routes.keys()]
       .sort(compare)
-      .map((host) => ({ host, backend: routes.get(host) as IngressBackend })),
+      .map((host) => ({ host, backends: routes.get(host) as WeightedBackend[] })),
   };
+}
+
+/**
+ * The legs an environment's own hosts answer with, weighted, or an empty list
+ * when nothing ready serves it.
+ *
+ * The legs are the split's, in the order the registry states them, or the alias
+ * build alone at {@link FULL_WEIGHT} when there is no split. A leg with no ready
+ * process is left out and its share redistributed — see {@link shares}.
+ */
+function servingLegs(
+  project: string,
+  env: EnvironmentRecord,
+  ready: RuntimeProcess[],
+): WeightedBackend[] {
+  const legs = env.split ?? aliasLeg(env);
+
+  /* A build named twice would otherwise be dialled twice at part of its weight;
+     the registry does not forbid it, and the two say the same thing. */
+  const merged = new Map<string, number>();
+  for (const leg of legs) merged.set(leg.build, (merged.get(leg.build) ?? 0) + leg.weight);
+
+  const serving: Array<{ backend: IngressBackend; weight: number }> = [];
+  for (const [build, weight] of merged) {
+    const process = ready.find(
+      (candidate) =>
+        candidate.project === project && candidate.env === env.name && candidate.build === build,
+    );
+    if (process !== undefined) serving.push({ backend: backendOf(process), weight });
+  }
+  if (serving.length === 0) return [];
+
+  const weights = shares(serving.map((leg) => leg.weight));
+  return serving.map((leg, index) => ({ backend: leg.backend, weight: weights[index] }));
+}
+
+/** The environment's alias as the single leg it is, or nothing when it has none. */
+function aliasLeg(env: EnvironmentRecord): Array<{ build: string; weight: number }> {
+  const build = env.alias?.build;
+  return build === undefined ? [] : [{ build, weight: FULL_WEIGHT }];
+}
+
+/**
+ * The weights of the legs that are actually ready, rescaled to sum to
+ * {@link FULL_WEIGHT}.
+ *
+ * A SPLIT IS A ROUTING PREFERENCE; AN OUTAGE IS NOT ONE OF THE OPTIONS. A leg
+ * whose process has not passed its readiness gate — the pass that first starts
+ * it, or a restart after it crashed — has its share handed to the legs that ARE
+ * ready, in proportion to what they already had, rather than being sent traffic
+ * nothing answers. It takes its share back on the pass after it becomes ready,
+ * so a 90/10 split whose 10 is still coming up serves 100 from the 90.
+ *
+ * Largest remainder, ties to the earlier leg, so the shares sum to exactly 100
+ * after rounding and the same input always rounds the same way. No leg rounds
+ * down to nothing: a registry weight is at least 1 and the legs it is measured
+ * against sum to at most 100, so every share is at least 1 before rounding.
+ */
+function shares(weights: number[]): number[] {
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  if (total <= 0) return weights.map(() => 1);
+
+  const exact = weights.map((weight) => (weight * FULL_WEIGHT) / total);
+  const given = exact.map((share) => Math.floor(share));
+
+  let left = FULL_WEIGHT - given.reduce((sum, share) => sum + share, 0);
+  const byRemainder = exact
+    .map((share, index) => ({ index, remainder: share - given[index] }))
+    .sort((a, b) => b.remainder - a.remainder || a.index - b.index);
+
+  for (const entry of byRemainder) {
+    if (left <= 0) break;
+    given[entry.index]++;
+    left--;
+  }
+  return given;
 }
 
 /**

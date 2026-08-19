@@ -1,7 +1,7 @@
 /* Internal: carrying out one reconcile plan against this node. */
 
 import { isScaloError, ScaloError } from "../core/error.ts";
-import { parseProcessId } from "../core/placement/ids.ts";
+import { formatProcessId, parseProcessId } from "../core/placement/ids.ts";
 import type { DesiredEnvironment, ReconcileAction } from "../core/placement/reconcile.ts";
 import { fleetPrefix } from "../core/registry/paths.ts";
 import type {
@@ -57,44 +57,50 @@ export interface Executor {
 export function createExecutor(deps: ExecutorDeps): Executor {
   const { agent, driver, probe, baseEnv, known } = deps;
 
-  async function runActivate(
-    action: Extract<ReconcileAction, { type: "activate" }>,
+  /**
+   * Brings one build into service, as one uninterrupted sequence.
+   *
+   * THE FLEET POINTER IS ONE POINTER PER ENVIRONMENT, AND A PROCESS READS IT
+   * ONCE — while it starts. So the activation that names a build and the start
+   * that loads it MUST NOT BE SEPARATED, and above all must not be batched with
+   * another build's: activate A, activate B, start A, start B would start BOTH
+   * processes against the pointer B left behind, and an environment split
+   * between two builds would run one build twice. Nothing downstream would
+   * notice — the registry, the routing and the process ids would all still say
+   * there are two legs.
+   *
+   * This function is that pairing, and the planner emits one action per build so
+   * it cannot be taken apart from the outside. It runs to the end or stops at
+   * the first step that fails: a failed activation raises before anything is
+   * started, because a process started under the old pointer would serve the
+   * wrong build.
+   */
+  async function runRollout(
+    action: Extract<ReconcileAction, { type: "rollout" }>,
     wanted: Map<string, DesiredEnvironment>,
-    blocked: Set<string>,
-  ): Promise<void> {
-    const key = placement(action.project, action.env);
-    try {
-      const version = wanted.get(key)?.build.celldVersionId;
-      if (version === undefined) {
-        throw new ScaloError("invalid-input", "Build has no runtime version", {
-          detail:
-            `build "${action.build}" of "${key}" carries no runtime version id, ` +
-            `so the fleet cannot be pointed at it`,
-        });
-      }
-      await driver.activateVersion(fleetPrefix(action.project, action.env), version);
-    } catch (error) {
-      blocked.add(key);
-      throw error;
-    }
-  }
-
-  async function runStart(
-    action: Extract<ReconcileAction, { type: "start" }>,
-    wanted: Map<string, DesiredEnvironment>,
-    blocked: Set<string>,
-    startedNow: Set<string>,
+    pending: ReconcileFailure[],
   ): Promise<void> {
     const key = placement(action.project, action.env);
     const entry = wanted.get(key);
-    /* The activation that should have preceded this failed, and its own failure
-       is already recorded; starting anyway would serve the wrong build. */
-    if (entry === undefined || blocked.has(key)) return;
+    if (entry === undefined) return;
+
+    const leg = entry.builds.find((candidate) => candidate.build.id === action.build);
+    if (leg === undefined) return;
+
+    const version = leg.build.celldVersionId;
+    if (version === undefined) {
+      throw new ScaloError("invalid-input", "Build has no runtime version", {
+        detail:
+          `build "${action.build}" of "${key}" carries no runtime version id, ` +
+          `so the fleet cannot be pointed at it`,
+      });
+    }
+    await driver.activateVersion(fleetPrefix(action.project, action.env), version);
 
     const input: RuntimeSpecInput = {
       project: entry.project,
       env: entry.env,
-      build: entry.build,
+      build: leg.build,
       /* Throws when this environment has variables this node cannot open, which
          takes the start with it: the failure is recorded against this one
          environment, every other environment of the pass carries on, and this
@@ -119,25 +125,49 @@ export function createExecutor(deps: ExecutorDeps): Executor {
 
     const spec = driver.processSpec(input);
     await agent.supervisor.start(spec);
-    known.set(spec.id, {
+    const started: RuntimeProcess = {
       processId: spec.id,
       project: entry.project,
       env: entry.env.name,
-      build: entry.build.id,
+      build: leg.build.id,
       port: action.ports.public,
       internalPort: action.ports.internal,
       ready: false,
-    });
-    startedNow.add(spec.id);
+    };
+    known.set(spec.id, started);
+
+    if (await driver.probeReady(started, probe)) {
+      known.set(spec.id, { ...started, ready: true });
+      return;
+    }
+    pending.push(noted(spec.id, "the process did not pass its readiness gate"));
+
+    /*
+     * A process this rollout started has never answered a request, so stopping
+     * it costs nothing and frees its id for another attempt — whatever was
+     * serving the environment before keeps serving it, and a split leg that
+     * cannot come up leaves its share with the legs that are up.
+     *
+     * TODO: a build that never passes its gate is started and stopped once per
+     * pass. Backing that off belongs with the failure accounting that reports it.
+     */
+    await agent.supervisor.stop(spec.id, { graceMs: driver.stopGraceMs });
+    known.delete(spec.id);
   }
 
+  /**
+   * Gates a process that was ALREADY running when the pass began.
+   *
+   * Never stops it, whatever the probe says: it may be a live server having a
+   * bad minute, and it is the only thing its environment has at that build. The
+   * gate that may stop what it probed is the one inside {@link runRollout},
+   * which only ever probes a process it has just started itself.
+   */
   async function runGate(
     action: Extract<ReconcileAction, { type: "await-ready" }>,
-    startedNow: Set<string>,
     pending: ReconcileFailure[],
   ): Promise<void> {
     const process = known.get(action.processId);
-    /* Never started, because its activation failed earlier in this same plan. */
     if (process === undefined) return;
 
     if (process.port === UNKNOWN_PORT) {
@@ -145,7 +175,10 @@ export function createExecutor(deps: ExecutorDeps): Executor {
          ran anyway would spend its whole deadline failing to connect, and the
          next pass would not start until it gave up. */
       pending.push(
-        noted(action, "the process was not started by this agent, so its listeners are unknown"),
+        noted(
+          action.processId,
+          "the process was not started by this agent, so its listeners are unknown",
+        ),
       );
       return;
     }
@@ -154,21 +187,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       known.set(action.processId, { ...process, ready: true });
       return;
     }
-    pending.push(noted(action, "the process did not pass its readiness gate"));
-
-    /*
-     * A process this pass started has never answered a request, so stopping it
-     * costs nothing and frees its id for another attempt — whatever was serving
-     * the environment before keeps serving it. A process that was already
-     * running is left alone: it may be a live server having a bad minute, and it
-     * is the only one its environment has.
-     *
-     * TODO: a build that never passes its gate is started and stopped once per
-     * pass. Backing that off belongs with the failure accounting that reports it.
-     */
-    if (!startedNow.has(action.processId)) return;
-    await agent.supervisor.stop(action.processId, { graceMs: driver.stopGraceMs });
-    known.delete(action.processId);
+    pending.push(noted(action.processId, "the process did not pass its readiness gate"));
   }
 
   return {
@@ -176,26 +195,16 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       const wanted = new Map(
         desired.map((entry) => [placement(entry.project, entry.env.name), entry]),
       );
-      /* Environments whose fleet pointer could not be moved: starting a process
-         for one of them would serve whatever the pointer still names. */
-      const blocked = new Set<string>();
-      /* Processes this pass started, and which have therefore never served a
-         request — the only ones a failed readiness gate may stop. */
-      const startedNow = new Set<string>();
 
       for (const action of plan) {
         try {
           switch (action.type) {
-            case "activate": {
-              await runActivate(action, wanted, blocked);
-              break;
-            }
-            case "start": {
-              await runStart(action, wanted, blocked, startedNow);
+            case "rollout": {
+              await runRollout(action, wanted, pending);
               break;
             }
             case "await-ready": {
-              await runGate(action, startedNow, pending);
+              await runGate(action, pending);
               break;
             }
             case "stop": {
@@ -255,12 +264,9 @@ export function createExecutor(deps: ExecutorDeps): Executor {
   };
 }
 
-/** Records a failure against the process an action names. */
-function noted(
-  action: Extract<ReconcileAction, { type: "await-ready" }>,
-  detail: string,
-): ReconcileFailure {
-  return { at: new Date().toISOString(), action: action.type, subject: action.processId, detail };
+/** Records a readiness failure against the process it concerns. */
+function noted(processId: string, detail: string): ReconcileFailure {
+  return { at: new Date().toISOString(), action: "await-ready", subject: processId, detail };
 }
 
 export function failureOf(
@@ -274,9 +280,15 @@ function placement(project: string, env: string): string {
   return `${project}/${env}`;
 }
 
+/**
+ * What a failed action concerns. Always a process id — the one a rollout would
+ * have produced, or the one the action names — so every failure of a pass points
+ * at a project, an environment AND a build, which is what tells two legs of one
+ * environment apart.
+ */
 function subjectOf(action: ReconcileAction): string {
-  return action.type === "activate" || action.type === "start"
-    ? placement(action.project, action.env)
+  return action.type === "rollout"
+    ? formatProcessId({ project: action.project, env: action.env, build: action.build })
     : action.processId;
 }
 
