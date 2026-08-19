@@ -277,6 +277,7 @@ function agentConfig(): AgentConfig {
     },
     node: { id: NODE_ID, listen: "127.0.0.1:7400" },
     platformDomains: ["apps.test"],
+    runtime: { binPath: "celld", portRangeStart: 42_000, probePath: "/" },
   };
 }
 

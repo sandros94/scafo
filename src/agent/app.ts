@@ -5,10 +5,12 @@ import { createNodeVerifier } from "../core/auth/node-token.ts";
 import { readJson } from "../core/registry/cas.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
 import { coordinatorKey, nodeKey } from "../core/registry/paths.ts";
+import type { CapacityPlan } from "../core/capacity/compute.ts";
 import type { CoordinatorLease, NodeRecord } from "../core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../core/types/supervisor.ts";
 import type { AgentConfig } from "./config.ts";
 import { renderProblem, requireNodeToken } from "./middleware.ts";
+import type { Reconciler, ReconcileStatus } from "./reconcile.ts";
 
 /** Everything the HTTP layer serves from; assembled once while the node boots. */
 export interface AgentContext {
@@ -17,6 +19,12 @@ export interface AgentContext {
   supervisor: Supervisor;
   /** Build of the agent, reported by `GET /v1/health`. */
   version: string;
+  /** Opens the environments' sealed varsets; without it they start unconfigured. */
+  varsetKey?: CryptoKey;
+  /** What this node probed about its own hardware; bounds the processes it starts. */
+  capacity?: CapacityPlan;
+  /** The reconcile loop, when this node runs one. */
+  reconciler?: Reconciler;
 }
 
 /** Body of `GET /v1/health`. */
@@ -33,6 +41,8 @@ export interface AgentState {
   /** Holder of the coordinator lease, whoever it is; null when nobody holds one. */
   lease: CoordinatorLease | null;
   processes: ProcessStatus[];
+  /** Last pass of the reconcile loop; absent on a node that runs no loop. */
+  reconcile?: ReconcileStatus;
 }
 
 /**
@@ -72,10 +82,12 @@ export function createAgentApp(agent: AgentContext): H3 {
         readJson<NodeRecord>(agent.registry, nodeKey(agent.config.node.id)),
         readJson<CoordinatorLease>(agent.registry, coordinatorKey()),
       ]);
+      const reconcile = agent.reconciler?.status();
       return {
         node: node?.value ?? null,
         lease: lease?.value ?? null,
         processes: agent.supervisor.list(),
+        ...(reconcile === undefined ? {} : { reconcile }),
       };
     },
     { middleware: [authenticated] },

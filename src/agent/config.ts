@@ -8,6 +8,7 @@
 
 import { type JSONCParseError, parseJSONC } from "confbox";
 import { ScaloError } from "../core/error.ts";
+import { DEFAULT_PORT_RANGE_START } from "../core/placement/ports.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
 import { assertHost, isHost } from "../core/utils/host.ts";
 
@@ -32,6 +33,18 @@ export interface AgentConfig {
   };
   /** Apex domains the platform serves wildcard subdomains under. */
   platformDomains: string[];
+  /** How this node runs and gates the processes that serve its environments. */
+  runtime: RuntimeConfig;
+}
+
+/** Every runtime setting, with the defaults already applied. */
+export interface RuntimeConfig {
+  /** Executable that runs one environment; resolved against `PATH` unless it is a path. */
+  binPath: string;
+  /** First port of the loopback range runtime processes are given pairs from. */
+  portRangeStart: number;
+  /** Path the application-level half of the readiness gate requests. */
+  probePath: string;
 }
 
 export interface LoadConfigOptions {
@@ -53,6 +66,12 @@ export const DEFAULT_REGION: string = "us-east-1";
 
 /** Loopback by default: the agent API is only safe on a trusted network. */
 export const DEFAULT_LISTEN: string = "127.0.0.1:7400";
+
+/** Command that runs an environment when none is configured. */
+export const DEFAULT_RUNTIME_BIN: string = "celld";
+
+/** Path probed for application readiness when none is configured. */
+export const DEFAULT_PROBE_PATH: string = "/";
 
 /** A `host:port` pair, as written for a listener or an advertised address. */
 export interface HostPort {
@@ -96,7 +115,24 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
     },
     node: { id, listen, internalListen, advertise },
     platformDomains: resolvePlatformDomains(sources),
+    runtime: {
+      binPath: resolve("celldBin", sources) ?? DEFAULT_RUNTIME_BIN,
+      portRangeStart: resolvePort("portRangeStart", sources, DEFAULT_PORT_RANGE_START),
+      probePath: resolve("probePath", sources) ?? DEFAULT_PROBE_PATH,
+    },
   };
+}
+
+/**
+ * Where other nodes should reach this one: the advertised address wins, then the
+ * internal listener, then the agent's own.
+ */
+export function advertisedAddress(node: AgentConfig["node"]): HostPort {
+  if (node.advertise !== undefined) return parseHostPort(node.advertise, "node.advertise");
+  if (node.internalListen !== undefined) {
+    return parseHostPort(node.internalListen, "node.internalListen");
+  }
+  return parseHostPort(node.listen, "node.listen");
 }
 
 /**
@@ -173,6 +209,13 @@ const ORIGINS = {
     env: ["SCALO_PLATFORM_DOMAINS"],
     file: "platformDomains",
   },
+  celldBin: { flag: "celld-bin", env: ["SCALO_CELLD_BIN"], file: "runtime.binPath" },
+  portRangeStart: {
+    flag: "port-range-start",
+    env: ["SCALO_PORT_RANGE_START"],
+    file: "runtime.portRangeStart",
+  },
+  probePath: { flag: "probe-path", env: ["SCALO_PROBE_PATH"], file: "runtime.probePath" },
 } satisfies Record<string, Origin>;
 
 type Setting = keyof typeof ORIGINS;
@@ -208,6 +251,24 @@ function required(setting: Setting, sources: Sources): string {
       `"${origin.file}" has no value: set it in the config file, ` +
       `set ${origin.env.join(" or ")} in the environment, or pass --${origin.flag}`,
   });
+}
+
+/**
+ * A port-valued setting. The file may carry it as a JSON number while a flag or
+ * an environment variable can only carry text, so both spellings are accepted.
+ */
+function resolvePort(setting: Setting, sources: Sources, fallback: number): number {
+  const origin: Origin = ORIGINS[setting];
+  const raw = flagOrEnv(origin, sources) ?? fileValue(sources.file, origin.file);
+  if (raw === undefined || raw === null || raw === "") return fallback;
+
+  const value = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN;
+  if (!Number.isInteger(value) || value < 1 || value > 65_535) {
+    throw new ScaloError("invalid-input", "Invalid configuration value", {
+      detail: `"${origin.file}" must be a port in 1-65535, got ${JSON.stringify(raw)}`,
+    });
+  }
+  return value;
 }
 
 function resolvePlatformDomains(sources: Sources): string[] {

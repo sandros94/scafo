@@ -9,11 +9,13 @@ export default defineBuildConfig({
         "./src/core/registry/index",
         "./src/core/auth/index",
         "./src/core/capacity/index",
+        "./src/core/placement/index",
         "./src/agent/index",
         "./src/cli/index",
         "./src/drivers/store/uns3",
         "./src/drivers/store/memory",
         "./src/drivers/host/node",
+        "./src/drivers/runtime/celld",
         "./src/drivers/supervisor/child",
       ],
       rolldown: {

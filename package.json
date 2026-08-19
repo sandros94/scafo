@@ -39,6 +39,10 @@
       "types": "./dist/core/capacity/index.d.mts",
       "default": "./dist/core/capacity/index.mjs"
     },
+    "./placement": {
+      "types": "./dist/core/placement/index.d.mts",
+      "default": "./dist/core/placement/index.mjs"
+    },
     "./agent": {
       "types": "./dist/agent/index.d.mts",
       "default": "./dist/agent/index.mjs"
@@ -54,6 +58,10 @@
     "./drivers/store/memory": {
       "types": "./dist/drivers/store/memory.d.mts",
       "default": "./dist/drivers/store/memory.mjs"
+    },
+    "./drivers/runtime/celld": {
+      "types": "./dist/drivers/runtime/celld.d.mts",
+      "default": "./dist/drivers/runtime/celld.mjs"
     },
     "./drivers/supervisor/child": {
       "types": "./dist/drivers/supervisor/child.d.mts",

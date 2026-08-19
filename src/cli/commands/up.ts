@@ -3,12 +3,9 @@
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import { S3Client } from "uns3";
 import { generateKey } from "unjwt/jwk";
-import {
-  type AgentConfig,
-  type HostPort,
-  loadAgentConfig,
-  parseHostPort,
-} from "../../agent/config.ts";
+import type { AgentContext } from "../../agent/app.ts";
+import { advertisedAddress, loadAgentConfig } from "../../agent/config.ts";
+import { createReconciler, runtimeBaseEnv } from "../../agent/reconcile.ts";
 import { startAgent } from "../../agent/serve.ts";
 import { probeCapacity } from "../../core/capacity/reader.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
@@ -16,6 +13,7 @@ import { initRegistry, readMeta } from "../../core/registry/meta.ts";
 import { registerNode } from "../../core/registry/nodes.ts";
 import type { NodeRecord } from "../../core/types/registry.ts";
 import { createNodeHostReader } from "../../drivers/host/node.ts";
+import { createCelldDriver } from "../../drivers/runtime/celld.ts";
 import { createUns3Store } from "../../drivers/store/uns3.ts";
 import { createChildSupervisor } from "../../drivers/supervisor/child.ts";
 import { readPackageVersion, readTextFile, reportFailure } from "../_utils.ts";
@@ -34,6 +32,9 @@ const upArgs: ArgsDef = {
   "internal-listen": { type: "string", description: "host:port for node-to-node traffic" },
   "advertise": { type: "string", description: "host:port other nodes reach this one at" },
   "platform-domains": { type: "string", description: "Comma-separated apex domains to serve" },
+  "celld-bin": { type: "string", description: "Executable that runs an environment" },
+  "port-range-start": { type: "string", description: "First loopback port runtime processes use" },
+  "probe-path": { type: "string", description: "Path the application readiness probe requests" },
 };
 
 export const up: CommandDef = defineCommand({
@@ -103,16 +104,29 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   });
 
   const version = await readPackageVersion();
-  const server = await startAgent({ config, registry, supervisor, version });
+  const agent: AgentContext = { config, registry, supervisor, version, capacity };
+
+  /* The driver writes deployment pointers through the same store the registry
+     uses, so a configured key prefix applies to fleets exactly as it does to
+     records. */
+  const driver = createCelldDriver({ binPath: config.runtime.binPath, store: registry.store });
+  const reconciler = createReconciler(agent, driver, { baseEnv: runtimeBaseEnv(process.env) });
+  agent.reconciler = reconciler;
+
+  const server = await startAgent(agent);
   console.log(`scalo ${version} listening on ${server.url} as node "${config.node.id}"`);
+  reconciler.start();
 
   await untilSignalled(async () => {
+    /* Stopped first: a pass that started while the node was shutting down would
+       start processes this shutdown is about to leave behind. */
+    reconciler.stop();
     await server.close();
     await Promise.all(
       supervisor
         .list()
         .filter((status) => status.state === "running")
-        .map((status) => supervisor.stop(status.id)),
+        .map((status) => supervisor.stop(status.id, { graceMs: driver.stopGraceMs })),
     );
   });
 }
@@ -129,15 +143,6 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
 async function generateNodePublicKey(): Promise<NodeRecord["publicKey"]> {
   const { publicKey } = await generateKey("EdDSA", { toJWK: true });
   return { kty: "OKP", crv: "Ed25519", x: publicKey.x };
-}
-
-/** Where other nodes should reach this one: the advertised address wins, then the internal listener. */
-function advertisedAddress(node: AgentConfig["node"]): HostPort {
-  if (node.advertise !== undefined) return parseHostPort(node.advertise, "node.advertise");
-  if (node.internalListen !== undefined) {
-    return parseHostPort(node.internalListen, "node.internalListen");
-  }
-  return parseHostPort(node.listen, "node.listen");
 }
 
 /** Runs until the operator or the init system asks the node to stop, then shuts it down once. */

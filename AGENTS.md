@@ -35,14 +35,16 @@ When a task involves design decisions, ambiguity, or changes to the project visi
 
 ### Module structure (each is a separate export path)
 
-- `scalo` — barrel: `ScaloError` and friends, the registry types, plus the `utils`, `registry`, `auth` and `capacity` namespaces
+- `scalo` — barrel: `ScaloError` and friends, the registry types, plus the `utils`, `registry`, `auth`, `capacity` and `placement` namespaces
 - `scalo/registry` — registry operations: keys, CAS document helpers, coordinator lease, projects, builds, environments, varsets, nodes, trust, domains, reaper
 - `scalo/auth` — node/operator EdDSA tokens and workload OIDC verification
 - `scalo/capacity` — cgroup v2 parsing and the capacity planning formulas
-- `scalo/agent` — the node agent: configuration loading, the HTTP API and its listener
+- `scalo/placement` — the pure reconcile planner, the process-id convention and the port allocator
+- `scalo/agent` — the node agent: configuration loading, the HTTP API and its listener, the reconcile loop
 - `scalo/drivers/store/uns3` — `CasStore` backed by an S3-compatible bucket via [`uns3`](https://github.com/sandros94/uns3)
 - `scalo/drivers/store/memory` — in-process `CasStore` with identical CAS semantics, for tests and local development
 - `scalo/drivers/host/node` — `HostReader` probing cgroup v2 and host totals on Node-compatible runtimes
+- `scalo/drivers/runtime/celld` — `RuntimeDriver` for celld 0.2.x: process spec, deployment-pointer activation, readiness gate
 - `scalo/drivers/supervisor/child` — `Supervisor` running supervised processes as children of the agent
 - `scalo` (bin) — the CLI; `scalo up` boots a node agent against a registry bucket
 
@@ -57,6 +59,7 @@ src/
       store.ts            # CasStore, CasHeaders, StoredObject
       registry.ts         # registry record shapes + the bucket key each lives at
       supervisor.ts       # Supervisor seam: ProcessSpec, ProcessStatus
+      runtime.ts          # RuntimeDriver seam: RuntimeProcess, RuntimeSpecInput, ProbeOptions
       index.ts            # type barrel
     utils/
       slug.ts             # slug validation, host-label format/parse
@@ -96,11 +99,19 @@ src/
       compute.ts          # capacity formulas: cores, memMb, rss budget, cells
       reader.ts           # HostReader seam + probeCapacity(reader)
       index.ts            # barrel
+    placement/
+      ids.ts              # `project--env--build` process-id convention (format/parse)
+      ports.ts            # loopback port-pair allocator over a configured range
+      reconcile.ts        # planReconcile: desired + actual -> ordered actions (pure)
+      index.ts            # barrel
   agent/
     config.ts             # loadAgentConfig: file + env + flags, runtime-agnostic
     middleware.ts         # bearer auth guard + RFC 9457 error rendering
     app.ts                # createAgentApp: AgentContext and the HTTP routes
     serve.ts              # startAgent: binds the app to config.node.listen
+    reconcile.ts          # createReconciler: the loop, its status, one pass at a time
+    _execute.ts           # internal: carries out one plan (activate/start/gate/stop)
+    _desired.ts           # internal: desired state read out of the registry
     index.ts              # barrel
   cli/
     index.ts              # the `scalo` binary (citty)
@@ -113,6 +124,9 @@ src/
       memory.ts           # MemoryCasStore, createMemoryStore()
     host/
       node.ts             # createNodeHostReader() — node:fs/promises + node:os
+    runtime/
+      celld.ts            # createCelldDriver() — process spec, activation, readiness gate
+      _deploy-pointer.ts  # internal: celld's deploy/current.json, read-modify-write
     supervisor/
       child.ts            # createChildSupervisor() — node:child_process
 ```
@@ -127,6 +141,8 @@ src/
 - **Single error type:** `ScaloError` carries a stable `code` plus an HTTP `status`, and renders to an RFC 9457 problem document. Messages may change, codes may not.
 - **Single multi-input bundle:** all entry points are `input`s of one `type: "bundle"` in `build.config.ts`, so rolldown code-splits shared core into `dist/_chunks/*`. Adding an entry = add its input (and any runtime dep to `external`).
 - **Store drivers are interchangeable:** `MemoryCasStore` implements the same conditional-write contract as the S3 driver, so registry logic can be tested without a bucket.
+- **Readiness is two questions, not one.** A runtime's own health endpoint reports on the _process_, not on the application it hosts: a process whose worker fails every single request still answers it with 200, and a process that is draining answers it while refusing everything else. `RuntimeDriver.probeReady` therefore gates on both the runtime health endpoint **and** an application-level request to a configured path, and only calls a process ready when both agree. A process is never sent traffic, and never allowed to replace the one it supersedes, until it has passed both.
+- **Idle eviction stays off, permanently.** In celld 0.2.1, evicting a cell because it has been idle corrupts that cell's replication chain in the bucket — writes already acknowledged to the client roll back the next time the cell is restored. The runtime disables idle eviction when its variable is simply absent, so the celld driver never sets `CELLD_IDLE_EVICT_S`, refuses (`ScaloError("invalid-input")`) any caller that passes it in `extraEnv`, and strips it from the environment a process would otherwise inherit. This is a data-safety rule, not a tuning preference: it stays until the upstream fix lands and is verified.
 
 ## Code Conventions
 
