@@ -267,6 +267,31 @@ describe("what happens to an accepted deploy", () => {
     expect(environment.alias).toBeNull();
   });
 
+  it("deploys into an ephemeral environment somebody else created", async () => {
+    /*
+     * A preview environment is created ephemeral, with an idle window that
+     * eventually reaps it. A deploy only needs that environment to exist — it
+     * expresses no opinion about how it was set up — so it must not be refused
+     * for disagreeing with settings it never named.
+     */
+    await createEnvironment(clock.ctx, PROJECT, {
+      name: "preview",
+      ephemeral: true,
+      idleTtlS: 900,
+    });
+
+    const id = (await responseId(
+      await upload(await operatorToken(), { ...meta(), environment: "preview" }),
+    )) as string;
+
+    await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
+    /* And it is still the environment it was: the deploy created nothing. */
+    await expect(getEnvironment(clock.ctx, PROJECT, "preview")).resolves.toMatchObject({
+      ephemeral: true,
+      idleTtlS: 900,
+    });
+  });
+
   it("records the build under the id the upload chose, when it chose one", async () => {
     const id = (await responseId(
       await upload(await operatorToken(), { ...meta(), buildId: "0f0f0f0f" }),
@@ -434,7 +459,7 @@ function agentConfig(): AgentConfig {
     },
     node: { id: OPERATOR, listen: "127.0.0.1:7400" },
     platformDomains: ["apps.test"],
-    runtime: { binPath: "celld", portRangeStart: 42_000, probePath: "/" },
+    runtime: { binPath: "celld", portRangeStart: 42_000, probePath: "/", bindHost: "127.0.0.1" },
   };
 }
 

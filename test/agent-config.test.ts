@@ -8,6 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_BIND_HOST,
   DEFAULT_CONFIG_PATHS,
   DEFAULT_LISTEN,
   DEFAULT_REGION,
@@ -391,6 +392,38 @@ describe("platform domains", () => {
     const config = await loadAgentConfig({ env: REQUIRED_ENV });
 
     expect(config.platformDomains).toEqual([]);
+  });
+});
+
+describe("the address runtime processes bind", () => {
+  it("keeps runtime processes on loopback until something says otherwise", async () => {
+    const config = await loadAgentConfig({ env: REQUIRED_ENV });
+
+    /* The safe half of the setting: a process nothing outside this machine can
+       reach is what a single node wants, and is never the wrong answer. */
+    expect(config.runtime.bindHost).toBe(DEFAULT_BIND_HOST);
+    expect(config.runtime.bindHost).toBe("127.0.0.1");
+  });
+
+  it("takes the wildcard addresses a multi-node fleet needs", async () => {
+    for (const host of ["0.0.0.0", "::", "10.0.0.4"]) {
+      const config = await loadAgentConfig({
+        env: { ...REQUIRED_ENV, SCALO_BIND_HOST: host },
+      });
+
+      expect(config.runtime.bindHost, host).toBe(host);
+    }
+  });
+
+  it("refuses an address no process could bind", async () => {
+    const error = await rejectsWith(
+      () => loadAgentConfig({ env: { ...REQUIRED_ENV, SCALO_BIND_HOST: "0.0.0.0:8080" } }),
+      "invalid-input",
+    );
+
+    /* A bare host: the ports come from the allocator, and a pair written here
+       would be two sources of truth for what a process listens on. */
+    expect(error.detail).toContain("runtime.bindHost");
   });
 });
 

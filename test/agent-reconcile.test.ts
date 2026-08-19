@@ -119,6 +119,9 @@ describe("one pass over a node that runs nothing yet", () => {
       secretKey: "key-secret",
       /* Peers reach this node at the address it advertises, not at its listener. */
       advertiseHost: "10.0.0.4",
+      /* And what the process binds is the node's own setting, so the address it
+         advertises is one something is actually listening on. */
+      bindHost: "127.0.0.1",
     });
     expect(input.capacity).toEqual(capacity);
     expect(input.baseEnv).toEqual(BASE_ENV);
@@ -593,7 +596,12 @@ function agentContext(
     },
     node: { id: "node-a", listen: "127.0.0.1:7400", advertise: "10.0.0.4:7401" },
     platformDomains: ["apps.test"],
-    runtime: { binPath: "celld", portRangeStart: PORT_RANGE_START, probePath: "/" },
+    runtime: {
+      binPath: "celld",
+      portRangeStart: PORT_RANGE_START,
+      probePath: "/",
+      bindHost: "127.0.0.1",
+    },
   };
 
   const agent: AgentContext = {

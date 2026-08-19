@@ -1,0 +1,772 @@
+/*
+ * Two nodes of one installation against real infrastructure: one SeaweedFS
+ * bucket holding the registry, and two Caddy+agent pairs that have never been
+ * told about each other. Everything they agree on, they agree on through the
+ * bucket.
+ *
+ * The topology mirrors two real VPSes. Each Caddy and its agent SHARE a network
+ * namespace, exactly as in the single-node suite, so a node's runtime processes
+ * are reached by its own ingress over loopback. What is new here is that the two
+ * PAIRS are separate containers with separate addresses on the docker bridge:
+ * anything the nodes do to each other has to cross a network, which is the whole
+ * point of running two of them.
+ *
+ * Skipped unless SCALO_E2E=1, because it is minutes rather than seconds:
+ *
+ *   SCALO_E2E=1 pnpm vitest run test/integration/e2e-multinode.test.ts
+ *
+ * Every assertion polls until a deadline, and any timeout dumps BOTH agents'
+ * container logs — with two nodes, the account of what went wrong is as often on
+ * the other one.
+ *
+ * NOTE on `SCALO_BIND_HOST`: runtime processes bind loopback by default, which
+ * no peer on another host can reach. Cross-node cell traffic therefore needs
+ * them bound wider, and because that exposes an unauthenticated peer listener it
+ * only happens where the operator has classified the network — `SCALO_TRANSPORT`
+ * below is that statement.
+ */
+
+import { spawn } from "node:child_process";
+import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { Readable } from "node:stream";
+import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
+import { S3Client } from "uns3";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { AgentState } from "../../src/agent/app.ts";
+import type { OperatorKeyFile } from "../../src/cli/commands/keygen.ts";
+import { signNodeToken } from "../../src/core/auth/node-token.ts";
+import {
+  createEnvironment,
+  listNodes,
+  readJson,
+  type RegistryContext,
+  environmentKey,
+  nodeKey,
+} from "../../src/core/registry/index.ts";
+import type { NodeRecord } from "../../src/core/types/registry.ts";
+import { createUns3Store } from "../../src/drivers/store/uns3.ts";
+
+const env = process.env;
+const E2E = env.SCALO_E2E === "1";
+
+const HERE = fileURLToPath(new URL(".", import.meta.url));
+const REPO_ROOT = resolve(HERE, "../..");
+const FIXTURES = join(HERE, "_e2e-fixtures");
+const CLI = join(REPO_ROOT, "dist/cli/index.mjs");
+
+const STORE_IMAGE = "chrislusf/seaweedfs:4.42";
+const CADDY_IMAGE = "caddy:2";
+/** node24 + celld + esbuild; the same image the single-node suite needs. */
+const AGENT_IMAGE = "scalo-v13-probe";
+
+const STORE_PORT = 8333;
+const CADDY_HTTP_PORT = 80;
+const CADDY_ADMIN_PORT = 2019;
+/** Published on each Caddy container, because its agent has no network of its own. */
+const AGENT_PORT = 7400;
+
+const BUCKET = "scalo-e2e-multinode";
+const KEY_PREFIX = "e2e";
+const ACCESS_KEY = "scalo";
+const SECRET_KEY = "scalo-secret";
+const REGION = "us-east-1";
+const PLATFORM_DOMAIN = "scalo.test";
+const PROJECT = "app";
+const ENVIRONMENT = "production";
+/** Deployed, deleted through the coordinator, and reaped: the ephemeral one. */
+const PREVIEW = "preview";
+/** Long enough that only the explicit deletion ever removes it. */
+const PREVIEW_IDLE_TTL_S = 3600;
+
+const NODE_A = "node-a";
+const NODE_B = "node-b";
+
+/* See the single-node suite: a user-defined network would make published ports
+   answer from the wrong address, and the default bridge gives both what is
+   needed — the containers reach each other, and the host reaches the ports. */
+const BRIDGE_NETWORK = "bridge";
+
+const SETUP_TIMEOUT_MS = 420_000;
+const STEP_TIMEOUT_MS = 180_000;
+/** Per-assertion ceiling; the reconcile interval is 5s, so this is many passes. */
+const DEADLINE_MS = 120_000;
+const BOOT_DEADLINE_MS = 60_000;
+const STORE_DEADLINE_MS = 120_000;
+const POLL_MS = 500;
+
+/** The lease TTL the agent runs with; failover is bounded by a few of these. */
+const LEASE_TTL_MS = 15_000;
+
+/** One node: its ingress, its agent, and everything the host needs to reach both. */
+interface Node {
+  id: string;
+  caddy: StartedTestContainer;
+  agent: StartedTestContainer;
+  /** Address the OTHER containers reach this pair at. */
+  bridgeAddress: string;
+  httpPort: number;
+  adminPort: number;
+  agentPort: number;
+  /** Everything the agent container has written, kept for failure messages. */
+  log: string[];
+  /** False once this suite has deliberately stopped the agent. */
+  running: boolean;
+}
+
+let store: StartedTestContainer;
+let nodes: Node[] = [];
+
+let storeFromHost: string;
+let storeFromContainers: string;
+
+let registry: RegistryContext;
+let keyPath: string;
+let operatorKey: OperatorKeyFile;
+let buildV1: string;
+
+const tmpDirs: string[] = [];
+/** Raw observations the report is written from; printed once at the end. */
+const observed: Record<string, unknown> = {};
+
+describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
+  beforeAll(async () => {
+    /* Built first: the agent containers run `dist/` off the bind-mounted
+       worktree, so a stale build would test the previous commit. */
+    const built = await run("pnpm", ["build"], REPO_ROOT, env as Record<string, string>);
+    if (built.code !== 0) throw new Error(`"pnpm build" failed:\n${built.output}`);
+
+    store = await new GenericContainer(STORE_IMAGE)
+      .withCommand(["server", "-s3"])
+      .withExposedPorts(STORE_PORT)
+      .withWaitStrategy(Wait.forLogMessage(/Start Seaweed S3 API Server/))
+      .withStartupTimeout(STORE_DEADLINE_MS)
+      .start();
+
+    storeFromHost = `http://${store.getHost()}:${String(store.getMappedPort(STORE_PORT))}`;
+    storeFromContainers = `http://${store.getIpAddress(BRIDGE_NETWORK)}:${String(STORE_PORT)}`;
+    await createBucket(storeFromHost, BUCKET);
+
+    /* Started one after the other rather than together: the first node to
+       arrive bootstraps the registry, and a second one racing that bootstrap is
+       a different test than this one. */
+    nodes = [await startNode(NODE_A), await startNode(NODE_B)];
+
+    registry = {
+      store: createUns3Store(
+        new S3Client({
+          endpoint: storeFromHost,
+          region: REGION,
+          credentials: { accessKeyId: ACCESS_KEY, secretAccessKey: SECRET_KEY },
+          bucketStyle: "path",
+          defaultBucket: BUCKET,
+        }),
+        { bucket: BUCKET, prefix: KEY_PREFIX },
+      ),
+    };
+
+    const dir = await mkdtemp(join(tmpdir(), "scalo-e2e-multi-key-"));
+    tmpDirs.push(dir);
+    keyPath = join(dir, "operator.json");
+    expectCleanExit(await runCli(["keygen", "--out", keyPath, "--register"], storeEnv()));
+    operatorKey = JSON.parse(await readFile(keyPath, "utf8")) as OperatorKeyFile;
+  }, SETUP_TIMEOUT_MS);
+
+  afterAll(async () => {
+    for (const node of nodes) {
+      /* Stopped before its Caddy: the agent lives in Caddy's namespace. */
+      await node.agent.stop().catch(() => {});
+      await node.caddy.stop().catch(() => {});
+    }
+    await store?.stop().catch(() => {});
+    for (const dir of tmpDirs) await rm(dir, { recursive: true, force: true });
+
+    console.log(`\n[e2e-multinode] raw observations\n${JSON.stringify(observed, null, 2)}`);
+  }, SETUP_TIMEOUT_MS);
+
+  it(
+    "brings both nodes up, each registered under its own address",
+    async () => {
+      for (const node of nodes) {
+        const health = await until(
+          `${node.id} to answer /v1/health`,
+          BOOT_DEADLINE_MS,
+          async () => {
+            const answer = await httpGet(node.agentPort, "/v1/health", {});
+            return answer.status === 200 ? answer : null;
+          },
+        );
+        expect(JSON.parse(health.body)).toMatchObject({ ok: true, node: node.id });
+      }
+
+      /* Two records, not one: the nodes share a bucket and nothing else, so a
+         second node overwriting the first's entry would be invisible until
+         something tried to reach it. */
+      expect(await listNodes(registry)).toEqual(expect.arrayContaining([NODE_A, NODE_B]));
+
+      for (const node of nodes) {
+        const record = await readJson<NodeRecord>(registry, nodeKey(node.id));
+        /* What makes one node reachable from the other, and therefore what the
+           coordinator hop is addressed to. */
+        expect(record?.value.addresses, node.id).toEqual({
+          internal: node.bridgeAddress,
+          agentPort: AGENT_PORT,
+        });
+      }
+      observed.nodes = nodes.map((node) => ({ id: node.id, address: node.bridgeAddress }));
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "deploys through one node and is served by both",
+    async () => {
+      const started = Date.now();
+      const result = await runCli(deployArgs(await stageApp("v1"), ENVIRONMENT), {});
+      observed.deployV1Ms = Date.now() - started;
+      observed.deployV1Output = result.output;
+
+      expectCleanExit(result);
+      expect(result.output, agentLogTail()).toContain("routed");
+      buildV1 = buildIdOf(result.output);
+      observed.buildV1 = buildV1;
+
+      /*
+       * The deploy was accepted by node-a alone. Node-b learns what to serve
+       * from the registry and starts its own process for it, so both ingresses
+       * answer for the same host — which is what a second node is for.
+       */
+      const servedAt: Record<string, number> = {};
+      for (const node of nodes) {
+        const at = Date.now();
+        await untilServes(node, envHost(), "v1");
+        servedAt[node.id] = Date.now() - at;
+      }
+      observed.servedAfterDeployMs = servedAt;
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "counts up through one durable object however many nodes are asked",
+    async () => {
+      /* Both processes have to be up and peered before the counter means
+         anything; the first answer from each node is what says they are. */
+      for (const node of nodes) {
+        await until(`${node.id} to answer /count`, DEADLINE_MS, async () => {
+          const answer = await httpGet(node.httpPort, "/count", { host: envHost() });
+          return answer.status === 200 && typeof countOf(answer.body) === "number" ? answer : null;
+        });
+      }
+
+      /*
+       * The assertion this whole topology exists for. One cell owns the counter;
+       * a request that lands on the node that does not own it is routed to the
+       * one that does, over the peer listeners. Two independent counters — the
+       * failure this catches — would repeat numbers instead of climbing.
+       */
+      const counts: Array<{ node: string; n: number }> = [];
+      for (let round = 0; round < 3; round++) {
+        for (const node of nodes) {
+          const answer = await httpGet(node.httpPort, "/count", { host: envHost() });
+          expectStatus(answer, 200);
+          counts.push({ node: node.id, n: countOf(answer.body) as number });
+        }
+      }
+
+      observed.counts = counts;
+      for (let i = 1; i < counts.length; i++) {
+        expect(counts[i].n, `${JSON.stringify(counts)}\n${agentLogTail()}`).toBeGreaterThan(
+          counts[i - 1].n,
+        );
+      }
+      /* Consecutive, in fact: nothing else is calling it, so a gap would mean a
+         request went somewhere this test cannot see. */
+      expect(counts.at(-1)?.n).toBe((counts[0].n as number) + counts.length - 1);
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "elects exactly one coordinator, and both nodes name the same one",
+    async () => {
+      const states = await until(
+        "one node to hold the coordinator lease",
+        DEADLINE_MS,
+        async () => {
+          const seen = await Promise.all(nodes.map(async (node) => stateOf(node)));
+          const holders = seen.filter((state) => state.coordinator?.self === true);
+          return holders.length === 1 ? seen : null;
+        },
+      );
+
+      const holders = nodes.filter((_, index) => states[index].coordinator?.self === true);
+      expect(holders).toHaveLength(1);
+      /* Both nodes read the same lease, so they agree on who it names — the one
+         answering is simply the only one that says `self`. */
+      const named = new Set(states.map((state) => state.coordinator?.node));
+      expect(named.size).toBe(1);
+      expect([...named][0]).toBe(holders[0].id);
+
+      observed.coordinator = {
+        node: holders[0].id,
+        fence: states[0].coordinator?.fence,
+      };
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "deletes an ephemeral environment asked of the node that is NOT the coordinator",
+    async () => {
+      /* Created from the host so it is ephemeral from the start: `ephemeral` is
+         part of an environment's identity and a deploy would have made a
+         long-lived one. The idle window is long, so nothing but this test's own
+         request ever deletes it. */
+      await createEnvironment(registry, PROJECT, {
+        name: PREVIEW,
+        ephemeral: true,
+        idleTtlS: PREVIEW_IDLE_TTL_S,
+      });
+      expectCleanExit(await runCli(deployArgs(await stageApp("v1"), PREVIEW), {}));
+
+      const coordinator = await coordinatorNode();
+      const asked = nodes.find((node) => node.id !== coordinator.id) as Node;
+      /* A process for it must exist somewhere before the deletion is worth
+         anything: it is what the reap has to take away afterwards. */
+      await untilServes(asked, previewHost(), "v1");
+
+      const started = Date.now();
+      const answer = await httpDelete(
+        asked.agentPort,
+        `/v1/environments/${PROJECT}/${PREVIEW}`,
+        await operatorToken(),
+      );
+      observed.proxiedDelete = {
+        askedNode: asked.id,
+        coordinatorNode: coordinator.id,
+        status: answer.status,
+        ms: Date.now() - started,
+        body: answer.body,
+      };
+
+      /* The node the operator asked does not hold the lease and cannot delete
+         anything; it forwarded the request and handed back what came out. */
+      expectStatus(answer, 200);
+      expect(JSON.parse(answer.body).deleted).toContain(environmentKey(PROJECT, PREVIEW));
+      /* Gone from the bucket, which is the only place it ever existed. */
+      expect(await readJson(registry, environmentKey(PROJECT, PREVIEW))).toBeNull();
+
+      /* And the nodes converge on it: an environment that is gone from the
+         registry is one nothing should still be running a process for. */
+      const reapedAt = Date.now();
+      for (const node of nodes) {
+        await until(`${node.id} to stop running ${PREVIEW}`, DEADLINE_MS, async () => {
+          const state = await stateOf(node);
+          const running = state.processes.filter(
+            (process) =>
+              process.state === "running" && process.id.startsWith(`${PROJECT}--${PREVIEW}--`),
+          );
+          return running.length === 0 ? state : null;
+        });
+      }
+      observed.previewReapedMs = Date.now() - reapedAt;
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "hands coordination to the survivor when the coordinator's node dies, and keeps serving",
+    async () => {
+      const coordinator = await coordinatorNode();
+      const survivor = nodes.find((node) => node.id !== coordinator.id) as Node;
+      const fenceBefore = (await stateOf(survivor)).coordinator?.fence ?? 0;
+
+      /*
+       * SIGKILL rather than a graceful stop, and the difference is the whole
+       * test: a node that is asked to stop gives the lease up on its way out,
+       * and the handover that follows proves nothing about a node that DIES.
+       * Killed outright, it releases nothing, so the survivor can only take over
+       * by outwaiting the lease — which is the guarantee being measured.
+       */
+      const killedAt = Date.now();
+      const killed = await run("docker", ["kill", coordinator.agent.getId()], REPO_ROOT, {
+        PATH: env.PATH ?? "",
+      });
+      expect(killed.code, killed.output).toBe(0);
+      coordinator.running = false;
+
+      /* Bounded by the lease: the survivor cannot take it until the dead
+         holder's TTL has run out, and takes it on one of the ticks after that. */
+      const state = await until(
+        `${survivor.id} to take the coordinator lease over`,
+        DEADLINE_MS,
+        async () => {
+          const seen = await stateOf(survivor);
+          return seen.coordinator?.self === true && (seen.coordinator.fence ?? 0) > fenceBefore
+            ? seen
+            : null;
+        },
+      );
+      const failoverMs = Date.now() - killedAt;
+
+      expect(state.coordinator?.node).toBe(survivor.id);
+      /* The fence only ever moves forward, and a takeover is what moves it: the
+         node that died can no longer act on the fence it held. */
+      expect(state.coordinator?.fence).toBeGreaterThan(fenceBefore);
+      observed.failover = {
+        died: coordinator.id,
+        how: "SIGKILL, so nothing was released and the lease had to expire",
+        tookOver: survivor.id,
+        fenceBefore,
+        fenceAfter: state.coordinator?.fence,
+        ms: failoverMs,
+        leaseTtlMs: LEASE_TTL_MS,
+      };
+      /*
+       * Bounded at both ends, and the arithmetic is the design:
+       *
+       * The dead node renewed every TTL/3, so at the moment it was killed its
+       * lease had between TTL - TTL/3 and TTL left to run. A survivor that took
+       * over sooner than that would have overwritten a lease its holder still
+       * had time on — which is the one thing the fence exists to prevent. Taking
+       * much longer than a TTL plus a tick would mean nothing was watching.
+       */
+      expect(failoverMs).toBeGreaterThanOrEqual(LEASE_TTL_MS - LEASE_TTL_MS / 3);
+      expect(failoverMs).toBeLessThanOrEqual(3 * LEASE_TTL_MS);
+
+      /* Availability, which is the other half of what a second node is for: the
+         application never stopped being served while all this happened. */
+      const answer = await untilServes(survivor, envHost(), "v1");
+      expect(JSON.parse(answer.body).version).toBe("v1");
+    },
+    STEP_TIMEOUT_MS,
+  );
+});
+
+/* ------------------------------------------------------------------ helpers */
+
+/** Starts one Caddy and the agent that shares its network namespace. */
+async function startNode(id: string): Promise<Node> {
+  const caddy = await new GenericContainer(CADDY_IMAGE)
+    .withCopyFilesToContainer([
+      { source: join(FIXTURES, "caddy.json"), target: "/etc/caddy/config.json" },
+    ])
+    .withCommand(["caddy", "run", "--config", "/etc/caddy/config.json"])
+    .withExposedPorts(CADDY_HTTP_PORT, CADDY_ADMIN_PORT, AGENT_PORT)
+    .withWaitStrategy(
+      Wait.forHttp(`/config/apps/http/servers/scalo/routes`, CADDY_ADMIN_PORT).forStatusCode(200),
+    )
+    .start();
+
+  const bridgeAddress = caddy.getIpAddress(BRIDGE_NETWORK);
+  const log: string[] = [];
+
+  const agent = await new GenericContainer(AGENT_IMAGE)
+    .withNetworkMode(`container:${caddy.getId()}`)
+    .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "rw" }])
+    .withWorkingDir("/work")
+    .withEnvironment({
+      SCALO_S3_ENDPOINT: storeFromContainers,
+      SCALO_S3_BUCKET: BUCKET,
+      SCALO_S3_PREFIX: KEY_PREFIX,
+      SCALO_S3_ACCESS_KEY: ACCESS_KEY,
+      SCALO_S3_SECRET_KEY: SECRET_KEY,
+      SCALO_S3_REGION: REGION,
+      SCALO_NODE_ID: id,
+      /* Both the agent listener and the runtime processes bind every interface
+         here, and the peer listener authenticates nobody: on a private docker
+         network that is the trusted-network case, stated rather than assumed. */
+      SCALO_TRANSPORT: "none",
+      /* Distinct per node, and container-local: the working directory is this
+         repository bind-mounted at /work, and an identity must never be written
+         into a checkout — let alone one two nodes would then share. */
+      SCALO_STATE_DIR: `/var/lib/scalo-${id}`,
+      SCALO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
+      SCALO_CADDY_ADMIN: `http://127.0.0.1:${String(CADDY_ADMIN_PORT)}`,
+      /* The address on the bridge, which is what the other node dials — both for
+         the agent API and, with the internal port, for cell traffic. */
+      SCALO_ADVERTISE: `${bridgeAddress}:${String(AGENT_PORT)}`,
+      /* THE multi-node setting. Runtime processes bind loopback by default,
+         which nothing on the other node can reach; the advertised address above
+         is only useful if something is listening on it. */
+      SCALO_BIND_HOST: "0.0.0.0",
+      ESBUILD_BINARY_PATH: "/usr/local/bin/esbuild",
+    })
+    .withCommand(["node", "dist/cli/index.mjs", "up", "--listen", `0.0.0.0:${String(AGENT_PORT)}`])
+    .withLogConsumer((stream: Readable) => {
+      stream.on("data", (chunk) => log.push(String(chunk)));
+      stream.on("err", (chunk) => log.push(String(chunk)));
+    })
+    .withWaitStrategy(Wait.forLogMessage(/listening on/))
+    .withStartupTimeout(BOOT_DEADLINE_MS)
+    .start();
+
+  return {
+    id,
+    caddy,
+    agent,
+    bridgeAddress,
+    httpPort: caddy.getMappedPort(CADDY_HTTP_PORT),
+    adminPort: caddy.getMappedPort(CADDY_ADMIN_PORT),
+    agentPort: caddy.getMappedPort(AGENT_PORT),
+    log,
+    running: true,
+  };
+}
+
+function envHost(): string {
+  return `${PROJECT}--${ENVIRONMENT}.${PLATFORM_DOMAIN}`;
+}
+
+function previewHost(): string {
+  return `${PROJECT}--${PREVIEW}.${PLATFORM_DOMAIN}`;
+}
+
+/** What one node currently believes about itself, as an authenticated caller sees it. */
+async function stateOf(node: Node): Promise<AgentState> {
+  const answer = await httpGet(node.agentPort, "/v1/state", {
+    authorization: `Bearer ${await operatorToken()}`,
+  });
+  if (answer.status !== 200) {
+    throw new Error(`${node.id} answered /v1/state with ${String(answer.status)}: ${answer.body}`);
+  }
+  return JSON.parse(answer.body) as AgentState;
+}
+
+/** The node currently holding the lease, waited for rather than assumed. */
+async function coordinatorNode(): Promise<Node> {
+  return until("a node to hold the coordinator lease", DEADLINE_MS, async () => {
+    for (const node of nodes) {
+      if (!node.running) continue;
+      const state = await stateOf(node);
+      if (state.coordinator?.self === true) return node;
+    }
+    return null;
+  });
+}
+
+/** The count an answer from `/count` carries, or null when it carries none. */
+function countOf(body: string): number | null {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    const n = (parsed as { n?: unknown }).n;
+    return typeof n === "number" ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The flags one deploy of the fixture is run with, from the host through node-a. */
+function deployArgs(dir: string, environment: string): string[] {
+  return [
+    "deploy",
+    dir,
+    "--agent",
+    `http://127.0.0.1:${String(nodes[0].agentPort)}`,
+    "--project",
+    PROJECT,
+    "--env",
+    environment,
+    "--flip",
+    "--runtime-configurable",
+    "--key",
+    keyPath,
+  ];
+}
+
+function storeEnv(): Record<string, string> {
+  return {
+    SCALO_S3_ENDPOINT: storeFromHost,
+    SCALO_S3_BUCKET: BUCKET,
+    SCALO_S3_PREFIX: KEY_PREFIX,
+    SCALO_S3_ACCESS_KEY: ACCESS_KEY,
+    SCALO_S3_SECRET_KEY: SECRET_KEY,
+    SCALO_S3_REGION: REGION,
+  };
+}
+
+/** A copy of the fixture application with its version variable set to `version`. */
+async function stageApp(version: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), `scalo-e2e-multi-app-${version}-`));
+  tmpDirs.push(dir);
+  await cp(join(FIXTURES, "app"), dir, { recursive: true });
+
+  const config = join(dir, "wrangler.jsonc");
+  const text = await readFile(config, "utf8");
+  await writeFile(
+    config,
+    text.replace(/"APP_VERSION": "[^"]*"/, `"APP_VERSION": "${version}"`),
+    "utf8",
+  );
+  return dir;
+}
+
+function buildIdOf(output: string): string {
+  const build = /scalo: build ([\da-f]{8,64})/.exec(output)?.[1];
+  if (build === undefined) throw new Error(`the deploy named no build:\n${output}`);
+  return build;
+}
+
+/** A fresh single-use operator token; a spent one is refused as a replay. */
+function operatorToken(): Promise<string> {
+  return signNodeToken(operatorKey.privateKey, operatorKey.id);
+}
+
+/** Polls one node's ingress until it answers with the expected app version. */
+async function untilServes(node: Node, host: string, version: string): Promise<HttpAnswer> {
+  return until(`${node.id} to serve "${version}" on ${host}`, DEADLINE_MS, async () => {
+    const answer = await httpGet(node.httpPort, "/", { host });
+    if (answer.status !== 200) return null;
+    return answer.body.includes(`"${version}"`) ? answer : null;
+  });
+}
+
+async function until<T>(
+  what: string,
+  deadlineMs: number,
+  probe: () => Promise<T | null>,
+): Promise<T> {
+  const giveUp = Date.now() + deadlineMs;
+  let last: unknown = null;
+
+  for (;;) {
+    try {
+      const value = await probe();
+      if (value !== null) return value;
+      last = null;
+    } catch (error) {
+      last = error;
+    }
+    if (Date.now() >= giveUp) {
+      const reason = last === null ? "" : `\nlast failure: ${describeFailure(last)}`;
+      throw new Error(
+        `timed out after ${String(deadlineMs)}ms waiting for ${what}${reason}\n${agentLogTail()}`,
+      );
+    }
+    await delay(POLL_MS);
+  }
+}
+
+function expectCleanExit(result: CommandResult): void {
+  expect(result.code, `${result.output}\n${agentLogTail()}`).toBe(0);
+}
+
+function expectStatus(answer: HttpAnswer, status: number): void {
+  expect(answer.status, `${answer.body}\n${agentLogTail()}`).toBe(status);
+}
+
+function describeFailure(error: unknown): string {
+  return error instanceof Error ? error.message : JSON.stringify(error);
+}
+
+/** The tail of BOTH agents' output: with two nodes, either may hold the reason. */
+function agentLogTail(limit: number = 8000): string {
+  return nodes
+    .map((node) => {
+      const text = node.log.join("");
+      const tail = text.length <= limit ? text : `…${text.slice(-limit)}`;
+      return `--- ${node.id} container logs ---\n${tail}\n--- end ${node.id} container logs ---`;
+    })
+    .join("\n");
+}
+
+interface HttpAnswer {
+  status: number;
+  body: string;
+}
+
+/**
+ * One GET, over `node:http` rather than `fetch` so the `Host` header can be set:
+ * every routing assertion in this suite is about which host was asked for.
+ */
+function httpGet(port: number, path: string, headers: Record<string, string>): Promise<HttpAnswer> {
+  return send(port, path, "GET", headers, undefined);
+}
+
+function httpDelete(port: number, path: string, token: string): Promise<HttpAnswer> {
+  return send(port, path, "DELETE", { authorization: `Bearer ${token}` }, undefined);
+}
+
+function send(
+  port: number,
+  path: string,
+  method: string,
+  headers: Record<string, string>,
+  body: string | undefined,
+): Promise<HttpAnswer> {
+  return new Promise<HttpAnswer>((settle, fail) => {
+    const request = httpRequest({ host: "127.0.0.1", port, path, method, headers }, (response) => {
+      let text = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk: string) => (text += chunk));
+      response.on("end", () => settle({ status: response.statusCode ?? 0, body: text }));
+    });
+    request.on("error", fail);
+    if (body !== undefined) request.write(body);
+    request.end();
+  });
+}
+
+interface CommandResult {
+  code: number;
+  output: string;
+}
+
+function runCli(args: string[], extraEnv: Record<string, string>): Promise<CommandResult> {
+  return run(process.execPath, [CLI, ...args], REPO_ROOT, {
+    PATH: env.PATH ?? "",
+    HOME: env.HOME ?? "",
+    ...extraEnv,
+  });
+}
+
+function run(
+  command: string,
+  args: string[],
+  cwd: string,
+  childEnv: Record<string, string>,
+): Promise<CommandResult> {
+  return new Promise<CommandResult>((settle, fail) => {
+    const child = spawn(command, args, { cwd, env: childEnv, stdio: ["ignore", "pipe", "pipe"] });
+
+    let output = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => (output += chunk));
+    child.stderr.on("data", (chunk: string) => (output += chunk));
+
+    child.on("error", fail);
+    child.on("close", (code) => settle({ code: code ?? -1, output }));
+  });
+}
+
+/**
+ * Creates the bucket with an anonymous PUT, retrying because SeaweedFS answers
+ * on its S3 port before it is willing to serve bucket operations on it.
+ */
+async function createBucket(endpoint: string, bucket: string): Promise<void> {
+  const giveUp = Date.now() + STORE_DEADLINE_MS;
+  let last = "no attempt was made";
+
+  for (;;) {
+    try {
+      const response = await fetch(`${endpoint}/${bucket}`, { method: "PUT" });
+      if (response.ok || response.status === 409) return;
+      last = `answered ${String(response.status)}: ${(await response.text()).slice(0, 200)}`;
+    } catch (error) {
+      last = describeFailure(error);
+    }
+    if (Date.now() >= giveUp) {
+      throw new Error(`could not create bucket "${bucket}" at ${endpoint}; last: ${last}`);
+    }
+    await delay(POLL_MS);
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((settle) => setTimeout(settle, ms));
+}

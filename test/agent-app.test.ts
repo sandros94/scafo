@@ -86,6 +86,8 @@ describe("GET /v1/state", () => {
       node: record,
       /* Nobody has taken the lease yet, and that is not an error to report. */
       lease: null,
+      /* The same fact read as an election: no lease, so nobody coordinates. */
+      coordinator: null,
       processes: PROCESSES,
     });
   });
@@ -279,7 +281,7 @@ function agentConfig(): AgentConfig {
     },
     node: { id: NODE_ID, listen: "127.0.0.1:7400" },
     platformDomains: ["apps.test"],
-    runtime: { binPath: "celld", portRangeStart: 42_000, probePath: "/" },
+    runtime: { binPath: "celld", portRangeStart: 42_000, probePath: "/", bindHost: "127.0.0.1" },
   };
 }
 

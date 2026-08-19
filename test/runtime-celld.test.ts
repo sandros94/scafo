@@ -88,6 +88,30 @@ describe("the spec one environment runs under", () => {
     ]);
   });
 
+  it("binds both listeners to the address the node configured", () => {
+    const spec = driver().processSpec(
+      specInput({ ports: { public: 42_010, internal: 42_011 }, node: { bindHost: "0.0.0.0" } }),
+    );
+
+    /*
+     * What makes a fleet spread over several nodes work at all: peers dial the
+     * advertised address to reach the process that owns a cell, and a listener
+     * on loopback answers nothing that is not on the same host.
+     */
+    expect(spec.args).toEqual([
+      "--bucket",
+      `registry/${FLEET}`,
+      "--endpoint",
+      "http://store.test:9000",
+      "--listen",
+      "0.0.0.0:42010",
+      "--internal-listen",
+      "0.0.0.0:42011",
+      "--advertise",
+      "10.0.0.4:42011",
+    ]);
+  });
+
   it("puts the installation's key prefix in front of the fleet, however it is written", () => {
     for (const keyPrefix of ["tenant-a", "/tenant-a", "tenant-a/", "//tenant-a//"]) {
       const spec = driver().processSpec(specInput({ node: { keyPrefix } }));
@@ -514,7 +538,7 @@ function driver(store: CasStore = new MemoryCasStore()): RuntimeDriver {
 interface SpecOverrides {
   vars?: PlainVarset | null;
   ports?: { public: number; internal: number };
-  node?: { keyPrefix?: string };
+  node?: { keyPrefix?: string; bindHost?: string };
   capacity?: CapacityPlan;
   baseEnv?: Record<string, string>;
   extraEnv?: Record<string, string>;

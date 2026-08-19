@@ -32,6 +32,12 @@ const EXPOSED: Record<string, Record<string, string>> = {
     SCALO_LISTEN: "127.0.0.1:7400",
     SCALO_ADVERTISE: "node-a.internal:7400",
   },
+  /* What a fleet spread over several nodes has to widen for cross-node cell
+     traffic, and what puts an unauthenticated peer listener on that network. */
+  "runtime processes bound past loopback": {
+    SCALO_LISTEN: "127.0.0.1:7400",
+    SCALO_BIND_HOST: "0.0.0.0",
+  },
 };
 
 describe("a node that would reach past loopback", () => {
@@ -66,6 +72,17 @@ describe("a node that would reach past loopback", () => {
     expect(error.detail).not.toContain("node.listen ");
   });
 
+  it("names the runtime's bind address when that is what exposed the node", async () => {
+    const config = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCALO_LISTEN: "127.0.0.1:7400", SCALO_BIND_HOST: "0.0.0.0" },
+    });
+
+    const error = await rejectionOf(() => Promise.resolve(assertTransportConfigured(config)));
+
+    expect(error.detail).toContain("runtime.bindHost");
+    expect(error.detail).not.toContain("node.listen ");
+  });
+
   it("boots once the operator classifies the network, either way", async () => {
     for (const [what, env] of Object.entries(EXPOSED)) {
       for (const driver of ["wireguard", "none"]) {
@@ -89,6 +106,8 @@ describe("a node that stays on this machine", () => {
       { SCALO_LISTEN: "[::1]:7400" },
       { SCALO_LISTEN: "127.0.0.1:7400", SCALO_INTERNAL_LISTEN: "127.0.0.1:7401" },
       { SCALO_LISTEN: "127.0.0.1:7400", SCALO_ADVERTISE: "127.0.0.53:7400" },
+      /* The default, stated: a single node's processes need nothing wider. */
+      { SCALO_LISTEN: "127.0.0.1:7400", SCALO_BIND_HOST: "127.0.0.1" },
     ];
 
     for (const env of loopback) {

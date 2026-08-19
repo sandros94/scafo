@@ -98,6 +98,8 @@ export class FaultStore implements CasStore {
   dels: number = 0;
   /** Runs before every put; write through the wrapped store here to race the caller. */
   onBeforePut?: (key: string) => void | Promise<void>;
+  /** Runs before every delete; the same seam for a race against a multi-step deletion. */
+  onBeforeDel?: (key: string) => void | Promise<void>;
 
   readonly #inner: CasStore;
   #budget: number | null = null;
@@ -135,6 +137,7 @@ export class FaultStore implements CasStore {
   }
 
   async del(key: string): Promise<void> {
+    await this.onBeforeDel?.(key);
     this.#spend();
     this.dels++;
     await this.#inner.del(key);
