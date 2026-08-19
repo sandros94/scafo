@@ -99,6 +99,19 @@ const PREVIEW_IDLE_TTL_S = 3600;
  * it, so the assertion still handles the other outcome.
  */
 const SOLO = "single";
+/**
+ * Deployed under a node selector only ONE node satisfies, then let loose again.
+ *
+ * Which node that is, is not rendezvous hashing's decision here but the
+ * operator's: node-b boots carrying {@link FAST_LABEL} and node-a carries no
+ * label at all, so `--node-selector tier=fast --replicas all` has exactly one
+ * eligible node however the digests fall.
+ */
+const TARGETED = "targeted";
+
+/** The label node-b boots with, and the one {@link TARGETED} selects on. */
+const FAST_LABEL = "tier=fast";
+
 /** Deployed to both nodes, retired out of service, then force-deleted. */
 const SUNSET = "sunset";
 /** Claimed for {@link SUNSET}, so its deletion has a claim to release too. */
@@ -202,8 +215,11 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
 
     /* Started one after the other rather than together: the first node to
        arrive bootstraps the registry, and a second one racing that bootstrap is
-       a different test than this one. */
-    nodes = [await startNode(NODE_A), await startNode(NODE_B)];
+       a different test than this one.
+
+       Only node-b is labelled, so the two are genuinely different KINDS of node
+       — which is what a heterogeneous fleet is, and what a selector is for. */
+    nodes = [await startNode(NODE_A), await startNode(NODE_B, FAST_LABEL)];
 
     registry = {
       store: createUns3Store(
@@ -266,7 +282,20 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
           agentPort: AGENT_PORT,
         });
       }
-      observed.nodes = nodes.map((node) => ({ id: node.id, address: node.bridgeAddress }));
+      /* What the operator said each node IS, written from its own configuration
+         on every registration. Only node-b was told anything, and a node told
+         nothing carries no labels rather than an empty set — which is what makes
+         it satisfy no selector at all. */
+      const labelled = await readJson<NodeRecord>(registry, nodeKey(NODE_B));
+      const unlabelled = await readJson<NodeRecord>(registry, nodeKey(NODE_A));
+      expect(labelled?.value.labels).toEqual({ tier: "fast" });
+      expect(unlabelled?.value.labels).toBeUndefined();
+
+      observed.nodes = nodes.map((node) => ({
+        id: node.id,
+        address: node.bridgeAddress,
+        labels: node.id === NODE_B ? FAST_LABEL : null,
+      }));
     },
     STEP_TIMEOUT_MS,
   );
@@ -433,6 +462,111 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         });
       }
       observed.previewReapedMs = Date.now() - reapedAt;
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "runs a labelled environment only on the node carrying the label, then spreads it when the selector is lifted",
+    async () => {
+      /*
+       * The multi-cloud story, at two nodes. node-b booted carrying
+       * `tier=fast`; node-a carries nothing. So which node runs this is the
+       * OPERATOR's decision here rather than rendezvous hashing's, and
+       * `--replicas all` means every MATCHING node rather than every node —
+       * the selector narrows the candidates before the replica count is read.
+       */
+      const labelled = nodes.find((node) => node.id === NODE_B) as Node;
+      const plain = nodes.find((node) => node.id === NODE_A) as Node;
+
+      /* Deployed THROUGH the labelled node, because a flipped deploy watches for
+         the build to be serving and only a node the selector admits will ever
+         run it. Intake is independent of placement; patience is not. */
+      const deployedAt = Date.now();
+      const result = await runCli(
+        deployArgs(
+          await stageApp("v1"),
+          TARGETED,
+          ["--node-selector", FAST_LABEL, "--replicas", "all"],
+          labelled,
+        ),
+        {},
+      );
+      expectCleanExit(result);
+
+      /* Both nodes read the same decision out of the same bucket, and it names
+         the labelled node alone. */
+      await until(
+        `both nodes to place ${TARGETED} on ${labelled.id} alone`,
+        DEADLINE_MS,
+        async () => {
+          const states = await Promise.all(nodes.map(async (node) => stateOf(node)));
+          const named = states.map((state) => placedNodes(state, TARGETED));
+          return named.every((ids) => ids?.length === 1 && ids[0] === labelled.id) ? states : null;
+        },
+      );
+      const placedMs = Date.now() - deployedAt;
+
+      /* The labelled node's own ingress serves it. */
+      const served = await untilServes(labelled, targetedHost(), "v1");
+      expect(JSON.parse(served.body).version).toBe("v1");
+
+      /* And the unlabelled one runs no process for it and answers the empty 200
+         Caddy gives any host it has no route for. */
+      const empty = await until(
+        `${plain.id} to answer nothing for ${TARGETED}`,
+        DEADLINE_MS,
+        async () => {
+          const state = await stateOf(plain);
+          if (state.processes.some(runsTargeted)) return null;
+          const answer = await httpGet(plain.httpPort, "/", { host: targetedHost() });
+          return answer.status === 200 && !answer.body.includes('"v1"') ? answer : null;
+        },
+      );
+      expect(empty.status).toBe(200);
+      expect(empty.body).not.toContain('"v1"');
+
+      /* The constraint is reported beside the decision, so an operator looking at
+         a one-node placement can see that one node is what was asked for. */
+      const view = (await stateOf(plain)).placements.find(
+        (entry) => entry.project === PROJECT && entry.env === TARGETED,
+      );
+      expect(view?.selector).toEqual({ tier: "fast" });
+
+      /*
+       * Lifting the constraint, asked of the node that is NOT running it: a
+       * selector change is a plain record update any node carries out, and it
+       * takes effect on the coordinator's next assignment pass rather than here.
+       */
+      const clearedAt = Date.now();
+      const cleared = await runCli(envArgs("selector", TARGETED, plain, ["--clear"]), {});
+      expectCleanExit(cleared);
+      expect(cleared.output).toContain("no nodes any more");
+
+      await until(`${TARGETED} to spread to both nodes`, DEADLINE_MS, async () => {
+        const states = await Promise.all(nodes.map(async (node) => stateOf(node)));
+        return states.every((state) => placedNodes(state, TARGETED)?.length === 2) ? states : null;
+      });
+      /* And the node that was excluded starts serving it, which is the whole
+         claim: the constraint was what kept it off, and nothing else. */
+      const spread = await untilServes(plain, targetedHost(), "v1");
+      const spreadMs = Date.now() - clearedAt;
+
+      expect(JSON.parse(spread.body).version).toBe("v1");
+      expect(placedNodes(await stateOf(plain), TARGETED)).toEqual([NODE_A, NODE_B]);
+
+      observed.nodeSelector = {
+        environment: TARGETED,
+        selector: FAST_LABEL,
+        deployedThrough: labelled.id,
+        placedOn: labelled.id,
+        excluded: plain.id,
+        placedMs,
+        excludedAnswer: { status: empty.status, body: empty.body.slice(0, 120) },
+        clearedThrough: plain.id,
+        spreadMs,
+        clearedOutput: cleared.output.trim().slice(0, 300),
+      };
     },
     STEP_TIMEOUT_MS,
   );
@@ -822,8 +956,14 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
 
 /* ------------------------------------------------------------------ helpers */
 
-/** Starts one Caddy and the agent that shares its network namespace. */
-async function startNode(id: string): Promise<Node> {
+/**
+ * Starts one Caddy and the agent that shares its network namespace.
+ *
+ * `labels` is what the operator says this node IS, written `k=v,k2=v2`. It is
+ * boot configuration: the agent writes it into the node's registry record on
+ * every registration, so it is set here and nowhere else.
+ */
+async function startNode(id: string, labels?: string): Promise<Node> {
   const caddy = await new GenericContainer(CADDY_IMAGE)
     .withCopyFilesToContainer([
       { source: join(FIXTURES, "caddy.json"), target: "/etc/caddy/config.json" },
@@ -868,6 +1008,7 @@ async function startNode(id: string): Promise<Node> {
          is only useful if something is listening on it. */
       SCALO_BIND_HOST: "0.0.0.0",
       ESBUILD_BINARY_PATH: "/usr/local/bin/esbuild",
+      ...(labels === undefined ? {} : { SCALO_NODE_LABELS: labels }),
     })
     .withCommand(["node", "dist/cli/index.mjs", "up", "--listen", `0.0.0.0:${String(AGENT_PORT)}`])
     .withLogConsumer((stream: Readable) => {
@@ -905,6 +1046,15 @@ function soloHost(): string {
 
 function sunsetHost(): string {
   return `${PROJECT}--${SUNSET}.${PLATFORM_DOMAIN}`;
+}
+
+function targetedHost(): string {
+  return `${PROJECT}--${TARGETED}.${PLATFORM_DOMAIN}`;
+}
+
+/** Whether a process on a node is one serving {@link TARGETED}. */
+function runsTargeted(process: ProcessStatus): boolean {
+  return process.state === "running" && process.id.startsWith(`${PROJECT}--${TARGETED}--`);
 }
 
 /** Whether a process on a node is one serving {@link SOLO}. */
@@ -974,13 +1124,18 @@ function countOf(body: string): number | null {
   }
 }
 
-/** The flags one deploy of the fixture is run with, from the host through node-a. */
-function deployArgs(dir: string, environment: string, extra: string[] = []): string[] {
+/** The flags one deploy of the fixture is run with, from the host through `via`. */
+function deployArgs(
+  dir: string,
+  environment: string,
+  extra: string[] = [],
+  via: Node = nodes[0],
+): string[] {
   return [
     "deploy",
     dir,
     "--agent",
-    `http://127.0.0.1:${String(nodes[0].agentPort)}`,
+    `http://127.0.0.1:${String(via.agentPort)}`,
     "--project",
     PROJECT,
     "--env",

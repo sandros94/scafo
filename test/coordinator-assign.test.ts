@@ -23,12 +23,13 @@ import {
   readPlacement,
   registerNode,
   retireEnvironment,
+  setNodeSelector,
   setReplicas,
   unretireEnvironment,
 } from "../src/core/registry/index.ts";
 import { deleteKey } from "../src/core/registry/cas.ts";
 import { environmentKey, placementKey } from "../src/core/registry/paths.ts";
-import type { NodeRecord, PlacementRecord } from "../src/core/types/registry.ts";
+import type { NodeRecord, NodeSelector, PlacementRecord } from "../src/core/types/registry.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, type ManualClock, rejectsWith } from "./_helpers.ts";
@@ -139,6 +140,192 @@ describe("assigning environments to nodes", () => {
     await coordinator.runOnce();
 
     expect((await readPlacement(clock.ctx, PROJECT, "prod"))?.nodes).toEqual([NODE_A, NODE_B]);
+  });
+});
+
+describe("assigning under a node selector", () => {
+  const FAST: NodeSelector = { tier: "fast" };
+
+  beforeEach(async () => {
+    /* Re-registered with labels: registration replaces a node's record
+       wholesale, which is exactly how an operator relabels a machine. */
+    await register(NODE_A, { tier: "fast", region: "eu-west-1" });
+    await register(NODE_B, { tier: "slow", region: "eu-west-1" });
+  });
+
+  it("places it only on the nodes whose labels the selector names", async () => {
+    await environmentNamed("prod", { nodeSelector: FAST });
+    const coordinator = coordinatorFor(NODE_A);
+
+    await coordinator.runOnce();
+
+    /* A long-lived environment defaults to "all", and under a selector "all"
+       means every MATCHING node — so the constraint is what narrows it here,
+       not the replica count. */
+    expect((await readPlacement(clock.ctx, PROJECT, "prod"))?.nodes).toEqual([NODE_A]);
+    expect(coordinator.status().lastAssignment?.unplaced).toEqual([]);
+  });
+
+  it("picks the replicas it was asked for out of the matching nodes alone", async () => {
+    await register("node-c", { tier: "fast", region: "us-east-1" });
+    await environmentNamed("prod", { nodeSelector: FAST });
+    await setReplicas(clock.ctx, PROJECT, "prod", 1);
+    const coordinator = coordinatorFor(NODE_A);
+
+    await coordinator.runOnce();
+
+    const placed = (await readPlacement(clock.ctx, PROJECT, "prod"))?.nodes ?? [];
+    expect(placed).toHaveLength(1);
+    /* The selector narrowed the candidates and rendezvous chose among THOSE, so
+       the one node it picked is necessarily a matching one. */
+    expect([NODE_A, "node-c"]).toContain(placed[0]);
+  });
+
+  it("leaves an unconstrained environment beside it over the whole fleet", async () => {
+    await environmentNamed("prod", { nodeSelector: FAST });
+    await environmentNamed("staging");
+    const coordinator = coordinatorFor(NODE_A);
+
+    await coordinator.runOnce();
+
+    expect((await readPlacement(clock.ctx, PROJECT, "prod"))?.nodes).toEqual([NODE_A]);
+    expect((await readPlacement(clock.ctx, PROJECT, "staging"))?.nodes).toEqual([NODE_A, NODE_B]);
+  });
+
+  it("moves the environment on the next tick after the selector changes", async () => {
+    await environmentNamed("prod", { nodeSelector: FAST });
+    const coordinator = coordinatorFor(NODE_A);
+    await coordinator.runOnce();
+    expect((await readPlacement(clock.ctx, PROJECT, "prod"))?.nodes).toEqual([NODE_A]);
+
+    await setNodeSelector(clock.ctx, PROJECT, "prod", { tier: "slow" });
+    clock.tick(TTL_MS / 3);
+    await coordinator.runOnce();
+
+    /* Stating the intent is one act and placing it is another: the change lands
+       on the coordinator's next pass, under the same fenced write as always. */
+    expect((await readPlacement(clock.ctx, PROJECT, "prod"))?.nodes).toEqual([NODE_B]);
+  });
+
+  it("puts it back over the whole fleet when the selector is cleared", async () => {
+    await environmentNamed("prod", { nodeSelector: FAST });
+    const coordinator = coordinatorFor(NODE_A);
+    await coordinator.runOnce();
+
+    await setNodeSelector(clock.ctx, PROJECT, "prod", null);
+    clock.tick(TTL_MS / 3);
+    await coordinator.runOnce();
+
+    expect((await readPlacement(clock.ctx, PROJECT, "prod"))?.nodes).toEqual([NODE_A, NODE_B]);
+  });
+});
+
+describe("an environment whose selector no live node satisfies", () => {
+  const IMPOSSIBLE: NodeSelector = { gpu: "a100" };
+
+  beforeEach(async () => {
+    await register(NODE_A, { tier: "fast" });
+    await register(NODE_B, { tier: "slow" });
+  });
+
+  it("KEEPS the placement it already had, writing nothing and deleting nothing", async () => {
+    await environmentNamed("prod");
+    const coordinator = coordinatorFor(NODE_A);
+    await coordinator.runOnce();
+    const before = await readPlacement(clock.ctx, PROJECT, "prod");
+    expect(before?.nodes).toEqual([NODE_A, NODE_B]);
+
+    /* The labels go away under it — a node not back from maintenance, a fleet
+       mid-relabelling, a typo'd selector. */
+    await setNodeSelector(clock.ctx, PROJECT, "prod", IMPOSSIBLE);
+    clock.tick(TTL_MS / 3);
+    written = [];
+    const deletesBefore = store.dels;
+    await coordinator.runOnce();
+
+    /*
+     * THE RULE THIS FEATURE HANGS FROM. An empty decision would stop the
+     * environment on every node serving it, and removing the record would stop
+     * it just as dead — a selector-bearing environment has no run-everywhere
+     * fallback. A stale-but-serving placement beats an outage, so the last
+     * decision stands untouched and the operator is told instead.
+     */
+    expect(await readPlacement(clock.ctx, PROJECT, "prod")).toEqual(before);
+    expect(placementWrites()).toEqual([]);
+    expect(store.dels).toBe(deletesBefore);
+  });
+
+  it("records the failure against that environment, naming the selector", async () => {
+    await environmentNamed("prod", { nodeSelector: IMPOSSIBLE });
+    const coordinator = coordinatorFor(NODE_A);
+
+    await coordinator.runOnce();
+
+    const unplaced = coordinator.status().lastAssignment?.unplaced ?? [];
+    expect(unplaced).toHaveLength(1);
+    expect(unplaced[0].target).toBe(`${PROJECT}/prod`);
+    expect(unplaced[0].reason).toBe("placement-unavailable");
+    /* The detail has to carry what an operator acts on: which environment, and
+       which labels nothing satisfied. */
+    expect(unplaced[0].detail).toContain(`${PROJECT}/prod`);
+    expect(unplaced[0].detail).toContain("gpu=a100");
+  });
+
+  it("writes no placement at all for one that was never placed", async () => {
+    await environmentNamed("prod", { nodeSelector: IMPOSSIBLE });
+    const coordinator = coordinatorFor(NODE_A);
+
+    await coordinator.runOnce();
+
+    /* Not an empty decision, and not a decision naming an arbitrary node: no
+       record, which is the state the node-side reader refuses to serve on. */
+    expect(await readPlacement(clock.ctx, PROJECT, "prod")).toBeNull();
+    expect(placementWrites()).toEqual([]);
+  });
+
+  it("is not a failure of the PASS: everything else is placed as usual", async () => {
+    await environmentNamed("prod", { nodeSelector: IMPOSSIBLE });
+    await environmentNamed("staging");
+    const coordinator = coordinatorFor(NODE_A);
+
+    await coordinator.runOnce();
+
+    expect(coordinator.status().lastAssignFailure).toBeNull();
+    expect(coordinator.status().holding).toBe(true);
+    expect((await readPlacement(clock.ctx, PROJECT, "staging"))?.nodes).toEqual([NODE_A, NODE_B]);
+    expect(coordinator.status().lastAssignment?.changed).toEqual([
+      { target: `${PROJECT}/staging`, nodes: [NODE_A, NODE_B] },
+    ]);
+  });
+
+  it("places it the moment a node that satisfies it turns up", async () => {
+    await environmentNamed("prod", { nodeSelector: IMPOSSIBLE });
+    const coordinator = coordinatorFor(NODE_A);
+    await coordinator.runOnce();
+    expect(await readPlacement(clock.ctx, PROJECT, "prod")).toBeNull();
+
+    await register("node-gpu", { gpu: "a100" });
+    clock.tick(TTL_MS / 3);
+    await coordinator.runOnce();
+
+    expect((await readPlacement(clock.ctx, PROJECT, "prod"))?.nodes).toEqual(["node-gpu"]);
+    expect(coordinator.status().lastAssignment?.unplaced).toEqual([]);
+  });
+
+  it("still removes the placement of one that is RETIRED, selector or not", async () => {
+    /* Retirement is a decision to stop; an unsatisfiable selector is a failure
+       to decide. Only the second is a reason to leave a placement standing. */
+    await environmentNamed("prod", { nodeSelector: IMPOSSIBLE });
+    const coordinator = coordinatorFor(NODE_A);
+    await register("node-gpu", { gpu: "a100" });
+    await coordinator.runOnce();
+    expect(await readPlacement(clock.ctx, PROJECT, "prod")).not.toBeNull();
+
+    await retireEnvironment(clock.ctx, PROJECT, "prod");
+    clock.tick(TTL_MS / 3);
+    await coordinator.runOnce();
+
+    expect(await readPlacement(clock.ctx, PROJECT, "prod")).toBeNull();
   });
 });
 
@@ -358,25 +545,32 @@ function agentFor(nodeId: string): AgentContext {
 /** An environment with a build to serve, so it is a real placement target. */
 async function environmentNamed(
   name: string,
-  opts?: { ephemeral?: boolean; idleTtlS?: number },
+  opts?: { ephemeral?: boolean; idleTtlS?: number; nodeSelector?: NodeSelector },
 ): Promise<void> {
   await createEnvironment(clock.ctx, PROJECT, {
     name,
     ...(opts?.ephemeral === undefined ? {} : { ephemeral: opts.ephemeral }),
     ...(opts?.idleTtlS === undefined ? {} : { idleTtlS: opts.idleTtlS }),
+    ...(opts?.nodeSelector === undefined ? {} : { nodeSelector: opts.nodeSelector }),
   });
   await flipAlias(clock.ctx, PROJECT, name, BUILD);
 }
 
-/** Registers `id` as a node that has just beaten. */
-async function register(id: string): Promise<NodeRecord> {
+/** Registers `id` as a node that has just beaten, carrying `labels` if any. */
+async function register(id: string, labels?: Record<string, string>): Promise<NodeRecord> {
   return registerNode(clock.ctx, {
     v: 1,
     id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: `key-${id}` },
     addresses: { internal: `10.0.0.${id === NODE_A ? "1" : "2"}`, agentPort: 7400 },
     heartbeatAt: new Date(clock.nowMs()).toISOString(),
+    ...(labels === undefined ? {} : { labels }),
   });
+}
+
+/** The placement keys a pass wrote, which is what "wrote nothing" is asserted against. */
+function placementWrites(): string[] {
+  return written.filter((key) => key.startsWith("_scalo/placement/"));
 }
 
 /** The decision the competing coordinator wrote, at the same fence. */

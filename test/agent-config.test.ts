@@ -395,6 +395,77 @@ describe("platform domains", () => {
   });
 });
 
+describe("the labels a node carries", () => {
+  it("reads the comma syntax a flag and an environment variable carry", async () => {
+    const config = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCALO_NODE_LABELS: " tier=fast, region = eu-west-1 ,," },
+    });
+
+    expect(config.node.labels).toEqual({ tier: "fast", region: "eu-west-1" });
+  });
+
+  it("reads the object the config file writes them as", async () => {
+    const config = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ node: { labels: { tier: "fast" } } })),
+      env: REQUIRED_ENV,
+    });
+
+    expect(config.node.labels).toEqual({ tier: "fast" });
+  });
+
+  it("lets the inline form replace the file's whole set rather than merging into it", async () => {
+    const config = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(
+        CONFIG_PATH,
+        JSON.stringify({ node: { labels: { tier: "slow", gpu: "a100" } } }),
+      ),
+      env: REQUIRED_ENV,
+      flags: { "node-labels": "tier=fast" },
+    });
+
+    /* Labels describe one machine: a set half-stated in two places is one
+       nobody can read off either of them. */
+    expect(config.node.labels).toEqual({ tier: "fast" });
+  });
+
+  it("carries none at all when nothing configures them", async () => {
+    const config = await loadAgentConfig({ env: REQUIRED_ENV });
+
+    expect(config.node.labels).toBeUndefined();
+  });
+
+  it.each(["tier", "Tier=fast", "tier=FAST", "tier=fast,tier=slow", "=fast"])(
+    "refuses %p, naming the setting",
+    async (value) => {
+      const error = await rejectsWith(
+        () => loadAgentConfig({ env: { ...REQUIRED_ENV, SCALO_NODE_LABELS: value } }),
+        "invalid-input",
+      );
+
+      expect(error.detail).toContain("node.labels");
+    },
+  );
+
+  it.each([{ node: { labels: ["tier=fast"] } }, { node: { labels: { tier: 1 } } }])(
+    "refuses a file value that is not an object of labels",
+    async (file) => {
+      const error = await rejectsWith(
+        () =>
+          loadAgentConfig({
+            configPath: CONFIG_PATH,
+            readFile: fileAt(CONFIG_PATH, JSON.stringify(file)),
+            env: REQUIRED_ENV,
+          }),
+        "invalid-input",
+      );
+
+      expect(error.detail).toContain("node.labels");
+    },
+  );
+});
+
 describe("the address runtime processes bind", () => {
   it("keeps runtime processes on loopback until something says otherwise", async () => {
     const config = await loadAgentConfig({ env: REQUIRED_ENV });

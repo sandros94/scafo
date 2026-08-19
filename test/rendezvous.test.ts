@@ -12,17 +12,33 @@ import {
   assignNodes,
   assertReplicas,
   defaultReplicas,
+  eligibleNodes,
   parseReplicas,
   rendezvousOrder,
   resolveReplicas,
 } from "../src/core/placement/index.ts";
-import type { EnvironmentRecord, ReplicaCount } from "../src/core/types/registry.ts";
+import type {
+  EnvironmentRecord,
+  NodeRecord,
+  NodeSelector,
+  ReplicaCount,
+} from "../src/core/types/registry.ts";
 import { randomSlug, rejectsWith, seededRng } from "./_helpers.ts";
 
 const PROJECT = "shop";
 
 /** Seeds the property run replays from; a failure is reproducible by its number. */
 const SEEDS = [1, 7, 42, 1337, 90_210];
+
+/** The label half the property run's fleet carries and half its environments select. */
+const FAST = "fast";
+
+/** One environment to place, with the constraint it places under. */
+interface Target {
+  project: string;
+  env: string;
+  selector?: NodeSelector;
+}
 
 describe("rendezvousOrder", () => {
   it("ranks the same nodes the same way however they arrive", async () => {
@@ -79,7 +95,7 @@ describe("assignNodes", () => {
     const chosen = await assignNodes({ project: PROJECT, env: "prod", nodes, replicas: 2 });
 
     expect(chosen).toHaveLength(2);
-    expect(chosen).toEqual([...ranked.slice(0, 2)].sort());
+    expect(chosen).toEqual(ranked.slice(0, 2).sort());
   });
 
   it("gives a count larger than the fleet everything the fleet has", async () => {
@@ -108,34 +124,61 @@ describe("the stability property", () => {
     "moves only the environments a removed node was serving (seed %i)",
     async (seed) => {
       const rng = seededRng(seed);
-      const nodes = Array.from({ length: 5 }, (_, i) => `node-${String(i)}-${randomSlug(rng, 6)}`);
-      const environments = Array.from({ length: 40 }, () => ({
+      /*
+       * Half the fleet carries `tier=fast` and half the environments select it,
+       * so one run covers the unconstrained case and the constrained one at
+       * once. The property has to hold WITHIN THE ELIGIBLE SET exactly as it
+       * holds over the whole fleet — selecting is only a way of deciding what
+       * the candidates are, and everything below is stated over candidates.
+       */
+      const fleet = Array.from({ length: 5 }, (_, i) =>
+        node(`node-${String(i)}-${randomSlug(rng, 6)}`, { tier: i < 3 ? FAST : "slow" }),
+      );
+      const environments: Target[] = Array.from({ length: 40 }, (_, i) => ({
         project: randomSlug(rng, 8),
         env: randomSlug(rng, 8),
+        ...(i % 2 === 0 ? { selector: { tier: FAST } } : {}),
       }));
       const replicas: ReplicaCount = 2;
 
+      /* Candidates first, rendezvous second — the order the coordinator uses. */
+      const place = async (candidates: NodeRecord[], target: Target): Promise<string[]> =>
+        assignNodes({
+          project: target.project,
+          env: target.env,
+          nodes: eligibleNodes(candidates, target.selector).map((record) => record.id),
+          replicas,
+        });
+
       const before = new Map<string, string[]>();
       for (const target of environments) {
-        before.set(
-          `${target.project}/${target.env}`,
-          await assignNodes({ ...target, nodes, replicas }),
-        );
+        before.set(`${target.project}/${target.env}`, await place(fleet, target));
       }
 
-      /* One node leaves — a crash, a drain, a machine taken out of the fleet. */
-      const leaving = nodes[2];
-      const remaining = nodes.filter((id) => id !== leaving);
+      /* One node leaves — a crash, a drain, a machine taken out of the fleet.
+         A `tier=fast` one, so the environments that select are disturbed too
+         rather than sitting the run out. */
+      const leaving = fleet[2].id;
+      const remaining = fleet.filter((record) => record.id !== leaving);
 
-      const seen: Array<{ key: string; was: string[]; now: string[]; held: boolean }> = [];
+      const seen: Array<{
+        key: string;
+        was: string[];
+        now: string[];
+        held: boolean;
+        selector?: NodeSelector;
+        eligible: number;
+      }> = [];
       for (const target of environments) {
         const key = `${target.project}/${target.env}`;
         const was = before.get(key) as string[];
         seen.push({
           key,
           was,
-          now: await assignNodes({ ...target, nodes: remaining, replicas }),
+          now: await place(remaining, target),
           held: was.includes(leaving),
+          ...(target.selector === undefined ? {} : { selector: target.selector }),
+          eligible: eligibleNodes(remaining, target.selector).length,
         });
       }
 
@@ -150,7 +193,7 @@ describe("the stability property", () => {
       );
 
       /* The ones it did serve keep every OTHER node they had, and replace just
-         the one that is missing. */
+         the one that is missing — out of what they are eligible for. */
       const disturbed = seen.filter((entry) => entry.held);
       expect(
         disturbed.map((entry) => ({
@@ -166,12 +209,27 @@ describe("the stability property", () => {
           env: entry.key,
           keptTheRest: true,
           stillThere: false,
-          count: Math.min(replicas, remaining.length),
+          count: Math.min(replicas, entry.eligible),
         })),
       );
 
-      /* The run is only evidence if the node actually held something. */
-      expect(disturbed.length).toBeGreaterThan(0);
+      /* And the constraint held the whole way through, which is what makes the
+         above a property OF the eligible set: a selecting environment never
+         landed on a node without the label, before the change or after it. */
+      const fast = new Set(
+        fleet.filter((record) => record.labels?.tier === FAST).map((record) => record.id),
+      );
+      for (const entry of seen.filter((candidate) => candidate.selector !== undefined)) {
+        expect(
+          [...entry.was, ...entry.now].every((id) => fast.has(id)),
+          entry.key,
+        ).toBe(true);
+      }
+
+      /* The run is only evidence if the node actually held something, on both
+         sides of the constraint. */
+      expect(disturbed.filter((entry) => entry.selector === undefined).length).toBeGreaterThan(0);
+      expect(disturbed.filter((entry) => entry.selector !== undefined).length).toBeGreaterThan(0);
     },
   );
 
@@ -196,6 +254,84 @@ describe("the stability property", () => {
       expect(count, `${id} was given ${String(count)} of 250`).toBeGreaterThan(20);
       expect(count, `${id} was given ${String(count)} of 250`).toBeLessThan(110);
     }
+  });
+});
+
+describe("a selector and a replica count together", () => {
+  /* Two of five carry the label, so "every matching node" and "every node" are
+     never the same answer by accident. */
+  const fleet = [
+    node("node-a", { tier: FAST }),
+    node("node-b", { tier: "slow" }),
+    node("node-c", { tier: FAST }),
+    node("node-d", { tier: "slow" }),
+    node("node-e", { tier: "slow" }),
+  ];
+  const selector: NodeSelector = { tier: FAST };
+
+  it('gives "all" every MATCHING node, and not every node', async () => {
+    const chosen = await assignNodes({
+      project: PROJECT,
+      env: "prod",
+      nodes: eligibleNodes(fleet, selector).map((record) => record.id),
+      replicas: "all",
+    });
+
+    expect(chosen).toEqual(["node-a", "node-c"]);
+  });
+
+  it("gives a count that many OF the matching nodes", async () => {
+    const chosen = await assignNodes({
+      project: PROJECT,
+      env: "prod",
+      nodes: eligibleNodes(fleet, selector).map((record) => record.id),
+      replicas: 1,
+    });
+
+    expect(chosen).toHaveLength(1);
+    expect(["node-a", "node-c"]).toContain(chosen[0]);
+  });
+
+  it("narrows BEFORE it ranks, so the best ineligible node costs nothing", async () => {
+    /*
+     * The composition order, asserted on the case that tells the two apart.
+     * Here the node rendezvous ranks FIRST over the whole fleet is the only one
+     * the selector excludes: narrowing first gives the best node that is
+     * allowed, while ranking first and filtering after would give nothing at
+     * all — an environment refused a placement by a node it never wanted.
+     */
+    const ranked = await rendezvousOrder(
+      PROJECT,
+      "prod",
+      fleet.map((record) => record.id),
+    );
+    const excluded = ranked[0];
+    const labelled = fleet.map((record) =>
+      node(record.id, { tier: record.id === excluded ? "slow" : FAST }),
+    );
+
+    const candidates = eligibleNodes(labelled, selector).map((record) => record.id);
+    const chosen = await assignNodes({
+      project: PROJECT,
+      env: "prod",
+      nodes: candidates,
+      replicas: 1,
+    });
+
+    expect(candidates).not.toContain(excluded);
+    expect(chosen).toEqual([(await rendezvousOrder(PROJECT, "prod", candidates))[0]]);
+    expect(chosen).toHaveLength(1);
+  });
+
+  it("answers nothing at all when no node matches, rather than falling back", async () => {
+    /* The empty answer the coordinator must never write down: see
+       `coordinator-assign.test.ts` for what it does with it instead. */
+    const candidates = eligibleNodes(fleet, { gpu: "a100" }).map((record) => record.id);
+
+    expect(candidates).toEqual([]);
+    expect(
+      await assignNodes({ project: PROJECT, env: "prod", nodes: candidates, replicas: "all" }),
+    ).toEqual([]);
   });
 });
 
@@ -260,6 +396,17 @@ describe("parseReplicas", () => {
     },
   );
 });
+
+/** A node record carrying the labels a selector is matched against. */
+function node(id: string, labels: Record<string, string>): NodeRecord {
+  return {
+    v: 1,
+    id,
+    publicKey: { kty: "OKP", crv: "Ed25519", x: `key-${id}` },
+    addresses: { internal: "10.0.0.1", agentPort: 7400 },
+    labels,
+  };
+}
 
 function environment(opts: { ephemeral: boolean; replicas?: ReplicaCount }): EnvironmentRecord {
   return {

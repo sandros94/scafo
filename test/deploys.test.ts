@@ -234,6 +234,9 @@ describe("what an upload must carry", () => {
       { flip: "yes" },
       { replicas: 0 },
       { replicas: "every" },
+      { nodeSelector: "tier=fast" },
+      { nodeSelector: {} },
+      { nodeSelector: { Tier: "fast" } },
     ];
 
     for (const patch of bad) {
@@ -331,6 +334,61 @@ describe("what happens to an accepted deploy", () => {
     await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
     await expect(getEnvironment(clock.ctx, PROJECT, "scaled")).resolves.toMatchObject({
       replicas: 2,
+    });
+  });
+
+  it("creates the environment with the node selector the upload asked for", async () => {
+    const id = (await responseId(
+      await upload(await operatorToken(), {
+        ...meta(),
+        environment: "targeted",
+        nodeSelector: { tier: "fast" },
+      }),
+    )) as string;
+
+    await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
+    await expect(getEnvironment(clock.ctx, PROJECT, "targeted")).resolves.toMatchObject({
+      nodeSelector: { tier: "fast" },
+    });
+  });
+
+  it("restates the node selector of an environment that already exists", async () => {
+    await createEnvironment(clock.ctx, PROJECT, {
+      name: "targeted",
+      nodeSelector: { tier: "slow" },
+    });
+
+    const id = (await responseId(
+      await upload(await operatorToken(), {
+        ...meta(),
+        environment: "targeted",
+        nodeSelector: { tier: "fast" },
+      }),
+    )) as string;
+
+    await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
+    await expect(getEnvironment(clock.ctx, PROJECT, "targeted")).resolves.toMatchObject({
+      nodeSelector: { tier: "fast" },
+    });
+  });
+
+  it("leaves the node selector alone when the upload names none", async () => {
+    /* Where an application runs is an operational decision. A deploy that
+       silently lifted a constraint would spread it across a fleet because
+       somebody re-ran a pipeline that never mentioned placement — and lifting
+       one is `scalo env selector --clear`, which says so out loud. */
+    await createEnvironment(clock.ctx, PROJECT, {
+      name: "targeted",
+      nodeSelector: { tier: "fast" },
+    });
+
+    const id = (await responseId(
+      await upload(await operatorToken(), { ...meta(), environment: "targeted" }),
+    )) as string;
+
+    await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
+    await expect(getEnvironment(clock.ctx, PROJECT, "targeted")).resolves.toMatchObject({
+      nodeSelector: { tier: "fast" },
     });
   });
 

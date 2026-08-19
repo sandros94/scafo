@@ -12,6 +12,7 @@ import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { type AgentState, createAgentApp, type EnvironmentRetirement } from "../src/agent/app.ts";
+import type { AssignmentFailure } from "../src/agent/_assign.ts";
 import type { AgentConfig } from "../src/agent/config.ts";
 import { renderProblem } from "../src/agent/middleware.ts";
 import { signNodeToken } from "../src/core/auth/index.ts";
@@ -256,6 +257,127 @@ describe("POST /v1/environments/:project/:env/retire", () => {
   });
 });
 
+describe("POST /v1/environments/:project/:env/selector", () => {
+  it("chooses which nodes may serve it, without any lease at all", async () => {
+    await deployable();
+
+    const body = await selectorBody({ selector: { tier: "fast" } });
+
+    /* A plain conditional update on one record, like retirement: no coordinator
+       runs on this app and none is needed. What it states is an intent — which
+       nodes actually get it stays the coordinator's to decide. */
+    expect(body.environment.nodeSelector).toEqual({ tier: "fast" });
+    expect(await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).toEqual(body.environment);
+  });
+
+  it("lifts the constraint when the body says null", async () => {
+    await deployable();
+    await selectorBody({ selector: { tier: "fast" } });
+
+    const body = await selectorBody({ selector: null });
+
+    expect("nodeSelector" in body.environment).toBe(false);
+  });
+
+  it("accepts a selector no node satisfies, because that is the coordinator's to report", async () => {
+    /* Refusing it here would mean an operator could not label an environment for
+       a node they are about to add. */
+    await deployable();
+
+    const body = await selectorBody({ selector: { gpu: "a100" } });
+
+    expect(body.environment.nodeSelector).toEqual({ gpu: "a100" });
+  });
+
+  it("refuses a body that says nothing about the selector", async () => {
+    await deployable();
+
+    /* Clearing a constraint is far too consequential to be what an omission
+       defaults to, so a missing field is neither "set" nor "clear". */
+    const response = await selectorRequest({});
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).detail).toContain("null to clear it");
+  });
+
+  it.each([{ selector: {} }, { selector: { Tier: "fast" } }, { selector: "tier=fast" }])(
+    "refuses %p",
+    async (sent) => {
+      await deployable();
+
+      const response = await selectorRequest(sent);
+
+      expect(response.status).toBe(400);
+      expect((await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).nodeSelector).toBeUndefined();
+    },
+  );
+
+  it("answers a missing environment as a miss rather than as a selector", async () => {
+    await deployable();
+
+    const response = await app.request(`/v1/environments/${PROJECT}/ghost/selector`, {
+      method: "POST",
+      headers: { ...(await bearer()), "content-type": "application/json" },
+      body: JSON.stringify({ selector: { tier: "fast" } }),
+    });
+
+    expect(response.status).toBe(404);
+  });
+});
+
+describe("GET /v1/state, on the node that is coordinating", () => {
+  const UNPLACED = {
+    target: `${PROJECT}/${ENVIRONMENT}`,
+    reason: "placement-unavailable" as const,
+    detail: `no live node carries every label of "gpu=a100"`,
+  };
+
+  it("reports what the last assignment pass could not place", async () => {
+    const coordinating = await appCoordinating([UNPLACED]);
+
+    const state = (await (
+      await coordinating.request("/v1/state", { headers: await bearer() })
+    ).json()) as AgentState;
+
+    /*
+     * The one place an unsatisfiable selector becomes visible. Nothing else
+     * changed — that is the point of the rule — so without this the operator
+     * would see an environment placed on nodes it no longer matches and have
+     * nothing anywhere telling them why.
+     */
+    expect(state.coordinator?.self).toBe(true);
+    expect(state.coordinator?.unplaced).toEqual([UNPLACED]);
+  });
+
+  it("says nothing at all when the pass placed everything", async () => {
+    const coordinating = await appCoordinating([]);
+
+    const state = (await (
+      await coordinating.request("/v1/state", { headers: await bearer() })
+    ).json()) as AgentState;
+
+    /* A settled installation reports no failures rather than reporting that
+       there were none. */
+    expect(state.coordinator?.self).toBe(true);
+    expect("unplaced" in (state.coordinator as object)).toBe(false);
+  });
+
+  it("never reports another node's account of its own pass", async () => {
+    /* The lease is a registry fact and the failures are not: they are this
+       node's account of work it did, and a node that is not coordinating did
+       none of it. */
+    await acquireLease(clock.ctx, "node-elsewhere");
+
+    const state = (await (
+      await app.request("/v1/state", { headers: await bearer() })
+    ).json()) as AgentState;
+
+    expect(state.coordinator?.node).toBe("node-elsewhere");
+    expect(state.coordinator?.self).toBe(false);
+    expect(state.coordinator?.unplaced).toBeUndefined();
+  });
+});
+
 describe("GET /v1/ingress/ask", () => {
   it("answers for a label under a platform domain without reading anything", async () => {
     /* Deliberately read-free: a platform label is a name this installation
@@ -456,4 +578,53 @@ async function bearer(): Promise<Record<string, string>> {
 async function deployable(): Promise<void> {
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, { name: ENVIRONMENT });
+}
+
+/** One call to the selector route with `sent` as the whole body. */
+async function selectorRequest(sent: Record<string, unknown>): Promise<Response> {
+  return app.request(`/v1/environments/${PROJECT}/${ENVIRONMENT}/selector`, {
+    method: "POST",
+    headers: { ...(await bearer()), "content-type": "application/json" },
+    body: JSON.stringify(sent),
+  });
+}
+
+/** The same call, asserted to have succeeded, with its body read back. */
+async function selectorBody(sent: Record<string, unknown>): Promise<EnvironmentRetirement> {
+  const response = await selectorRequest(sent);
+  expect(response.status, await response.clone().text()).toBe(200);
+  return (await response.json()) as EnvironmentRetirement;
+}
+
+/**
+ * A second app for this node, holding the lease and reporting `unplaced` as the
+ * account of its last assignment pass. The lease is a real one, because that is
+ * what the state route reads the election from.
+ */
+async function appCoordinating(unplaced: AssignmentFailure[]): Promise<H3> {
+  const held = await acquireLease(clock.ctx, NODE_ID);
+  if (held === null) throw new Error("the fixture could not take the lease");
+
+  return createAgentApp({
+    config: agentConfig(),
+    nodeId: NODE_ID,
+    registry: clock.ctx,
+    supervisor: fakeSupervisor(),
+    version: VERSION,
+    coordinator: {
+      start: () => {},
+      stop: () => Promise.resolve(),
+      runOnce: () => Promise.resolve(),
+      handle: () => held,
+      status: () => ({
+        holding: true,
+        lease: held.lease,
+        lastReapAt: null,
+        lastReapFailure: null,
+        lastAssignAt: new Date(clock.nowMs()).toISOString(),
+        lastAssignment: { live: [NODE_ID], changed: [], removed: [], skipped: [], unplaced },
+        lastAssignFailure: null,
+      }),
+    },
+  });
 }

@@ -23,6 +23,7 @@ import {
   NODE_LIVENESS_WINDOW_MS,
   readPlacement,
   registerNode,
+  setNodeSelector,
   setReplicas,
   writePlacement,
 } from "../src/core/registry/index.ts";
@@ -304,7 +305,101 @@ describe("setReplicas", () => {
   });
 });
 
+describe("setNodeSelector", () => {
+  it("states which nodes may serve an environment, leaving everything else alone", async () => {
+    const before = await getEnvironment(clock.ctx, PROJECT, ENV);
+
+    const updated = await setNodeSelector(clock.ctx, PROJECT, ENV, { tier: "fast" });
+
+    expect(updated).toEqual({ ...before, nodeSelector: { tier: "fast" } });
+    expect((await getEnvironment(clock.ctx, PROJECT, ENV)).nodeSelector).toEqual({ tier: "fast" });
+  });
+
+  it("replaces the whole selector rather than merging into it", async () => {
+    await setNodeSelector(clock.ctx, PROJECT, ENV, { tier: "fast", region: "eu-west-1" });
+
+    const updated = await setNodeSelector(clock.ctx, PROJECT, ENV, { region: "us-east-1" });
+
+    /* A selector is one statement about where an environment runs; merging would
+       leave an operator unable to take a requirement back off. */
+    expect(updated.nodeSelector).toEqual({ region: "us-east-1" });
+  });
+
+  it("clears it by REMOVING the field, not by storing an empty one", async () => {
+    await setNodeSelector(clock.ctx, PROJECT, ENV, { tier: "fast" });
+
+    const cleared = await setNodeSelector(clock.ctx, PROJECT, ENV, null);
+
+    /* The readers ask whether an environment carries a selector AT ALL — the
+       run-everywhere fallback turns on that question — so an empty object left
+       behind would keep the environment waiting on a coordinator forever. */
+    expect("nodeSelector" in cleared).toBe(false);
+    expect(await getEnvironment(clock.ctx, PROJECT, ENV)).toEqual(cleared);
+  });
+
+  it("clears one that was never set, without complaint", async () => {
+    const cleared = await setNodeSelector(clock.ctx, PROJECT, ENV, null);
+
+    expect("nodeSelector" in cleared).toBe(false);
+  });
+
+  it.each([{}, { Tier: "fast" }, { tier: "very fast" }, { tier: 1 }, [], "tier=fast"])(
+    "refuses %p and writes nothing",
+    async (value) => {
+      const putsBefore = store.puts;
+
+      await rejectsWith(
+        () => setNodeSelector(clock.ctx, PROJECT, ENV, value as never),
+        "invalid-input",
+      );
+
+      expect(store.puts).toBe(putsBefore);
+      expect((await getEnvironment(clock.ctx, PROJECT, ENV)).nodeSelector).toBeUndefined();
+    },
+  );
+
+  it("refuses an environment that is not there", async () => {
+    const error = await rejectsWith(
+      () => setNodeSelector(clock.ctx, PROJECT, "ghost", { tier: "fast" }),
+      "not-found",
+    );
+
+    expect(error.detail).toContain(environmentKey(PROJECT, "ghost"));
+  });
+
+  it("leaves the replica count it sits beside untouched", async () => {
+    await setReplicas(clock.ctx, PROJECT, ENV, 2);
+
+    const updated = await setNodeSelector(clock.ctx, PROJECT, ENV, { tier: "fast" });
+
+    /* The two compose: how many nodes, and which nodes they may be. */
+    expect(updated.replicas).toBe(2);
+    expect(updated.nodeSelector).toEqual({ tier: "fast" });
+  });
+});
+
 describe("createEnvironment", () => {
+  it("carries a node selector into the record, and leaves it off when none was given", async () => {
+    const stated = await createEnvironment(clock.ctx, PROJECT, {
+      name: "targeted",
+      nodeSelector: { tier: "fast" },
+    });
+    const silent = await createEnvironment(clock.ctx, PROJECT, { name: "anywhere" });
+
+    expect(stated.nodeSelector).toEqual({ tier: "fast" });
+    expect("nodeSelector" in silent).toBe(false);
+  });
+
+  it("refuses a selector that is not one, creating nothing", async () => {
+    const error = await rejectsWith(
+      () => createEnvironment(clock.ctx, PROJECT, { name: "bad", nodeSelector: {} }),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("clear the selector");
+    await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, "bad"), "not-found");
+  });
+
   it("carries a replica count into the record, and leaves it off when none was given", async () => {
     const stated = await createEnvironment(clock.ctx, PROJECT, { name: "one", replicas: 1 });
     const silent = await createEnvironment(clock.ctx, PROJECT, { name: "two" });

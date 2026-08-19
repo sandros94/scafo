@@ -18,8 +18,10 @@ import {
   agentOps,
   CLI_NODE_ID,
   describeRetirement,
+  describeSelectorChange,
   directOps,
   type EnvironmentOps,
+  readSelectorFlags,
 } from "../src/cli/_environments.ts";
 import { signNodeToken } from "../src/core/auth/index.ts";
 import {
@@ -106,6 +108,102 @@ describe.each([
 
   it("reports an environment that is not there rather than inventing one", async () => {
     await rejectsWith(() => build().retire({ project: PROJECT, env: "ghost" }), "not-found");
+  });
+});
+
+/* Choosing which nodes may serve an environment is a plain record update, so it
+   goes the same two ways retirement does and must answer identically on both. */
+describe.each([
+  ["through a node agent", (): EnvironmentOps => throughAgent()],
+  ["straight through the bucket", (): EnvironmentOps => throughBucket()],
+])("setting a node selector %s", (_name, build) => {
+  it("states the labels a node must carry, and answers with the record", async () => {
+    const environment = await build().setSelector(PROD, { tier: "fast" });
+
+    expect(environment.nodeSelector).toEqual({ tier: "fast" });
+    expect(await getEnvironment(clock.ctx, PROJECT, "prod")).toEqual(environment);
+  });
+
+  it("lifts the constraint when it is cleared", async () => {
+    await build().setSelector(PROD, { tier: "fast" });
+
+    const environment = await build().setSelector(PROD, null);
+
+    /* The field is gone rather than emptied: an environment with no selector is
+       served everywhere again, and an empty one would wait on a coordinator. */
+    expect("nodeSelector" in environment).toBe(false);
+    expect((await getEnvironment(clock.ctx, PROJECT, "prod")).nodeSelector).toBeUndefined();
+  });
+
+  it("refuses a selector that is not one, changing nothing", async () => {
+    await rejectsWith(() => build().setSelector(PROD, { Tier: "fast" } as never), "invalid-input");
+
+    expect((await getEnvironment(clock.ctx, PROJECT, "prod")).nodeSelector).toBeUndefined();
+  });
+
+  it("refuses an empty selector, naming the way to lift a constraint", async () => {
+    const error = await rejectsWith(() => build().setSelector(PROD, {}), "invalid-input");
+
+    expect(error.detail).toContain("clear the selector");
+  });
+
+  it("reports an environment that is not there rather than inventing one", async () => {
+    await rejectsWith(
+      () => build().setSelector({ project: PROJECT, env: "ghost" }, { tier: "fast" }),
+      "not-found",
+    );
+  });
+
+  it("takes no coordinator lease to do it", async () => {
+    /* Unlike a deletion: there is nothing here two nodes doing it at once could
+       corrupt, so neither transport has to become the coordinator. */
+    await build().setSelector(PROD, { tier: "fast" });
+
+    const lease = await readJson<CoordinatorLease>(clock.ctx, coordinatorKey());
+    expect(lease?.value.node).not.toBe(CLI_NODE_ID);
+  });
+});
+
+describe("what --set and --clear are read as", () => {
+  it("reads the labels of --set", () => {
+    expect(readSelectorFlags({ set: "tier=fast,region=eu-west-1", clear: false })).toEqual({
+      tier: "fast",
+      region: "eu-west-1",
+    });
+  });
+
+  it("reads --clear as the null that lifts the constraint", () => {
+    expect(readSelectorFlags({ set: undefined, clear: true })).toBeNull();
+  });
+
+  it("refuses both at once, which say opposite things", async () => {
+    const error = await rejectsWith(
+      () => Promise.resolve(readSelectorFlags({ set: "tier=fast", clear: true })),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("opposite");
+  });
+
+  it("refuses NEITHER rather than reading it as a clear", async () => {
+    /* An accidental `scalo env selector` that lifted a constraint would move an
+       application across a fleet without anyone having asked it to. */
+    const error = await rejectsWith(
+      () => Promise.resolve(readSelectorFlags({ set: undefined, clear: false })),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("--set");
+    expect(error.detail).toContain("--clear");
+  });
+
+  it("refuses labels it cannot read, before any node is troubled with them", async () => {
+    const error = await rejectsWith(
+      () => Promise.resolve(readSelectorFlags({ set: "tier", clear: false })),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("--set");
   });
 });
 
@@ -232,6 +330,23 @@ describe("what the command puts on the terminal", () => {
     const environment = await getEnvironment(clock.ctx, PROJECT, "prod");
 
     expect(describeRetirement(PROD, environment)).toContain("is not retired");
+  });
+
+  it("names the labels a selector now asks for, and who acts on them", async () => {
+    const environment = await throughBucket().setSelector(PROD, { tier: "fast" });
+
+    const printed = describeSelectorChange(PROD, environment);
+
+    expect(printed).toContain("tier=fast");
+    /* Stating the intent is not placing it: the coordinator does that, and the
+       operator has to know that is what they are waiting for. */
+    expect(printed).toContain("coordinator");
+  });
+
+  it("says what a cleared selector means, rather than saying nothing", async () => {
+    const environment = await throughBucket().setSelector(PROD, null);
+
+    expect(describeSelectorChange(PROD, environment)).toContain("no nodes any more");
   });
 });
 

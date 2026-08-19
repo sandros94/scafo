@@ -18,6 +18,7 @@ import {
   flipAlias,
   type LeaseHandle,
   retireEnvironment,
+  setNodeSelector,
   unretireEnvironment,
   writePlacement,
 } from "../src/core/registry/index.ts";
@@ -134,6 +135,103 @@ describe("an environment that has been placed", () => {
     expect(
       state.placements.map((view) => `${view.project}/${view.env}:${String(view.self)}`),
     ).toEqual([`${OTHER_PROJECT}/prod:true`, `${PROJECT}/prod:false`]);
+  });
+});
+
+describe("an environment that carries a node selector", () => {
+  const FAST = { tier: "fast" };
+
+  it("is NOT served anywhere while no coordinator has placed it", async () => {
+    /*
+     * THE ASYMMETRY, and the whole reason this is not the fallback above. A
+     * selector is an explicit constraint — the operator has said which nodes may
+     * run this — while the run-everywhere fallback exists to preserve behaviour
+     * nobody ever stated. Serving it here before the coordinator has decided
+     * would break exactly what was asked for, on the widest possible set of
+     * nodes: every one of them, including all the ones the selector excludes.
+     */
+    await setNodeSelector(registry, PROJECT, "prod", FAST);
+
+    for (const nodeId of [SELF, PEER, "node-c"]) {
+      const state = await readDesired(registry, { nodeId });
+      expect(state.environments, nodeId).toEqual([]);
+      /* And it is reported as undecided rather than as placed on nobody: there
+         is no decision to report, which is the state it is waiting out. */
+      expect(state.placements, nodeId).toEqual([]);
+    }
+  });
+
+  it("is served the moment a decision names this node, selector and all", async () => {
+    /*
+     * The record WINS over both rules. Which nodes satisfy a selector is the
+     * coordinator's judgement, made over the labels of the whole fleet at once,
+     * and a node that re-decided it locally would fight the only writer there
+     * is — including through every window in which the two disagree.
+     */
+    await setNodeSelector(registry, PROJECT, "prod", FAST);
+    await writePlacement(registry, PROJECT, "prod", [SELF], lease);
+
+    const state = await readDesired(registry, { nodeId: SELF });
+
+    expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
+    expect(state.placements).toEqual([
+      { project: PROJECT, env: "prod", nodes: [SELF], self: true, selector: FAST },
+    ]);
+  });
+
+  it("is left out again when the decision names other nodes", async () => {
+    await setNodeSelector(registry, PROJECT, "prod", FAST);
+    await writePlacement(registry, PROJECT, "prod", [PEER], lease);
+
+    const state = await readDesired(registry, { nodeId: SELF });
+
+    expect(state.environments).toEqual([]);
+    expect(state.placements[0]).toMatchObject({ self: false, selector: FAST });
+  });
+
+  it("reports the constraint beside the decision, so both are read together", async () => {
+    /* A decision naming one node reads very differently once it is clear the
+       environment asked for exactly one kind of node. */
+    await deployed(PROJECT, "staging");
+    await setNodeSelector(registry, PROJECT, "prod", FAST);
+    await writePlacement(registry, PROJECT, "prod", [SELF], lease);
+    await writePlacement(registry, PROJECT, "staging", [SELF, PEER], lease);
+
+    const state = await readDesired(registry, { nodeId: SELF });
+
+    expect(state.placements).toEqual([
+      { project: PROJECT, env: "prod", nodes: [SELF], self: true, selector: FAST },
+      /* No selector, no field: an unconstrained environment says nothing here. */
+      { project: PROJECT, env: "staging", nodes: [SELF, PEER], self: true },
+    ]);
+  });
+
+  it("goes back to being served everywhere the moment the selector is cleared", async () => {
+    await setNodeSelector(registry, PROJECT, "prod", FAST);
+    expect((await readDesired(registry, { nodeId: SELF })).environments).toEqual([]);
+
+    await setNodeSelector(registry, PROJECT, "prod", null);
+
+    /* Undecided AND unconstrained is the fallback's case again, so the node
+       takes it straight back rather than waiting for a coordinator. */
+    for (const nodeId of [SELF, PEER]) {
+      const state = await readDesired(registry, { nodeId });
+      expect(
+        state.environments.map((entry) => entry.env.name),
+        nodeId,
+      ).toEqual(["prod"]);
+    }
+  });
+
+  it("leaves the environments beside it entirely alone", async () => {
+    await deployed(PROJECT, "staging");
+    await setNodeSelector(registry, PROJECT, "prod", FAST);
+
+    const state = await readDesired(registry, { nodeId: SELF });
+
+    /* One constrained environment waiting on a coordinator must not hold up the
+       unconstrained ones this node is already meant to be serving. */
+    expect(state.environments.map((entry) => entry.env.name)).toEqual(["staging"]);
   });
 });
 
