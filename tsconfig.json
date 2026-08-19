@@ -15,6 +15,9 @@
     "noImplicitAny": true,
     "noImplicitOverride": true,
     "noEmit": true,
+    // Dependency type definitions are taken as published; they reference optional
+    // peers (WebSocket and edge-runtime typings) this project does not install.
+    "skipLibCheck": true,
     "composite": true,
     "isolatedDeclarations": true,
     "allowImportingTsExtensions": true,

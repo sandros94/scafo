@@ -29,6 +29,7 @@ When a task involves design decisions, ambiguity, or changes to the project visi
 - **Format:** `pnpm fmt` (automd + oxlint --fix + oxfmt)
 - **Benchmarks:** `pnpm bench`
 - **Dev playground:** `pnpm dev` (runs `playground/main.ts` with bun)
+- **CLI:** `node dist/cli/index.mjs up --help` after a build (installed as the `scalo` binary)
 
 ## Architecture
 
@@ -38,9 +39,12 @@ When a task involves design decisions, ambiguity, or changes to the project visi
 - `scalo/registry` — registry operations: keys, CAS document helpers, coordinator lease, projects, builds, environments, varsets, nodes, trust, domains, reaper
 - `scalo/auth` — node/operator EdDSA tokens and workload OIDC verification
 - `scalo/capacity` — cgroup v2 parsing and the capacity planning formulas
+- `scalo/agent` — the node agent: configuration loading, the HTTP API and its listener
 - `scalo/drivers/store/uns3` — `CasStore` backed by an S3-compatible bucket via [`uns3`](https://github.com/sandros94/uns3)
 - `scalo/drivers/store/memory` — in-process `CasStore` with identical CAS semantics, for tests and local development
 - `scalo/drivers/host/node` — `HostReader` probing cgroup v2 and host totals on Node-compatible runtimes
+- `scalo/drivers/supervisor/child` — `Supervisor` running supervised processes as children of the agent
+- `scalo` (bin) — the CLI; `scalo up` boots a node agent against a registry bucket
 
 ### Source layout
 
@@ -52,6 +56,7 @@ src/
     types/
       store.ts            # CasStore, CasHeaders, StoredObject
       registry.ts         # registry record shapes + the bucket key each lives at
+      supervisor.ts       # Supervisor seam: ProcessSpec, ProcessStatus
       index.ts            # type barrel
     utils/
       slug.ts             # slug validation, host-label format/parse
@@ -91,18 +96,32 @@ src/
       compute.ts          # capacity formulas: cores, memMb, rss budget, cells
       reader.ts           # HostReader seam + probeCapacity(reader)
       index.ts            # barrel
+  agent/
+    config.ts             # loadAgentConfig: file + env + flags, runtime-agnostic
+    middleware.ts         # bearer auth guard + RFC 9457 error rendering
+    app.ts                # createAgentApp: AgentContext and the HTTP routes
+    serve.ts              # startAgent: binds the app to config.node.listen
+    index.ts              # barrel
+  cli/
+    index.ts              # the `scalo` binary (citty)
+    commands/
+      up.ts               # `scalo up`: register the node and serve the agent
+    _utils.ts             # internal: file reads, package version, failure output
   drivers/
     store/
       uns3.ts             # createUns3Store()
       memory.ts           # MemoryCasStore, createMemoryStore()
     host/
       node.ts             # createNodeHostReader() — node:fs/promises + node:os
+    supervisor/
+      child.ts            # createChildSupervisor() — node:child_process
 ```
 
 ### Key design patterns
 
 - **CAS-only mutation:** every registry write goes through `CasStore.put()` with a precondition. A failed precondition surfaces as `ScaloError("cas-conflict")`; callers recover by re-reading and retrying (`utils.withRetry`).
-- **`src/core/**` has zero foreign runtime dependencies.** It may not import third-party packages — only web-standard globals (`crypto.subtle`, `TextEncoder`, `fetch`). The one exception is [`unjwt`](https://github.com/sandros94/unjwt) inside `src/core/auth/**`: own runtime-agnostic libraries are building blocks, not dependencies to avoid. Only `src/drivers/**` may import `uns3` or runtime modules (`node:*`).
+- **`src/core/**` has zero foreign runtime dependencies.** It may not import third-party packages — only web-standard globals (`crypto.subtle`, `TextEncoder`, `fetch`). The one exception is [`unjwt`](https://github.com/sandros94/unjwt) inside `src/core/auth/**`: own runtime-agnostic libraries are building blocks, not dependencies to avoid.
+- **Layers decide what may be imported.** `src/core/**` is pure as above. `src/drivers/**` is where a runtime is allowed: `node:*`, `uns3`. `src/agent/**` and `src/cli/**` are the application layer and may use established runtime-agnostic packages (`h3`, `confbox`, `citty`); of the two, only the CLI reaches for `node:*` — `src/agent/config.ts` in particular takes its file reader as an argument so it stays runnable anywhere. Every new runtime dependency also belongs in `external` in `build.config.ts`.
 - **Core never reaches for a runtime.** Anything impure lives behind an interface core defines and a driver implements (`CasStore`, `HostReader`); the caller wires the two together.
 - **One rejection for every bad token:** `src/core/auth` answers expired, replayed, unknown-key, forged and malformed tokens with the same `ScaloError("auth-invalid")` — no message, no detail, reason in `cause`. Only a trust-policy denial is distinguishable (`trust-mismatch`), because that is authorization, not authentication.
 - **Single error type:** `ScaloError` carries a stable `code` plus an HTTP `status`, and renders to an RFC 9457 problem document. Messages may change, codes may not.
