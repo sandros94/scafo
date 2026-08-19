@@ -60,7 +60,12 @@ function toProblem(error: HTTPError): ProblemDetails {
   return { type: "urn:scalo:internal", title: "Internal Server Error", status: 500 };
 }
 
-function bearerToken(event: H3Event): string {
+/**
+ * The bearer token a request presents. Throws the same
+ * `ScaloError("auth-invalid")` every other rejection uses when there is none, so
+ * a missing header is indistinguishable from a bad one.
+ */
+export function bearerToken(event: H3Event): string {
   const header = event.req.headers.get("authorization") ?? "";
   const token = /^bearer\s+(?<token>\S+)$/i.exec(header)?.groups?.token;
 

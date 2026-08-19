@@ -11,12 +11,16 @@ import { planReconcile, type ReconcileAction } from "../core/placement/reconcile
 import type { ProbeOptions, RuntimeDriver, RuntimeProcess } from "../core/types/runtime.ts";
 import { readDesired } from "./_desired.ts";
 import { createExecutor, failureOf, type ReconcileFailure } from "./_execute.ts";
+import { applyIngress } from "./_ingress.ts";
 import type { AgentContext } from "./app.ts";
 
 export type { ReconcileFailure } from "./_execute.ts";
 
 /** Time between two passes of the loop when none is configured. */
 export const DEFAULT_RECONCILE_INTERVAL_MS: number = 5_000;
+
+/** What a failure to converge the ingress is recorded against. */
+export const INGRESS_SUBJECT: string = "ingress";
 
 /** What the loop did last, as reported by the agent API. */
 export interface ReconcileStatus {
@@ -107,6 +111,20 @@ export function createReconciler(
         }),
       });
       await executor.execute(plan, desired, pending);
+
+      try {
+        /* Routing is published from what the pass ended with, not from what it
+           planned: only a process that came out of it ready may take traffic. */
+        await applyIngress(agent, desired, [...known.values()]);
+      } catch (error) {
+        /*
+         * An ingress that cannot be reached is recorded and nothing more. The
+         * processes this pass started are running either way, the next pass
+         * states the same routing again, and a pass that gave up here would stop
+         * reconciling the node over a failure outside it.
+         */
+        pending.push(failureOf(error, { subject: INGRESS_SUBJECT }));
+      }
     } catch (error) {
       /*
        * Only reading the registry and planning throw out this far; a failed

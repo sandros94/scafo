@@ -39,14 +39,17 @@ When a task involves design decisions, ambiguity, or changes to the project visi
 - `scalo/registry` — registry operations: keys, CAS document helpers, coordinator lease, projects, builds, environments, varsets, nodes, trust, domains, reaper
 - `scalo/auth` — node/operator EdDSA tokens and workload OIDC verification
 - `scalo/capacity` — cgroup v2 parsing and the capacity planning formulas
-- `scalo/placement` — the pure reconcile planner, the process-id convention and the port allocator
-- `scalo/agent` — the node agent: configuration loading, the HTTP API and its listener, the reconcile loop
+- `scalo/placement` — the pure reconcile planner, the pure route renderer, the process-id convention and the port allocator
+- `scalo/agent` — the node agent: configuration loading, the HTTP API and its listener, the reconcile loop, deploy intake
 - `scalo/drivers/store/uns3` — `CasStore` backed by an S3-compatible bucket via [`uns3`](https://github.com/sandros94/uns3)
 - `scalo/drivers/store/memory` — in-process `CasStore` with identical CAS semantics, for tests and local development
 - `scalo/drivers/host/node` — `HostReader` probing cgroup v2 and host totals on Node-compatible runtimes
 - `scalo/drivers/runtime/celld` — `RuntimeDriver` for celld 0.2.x: process spec, deployment-pointer activation, readiness gate
 - `scalo/drivers/supervisor/child` — `Supervisor` running supervised processes as children of the agent
-- `scalo` (bin) — the CLI; `scalo up` boots a node agent against a registry bucket
+- `scalo/drivers/ingress/caddy` — `IngressDriver` converging an operator-run Caddy through its admin API
+- `scalo/drivers/deploy/celld` — `DeployRunner` unpacking an artifact and publishing it with the celld CLI
+- `scalo/drivers/archive/tar-zst` — the `.tar.zst` artifact format, packed by the client and unpacked by the agent
+- `scalo` (bin) — the CLI; `scalo up` boots a node agent, `scalo keygen` mints an operator key, `scalo deploy` uploads a build
 
 ### Source layout
 
@@ -60,6 +63,8 @@ src/
       registry.ts         # registry record shapes + the bucket key each lives at
       supervisor.ts       # Supervisor seam: ProcessSpec, ProcessStatus
       runtime.ts          # RuntimeDriver seam: RuntimeProcess, RuntimeSpecInput, ProbeOptions
+      ingress.ts          # IngressDriver seam: IngressDesired, IngressBackend
+      deploy.ts           # DeployRunner seam: DeployRunInput, DeployTarget
       index.ts            # type barrel
     utils/
       slug.ts             # slug validation, host-label format/parse
@@ -103,6 +108,7 @@ src/
       ids.ts              # `project--env--build` process-id convention (format/parse)
       ports.ts            # loopback port-pair allocator over a configured range
       reconcile.ts        # planReconcile: desired + actual -> ordered actions (pure)
+      routes.ts           # renderRoutes: environments + ready processes -> hosts (pure)
       index.ts            # barrel
   agent/
     config.ts             # loadAgentConfig: file + env + flags, runtime-agnostic
@@ -110,13 +116,18 @@ src/
     app.ts                # createAgentApp: AgentContext and the HTTP routes
     serve.ts              # startAgent: binds the app to config.node.listen
     reconcile.ts          # createReconciler: the loop, its status, one pass at a time
+    deploys.ts            # createDeployService: accept an artifact, publish it, watch it land
     _execute.ts           # internal: carries out one plan (activate/start/gate/stop)
     _desired.ts           # internal: desired state read out of the registry
+    _ingress.ts           # internal: renders the routing after a pass and applies it
+    _intake.ts            # internal: dual-token auth, multipart and JSON request reading
     index.ts              # barrel
   cli/
     index.ts              # the `scalo` binary (citty)
     commands/
       up.ts               # `scalo up`: register the node and serve the agent
+      keygen.ts           # `scalo keygen`: mint (and register) an operator key
+      deploy.ts           # `scalo deploy`: pack a directory, upload it, follow the deploy
     _utils.ts             # internal: file reads, package version, failure output
   drivers/
     store/
@@ -129,6 +140,13 @@ src/
       _deploy-pointer.ts  # internal: celld's deploy/current.json, read-modify-write
     supervisor/
       child.ts            # createChildSupervisor() — node:child_process
+    ingress/
+      caddy.ts            # createCaddyDriver() — converges routes over Caddy's admin API
+    deploy/
+      celld.ts            # createCelldDeployRunner() — unpack, publish, read back the version
+      _esbuild.ts         # internal: locating esbuild's per-platform binary
+    archive/
+      tar-zst.ts          # packDirectory/unpackArchive — the artifact format, node:zlib + tar
 ```
 
 ### Key design patterns
@@ -143,6 +161,9 @@ src/
 - **Store drivers are interchangeable:** `MemoryCasStore` implements the same conditional-write contract as the S3 driver, so registry logic can be tested without a bucket.
 - **Readiness is two questions, not one.** A runtime's own health endpoint reports on the _process_, not on the application it hosts: a process whose worker fails every single request still answers it with 200, and a process that is draining answers it while refusing everything else. `RuntimeDriver.probeReady` therefore gates on both the runtime health endpoint **and** an application-level request to a configured path, and only calls a process ready when both agree. A process is never sent traffic, and never allowed to replace the one it supersedes, until it has passed both.
 - **Idle eviction stays off, permanently.** In celld 0.2.1, evicting a cell because it has been idle corrupts that cell's replication chain in the bucket — writes already acknowledged to the client roll back the next time the cell is restored. The runtime disables idle eviction when its variable is simply absent, so the celld driver never sets `CELLD_IDLE_EVICT_S`, refuses (`ScaloError("invalid-input")`) any caller that passes it in `extraEnv`, and strips it from the environment a process would otherwise inherit. This is a data-safety rule, not a tuning preference: it stays until the upstream fix lands and is verified.
+- **Routing follows readiness, never intent.** `renderRoutes` is pure and takes only what a node actually has running: an environment is reachable at `<project>--<env>.<domain>` (plus `<project>.<domain>` for `production`, plus any custom domain claimed for it) solely when a process serving its alias build has passed its readiness gate, and every ready process is separately reachable at `<project>--<build>.<domain>` so a build stays inspectable for as long as it runs. Hosts whose label would exceed the DNS limit are skipped rather than thrown over — one unnameable environment must not take a node's whole routing with it. The reconcile loop renders this after every pass and hands it to `IngressDriver.apply`, whose failures are recorded in the pass status and never abort it: an ingress that cannot be reached must not stop a node reconciling itself.
+- **A deploy is accepted, then carried out.** `POST /v1/deploys` takes multipart `meta` + `artifact`, ensures the project and environment exist, answers `202` with a `Location`, and does the rest in the background: publish the artifact through `DeployRunner` (unpack, run the builder, read back the runtime's version id), record an immutable build, and — when the upload asked to flip — move the alias and watch the reconcile loop until a process serving that build is ready. Exactly three states are final (`deployed`, `routed`, `failed`), so a client polls until it reaches one. Missing the routing deadline is a warning and never an error: the build exists and the loop keeps trying. Deploy status is soft state held in memory, so a restarted agent forgets deploys in flight while the registry remembers everything they had already committed.
+- **Two ways in, one way out.** The deploy-facing routes accept either an operator's node token or a project's workload OIDC token. The node token is tried first because it needs nothing but the header; only when it fails as authentication is the bearer offered to the trust policy of the project the request names. A caller that fails both gets the single `auth-invalid` problem document every other rejection uses — it cannot learn which half it failed, nor whether the project exists. The one distinguishable outcome is `trust-mismatch`, which is authorization: a token trusted for one project can never deploy or flip another.
 
 ## Code Conventions
 

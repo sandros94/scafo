@@ -35,6 +35,21 @@ export interface AgentConfig {
   platformDomains: string[];
   /** How this node runs and gates the processes that serve its environments. */
   runtime: RuntimeConfig;
+  /**
+   * Where the node publishes what it serves. Absent means no ingress at all:
+   * the processes still run and are simply not reachable from outside the node.
+   */
+  ingress?: IngressConfig;
+}
+
+/** Which ingress a node drives, and how it is reached. */
+export interface IngressConfig {
+  /** The only ingress implemented; anything else fails the boot. */
+  driver: "caddy";
+  /** Base URL of the ingress admin API; the driver's own default applies when absent. */
+  adminUrl?: string;
+  /** Server within the ingress configuration this node writes its routes into. */
+  serverName?: string;
 }
 
 /** Every runtime setting, with the defaults already applied. */
@@ -104,6 +119,8 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
   if (advertise !== undefined) parseHostPort(advertise, ORIGINS.advertise.file);
   assertNodeId(id);
 
+  const ingress = resolveIngress(sources);
+
   return {
     bucket: {
       endpoint: required("endpoint", sources),
@@ -120,6 +137,7 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
       portRangeStart: resolvePort("portRangeStart", sources, DEFAULT_PORT_RANGE_START),
       probePath: resolve("probePath", sources) ?? DEFAULT_PROBE_PATH,
     },
+    ...(ingress === undefined ? {} : { ingress }),
   };
 }
 
@@ -216,6 +234,13 @@ const ORIGINS = {
     file: "runtime.portRangeStart",
   },
   probePath: { flag: "probe-path", env: ["SCALO_PROBE_PATH"], file: "runtime.probePath" },
+  ingressDriver: {
+    flag: "ingress-driver",
+    env: ["SCALO_INGRESS_DRIVER"],
+    file: "ingress.driver",
+  },
+  caddyAdmin: { flag: "caddy-admin", env: ["SCALO_CADDY_ADMIN"], file: "ingress.adminUrl" },
+  caddyServer: { flag: "caddy-server", env: ["SCALO_CADDY_SERVER"], file: "ingress.serverName" },
 } satisfies Record<string, Origin>;
 
 type Setting = keyof typeof ORIGINS;
@@ -284,6 +309,32 @@ function resolvePlatformDomains(sources: Sources): string[] {
 
   for (const domain of domains) assertHost(domain);
   return domains;
+}
+
+/**
+ * The ingress this node drives, or undefined when it drives none.
+ *
+ * Naming an admin API is enough to ask for one: there is a single driver, so
+ * spelling it out as well would be ceremony. Configuring nothing but a server
+ * name leaves the ingress off, because nothing says where to reach it.
+ */
+function resolveIngress(sources: Sources): IngressConfig | undefined {
+  const driver = resolve("ingressDriver", sources);
+  const adminUrl = resolve("caddyAdmin", sources);
+  const serverName = resolve("caddyServer", sources);
+
+  if (driver === undefined && adminUrl === undefined) return undefined;
+  if (driver !== undefined && driver !== "caddy") {
+    throw new ScaloError("invalid-input", "Invalid configuration value", {
+      detail: `"${ORIGINS.ingressDriver.file}" must be "caddy", got ${JSON.stringify(driver)}`,
+    });
+  }
+
+  return {
+    driver: "caddy",
+    ...(adminUrl === undefined ? {} : { adminUrl }),
+    ...(serverName === undefined ? {} : { serverName }),
+  };
 }
 
 async function readConfigFile(

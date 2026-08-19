@@ -1,0 +1,193 @@
+/*
+ * Deploy runner for celld 0.2.x: unpacks an uploaded artifact and publishes it
+ * into an environment's fleet as a new version.
+ *
+ * Publishing is a task, not a service — it starts, does one thing and exits — so
+ * it runs as a plain child process rather than through the supervisor, which
+ * exists to keep long-lived processes alive.
+ */
+
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { parseJSONC } from "confbox";
+import { ScaloError } from "../../core/error.ts";
+import type { DeployRunInput, DeployRunner, DeployRunResult } from "../../core/types/deploy.ts";
+import { unpackArchive } from "../archive/tar-zst.ts";
+import { esbuildBinaryPath } from "./_esbuild.ts";
+
+/** Command run when the caller does not name one. */
+export const DEFAULT_CELLD_BIN: string = "celld";
+
+/** How long one publish may take before it is killed. */
+export const DEFAULT_DEPLOY_TIMEOUT_MS: number = 300_000;
+
+/** Config files an artifact may carry, in the order they are looked for. */
+const CONFIG_NAMES: string[] = ["wrangler.jsonc", "wrangler.json"];
+
+/** The line the runtime reports a published version on. */
+const VERSION_RE = /Current Version ID:\s*([\da-f]{8,64})/i;
+
+/** Variable the runtime is told which esbuild executable to build with. */
+const ESBUILD_ENV = "CELLD_ESBUILD";
+
+export interface CelldDeployRunnerOptions {
+  /** Executable that publishes a version; resolved against `PATH` unless it is a path. */
+  binPath?: string;
+  /** Directory the unpacked artifact is staged under. Defaults to the OS temp directory. */
+  stagingDir?: string;
+  /**
+   * Environment the publish starts from; it REPLACES the child's rather than
+   * extending it, so it must carry at least a usable `PATH`. Defaults to none,
+   * which only works when `binPath` is an absolute path.
+   */
+  baseEnv?: Record<string, string>;
+  /** Time a publish is given. Defaults to {@link DEFAULT_DEPLOY_TIMEOUT_MS}. */
+  timeoutMs?: number;
+}
+
+/** Builds the runner that publishes artifacts through the celld CLI. */
+export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): DeployRunner {
+  const binPath = opts?.binPath ?? DEFAULT_CELLD_BIN;
+  const staging = opts?.stagingDir ?? tmpdir();
+  const baseEnv = opts?.baseEnv ?? {};
+  const timeoutMs = opts?.timeoutMs ?? DEFAULT_DEPLOY_TIMEOUT_MS;
+
+  return {
+    async run(input: DeployRunInput): Promise<DeployRunResult> {
+      /* Resolved before anything is unpacked: a node with no builder cannot
+         publish, and finding that out after writing megabytes to disk helps
+         nobody. */
+      const esbuild = esbuildBinaryPath(globalThis.process?.env ?? {});
+      const dir = await mkdtemp(join(staging, "scalo-deploy-"));
+
+      try {
+        await unpackArchive(input.artifact, dir);
+        const config = await prepareConfig(dir, input.script);
+
+        const output = await run(
+          binPath,
+          [
+            "deploy",
+            "--config",
+            config,
+            "--bucket",
+            `${input.target.bucket}/${input.target.prefix}`,
+            "--endpoint",
+            input.target.endpoint,
+          ],
+          {
+            timeoutMs,
+            env: {
+              ...baseEnv,
+              AWS_ACCESS_KEY_ID: input.target.accessKey,
+              AWS_SECRET_ACCESS_KEY: input.target.secretKey,
+              AWS_REGION: input.target.region,
+              [ESBUILD_ENV]: esbuild,
+            },
+          },
+        );
+
+        const version = VERSION_RE.exec(output)?.[1];
+        if (version === undefined) {
+          throw new ScaloError("store-nonconforming", "Publish reported no version", {
+            detail: `"${binPath} deploy" exited successfully without naming a version id`,
+          });
+        }
+        /* Version ids address bucket keys, which are lowercase throughout. */
+        return { celldVersionId: version.toLowerCase() };
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  };
+}
+
+/**
+ * Points the artifact's config at the name scalo recorded for it, and returns
+ * the path to it.
+ *
+ * The runtime files a version under the name its config carries, and the fleet's
+ * pointer is then addressed by that name for the lifetime of the environment. An
+ * artifact that named itself something else would deploy into a second fleet
+ * directory the agent never activates, so the recorded name wins.
+ */
+async function prepareConfig(dir: string, script: string): Promise<string> {
+  for (const name of CONFIG_NAMES) {
+    const path = join(dir, name);
+    let text: string;
+    try {
+      text = await readFile(path, "utf8");
+    } catch {
+      continue;
+    }
+
+    const parsed: unknown = parseJSONC(text, { allowTrailingComma: true });
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new ScaloError("invalid-input", "Artifact config is not an object", {
+        detail: `"${name}" must hold an object of runtime settings`,
+      });
+    }
+
+    await writeFile(path, JSON.stringify({ ...parsed, name: script }, null, 2), "utf8");
+    return path;
+  }
+
+  throw new ScaloError("invalid-input", "Artifact carries no runtime config", {
+    detail: `the archive has none of ${CONFIG_NAMES.join(", ")} at its root`,
+  });
+}
+
+/**
+ * Runs the publish to completion and hands back everything it said. Output is
+ * kept whole: it is the only account of what a failed publish did.
+ */
+function run(
+  command: string,
+  args: string[],
+  opts: { timeoutMs: number; env: Record<string, string> },
+): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const child = spawn(command, args, {
+      env: opts.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: opts.timeoutMs,
+    });
+
+    let output = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => (output += chunk));
+    child.stderr.on("data", (chunk: string) => (output += chunk));
+
+    child.on("error", (error) => {
+      reject(
+        new ScaloError("capability-missing", "Publish command could not be run", {
+          detail: `"${command}" could not be started on this node`,
+          cause: error,
+        }),
+      );
+    });
+
+    child.on("close", (code, signal) => {
+      if (code === 0) {
+        resolve(output);
+        return;
+      }
+      const ended =
+        signal === null ? `exited with code ${String(code)}` : `was killed by ${signal}`;
+      reject(
+        new ScaloError("invalid-input", "Publish failed", {
+          detail: `"${command} ${args[0] ?? ""}" ${ended}: ${lastLines(output)}`,
+        }),
+      );
+    });
+  });
+}
+
+/** The tail of a failed publish's output, which is where its reason is. */
+function lastLines(output: string, limit: number = 2000): string {
+  const trimmed = output.trim();
+  return trimmed.length <= limit ? trimmed : `…${trimmed.slice(-limit)}`;
+}

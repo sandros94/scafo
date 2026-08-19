@@ -2,13 +2,34 @@
 
 import { H3 } from "h3";
 import { createNodeVerifier } from "../core/auth/node-token.ts";
+import { createOidcVerifier } from "../core/auth/oidc.ts";
+import { ScaloError } from "../core/error.ts";
 import { readJson } from "../core/registry/cas.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
+import { checkDomain } from "../core/registry/domains.ts";
+import { flipAlias, rollbackAlias } from "../core/registry/environments.ts";
 import { coordinatorKey, nodeKey } from "../core/registry/paths.ts";
 import type { CapacityPlan } from "../core/capacity/compute.ts";
-import type { CoordinatorLease, NodeRecord } from "../core/types/registry.ts";
+import type { IngressDriver } from "../core/types/ingress.ts";
+import type {
+  CoordinatorLease,
+  EnvironmentRecord,
+  NodeRecord,
+  ScaloWarning,
+} from "../core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../core/types/supervisor.ts";
+import { isHost } from "../core/utils/host.ts";
+import { parseHostLabel } from "../core/utils/slug.ts";
+import {
+  type DeployVerifiers,
+  readAliasRequest,
+  readDeployRequest,
+  tryNodeToken,
+  verifyCaller,
+  verifyWorkload,
+} from "./_intake.ts";
 import type { AgentConfig } from "./config.ts";
+import type { DeployService, DeployStatus } from "./deploys.ts";
 import { renderProblem, requireNodeToken } from "./middleware.ts";
 import type { Reconciler, ReconcileStatus } from "./reconcile.ts";
 
@@ -25,6 +46,13 @@ export interface AgentContext {
   capacity?: CapacityPlan;
   /** The reconcile loop, when this node runs one. */
   reconciler?: Reconciler;
+  /**
+   * Where the node publishes what it serves. Without one the processes still
+   * run and are simply not reachable from outside the node.
+   */
+  ingress?: IngressDriver;
+  /** Accepts uploaded artifacts; without it this node refuses deploys. */
+  deploys?: DeployService;
 }
 
 /** Body of `GET /v1/health`. */
@@ -45,15 +73,28 @@ export interface AgentState {
   reconcile?: ReconcileStatus;
 }
 
+/** Body of `POST /v1/aliases`: the environment as it now stands. */
+export interface AliasResult {
+  environment: EnvironmentRecord;
+  warnings: ScaloWarning[];
+}
+
 /**
  * Builds the agent app. Every route answers failures as RFC 9457 problem
- * documents, and every route but health requires a node or operator token.
+ * documents, and every route but health and the ingress ask requires a node,
+ * operator or workload token.
  */
 export function createAgentApp(agent: AgentContext): H3 {
-  /* One verifier for the whole app, never one per request: it caches the public
-     keys it reads from the registry and remembers the id of every token already
-     spent, and single-use tokens only stay single-use while that cache is shared. */
-  const authenticated = requireNodeToken(createNodeVerifier(agent.registry));
+  /* One verifier of each kind for the whole app, never one per request: the node
+     verifier caches the public keys it reads from the registry and remembers the
+     id of every token already spent — single-use tokens only stay single-use
+     while that record is shared — and the OIDC one caches each issuer's key set. */
+  const nodeVerifier = createNodeVerifier(agent.registry);
+  const authenticated = requireNodeToken(nodeVerifier);
+  const verifiers: DeployVerifiers = {
+    node: nodeVerifier,
+    oidc: createOidcVerifier(agent.registry),
+  };
 
   const app = new H3({
     /* The problem renderer decides what is worth logging, so the framework's own
@@ -75,6 +116,20 @@ export function createAgentApp(agent: AgentContext): H3 {
     node: agent.config.node.id,
   }));
 
+  /*
+   * Unauthenticated on purpose: this is what an ingress asks before it issues a
+   * certificate for a host, and it holds no key of ours. It answers nothing but
+   * yes or no, and only about hosts that are already public knowledge.
+   */
+  app.get("/v1/ingress/ask", async (event): Promise<Response> => {
+    const domain = event.url.searchParams.get("domain") ?? "";
+    if (await servesHost(agent, domain)) return new Response(null, { status: 200 });
+
+    throw new ScaloError("not-found", "Host is not served here", {
+      detail: `"${domain}" is neither a claimed domain nor a label under a platform domain`,
+    });
+  });
+
   app.get(
     "/v1/state",
     async (): Promise<AgentState> => {
@@ -93,5 +148,87 @@ export function createAgentApp(agent: AgentContext): H3 {
     { middleware: [authenticated] },
   );
 
+  app.post("/v1/deploys", async (event): Promise<Response> => {
+    /* An operator's token needs nothing but the header, so it is checked before
+       the artifact is buffered. A workload's is checked against the project the
+       upload names, which cannot be known until the body has been read. */
+    const operator = await tryNodeToken(verifiers, event);
+    const request = await readDeployRequest(event);
+    if (operator === null) await verifyWorkload(verifiers, event, request.meta.project);
+
+    const status = await deployService(agent).start(request.meta, request.artifact);
+    /* Answered before the artifact has been published: the rest of the work
+       outlives this request and is reported at the location below. */
+    return new Response(JSON.stringify(status), {
+      status: 202,
+      headers: { "content-type": "application/json", "location": deployLocation(status.id) },
+    });
+  });
+
+  app.get("/v1/deploys/:id", async (event): Promise<DeployStatus> => {
+    const id = event.context.params?.id ?? "";
+    const status = agent.deploys?.get(id) ?? null;
+
+    /*
+     * A workload token is only ever checked against a project, and the only
+     * project an id names is the one of the deploy it belongs to. An id this
+     * node has never seen therefore has nothing to authenticate against, and is
+     * answered as an authentication failure rather than as a miss — which id
+     * exists is not something an unauthenticated caller gets to find out.
+     */
+    await verifyCaller(verifiers, event, status?.project ?? null);
+    if (status === null) {
+      throw new ScaloError("not-found", "No such deploy", {
+        detail: `this node has no deploy "${id}"; a restarted agent forgets the ones it accepted`,
+      });
+    }
+    return status;
+  });
+
+  app.post("/v1/aliases", async (event): Promise<AliasResult> => {
+    const request = await readAliasRequest(event);
+    await verifyCaller(verifiers, event, request.project);
+
+    if (request.rollback) {
+      const environment = await rollbackAlias(agent.registry, request.project, request.environment);
+      return { environment, warnings: [] };
+    }
+    return flipAlias(agent.registry, request.project, request.environment, request.build as string);
+  });
+
   return app;
+}
+
+/** Where the status of a deploy is polled. */
+export function deployLocation(id: string): string {
+  return `/v1/deploys/${id}`;
+}
+
+/**
+ * Whether this installation answers for `host`: a label under one of its
+ * platform domains, or a custom domain some environment has claimed.
+ *
+ * The platform domains are checked first, so the common case costs no bucket
+ * read. A host that is not a host at all is simply not served, rather than an
+ * error — the caller is an ingress asking about whatever arrived on the wire.
+ */
+async function servesHost(agent: AgentContext, host: string): Promise<boolean> {
+  if (!isHost(host)) return false;
+
+  for (const domain of agent.config.platformDomains) {
+    const suffix = `.${domain}`;
+    if (!host.endsWith(suffix)) continue;
+    if (parseHostLabel(host.slice(0, -suffix.length)) !== null) return true;
+  }
+  return (await checkDomain(agent.registry, host)) !== null;
+}
+
+function deployService(agent: AgentContext): DeployService {
+  const deploys = agent.deploys;
+  if (deploys === undefined) {
+    throw new ScaloError("capability-missing", "This node does not accept deploys", {
+      detail: "no deploy runner is configured, so there is nothing to publish an artifact with",
+    });
+  }
+  return deploys;
 }

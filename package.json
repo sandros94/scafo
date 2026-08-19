@@ -66,6 +66,18 @@
     "./drivers/supervisor/child": {
       "types": "./dist/drivers/supervisor/child.d.mts",
       "default": "./dist/drivers/supervisor/child.mjs"
+    },
+    "./drivers/ingress/caddy": {
+      "types": "./dist/drivers/ingress/caddy.d.mts",
+      "default": "./dist/drivers/ingress/caddy.mjs"
+    },
+    "./drivers/deploy/celld": {
+      "types": "./dist/drivers/deploy/celld.d.mts",
+      "default": "./dist/drivers/deploy/celld.mjs"
+    },
+    "./drivers/archive/tar-zst": {
+      "types": "./dist/drivers/archive/tar-zst.d.mts",
+      "default": "./dist/drivers/archive/tar-zst.mjs"
     }
   },
   "scripts": {
@@ -83,7 +95,9 @@
   "dependencies": {
     "citty": "^0.2.2",
     "confbox": "^0.2.4",
+    "esbuild": "^0.28.2",
     "h3": "2.0.1-rc.26",
+    "tar": "^7.5.22",
     "unjwt": "^0.7.3",
     "uns3": "^0.0.7"
   },
