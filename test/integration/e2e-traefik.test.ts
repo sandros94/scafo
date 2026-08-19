@@ -59,10 +59,14 @@ import {
   FIXTURES,
   type HttpAnswer,
   httpGet,
+  httpPost,
   registryAt,
   REPO_ROOT,
   runCli,
+  sampleVersions,
   SETUP_TIMEOUT_MS,
+  SPLIT_MIN_REQUESTS,
+  SPLIT_SAMPLE,
   stageApp,
   type StartedStore,
   startStore,
@@ -438,6 +442,170 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       expect(state.reconcile?.failures ?? []).toEqual([]);
       observed.finalProcesses = state.processes;
       observed.finalReconcile = state.reconcile;
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  /*
+   * Weighted traffic, the pull-model half. The Caddy suite eases a canary in
+   * with `scalo deploy --canary`; this one states the split outright with
+   * `scalo env split --set`, so between the two suites both surfaces are driven
+   * end to end — and here the leg being brought back (v1) is one whose process
+   * was STOPPED when v2 superseded it, which is the restart path.
+   */
+
+  it(
+    "splits the environment's traffic over both builds, and Traefik serves both",
+    async () => {
+      const started = Date.now();
+      const result = await runCli(
+        [
+          "env",
+          "split",
+          "--project",
+          PROJECT,
+          "--env",
+          ENVIRONMENT,
+          "--set",
+          `${buildV1}=50,${buildV2}=50`,
+          "--agent",
+          `http://127.0.0.1:${String(agentPort)}`,
+          "--key",
+          keyPath,
+        ],
+        {},
+      );
+      expectCleanExit(result);
+      expect(result.output).toContain("splits its traffic");
+      observed.splitOutput = result.output;
+
+      const record = await getEnvironment(registry, PROJECT, ENVIRONMENT);
+      expect(record.split).toEqual([
+        { build: buildV1, weight: 50 },
+        { build: buildV2, weight: 50 },
+      ]);
+      /* The alias has not moved; a split weights traffic and nothing else. */
+      expect(record.alias).toMatchObject({ build: buildV2 });
+
+      /*
+       * What the NODE publishes, first — the weighted service, with one child
+       * per leg — and only then what Traefik serves. Keeping the two apart is
+       * this suite's whole reason for existing, and the split is where the
+       * document changes shape rather than merely changing a port.
+       */
+      const weighted = await wait(
+        "the node to publish a weighted service for the environment host",
+        DEADLINE_MS,
+        async () => {
+          const service = (await snapshotNow()).http?.services[`scalo_${envHost()}`];
+          return service !== undefined && "weighted" in service ? service : null;
+        },
+      );
+      expect(weighted.weighted.services.map((child) => child.weight)).toEqual([50, 50]);
+      /* Every child resolves inside the same document, unqualified. */
+      const services = (await snapshotNow()).http?.services ?? {};
+      for (const child of weighted.weighted.services) {
+        expect(child.name, child.name).not.toContain("@");
+        expect(services[child.name], child.name).toBeDefined();
+      }
+      observed.weightedService = weighted;
+      observed.splitPublishedMs = Date.now() - started;
+
+      /*
+       * And now the wire. Two builds of one environment answering on one host is
+       * only possible because the node activated and started each of them in its
+       * own paired step: batched activations would have started both processes
+       * on the last-activated version, and all forty of these would say "v2".
+       */
+      const reached = await wait(
+        `${envHost()} to answer with both builds`,
+        DEADLINE_MS,
+        async () => {
+          const counted = await sampleVersions(httpPort, envHost(), SPLIT_SAMPLE);
+          return counted.v1 !== undefined && counted.v2 !== undefined ? counted : null;
+        },
+      );
+      observed.splitReachedSample = reached;
+      observed.splitServedMs = Date.now() - started;
+
+      /* Measured again on a settled routing: the sample above may have started a
+         poll before Traefik read the weighted service, and a window that
+         straddles the change measures the change rather than the split. */
+      const seen = await sampleVersions(httpPort, envHost(), SPLIT_SAMPLE);
+      observed.splitSample = seen;
+
+      for (const version of ["v1", "v2"]) {
+        expect(seen[version], `${version} of ${JSON.stringify(seen)}`).toBeGreaterThanOrEqual(
+          SPLIT_MIN_REQUESTS,
+        );
+      }
+      expect(Object.keys(seen).sort()).toEqual(["v1", "v2"]);
+
+      /* The apex divides the same way, and each leg stays addressable alone. */
+      const apex = await sampleVersions(httpPort, apexHost(), SPLIT_SAMPLE);
+      expect(Object.keys(apex).sort()).toEqual(["v1", "v2"]);
+      observed.splitApexSample = apex;
+      expect(JSON.parse((await untilServes(buildHost(buildV1), "v1")).body).version).toBe("v1");
+      expect(JSON.parse((await untilServes(buildHost(buildV2), "v2")).body).version).toBe("v2");
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "promotes one leg with a flip, which clears the split and withdraws the other",
+    async () => {
+      const answer = await httpPost(
+        agentPort,
+        "/v1/aliases",
+        { project: PROJECT, environment: ENVIRONMENT, build: buildV1 },
+        await operatorToken(),
+      );
+      expect(answer.status, answer.body).toBe(200);
+
+      const body = JSON.parse(answer.body);
+      expect(body.environment.split).toBeNull();
+      /* A flip is a full cutover and says so, so an operator promoting a leg is
+         told the split they were running has ended. */
+      expect(body.warnings.map((warning: { code: string }) => warning.code)).toContain(
+        "split-cleared",
+      );
+      observed.promotionWarnings = body.warnings;
+
+      /* Back to a plain load balancer: the weighted service and its children go
+         with the split that declared them. */
+      const plain = await wait(
+        "the node to publish a single-backend service again",
+        DEADLINE_MS,
+        async () => {
+          const service = (await snapshotNow()).http?.services[`scalo_${envHost()}`];
+          return service !== undefined && "loadBalancer" in service ? service : null;
+        },
+      );
+      expect(plain.loadBalancer.servers).toHaveLength(1);
+      observed.afterPromotionService = plain;
+
+      const settled = await wait(
+        `${envHost()} to serve the promoted build alone`,
+        DEADLINE_MS,
+        async () => {
+          const counted = await sampleVersions(httpPort, envHost(), SPLIT_SAMPLE);
+          return counted.v1 === SPLIT_SAMPLE ? counted : null;
+        },
+      );
+      observed.promotedSample = settled;
+
+      /* The leg that lost is retired the way every superseded build is, and its
+         host stops resolving with the process that served it. */
+      const withdrawn = await wait(
+        `${buildHost(buildV2)} to stop being routed by Traefik`,
+        DEADLINE_MS,
+        async () => {
+          const got = await httpGet(httpPort, "/", { host: buildHost(buildV2) });
+          return got.status === 404 ? got : null;
+        },
+      );
+      expect(withdrawn.body.trim()).toBe(TRAEFIK_NO_ROUTE_BODY);
+      expect(await scaloRouters()).not.toContain(`scalo_${buildHost(buildV2)}@http`);
     },
     STEP_TIMEOUT_MS,
   );

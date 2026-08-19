@@ -225,6 +225,80 @@ export function send(
   });
 }
 
+/**
+ * Requests one traffic-split assertion sends through an ingress.
+ *
+ * TWO FULL WEIGHT CYCLES, and the number is load-bearing rather than a round
+ * one. The weights of a split sum to 100, and BOTH ingresses walk a cycle of
+ * exactly that length — so any 200 consecutive requests contain exactly twice
+ * each leg's weight, whatever point in the cycle the sample happens to start at.
+ * The measurement is therefore exact rather than statistical.
+ *
+ * A SHORTER SAMPLE IS NOT MERELY NOISIER, IT IS WRONG, and the two ingresses
+ * disagree about how. Pinned by reading the response sequence off each
+ * container for an even split:
+ *
+ *   Caddy 2.11.4   AAAA…(50)…AAAA BBBB…(50)…BBBB   — one BLOCK per leg
+ *   Traefik 3.7.10 ABABABABABABABABABABABABABAB…   — perfectly interleaved
+ *
+ * Caddy's `weighted_round_robin` hands a leg its whole weight in consecutive
+ * requests before moving on, so a 40-request window can land entirely inside one
+ * block and see a single build, or straddle a boundary and report 9/31 for a
+ * 50/50 — which is what a first attempt at this assertion did. Traefik's
+ * weighted service is smooth and would have passed either way. Neither is wrong;
+ * they are correct over a cycle and say nothing in particular over less than one.
+ */
+export const SPLIT_SAMPLE: number = 200;
+
+/**
+ * The least share of {@link SPLIT_SAMPLE} a leg of an even split must take.
+ *
+ * DELIBERATELY GENEROUS — the sample above makes an even split land on exactly
+ * half, so this leaves a wide margin. What is being asserted is that both builds
+ * are really serving, which is to say that the split reached the registry, the
+ * planner, two processes, the routing and the ingress. How precisely a policy
+ * divides the traffic is the ingress's own business, and is pinned exactly
+ * against both containers in their driver suites.
+ */
+export const SPLIT_MIN_SHARE: number = 0.25;
+
+/** {@link SPLIT_MIN_SHARE} of {@link SPLIT_SAMPLE}, as whole requests. */
+export const SPLIT_MIN_REQUESTS: number = Math.ceil(SPLIT_SAMPLE * SPLIT_MIN_SHARE);
+
+/**
+ * Sends `count` requests to one host and counts which application version
+ * answered each, so a weighted split can be read off the wire.
+ *
+ * A request that did not answer 200 is counted under its status rather than
+ * dropped: a sample that quietly ignored the failures would report a clean split
+ * while half of it was 502s.
+ */
+export async function sampleVersions(
+  port: number,
+  host: string,
+  count: number = SPLIT_SAMPLE,
+): Promise<Record<string, number>> {
+  const seen: Record<string, number> = {};
+
+  for (let i = 0; i < count; i++) {
+    const answer = await httpGet(port, "/", { host });
+    const version =
+      answer.status === 200 ? versionIn(answer.body) : `status ${String(answer.status)}`;
+    seen[version] = (seen[version] ?? 0) + 1;
+  }
+  return seen;
+}
+
+/** The version the fixture application reported, or what was wrong with the body. */
+function versionIn(body: string): string {
+  try {
+    const parsed = JSON.parse(body) as { version?: unknown };
+    return typeof parsed.version === "string" ? parsed.version : "no version";
+  } catch {
+    return "not json";
+  }
+}
+
 export interface UntilOptions {
   /**
    * What to attach to a deadline that ran out — the agent container's logs, in

@@ -16,9 +16,9 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { APEX_ENVIRONMENT, renderRoutes } from "../src/core/placement/routes.ts";
+import { APEX_ENVIRONMENT, FULL_WEIGHT, renderRoutes } from "../src/core/placement/routes.ts";
 import type { IngressDesired } from "../src/core/types/ingress.ts";
-import type { EnvironmentRecord } from "../src/core/types/registry.ts";
+import type { EnvironmentRecord, SplitEntry } from "../src/core/types/registry.ts";
 import type { RuntimeProcess } from "../src/core/types/runtime.ts";
 import { HOST_LABEL_RE, isHost } from "../src/core/utils/host.ts";
 import { isSlug } from "../src/core/utils/slug.ts";
@@ -31,6 +31,7 @@ import {
   renderTraefikConfig,
   TRAEFIK_KEY_PREFIX,
   type TraefikDynamicConfig,
+  type TraefikService,
 } from "../src/drivers/ingress/traefik.ts";
 
 const DOMAIN = "apps.test";
@@ -39,12 +40,22 @@ const PROJECT = "shop";
 const OTHER_PROJECT = "blog";
 const BUILD = "aaaa1111";
 const OTHER_BUILD = "bbbb2222";
+const THIRD_BUILD = "cccc3333";
 const CUSTOM_DOMAIN = "shop.example.com";
 
-/** One host and the process it reaches: all a routing means, in either format. */
+/**
+ * One host, one process it reaches, and the share of its traffic that goes
+ * there: all a routing means, in either format.
+ *
+ * The weight is part of the essence rather than an extra: a split that two
+ * ingresses agreed on the SET of but not the shares of would be two different
+ * routings dressed as one, and an operator moving between them would see their
+ * canary silently change size.
+ */
 interface Upstream {
   host: string;
   upstream: string;
+  weight: number;
 }
 
 /** The states a node passes through, from serving nothing to serving a fleet. */
@@ -97,6 +108,56 @@ const FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
       claims: [{ host: CUSTOM_DOMAIN, project: PROJECT, environment: APEX_ENVIRONMENT }],
     }),
   },
+  {
+    name: "a 90/10 canary, with both legs ready",
+    desired: renderRoutes({
+      platformDomains: [DOMAIN],
+      environments: [
+        environment(
+          PROJECT,
+          APEX_ENVIRONMENT,
+          BUILD,
+          [CUSTOM_DOMAIN],
+          [
+            { build: BUILD, weight: 90 },
+            { build: OTHER_BUILD, weight: 10 },
+          ],
+        ),
+      ],
+      processes: [
+        process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000),
+        process(PROJECT, APEX_ENVIRONMENT, OTHER_BUILD, 42_002),
+      ],
+      claims: [{ host: CUSTOM_DOMAIN, project: PROJECT, environment: APEX_ENVIRONMENT }],
+    }),
+  },
+  {
+    name: "a three-way split beside an unsplit environment",
+    desired: renderRoutes({
+      platformDomains: [DOMAIN, OTHER_DOMAIN],
+      environments: [
+        environment(
+          PROJECT,
+          APEX_ENVIRONMENT,
+          BUILD,
+          [],
+          [
+            { build: BUILD, weight: 50 },
+            { build: OTHER_BUILD, weight: 30 },
+            { build: THIRD_BUILD, weight: 20 },
+          ],
+        ),
+        environment(OTHER_PROJECT, "staging", BUILD),
+      ],
+      processes: [
+        process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000),
+        process(PROJECT, APEX_ENVIRONMENT, OTHER_BUILD, 42_002),
+        process(PROJECT, APEX_ENVIRONMENT, THIRD_BUILD, 42_004),
+        process(OTHER_PROJECT, "staging", BUILD, 42_006),
+      ],
+      claims: [],
+    }),
+  },
 ];
 
 describe("the two drivers say the same thing about the same routing", () => {
@@ -110,14 +171,45 @@ describe("the two drivers say the same thing about the same routing", () => {
          empty because both failed to render anything. */
       expect(caddy).toEqual(
         desired.routes
-          .map((route) => ({
-            host: route.host,
-            upstream: `127.0.0.1:${String(route.backend.port)}`,
-          }))
-          .sort((a, b) => (a.host < b.host ? -1 : 1)),
+          .flatMap((route) =>
+            route.backends.map((leg) => ({
+              host: route.host,
+              upstream: `127.0.0.1:${String(leg.backend.port)}`,
+              weight: leg.weight,
+            })),
+          )
+          .sort(byUpstream),
       );
     });
   }
+
+  it("agrees on the weights of every split it is given, not merely on the legs", () => {
+    /* The set of upstreams and the shares between them are two claims, and only
+       the second one is new. Asserted apart from the fixtures above so a driver
+       that dropped its weights while keeping its upstreams cannot pass. */
+    const weighted = FIXTURES.filter(({ desired }) =>
+      desired.routes.some((route) => route.backends.length > 1),
+    );
+    expect(weighted.length).toBeGreaterThan(0);
+
+    for (const { name, desired } of weighted) {
+      const caddy = caddyUpstreams(renderCaddyRoutes(desired));
+      const traefik = traefikUpstreams(renderTraefikConfig(desired));
+
+      expect(
+        traefik.map((leg) => leg.weight),
+        name,
+      ).toEqual(caddy.map((leg) => leg.weight));
+      /* And the shares of one host still add up to the whole of it. */
+      for (const route of desired.routes) {
+        const shares = caddy.filter((leg) => leg.host === route.host);
+        expect(
+          shares.reduce((sum, leg) => sum + leg.weight, 0),
+          `${name}: ${route.host}`,
+        ).toBe(FULL_WEIGHT);
+      }
+    }
+  });
 
   it("agrees that an empty routing means an empty routing, in both formats", () => {
     /* Said in opposite ways, which is the whole difference between the two: a
@@ -190,48 +282,81 @@ describe("neither namespace can collide with a host", () => {
   });
 });
 
-/** What a Caddy route says: the host it matches and the upstream it dials. */
+/**
+ * What a Caddy route says: the host it matches, the upstreams it dials and the
+ * share each takes.
+ *
+ * A route with no load-balancing policy has one upstream taking all of it, which
+ * is how Caddy is told "there is nothing to choose between"; the weights of one
+ * that has a policy are POSITIONAL, so they are zipped with the upstreams rather
+ * than looked up.
+ */
 function caddyUpstreams(routes: CaddyRoute[]): Upstream[] {
   return routes
     .flatMap((route) =>
       route.match.flatMap((match) =>
         match.host.flatMap((host) =>
-          route.handle.flatMap((handle) =>
-            handle.upstreams.map((upstream) => ({ host, upstream: upstream.dial })),
-          ),
+          route.handle.flatMap((handle) => {
+            const weights = handle.load_balancing?.selection_policy.weights;
+            if (weights !== undefined && weights.length !== handle.upstreams.length) {
+              throw new Error(`"${host}" has ${String(weights.length)} weights for its upstreams`);
+            }
+            return handle.upstreams.map((upstream, at) => ({
+              host,
+              upstream: upstream.dial,
+              weight: weights?.[at] ?? FULL_WEIGHT,
+            }));
+          }),
         ),
       ),
     )
-    .sort(byHost);
+    .sort(byUpstream);
 }
 
 /**
  * The same, read out of a Traefik document: the host comes out of the router's
- * rule, and the upstream out of the service the rule names — so the extraction
- * fails if the two ever stop referring to each other.
+ * rule, and the upstreams out of the service the rule names — following the
+ * child services of a weighted one, so the extraction fails if a leg ever stops
+ * resolving inside the document that declares it.
  */
 function traefikUpstreams(config: TraefikDynamicConfig): Upstream[] {
   const services = config.http?.services ?? {};
+
+  const resolve = (name: string): TraefikService => {
+    const service = services[name];
+    if (service === undefined) throw new Error(`nothing declares service "${name}"`);
+    return service;
+  };
 
   return Object.values(config.http?.routers ?? {})
     .flatMap((router) => {
       const host = /^Host\(`([^`]+)`\)$/.exec(router.rule)?.[1];
       if (host === undefined) throw new Error(`rule "${router.rule}" is not a plain host match`);
 
-      const service = services[router.service];
-      if (service === undefined) throw new Error(`router names no service "${router.service}"`);
+      const service = resolve(router.service);
+      const legs =
+        "weighted" in service
+          ? service.weighted.services.map((child) => ({
+              service: resolve(child.name),
+              weight: child.weight,
+            }))
+          : [{ service, weight: FULL_WEIGHT }];
 
-      return service.loadBalancer.servers.map((server) => ({
-        host,
-        /* Down to the same authority the Caddy dial is written as; the scheme is
-           the format's business, the destination is the routing's. */
-        upstream: new URL(server.url).host,
-      }));
+      return legs.flatMap((leg) => {
+        if ("weighted" in leg.service) throw new Error(`"${host}" nests a weighted service`);
+        return leg.service.loadBalancer.servers.map((server) => ({
+          host,
+          /* Down to the same authority the Caddy dial is written as; the scheme
+             is the format's business, the destination is the routing's. */
+          upstream: new URL(server.url).host,
+          weight: leg.weight,
+        }));
+      });
     })
-    .sort(byHost);
+    .sort(byUpstream);
 }
 
-function byHost(a: Upstream, b: Upstream): number {
+function byUpstream(a: Upstream, b: Upstream): number {
   if (a.host === b.host) return a.upstream < b.upstream ? -1 : 1;
   return a.host < b.host ? -1 : 1;
 }
@@ -241,6 +366,7 @@ function environment(
   name: string,
   build?: string,
   domains: string[] = [],
+  split: SplitEntry[] | null = null,
 ): { project: string; env: EnvironmentRecord } {
   return {
     project,
@@ -249,7 +375,7 @@ function environment(
       name,
       prefix: `fleets/${project}/${name}`,
       alias: build === undefined ? null : { build, flippedAt: "2026-01-01T00:00:00.000Z" },
-      split: null,
+      split,
       domains,
       placement: "auto",
       ephemeral: false,

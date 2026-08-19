@@ -24,8 +24,10 @@ import {
   DEFAULT_ENTRY_POINT,
   renderTraefikConfig,
   TRAEFIK_KEY_PREFIX,
+  traefikLegKey,
   type TraefikDriver,
   type TraefikDynamicConfig,
+  type TraefikLoadBalancerService,
 } from "../src/drivers/ingress/traefik.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
@@ -33,6 +35,8 @@ import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
 const NODE_ID = "node-a";
 const HOST = "shop.apps.test";
 const OTHER_HOST = "shop--staging.apps.test";
+const BUILD = "aaaa1111";
+const OTHER_BUILD = "bbbb2222";
 
 let clock: ManualClock;
 let driver: TraefikDriver;
@@ -196,8 +200,132 @@ describe("caching what the reconcile loop applies", () => {
 
     /* The caller holds the document it was given; a later pass renders a new one
        rather than mutating the one already published. */
-    expect(snapshot.http?.services[`${TRAEFIK_KEY_PREFIX}${HOST}`]?.loadBalancer.servers).toEqual([
-      { url: "http://127.0.0.1:42000" },
+    const held = snapshot.http?.services[`${TRAEFIK_KEY_PREFIX}${HOST}`] as
+      | TraefikLoadBalancerService
+      | undefined;
+    expect(held?.loadBalancer.servers).toEqual([{ url: "http://127.0.0.1:42000" }]);
+  });
+});
+
+describe("a host divided between several backends", () => {
+  /*
+   * The shape below is not taken from the documentation. It was PINNED against
+   * `traefik:v3` (v3.7.10) by serving it to a real http provider: the weighted
+   * service was accepted, its unqualified child names resolved within the
+   * document, and 200 requests over a two-leg `[90, 10]` split arrived 180/20,
+   * exactly.
+   */
+  it("renders a weighted service over one child service per leg", () => {
+    const config = renderTraefikConfig(
+      split(HOST, [
+        [BUILD, 42_000, 90],
+        [OTHER_BUILD, 42_002, 10],
+      ]),
+    );
+
+    expect(config).toEqual({
+      http: {
+        routers: {
+          [`${TRAEFIK_KEY_PREFIX}${HOST}`]: {
+            rule: "Host(`shop.apps.test`)",
+            service: `${TRAEFIK_KEY_PREFIX}${HOST}`,
+            entryPoints: [DEFAULT_ENTRY_POINT],
+          },
+        },
+        services: {
+          [`${TRAEFIK_KEY_PREFIX}${HOST}`]: {
+            weighted: {
+              services: [
+                { name: traefikLegKey(HOST, BUILD), weight: 90 },
+                { name: traefikLegKey(HOST, OTHER_BUILD), weight: 10 },
+              ],
+            },
+          },
+          [traefikLegKey(HOST, BUILD)]: {
+            loadBalancer: { servers: [{ url: "http://127.0.0.1:42000" }] },
+          },
+          [traefikLegKey(HOST, OTHER_BUILD)]: {
+            loadBalancer: { servers: [{ url: "http://127.0.0.1:42002" }] },
+          },
+        },
+      },
+    });
+  });
+
+  it("names every child in a way that resolves inside this document", () => {
+    const config = renderTraefikConfig(
+      split(HOST, [
+        [BUILD, 42_000, 60],
+        [OTHER_BUILD, 42_002, 40],
+      ]),
+    );
+    const services = config.http?.services ?? {};
+    const weighted = services[`${TRAEFIK_KEY_PREFIX}${HOST}`];
+
+    for (const child of "weighted" in weighted ? weighted.weighted.services : []) {
+      /* Unqualified on purpose: a name carrying `@` names another provider's
+         service, and this document is the whole of what this provider supplies. */
+      expect(child.name, child.name).not.toContain("@");
+      expect(services[child.name], child.name).toBeDefined();
+    }
+  });
+
+  it("keeps a child key from colliding with any router key", () => {
+    /* The separator is the namespace's own underscore, which cannot occur in a
+       DNS name or in a build id — unlike `--`, which every environment label
+       carries and a claimed domain may too. */
+    const config = renderTraefikConfig({
+      routes: [
+        ...split(OTHER_HOST, [
+          [BUILD, 42_000, 70],
+          [OTHER_BUILD, 42_002, 30],
+        ]).routes,
+        ...desired([[`${OTHER_HOST}--${BUILD}`, 42_004]]).routes,
+      ],
+    });
+
+    const services = Object.keys(config.http?.services ?? {});
+    const routers = Object.keys(config.http?.routers ?? {});
+    expect(new Set(services).size).toBe(services.length);
+    /* Every router still owns its own key; the children only ever add to them. */
+    for (const router of routers) expect(services).toContain(router);
+    expect(services).toHaveLength(routers.length + 2);
+  });
+
+  it("keeps a single backend on the plain load balancer it has always had", () => {
+    /* A weighted service over one child would be indirection that buys nothing,
+       and would rewrite a document Traefik hashes for every host on the node. */
+    const service = renderTraefikConfig(desired([[HOST, 42_000]])).http?.services[
+      `${TRAEFIK_KEY_PREFIX}${HOST}`
+    ];
+
+    expect(service).toEqual({ loadBalancer: { servers: [{ url: "http://127.0.0.1:42000" }] } });
+  });
+
+  it("renders the same document byte for byte twice", () => {
+    const routing = split(HOST, [
+      [BUILD, 42_000, 90],
+      [OTHER_BUILD, 42_002, 10],
+    ]);
+
+    expect(JSON.stringify(renderTraefikConfig(routing))).toBe(
+      JSON.stringify(renderTraefikConfig(routing)),
+    );
+  });
+
+  it("withdraws the child services with the split that named them", async () => {
+    await driver.apply(
+      split(HOST, [
+        [BUILD, 42_000, 90],
+        [OTHER_BUILD, 42_002, 10],
+      ]),
+    );
+    await driver.apply(desired([[HOST, 42_000]]));
+
+    /* One service left, and it is the host's own: nothing of the split survives
+       a pass that no longer states one. */
+    expect(Object.keys(driver.snapshot().http?.services ?? {})).toEqual([
+      `${TRAEFIK_KEY_PREFIX}${HOST}`,
     ]);
   });
 });
@@ -253,9 +381,28 @@ function desired(entries: Array<[string, number]>): IngressDesired {
   return {
     routes: entries.map(([host, port]) => ({
       host,
-      backend: { project: "shop", env: "production", build: "aaaa1111", port },
+      backends: [{ backend: backend(port, BUILD), weight: 100 }],
     })),
   };
+}
+
+/** One host divided between several builds, as a split renders it. */
+function split(host: string, legs: Array<[string, number, number]>): IngressDesired {
+  return {
+    routes: [
+      {
+        host,
+        backends: legs.map(([build, port, weight]) => ({ backend: backend(port, build), weight })),
+      },
+    ],
+  };
+}
+
+function backend(
+  port: number,
+  build: string,
+): { project: string; env: string; build: string; port: number } {
+  return { project: "shop", env: "production", build, port };
 }
 
 /** The agent app as a node with `ingress` configured — or not — would build it. */

@@ -2,12 +2,22 @@
  * The pure reconcile planner: what this node must do to serve what the registry
  * wants, and the order it must do it in.
  *
- * The property every case here defends is the platform's zero-downtime
- * guarantee: a process that still serves an environment is never planned for a
- * stop until a replacement for that environment is running AND has passed its
- * readiness gate. A flip that stopped the old process first would drop every
- * request the new one cannot answer yet, and a replacement that never becomes
- * ready would leave the environment with nothing serving at all.
+ * TWO properties every case here defends.
+ *
+ * The platform's zero-downtime guarantee: a process that still serves an
+ * environment is never planned for a stop until EVERY build that environment is
+ * wanted at has a process that has passed its readiness gate. A flip that
+ * stopped the old process first would drop every request the new one cannot
+ * answer yet; a split that retired the outgoing build before its incoming leg
+ * was ready would do the same to that leg's share.
+ *
+ * And the pairing the fleet pointer forces: one pointer per environment, read
+ * once per process at startup, so an environment serving several builds must
+ * have each of them activated and started as ONE step. The planner says that by
+ * emitting one `rollout` per build rather than a phase of activations and a
+ * phase of starts — a distinction with no visible consequence for a single-build
+ * environment and a total one for a split, where the phased plan would start
+ * every process against the last activation and run one build twice.
  *
  * Planning is pure, so nothing here touches a store, a supervisor or a clock:
  * the port pairs are handed in by a counting stand-in, which also makes "how
@@ -23,6 +33,7 @@ import {
   type ReconcileAction,
   type ReconcileInput,
 } from "../src/core/placement/reconcile.ts";
+import type { BuildRecord, SplitEntry } from "../src/core/types/registry.ts";
 import type { RuntimeProcess } from "../src/core/types/runtime.ts";
 import { seededRng } from "./_helpers.ts";
 
@@ -40,11 +51,8 @@ const BUILD_THREE = "3333cccc";
 const CREATED_AT = "2026-01-01T00:00:00.000Z";
 const FLIPPED_AT = "2026-01-02T00:00:00.000Z";
 
-/** The phases a plan is emitted in, in the order they must be executed. */
-const PHASES: ReconcileAction["type"][] = ["activate", "start", "await-ready", "stop"];
-
 describe("an environment with nothing running for it", () => {
-  it("points the fleet at the build, starts a process on an allocated pair, then gates it", () => {
+  it("rolls the build out on an allocated pair, as one action", () => {
     const ports = countingPorts();
 
     const plan = planReconcile({
@@ -53,25 +61,30 @@ describe("an environment with nothing running for it", () => {
       ports,
     });
 
+    /* One action, not three. Pointing the fleet at the build, starting the
+       process that loads it and gating that process are inseparable. */
     expect(plan).toEqual([
-      { type: "activate", project: "shop", env: "prod", build: BUILD_ONE },
       {
-        type: "start",
+        type: "rollout",
         project: "shop",
         env: "prod",
         build: BUILD_ONE,
         ports: { public: PORT_START, internal: PORT_START + 1 },
       },
-      { type: "await-ready", processId: `shop--prod--${BUILD_ONE}` },
     ]);
-    /* The gate names the id the process will be started under, which is the
-       conventional one for the three parts it serves. */
-    expect(plan[2]).toEqual({
-      type: "await-ready",
-      processId: formatProcessId({ project: "shop", env: "prod", build: BUILD_ONE }),
-    });
     expect(stops(plan)).toEqual([]);
     expect(ports.calls).toBe(1);
+  });
+
+  it("names the three parts the process will be identified by", () => {
+    const plan = planReconcile({
+      desired: [mkDesired("shop", "prod", BUILD_ONE)],
+      actual: [],
+      ports: countingPorts(),
+    });
+
+    const rollout = plan[0] as Extract<ReconcileAction, { type: "rollout" }>;
+    expect(formatProcessId(rollout)).toBe(`shop--prod--${BUILD_ONE}`);
   });
 });
 
@@ -134,8 +147,7 @@ describe("a replacement that has passed its gate", () => {
     ]);
     /* The environment is already served by the build it should be: there is
        nothing left to load and nothing left to start. */
-    expect(plan.filter((action) => action.type === "activate")).toEqual([]);
-    expect(plan.filter((action) => action.type === "start")).toEqual([]);
+    expect(rollouts(plan)).toEqual([]);
     expect(ports.calls).toBe(0);
   });
 
@@ -156,35 +168,192 @@ describe("a replacement that has passed its gate", () => {
       { type: "stop", processId: newer.processId, reason: `superseded by build "${BUILD_ONE}"` },
     ]);
     /*
-     * Nothing is loaded and nothing is started, because both builds already run.
+     * Nothing is rolled out, because both builds already run.
      *
      * A rollback therefore plans no activation, and the fleet's deployment
      * pointer keeps naming the build that was rolled back FROM for as long as a
      * process of the aliased build survives. Nothing loads the abandoned build
-     * from it: an activation is planned together with every start, so the
-     * pointer is corrected before the next process reads it.
+     * from it: an activation is inside every rollout, so the pointer is
+     * corrected before the next process reads it.
      */
-    expect(plan.filter((action) => action.type === "activate")).toEqual([]);
-    expect(plan.filter((action) => action.type === "start")).toEqual([]);
+    expect(rollouts(plan)).toEqual([]);
   });
 
   it("points the fleet at the build it was rolled back to before starting a replacement", () => {
     /* The pointer left behind above, corrected the moment the environment has
        nothing serving it: a start is never planned without the activation that
-       decides what that process will load. */
+       decides what that process will load, because they are one action. */
     const plan = planReconcile({
       desired: [mkDesired("shop", "prod", BUILD_ONE)],
       actual: [],
       ports: countingPorts(),
     });
 
-    expect(plan[0]).toEqual({
-      type: "activate",
-      project: "shop",
-      env: "prod",
-      build: BUILD_ONE,
+    expect(plan[0]).toMatchObject({ type: "rollout", build: BUILD_ONE });
+  });
+});
+
+describe("an environment serving several builds at once", () => {
+  it("rolls each leg out on its own, alias first and the split in registry order", () => {
+    const ports = countingPorts();
+
+    const plan = planReconcile({
+      desired: [mkDesired("shop", "prod", BUILD_TWO, { legs: [BUILD_THREE, BUILD_ONE] })],
+      actual: [],
+      ports,
     });
-    expect(plan[1]).toMatchObject({ type: "start", build: BUILD_ONE });
+
+    /*
+     * THE CASE THE ACTION SHAPE EXISTS FOR. Three rollouts, each carrying its
+     * own build and its own port pair, and the executor takes each to its end
+     * before starting the next. A plan phased as "activate two, activate three,
+     * activate one, then start three processes" would leave the fleet pointer at
+     * the last activation, and all three processes would load that one build.
+     */
+    expect(plan).toEqual([
+      {
+        type: "rollout",
+        project: "shop",
+        env: "prod",
+        build: BUILD_TWO,
+        ports: { public: PORT_START, internal: PORT_START + 1 },
+      },
+      {
+        type: "rollout",
+        project: "shop",
+        env: "prod",
+        build: BUILD_THREE,
+        ports: { public: PORT_START + 2, internal: PORT_START + 3 },
+      },
+      {
+        type: "rollout",
+        project: "shop",
+        env: "prod",
+        build: BUILD_ONE,
+        ports: { public: PORT_START + 4, internal: PORT_START + 5 },
+      },
+    ]);
+    /* Registry order, NOT sorted order: two, three, one is what was written. */
+    expect(builtBy(plan)).toEqual([BUILD_TWO, BUILD_THREE, BUILD_ONE]);
+    expect(ports.calls).toBe(3);
+  });
+
+  it("counts the alias and a split leg naming it as one build", () => {
+    const ports = countingPorts();
+
+    const plan = planReconcile({
+      desired: [mkDesired("shop", "prod", BUILD_ONE, { legs: [BUILD_ONE, BUILD_TWO] })],
+      actual: [],
+      ports,
+    });
+
+    /* An alias that is itself a leg is one build and one process, whichever of
+       the two roles put it there. */
+    expect(builtBy(plan)).toEqual([BUILD_ONE, BUILD_TWO]);
+    expect(ports.calls).toBe(2);
+  });
+
+  it("re-pairs the activation of a leg that crashed, leaving the surviving one alone", () => {
+    /* The pointer may name either leg by now — whichever was rolled out last —
+       so restarting the one that died goes through the same paired action a
+       first start does, rather than assuming the pointer still fits. */
+    const survivor = mkProcess("shop", "prod", BUILD_ONE, { ready: true });
+
+    const plan = planReconcile({
+      desired: [mkDesired("shop", "prod", BUILD_ONE, { legs: [BUILD_TWO] })],
+      actual: [survivor],
+      ports: countingPorts(),
+    });
+
+    expect(plan).toEqual([
+      {
+        type: "rollout",
+        project: "shop",
+        env: "prod",
+        build: BUILD_TWO,
+        ports: { public: PORT_START, internal: PORT_START + 1 },
+      },
+    ]);
+    /* And nothing is stopped: the surviving leg is serving, and the one being
+       restarted is not proven yet. */
+    expect(stops(plan)).toEqual([]);
+  });
+
+  it("stops nothing until EVERY leg has a ready process", () => {
+    const outgoing = mkProcess("shop", "prod", BUILD_THREE, { ready: true });
+    const first = mkProcess("shop", "prod", BUILD_ONE, { ready: true });
+    const second = mkProcess("shop", "prod", BUILD_TWO, { ready: false });
+
+    const plan = planReconcile({
+      desired: [mkDesired("shop", "prod", BUILD_ONE, { legs: [BUILD_TWO] })],
+      actual: [outgoing, first, second],
+      ports: countingPorts(),
+    });
+
+    /* The 90 is up, the 10 is not, and the build being replaced keeps running:
+       retiring it now would hand the unproven leg's share to nothing. */
+    expect(plan).toEqual([{ type: "await-ready", processId: second.processId }]);
+    expect(stoppedIds(plan)).not.toContain(outgoing.processId);
+  });
+
+  it("retires what is not a leg once every leg is ready, naming all of them", () => {
+    const outgoing = mkProcess("shop", "prod", BUILD_THREE, { ready: true });
+    const first = mkProcess("shop", "prod", BUILD_ONE, { ready: true });
+    const second = mkProcess("shop", "prod", BUILD_TWO, { ready: true });
+
+    const plan = planReconcile({
+      desired: [mkDesired("shop", "prod", BUILD_ONE, { legs: [BUILD_TWO] })],
+      actual: [outgoing, first, second],
+      ports: countingPorts(),
+    });
+
+    expect(plan).toEqual([
+      {
+        type: "stop",
+        processId: outgoing.processId,
+        reason: `superseded by builds "${BUILD_ONE}", "${BUILD_TWO}"`,
+      },
+    ]);
+  });
+
+  it("stops the legs a cleared split dropped, once the alias is ready", () => {
+    /* `scalo env split --clear`, seen one pass later: the environment is wanted
+       at its alias alone again, and the leg that was taking 10% is retired — but
+       only because the alias is up, which it has been all along. */
+    const alias = mkProcess("shop", "prod", BUILD_ONE, { ready: true });
+    const dropped = mkProcess("shop", "prod", BUILD_TWO, { ready: true });
+
+    const plan = planReconcile({
+      desired: [mkDesired("shop", "prod", BUILD_ONE)],
+      actual: [alias, dropped],
+      ports: countingPorts(),
+    });
+
+    expect(plan).toEqual([
+      { type: "stop", processId: dropped.processId, reason: `superseded by build "${BUILD_ONE}"` },
+    ]);
+  });
+
+  it("keeps every process an environment has while one of its legs is unresolved", () => {
+    /*
+     * A leg whose build record is gone from the registry — a corrupted or raced
+     * state, since the reaper refuses to delete a build a split references. It
+     * cannot be rolled out, and it must not be quietly dropped either: dropping
+     * it would retire the process still serving it and hand its share of the
+     * traffic to the other legs, over a build nobody withdrew. It counts as an
+     * unproven leg, so nothing this environment runs is stopped.
+     */
+    const alias = mkProcess("shop", "prod", BUILD_ONE, { ready: true });
+    const orphan = mkProcess("shop", "prod", BUILD_THREE, { ready: true });
+
+    const plan = planReconcile({
+      desired: [mkDesired("shop", "prod", BUILD_ONE, { unresolved: [BUILD_THREE] })],
+      actual: [alias, orphan],
+      ports: countingPorts(),
+    });
+
+    expect(plan).toEqual([]);
+    expect(stoppedIds(plan)).not.toContain(orphan.processId);
   });
 });
 
@@ -222,22 +391,19 @@ describe("an environment the registry no longer lists", () => {
     });
 
     expect(plan).toEqual([
-      { type: "activate", project: "shop", env: "prod", build: BUILD_TWO },
       {
-        type: "start",
+        type: "rollout",
         project: "shop",
         env: "prod",
         build: BUILD_TWO,
         ports: { public: PORT_START, internal: PORT_START + 1 },
       },
-      { type: "await-ready", processId: `shop--prod--${BUILD_TWO}` },
       {
         type: "stop",
         processId: stranger.processId,
         reason: "environment is no longer served by this node",
       },
     ]);
-    expect(phasesOf(plan)).toEqual(["activate", "start", "await-ready", "stop"]);
   });
 
   it("keeps environments of different projects that share a name apart", () => {
@@ -272,6 +438,19 @@ describe("a steady state", () => {
 
     expect(plan).toEqual([]);
     expect(ports.calls).toBe(0);
+  });
+
+  it("plans nothing for a split whose every leg is already ready", () => {
+    const plan = planReconcile({
+      desired: [mkDesired("shop", "prod", BUILD_ONE, { legs: [BUILD_TWO] })],
+      actual: [
+        mkProcess("shop", "prod", BUILD_ONE, { ready: true }),
+        mkProcess("shop", "prod", BUILD_TWO, { ready: true, port: RUNNING_PORT + 2 }),
+      ],
+      ports: countingPorts(),
+    });
+
+    expect(plan).toEqual([]);
   });
 
   it("plans nothing for a second process of the same build, ready or not", () => {
@@ -318,18 +497,18 @@ describe("the port allocator", () => {
     const plan = planReconcile({
       desired: [
         mkDesired("shop", "prod", BUILD_ONE),
-        mkDesired("shop", "preview", BUILD_TWO),
+        mkDesired("shop", "preview", BUILD_TWO, { legs: [BUILD_THREE] }),
         mkDesired("blog", "prod", BUILD_THREE),
       ],
       actual: [],
       ports,
     });
 
-    const starts = plan.filter((action) => action.type === "start");
-    expect(starts).toHaveLength(3);
-    expect(ports.calls).toBe(3);
-    /* Every start carries its own pair, and no pair is handed out twice. */
-    const allocated = starts.flatMap((action) => [action.ports.public, action.ports.internal]);
+    const started = rollouts(plan);
+    expect(started).toHaveLength(4);
+    expect(ports.calls).toBe(4);
+    /* Every rollout carries its own pair, and no pair is handed out twice. */
+    const allocated = started.flatMap((action) => [action.ports.public, action.ports.internal]);
     expect(new Set(allocated).size).toBe(allocated.length);
   });
 
@@ -347,7 +526,7 @@ describe("the port allocator", () => {
       ports,
     });
 
-    expect(plan.filter((action) => action.type === "start")).toEqual([]);
+    expect(rollouts(plan)).toEqual([]);
     expect(ports.calls).toBe(0);
   });
 });
@@ -370,17 +549,31 @@ describe("ordering", () => {
     }
   });
 
-  it("groups a plan into activations, starts, gates and stops, in that order", () => {
+  it("puts every stop after every rollout and gate, and groups the rest by environment", () => {
+    /*
+     * The phasing that is left, and the whole of it. Rollouts and gates are NOT
+     * two phases any more — they interleave, per environment, in registry order
+     * — because a leg that has to be started and a leg that only has to be gated
+     * are both just "this leg is not ready yet". What is still a phase is the
+     * stops: nothing is taken out of service until everything the pass is
+     * bringing into service has been dealt with.
+     */
     const plan = planReconcile(busyInput());
 
-    expect(phasesOf(plan)).toEqual(["activate", "start", "await-ready", "stop"]);
-    /* All four phases are present, so the ordering above was actually exercised. */
-    expect(new Set(plan.map((action) => action.type))).toEqual(new Set(PHASES));
+    const firstStop = plan.findIndex((action) => action.type === "stop");
+    expect(firstStop).toBeGreaterThan(0);
+    expect(plan.slice(firstStop).every((action) => action.type === "stop")).toBe(true);
+    /* All three kinds are present, so the ordering above was actually exercised. */
+    expect(new Set(plan.map((action) => action.type))).toEqual(
+      new Set(["rollout", "await-ready", "stop"]),
+    );
+    /* And each environment's actions are contiguous, in registry order. */
+    expect(environmentsOf(plan)).toEqual([...new Set(environmentsOf(plan))]);
   });
 });
 
 describe("across randomly generated states", () => {
-  it("never stops a process before a ready replacement exists for its environment", () => {
+  it("never stops a process before every leg of its environment is ready", () => {
     for (let seed = 1; seed <= 200; seed++) {
       const input = randomInput(seededRng(seed));
 
@@ -394,53 +587,60 @@ describe("across randomly generated states", () => {
     }
   });
 
-  it("keeps the phases in execution order and asks for one port pair per start", () => {
+  it("keeps the stops last and asks for one port pair per rollout", () => {
     for (let seed = 1; seed <= 200; seed++) {
       const input = randomInput(seededRng(seed));
       const ports = countingPorts();
 
       const plan = planReconcile({ desired: input.desired, actual: input.actual, ports });
 
-      expect(phasesOf(plan), `for scenario seed ${String(seed)}`).toEqual(
-        PHASES.filter((phase) => plan.some((action) => action.type === phase)),
-      );
-      expect(ports.calls, `for scenario seed ${String(seed)}`).toBe(
-        plan.filter((action) => action.type === "start").length,
-      );
+      const firstStop = plan.findIndex((action) => action.type === "stop");
+      const tail = firstStop === -1 ? [] : plan.slice(firstStop);
+      expect(
+        tail.every((action) => action.type === "stop"),
+        `for scenario seed ${String(seed)}`,
+      ).toBe(true);
+      expect(ports.calls, `for scenario seed ${String(seed)}`).toBe(rollouts(plan).length);
       /* Every process is spoken about at most once. */
       const ids = stoppedIds(plan);
       expect(new Set(ids).size, `for scenario seed ${String(seed)}`).toBe(ids.length);
     }
   });
 
-  it("starts exactly one process for every environment nothing runs yet", () => {
+  it("rolls out exactly one process for every leg nothing runs yet, and no other", () => {
     for (let seed = 1; seed <= 200; seed++) {
       const input = randomInput(seededRng(seed));
       const plan = planReconcile(clone(input));
 
       for (const entry of input.desired) {
-        const serves = input.actual.some(
-          (process) =>
-            process.project === entry.project &&
-            process.env === entry.env.name &&
-            process.build === entry.build.id,
-        );
-        const started = plan.filter(
-          (action) =>
-            action.type === "start" &&
-            action.project === entry.project &&
-            action.env === entry.env.name,
-        );
-        const activated = plan.filter(
-          (action) =>
-            action.type === "activate" &&
-            action.project === entry.project &&
-            action.env === entry.env.name,
-        );
+        for (const leg of entry.builds) {
+          const serves = input.actual.some(
+            (process) =>
+              process.project === entry.project &&
+              process.env === entry.env.name &&
+              process.build === leg.build.id,
+          );
+          const started = plan.filter(
+            (action) =>
+              action.type === "rollout" &&
+              action.project === entry.project &&
+              action.env === entry.env.name &&
+              action.build === leg.build.id,
+          );
 
-        const because = `for seed ${String(seed)}, ${entry.project}/${entry.env.name}`;
-        expect(started.length, `${because}: starts`).toBe(serves ? 0 : 1);
-        expect(activated.length, `${because}: activations`).toBe(serves ? 0 : 1);
+          const because = `for seed ${String(seed)}, ${entry.project}/${entry.env.name}`;
+          expect(started.length, `${because} at ${leg.build.id}`).toBe(serves ? 0 : 1);
+        }
+      }
+      /* And nothing is rolled out that no environment asked for. */
+      for (const action of rollouts(plan)) {
+        const wanted = input.desired.find(
+          (entry) => entry.project === action.project && entry.env.name === action.env,
+        );
+        expect(
+          wanted?.builds.map((leg) => leg.build.id),
+          `for seed ${String(seed)}`,
+        ).toContain(action.build);
       }
     }
   });
@@ -469,8 +669,9 @@ const SAFE = "safe";
 /**
  * Whether one planned stop was allowed, and what is wrong with it when it was
  * not. A process may only be stopped when its environment has left desired state
- * altogether, or when another process of that environment already serves the
- * build it is wanted at AND has passed its readiness gate.
+ * altogether, or when EVERY build that environment is wanted at has a process
+ * that has passed its readiness gate — and the process being stopped is at none
+ * of those builds.
  */
 function stopVerdict(
   action: Extract<ReconcileAction, { type: "stop" }>,
@@ -488,21 +689,34 @@ function stopVerdict(
       : `"${action.processId}" serves no wanted environment but was stopped as "${action.reason}"`;
   }
 
-  if (stopped.build === wanted.build.id) {
-    return `"${action.processId}" serves the very build its environment is wanted at`;
+  const legs = wanted.builds.map((leg) => leg.build.id);
+  if (legs.includes(stopped.build)) {
+    return `"${action.processId}" serves a build its environment is wanted at`;
   }
-  const replaced = input.actual.some(
-    (process) =>
-      process.project === stopped.project &&
-      process.env === stopped.env &&
-      process.build === wanted.build.id &&
-      process.ready,
-  );
-  if (!replaced) return `"${action.processId}" was stopped with no ready replacement running`;
+  if ((wanted.unresolved ?? []).length > 0) {
+    return `"${action.processId}" was stopped while its environment had an unresolved leg`;
+  }
 
-  return action.reason === `superseded by build "${wanted.build.id}"`
+  const unproven = legs.filter(
+    (build) =>
+      !input.actual.some(
+        (process) =>
+          process.project === stopped.project &&
+          process.env === stopped.env &&
+          process.build === build &&
+          process.ready,
+      ),
+  );
+  if (unproven.length > 0) {
+    return `"${action.processId}" was stopped while ${unproven.join(", ")} had no ready process`;
+  }
+
+  const named = legs.map((build) => `"${build}"`).join(", ");
+  const expected =
+    legs.length === 1 ? `superseded by build ${named}` : `superseded by builds ${named}`;
+  return action.reason === expected
     ? SAFE
-    : `"${action.processId}" was retired as "${action.reason}", which names the wrong build`;
+    : `"${action.processId}" was retired as "${action.reason}", which names the wrong builds`;
 }
 
 /** Hands out sequential pairs and counts how often a plan asked for one. */
@@ -528,15 +742,31 @@ function countingPorts(start: number = PORT_START): CountingPorts {
 interface DesiredOptions {
   ephemeral?: boolean;
   varsetId?: string;
+  /** Builds the environment also splits its traffic to, beyond its alias. */
+  legs?: string[];
+  /** Split legs whose build record could not be read. */
+  unresolved?: string[];
 }
 
-/** One environment as the registry wants it served, with its alias resolved. */
+/** One environment as the registry wants it served, with its builds resolved. */
 function mkDesired(
   project: string,
   env: string,
   build: string,
   opts?: DesiredOptions,
 ): DesiredEnvironment {
+  const legs = opts?.legs ?? [];
+  const unresolved = opts?.unresolved ?? [];
+  /* Deduped the way the reader dedupes it: the alias may itself be a leg. */
+  const ids = [build, ...legs.filter((leg) => leg !== build)];
+  const split: SplitEntry[] =
+    legs.length + unresolved.length === 0
+      ? []
+      : [...legs, ...unresolved].map((leg, at, all) => ({
+          build: leg,
+          weight: at === 0 ? 100 - all.length + 1 : 1,
+        }));
+
   const wanted: DesiredEnvironment = {
     project,
     env: {
@@ -544,23 +774,31 @@ function mkDesired(
       name: env,
       prefix: `fleets/${project}/${env}`,
       alias: { build, flippedAt: FLIPPED_AT },
-      split: null,
+      split: split.length === 0 ? null : split,
       domains: [],
       placement: "auto",
       ephemeral: opts?.ephemeral ?? false,
       createdAt: CREATED_AT,
     },
-    build: {
-      v: 1,
-      id: build,
-      artifact: `artifacts/${project}/${build}.tar.zst`,
-      celldVersionId: `version-${build}`,
-      runtimeConfigurable: true,
-      createdAt: CREATED_AT,
-    },
+    builds: ids.map((id, at) => ({
+      build: mkBuild(project, id),
+      role: at === 0 ? "alias" : "split",
+    })),
   };
+  if (unresolved.length > 0) wanted.unresolved = [...unresolved];
   if (opts?.varsetId !== undefined) wanted.varsetId = opts.varsetId;
   return wanted;
+}
+
+function mkBuild(project: string, build: string): BuildRecord {
+  return {
+    v: 1,
+    id: build,
+    artifact: `artifacts/${project}/${build}.tar.zst`,
+    celldVersionId: `version-${build}`,
+    runtimeConfigurable: true,
+    createdAt: CREATED_AT,
+  };
 }
 
 interface ProcessOptions {
@@ -590,18 +828,18 @@ function mkProcess(
   };
 }
 
-/** A state exercising all four phases at once, across two projects. */
+/** A state exercising every kind of action at once, across two projects. */
 function busyInput(): ReconcileInput {
   return {
     desired: [
-      /* Nothing runs it yet: activate, start, gate. */
+      /* Nothing runs it yet: one rollout. */
       mkDesired("shop", "prod", BUILD_THREE),
       /* Served by the wanted build already, with an older one to retire. */
       mkDesired("shop", "preview", BUILD_TWO, { ephemeral: true }),
       /* Replacement running but unproven: gate only. */
       mkDesired("blog", "prod", BUILD_TWO),
-      /* Steady state: nothing to do at all. */
-      mkDesired("blog", "staging", BUILD_ONE),
+      /* A split with one leg up and one still to start. */
+      mkDesired("blog", "staging", BUILD_ONE, { legs: [BUILD_THREE] }),
     ],
     actual: [
       mkProcess("shop", "preview", BUILD_ONE, { ready: true, port: RUNNING_PORT }),
@@ -621,7 +859,7 @@ const PROJECTS = ["shop", "blog"];
 const ENVIRONMENTS = ["prod", "preview", "staging"];
 const BUILDS = [BUILD_ONE, BUILD_TWO, BUILD_THREE];
 
-/** A random mix of wanted environments and running processes. */
+/** A random mix of wanted environments — some of them split — and running processes. */
 function randomInput(rng: () => number): ReconcileInput {
   const desired: DesiredEnvironment[] = [];
   const actual: RuntimeProcess[] = [];
@@ -629,7 +867,16 @@ function randomInput(rng: () => number): ReconcileInput {
 
   for (const project of PROJECTS) {
     for (const env of ENVIRONMENTS) {
-      if (rng() < 0.75) desired.push(mkDesired(project, env, pick(BUILDS, rng)));
+      if (rng() < 0.75) {
+        const legs = BUILDS.filter(() => rng() < 0.3);
+        const unresolved = rng() < 0.1 ? ["dddd4444"] : [];
+        desired.push(
+          mkDesired(project, env, pick(BUILDS, rng), {
+            ...(legs.length === 0 ? {} : { legs }),
+            ...(unresolved.length === 0 ? {} : { unresolved }),
+          }),
+        );
+      }
 
       const count = Math.floor(rng() * 4);
       const used = new Set<string>();
@@ -651,11 +898,21 @@ function pick<T>(values: T[], rng: () => number): T {
   return values[Math.floor(rng() * values.length)];
 }
 
-/** The phases a plan is made of, in the order they appear and without repeats. */
-function phasesOf(plan: ReconcileAction[]): ReconcileAction["type"][] {
-  const seen: ReconcileAction["type"][] = [];
+function rollouts(plan: ReconcileAction[]): Array<Extract<ReconcileAction, { type: "rollout" }>> {
+  return plan.filter((action) => action.type === "rollout");
+}
+
+function builtBy(plan: ReconcileAction[]): string[] {
+  return rollouts(plan).map((action) => action.build);
+}
+
+/** The environment each non-stop action concerns, in plan order and without repeats. */
+function environmentsOf(plan: ReconcileAction[]): string[] {
+  const seen: string[] = [];
   for (const action of plan) {
-    if (seen.at(-1) !== action.type) seen.push(action.type);
+    if (action.type !== "rollout") continue;
+    const key = `${action.project}/${action.env}`;
+    if (seen.at(-1) !== key) seen.push(key);
   }
   return seen;
 }

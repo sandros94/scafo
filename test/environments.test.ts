@@ -2,6 +2,7 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  canarySplit,
   createBuild,
   createEnvironment,
   createProject,
@@ -134,6 +135,114 @@ describe("flipAlias", () => {
     const { environment } = await flipAlias(clock.ctx, PROJECT, ENV, B3);
     expect(environment.split).toBeNull();
     expect(environment.alias).toMatchObject({ build: B3, previous: B1 });
+  });
+
+  it("says so, naming the legs it just stopped serving", async () => {
+    /* An operator running 90/10 who flips has also ended the split, which is
+       usually what they meant — and is worth saying either way, because nothing
+       else in the answer mentions what was there a moment ago. */
+    await flipAlias(clock.ctx, PROJECT, ENV, B1);
+    await setSplit(clock.ctx, PROJECT, ENV, [
+      { build: B1, weight: 90 },
+      { build: B2, weight: 10 },
+    ]);
+
+    const { warnings } = await flipAlias(clock.ctx, PROJECT, ENV, B3);
+
+    expect(warnings.map((warning) => warning.code)).toEqual(["split-cleared"]);
+    expect(warnings[0].detail).toContain(`"${B1}" at 90%`);
+    expect(warnings[0].detail).toContain(`"${B2}" at 10%`);
+    expect(warnings[0].detail).toContain(B3);
+  });
+
+  it("says nothing about a split when there was none", async () => {
+    await flipAlias(clock.ctx, PROJECT, ENV, B1);
+
+    const { warnings } = await flipAlias(clock.ctx, PROJECT, ENV, B2);
+    expect(warnings).toEqual([]);
+  });
+});
+
+describe("canarySplit", () => {
+  it("weighs the new build against whatever the alias points at", async () => {
+    await flipAlias(clock.ctx, PROJECT, ENV, B1);
+
+    const record = await canarySplit(clock.ctx, PROJECT, ENV, { build: B2, weight: 10 });
+
+    /* Alias leg first, which is the order every reader takes the legs in. */
+    expect(record.split).toEqual([
+      { build: B1, weight: 90 },
+      { build: B2, weight: 10 },
+    ]);
+    /* And the alias has NOT moved: it is still the primary pointer and still
+       what a rollback goes back to. */
+    expect(record.alias).toMatchObject({ build: B1 });
+  });
+
+  it("refuses an environment that has never been flipped, naming the way forward", async () => {
+    const error = await rejectsWith(
+      () => canarySplit(clock.ctx, PROJECT, ENV, { build: B1, weight: 10 }),
+      "invalid-input",
+    );
+
+    /* There is nothing to hold the other side of the split, and easing traffic
+       onto the only thing that serves an environment means nothing. */
+    expect(error.detail).toContain("--flip");
+    expect((await getEnvironment(clock.ctx, PROJECT, ENV)).split).toBeNull();
+  });
+
+  it("refuses to split a build against itself", async () => {
+    await flipAlias(clock.ctx, PROJECT, ENV, B1);
+
+    const error = await rejectsWith(
+      () => canarySplit(clock.ctx, PROJECT, ENV, { build: B1, weight: 10 }),
+      "invalid-input",
+    );
+    expect(error.detail).toContain(B1);
+  });
+
+  it("requires the canary build to exist", async () => {
+    await flipAlias(clock.ctx, PROJECT, ENV, B1);
+
+    await rejectsWith(
+      () => canarySplit(clock.ctx, PROJECT, ENV, { build: "deadbeef", weight: 10 }),
+      "not-found",
+    );
+    expect((await getEnvironment(clock.ctx, PROJECT, ENV)).split).toBeNull();
+  });
+
+  it("refuses a weight that leaves one side of the split with nothing", async () => {
+    await flipAlias(clock.ctx, PROJECT, ENV, B1);
+
+    for (const weight of [0, 100, -5, 10.5]) {
+      const error = await rejectsWith(
+        () => canarySplit(clock.ctx, PROJECT, ENV, { build: B2, weight }),
+        "invalid-input",
+      );
+      expect(error.detail, String(weight)).toContain("1 to 99");
+    }
+  });
+
+  it("replaces a split that was already there", async () => {
+    await flipAlias(clock.ctx, PROJECT, ENV, B1);
+    await canarySplit(clock.ctx, PROJECT, ENV, { build: B2, weight: 10 });
+
+    const widened = await canarySplit(clock.ctx, PROJECT, ENV, { build: B2, weight: 50 });
+
+    expect(widened.split).toEqual([
+      { build: B1, weight: 50 },
+      { build: B2, weight: 50 },
+    ]);
+  });
+
+  it("is promoted by an ordinary flip, which clears it", async () => {
+    await flipAlias(clock.ctx, PROJECT, ENV, B1);
+    await canarySplit(clock.ctx, PROJECT, ENV, { build: B2, weight: 10 });
+
+    const { environment } = await flipAlias(clock.ctx, PROJECT, ENV, B2);
+
+    expect(environment.split).toBeNull();
+    expect(environment.alias).toMatchObject({ build: B2, previous: B1 });
   });
 });
 

@@ -11,14 +11,17 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { readDesired } from "../src/agent/_desired.ts";
 import {
   acquireLease,
+  buildKey,
   createBuild,
   createEnvironment,
   createProject,
+  deleteKey,
   deletePlacement,
   flipAlias,
   type LeaseHandle,
   retireEnvironment,
   setNodeSelector,
+  setSplit,
   unretireEnvironment,
   writePlacement,
 } from "../src/core/registry/index.ts";
@@ -29,6 +32,7 @@ import { ctxWith } from "./_helpers.ts";
 const PROJECT = "shop";
 const OTHER_PROJECT = "blog";
 const BUILD = "b1b1b1b1";
+const OTHER_BUILD = "b2b2b2b2";
 const SELF = "node-a";
 const PEER = "node-b";
 
@@ -279,7 +283,7 @@ describe("what is left out for reasons other than placement", () => {
        environment, so nothing has to be rebuilt to serve it again. */
     const state = await readDesired(registry, { nodeId: SELF });
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
-    expect(state.environments[0].build.id).toBe(BUILD);
+    expect(state.environments[0].builds.map((leg) => leg.build.id)).toEqual([BUILD]);
   });
 
   it("leaves a retired environment out on every node, not just this one", async () => {
@@ -316,7 +320,103 @@ describe("what is left out for reasons other than placement", () => {
     expect(await readDesired(empty, { nodeId: SELF })).toEqual({
       environments: [],
       placements: [],
+      failures: [],
     });
+  });
+});
+
+describe("an environment whose traffic is split", () => {
+  beforeEach(async () => {
+    await createBuild(registry, PROJECT, { id: OTHER_BUILD, runtimeConfigurable: true });
+  });
+
+  it("resolves the alias first, then the legs in the order the registry states them", async () => {
+    await setSplit(registry, PROJECT, "prod", [
+      { build: OTHER_BUILD, weight: 90 },
+      { build: BUILD, weight: 10 },
+    ]);
+
+    const state = await readDesired(registry, { nodeId: SELF });
+
+    /* Alias FIRST, whatever the split says, because the alias is the primary
+       pointer whether or not it is also a leg — and then the split in its own
+       order, so two nodes plan the same rollouts in the same sequence. */
+    expect(state.environments[0].builds).toEqual([
+      { build: expect.objectContaining({ id: BUILD }), role: "alias" },
+      { build: expect.objectContaining({ id: OTHER_BUILD }), role: "split" },
+    ]);
+    expect(state.failures).toEqual([]);
+  });
+
+  it("counts a leg that names the alias once", async () => {
+    await setSplit(registry, PROJECT, "prod", [
+      { build: BUILD, weight: 50 },
+      { build: OTHER_BUILD, weight: 50 },
+    ]);
+
+    const state = await readDesired(registry, { nodeId: SELF });
+
+    expect(state.environments[0].builds.map((leg) => leg.build.id)).toEqual([BUILD, OTHER_BUILD]);
+    expect(state.environments[0].builds[0].role).toBe("alias");
+  });
+
+  it("keeps the environment and records the leg whose build is gone", async () => {
+    /*
+     * A corrupted or raced registry — the reaper refuses to delete a build any
+     * split references — and the reading that matters is what does NOT happen:
+     * the environment stays desired, so nothing it runs is planned for a stop.
+     * Dropping the leg silently would retire the process still serving it and
+     * hand its share of the traffic to the other legs.
+     */
+    await setSplit(registry, PROJECT, "prod", [
+      { build: BUILD, weight: 90 },
+      { build: OTHER_BUILD, weight: 10 },
+    ]);
+    await deleteKey(registry, buildKey(PROJECT, OTHER_BUILD));
+
+    const state = await readDesired(registry, { nodeId: SELF });
+
+    expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
+    expect(state.environments[0].builds.map((leg) => leg.build.id)).toEqual([BUILD]);
+    expect(state.environments[0].unresolved).toEqual([OTHER_BUILD]);
+    expect(state.failures).toEqual([
+      { subject: `${PROJECT}/prod`, detail: expect.stringContaining(OTHER_BUILD) },
+    ]);
+  });
+
+  it("says nothing about unresolved legs when every one of them resolved", async () => {
+    await setSplit(registry, PROJECT, "prod", [
+      { build: BUILD, weight: 90 },
+      { build: OTHER_BUILD, weight: 10 },
+    ]);
+
+    const state = await readDesired(registry, { nodeId: SELF });
+
+    /* No field rather than an empty one: an environment with nothing missing
+       says nothing here, exactly as an unconstrained one says no selector. */
+    expect(state.environments[0].unresolved).toBeUndefined();
+  });
+
+  it("goes back to the alias alone the moment the split is cleared", async () => {
+    await setSplit(registry, PROJECT, "prod", [
+      { build: BUILD, weight: 50 },
+      { build: OTHER_BUILD, weight: 50 },
+    ]);
+    await setSplit(registry, PROJECT, "prod", null);
+
+    const state = await readDesired(registry, { nodeId: SELF });
+
+    expect(state.environments[0].builds.map((leg) => leg.build.id)).toEqual([BUILD]);
+  });
+
+  it("leaves a retired environment out, split or no split", async () => {
+    await setSplit(registry, PROJECT, "prod", [
+      { build: BUILD, weight: 50 },
+      { build: OTHER_BUILD, weight: 50 },
+    ]);
+    await retireEnvironment(registry, PROJECT, "prod");
+
+    expect((await readDesired(registry, { nodeId: SELF })).environments).toEqual([]);
   });
 });
 

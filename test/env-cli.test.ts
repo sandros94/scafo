@@ -19,9 +19,11 @@ import {
   CLI_NODE_ID,
   describeRetirement,
   describeSelectorChange,
+  describeSplitChange,
   directOps,
   type EnvironmentOps,
   readSelectorFlags,
+  readSplitFlags,
 } from "../src/cli/_environments.ts";
 import { signNodeToken } from "../src/core/auth/index.ts";
 import {
@@ -45,6 +47,8 @@ import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
 const NODE_ID = "node-a";
 const PROJECT = "app";
 const BUILD = "b1b1b1b1";
+/** A second build, so a split has two legs to weigh against each other. */
+const OTHER_BUILD = "b2b2b2b2";
 const AGENT_URL = "http://10.0.0.4:7400";
 const HOUR_MS = 3_600_000;
 
@@ -71,7 +75,9 @@ beforeEach(async () => {
     addresses: { internal: "10.0.0.4", agentPort: 7400 },
   });
   await createProject(clock.ctx, { slug: PROJECT });
-  await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
+  for (const id of [BUILD, OTHER_BUILD]) {
+    await createBuild(clock.ctx, PROJECT, { id, runtimeConfigurable: true });
+  }
   await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
   await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true });
   await flipAlias(clock.ctx, PROJECT, "prod", BUILD);
@@ -204,6 +210,178 @@ describe("what --set and --clear are read as", () => {
     );
 
     expect(error.detail).toContain("--set");
+  });
+});
+
+/* Weighting an environment's traffic is a plain record update too, so it goes
+   the same two ways and must answer identically on both. */
+describe.each([
+  ["through a node agent", (): EnvironmentOps => throughAgent()],
+  ["straight through the bucket", (): EnvironmentOps => throughBucket()],
+])("splitting traffic %s", (_name, build) => {
+  it("states the legs and their weights, in the order they were written", async () => {
+    const environment = await build().setSplit(PROD, [
+      { build: OTHER_BUILD, weight: 90 },
+      { build: BUILD, weight: 10 },
+    ]);
+
+    /* Order is kept, not sorted: it is what the planner rolls the legs out in
+       and what both ingresses weight them in. */
+    expect(environment.split).toEqual([
+      { build: OTHER_BUILD, weight: 90 },
+      { build: BUILD, weight: 10 },
+    ]);
+    expect(await getEnvironment(clock.ctx, PROJECT, "prod")).toEqual(environment);
+  });
+
+  it("leaves the alias exactly where it was", async () => {
+    await build().setSplit(PROD, [
+      { build: BUILD, weight: 50 },
+      { build: OTHER_BUILD, weight: 50 },
+    ]);
+
+    /* The alias is the primary pointer and the rollback target; a split weights
+       traffic and says nothing about it. */
+    expect((await getEnvironment(clock.ctx, PROJECT, "prod")).alias).toMatchObject({
+      build: BUILD,
+    });
+  });
+
+  it("clears the split when it is cleared", async () => {
+    await build().setSplit(PROD, [
+      { build: BUILD, weight: 50 },
+      { build: OTHER_BUILD, weight: 50 },
+    ]);
+
+    const environment = await build().setSplit(PROD, null);
+
+    expect(environment.split).toBeNull();
+  });
+
+  it("relays the registry's own refusal when the weights do not add up", async () => {
+    const error = await rejectsWith(
+      () =>
+        build().setSplit(PROD, [
+          { build: BUILD, weight: 90 },
+          { build: OTHER_BUILD, weight: 20 },
+        ]),
+      "invalid-input",
+    );
+
+    /* Verbatim, whichever way the operator reached the installation: the rule is
+       the registry's and the wording must not depend on the transport. */
+    expect(error.detail).toContain("110");
+    expect(error.detail).toContain("sum to 100");
+  });
+
+  it("refuses a leg whose build does not exist, changing nothing", async () => {
+    await rejectsWith(
+      () =>
+        build().setSplit(PROD, [
+          { build: BUILD, weight: 90 },
+          { build: "deadbeef", weight: 10 },
+        ]),
+      "not-found",
+    );
+
+    expect((await getEnvironment(clock.ctx, PROJECT, "prod")).split).toBeNull();
+  });
+
+  it("weighs a canary against whatever the alias points at", async () => {
+    const environment = await build().canary(PROD, { build: OTHER_BUILD, weight: 10 });
+
+    expect(environment.split).toEqual([
+      { build: BUILD, weight: 90 },
+      { build: OTHER_BUILD, weight: 10 },
+    ]);
+  });
+
+  it("refuses a canary on an environment that was never flipped, naming --flip", async () => {
+    const error = await rejectsWith(
+      () => build().canary(PREVIEW, { build: BUILD, weight: 10 }),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("--flip");
+  });
+
+  it("reports an environment that is not there rather than inventing one", async () => {
+    await rejectsWith(
+      () => build().setSplit({ project: PROJECT, env: "ghost" }, null),
+      "not-found",
+    );
+  });
+
+  it("takes no coordinator lease to do it", async () => {
+    await build().setSplit(PROD, [
+      { build: BUILD, weight: 50 },
+      { build: OTHER_BUILD, weight: 50 },
+    ]);
+
+    const lease = await readJson<CoordinatorLease>(clock.ctx, coordinatorKey());
+    expect(lease?.value.node).not.toBe(CLI_NODE_ID);
+  });
+});
+
+describe("what --set and --clear are read as, for a split", () => {
+  it("reads the legs of --set, keeping their order", () => {
+    expect(readSplitFlags({ set: "bbbb2222=90,aaaa1111=10", clear: false })).toEqual([
+      { build: "bbbb2222", weight: 90 },
+      { build: "aaaa1111", weight: 10 },
+    ]);
+  });
+
+  it("reads --clear as the null that ends the split", () => {
+    expect(readSplitFlags({ set: undefined, clear: true })).toBeNull();
+  });
+
+  it("refuses both at once, which say opposite things", async () => {
+    const error = await rejectsWith(
+      () => Promise.resolve(readSplitFlags({ set: "a=50,b=50", clear: true })),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("opposite");
+  });
+
+  it("refuses NEITHER rather than reading it as a clear", async () => {
+    /* An accidental `scalo env split` that collapsed a canary onto the alias
+       would move an application's whole traffic without anyone having asked. */
+    const error = await rejectsWith(
+      () => Promise.resolve(readSplitFlags({ set: undefined, clear: false })),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("--set");
+    expect(error.detail).toContain("--clear");
+  });
+
+  it("refuses a weight that is not a whole number of percent", async () => {
+    for (const stated of ["a=90,b=ten", "a=90,b=1.5", "a=90,b=-10"]) {
+      const error = await rejectsWith(
+        () => Promise.resolve(readSplitFlags({ set: stated, clear: false })),
+        "invalid-input",
+      );
+      expect(error.detail, stated).toContain("--set");
+    }
+  });
+
+  it("refuses a pair it cannot read at all", async () => {
+    for (const stated of ["a90,b10", "=90", ""]) {
+      await rejectsWith(
+        () => Promise.resolve(readSplitFlags({ set: stated, clear: false })),
+        "invalid-input",
+      );
+    }
+  });
+
+  it("leaves what the weights must add up to to the registry", () => {
+    /* Read here, refused there: an operator gets the same wording however they
+       reached the installation, and the rule lives in one place. */
+    expect(readSplitFlags({ set: "aaaa1111=90,bbbb2222=90", clear: false })).toEqual([
+      { build: "aaaa1111", weight: 90 },
+      { build: "bbbb2222", weight: 90 },
+    ]);
   });
 });
 
@@ -347,6 +525,34 @@ describe("what the command puts on the terminal", () => {
     const environment = await throughBucket().setSelector(PROD, null);
 
     expect(describeSelectorChange(PROD, environment)).toContain("no nodes any more");
+  });
+
+  it("names the legs a split now weights, and what has to happen before it takes", async () => {
+    const environment = await throughBucket().setSplit(PROD, [
+      { build: BUILD, weight: 90 },
+      { build: OTHER_BUILD, weight: 10 },
+    ]);
+
+    const printed = describeSplitChange(PROD, environment);
+
+    expect(printed).toContain(`"${BUILD}" 90%`);
+    expect(printed).toContain(`"${OTHER_BUILD}" 10%`);
+    /* A leg takes its share once it is ready, and until then its share goes to
+       the legs that are — which is not obvious and is the thing to say. */
+    expect(printed).toContain("readiness gate");
+  });
+
+  it("says which build a cleared split leaves serving on its own", async () => {
+    await throughBucket().setSplit(PROD, [
+      { build: BUILD, weight: 90 },
+      { build: OTHER_BUILD, weight: 10 },
+    ]);
+    const environment = await throughBucket().setSplit(PROD, null);
+
+    const printed = describeSplitChange(PROD, environment);
+
+    expect(printed).toContain(`build "${BUILD}"`);
+    expect(printed).toContain("stop every other leg");
   });
 });
 

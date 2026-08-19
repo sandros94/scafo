@@ -53,6 +53,7 @@ import {
   trustKey,
 } from "../../src/core/registry/index.ts";
 import type { NodeRecord, TrustPolicy } from "../../src/core/types/registry.ts";
+import type { ProcessStatus } from "../../src/core/types/supervisor.ts";
 import {
   AGENT_IMAGE,
   BOOT_DEADLINE_MS,
@@ -69,7 +70,10 @@ import {
   registryAt,
   REPO_ROOT,
   runCli,
+  sampleVersions,
   SETUP_TIMEOUT_MS,
+  SPLIT_MIN_REQUESTS,
+  SPLIT_SAMPLE,
   stageApp as stageAppIn,
   type StartedStore,
   startStore,
@@ -138,6 +142,8 @@ let operatorKey: OperatorKeyFile;
 let buildV1: string;
 let buildV2: string;
 let buildCi: string;
+/** The build eased in with `scalo deploy --canary`, beside the alias. */
+let buildCanary: string;
 
 const tmpDirs: string[] = [];
 /** Everything the agent container has written, kept for failure messages. */
@@ -556,6 +562,139 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
     },
     STEP_TIMEOUT_MS,
   );
+
+  /*
+   * Weighted traffic, from here to the end. Production is at v1 with one process
+   * running it, which is the state a canary is actually eased into: a build that
+   * has been serving for a while, and a new one nobody has sent traffic to yet.
+   */
+
+  it(
+    "eases a canary in without flipping, and Caddy divides the traffic between both builds",
+    async () => {
+      const started = Date.now();
+      const result = await runCli(canaryArgs(await stageApp("v5"), 50), {});
+      observed.canaryDeployMs = Date.now() - started;
+      observed.canaryDeployOutput = result.output;
+
+      expectCleanExit(result);
+      /* Deployed WITHOUT a flip, then weighed against whatever the alias points
+         at — which the node reads for itself, so the CLI never has to know. */
+      expect(result.output, agentLogTail()).toContain("splits its traffic");
+      buildCanary = buildIdOf(result.output);
+      expect(buildCanary).not.toBe(buildV1);
+      observed.buildCanary = buildCanary;
+
+      const environment = await getEnvironment(registry, PROJECT, ENVIRONMENT);
+      expect(environment.split).toEqual([
+        { build: buildV1, weight: 50 },
+        { build: buildCanary, weight: 50 },
+      ]);
+      /* The alias has NOT moved: it is still the primary pointer and still what
+         a rollback goes back to. */
+      expect(environment.alias).toMatchObject({ build: buildV1 });
+
+      /*
+       * THE ASSERTION THIS WHOLE SLICE EXISTS FOR. Two builds of one environment
+       * answering on one host — which means the node activated and started each
+       * of them in its own paired step. Batched activations would have started
+       * both processes on the last-activated version, and every one of these
+       * forty requests would have come back "v5".
+       */
+      const reached = await until(
+        `${apexHost()} to answer with both builds`,
+        DEADLINE_MS,
+        async () => {
+          const counted = await sampleVersions(caddyHttpPort, apexHost(), SPLIT_SAMPLE);
+          return counted.v1 !== undefined && counted.v5 !== undefined ? counted : null;
+        },
+      );
+      observed.canaryReachedSample = reached;
+
+      /* Measured again on a settled routing: the sample above may have started
+         before the canary's route was in place, and a window that straddles the
+         change is a measurement of the change rather than of the split. */
+      const seen = await sampleVersions(caddyHttpPort, apexHost(), SPLIT_SAMPLE);
+      observed.canarySample = seen;
+
+      for (const version of ["v1", "v5"]) {
+        expect(seen[version], `${version} of ${JSON.stringify(seen)}`).toBeGreaterThanOrEqual(
+          SPLIT_MIN_REQUESTS,
+        );
+      }
+      /* Nothing but the two legs answered: no 502 from a leg the routing named
+         before it was ready, and no third build. */
+      expect(Object.keys(seen).sort()).toEqual(["v1", "v5"]);
+
+      /* And each leg is still addressable on its own, unweighted. */
+      for (const [build, version] of [
+        [buildV1, "v1"],
+        [buildCanary, "v5"],
+      ]) {
+        const answer = await untilServes(buildHost(build), version);
+        expect(JSON.parse(answer.body).version).toBe(version);
+      }
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "promotes the canary with a flip, which clears the split and retires the leg that lost",
+    async () => {
+      const answer = await httpPost(
+        agentPort,
+        "/v1/aliases",
+        { project: PROJECT, environment: ENVIRONMENT, build: buildCanary },
+        await operatorToken(),
+      );
+      expectStatus(answer, 200);
+
+      const body = JSON.parse(answer.body);
+      expect(body.environment.split).toBeNull();
+      expect(body.environment.alias).toMatchObject({ build: buildCanary, previous: buildV1 });
+      /* A flip is a full cutover and says so, because nothing else in the answer
+         mentions the split that was running a moment ago. */
+      expect(body.warnings.map((warning: { code: string }) => warning.code)).toContain(
+        "split-cleared",
+      );
+      observed.promotionWarnings = body.warnings;
+
+      const settled = await until(
+        `${apexHost()} to serve the promoted build alone`,
+        DEADLINE_MS,
+        async () => {
+          const counted = await sampleVersions(caddyHttpPort, apexHost(), SPLIT_SAMPLE);
+          return counted.v5 === SPLIT_SAMPLE ? counted : null;
+        },
+      );
+      observed.promotedSample = settled;
+
+      /* The retired leg goes the way every superseded build goes: its process is
+         stopped once the winner is ready, and its host goes with it. */
+      const state = await until(
+        "the node to report one process for production",
+        DEADLINE_MS,
+        async () => {
+          const got = await httpGet(agentPort, "/v1/state", {
+            authorization: `Bearer ${await operatorToken()}`,
+          });
+          if (got.status !== 200) return null;
+
+          const parsed = JSON.parse(got.body) as AgentState;
+          return production(parsed).length === 1 ? parsed : null;
+        },
+      );
+      expect(production(state)[0].id).toBe(`${PROJECT}--${ENVIRONMENT}--${buildCanary}`);
+      expect(state.reconcile?.failures ?? []).toEqual([]);
+      observed.afterPromotionProcesses = state.processes;
+
+      const routes = await caddyRoutes();
+      expect(routes.map((route) => route["@id"])).not.toContain(`scalo_${buildHost(buildV1)}`);
+      /* And the operator's own route is still there, after all of it. */
+      expect(routes.map((route) => route["@id"])).toContain("operator_authored");
+    },
+    STEP_TIMEOUT_MS,
+  );
 });
 
 /* ------------------------------------------------------------------ helpers */
@@ -597,6 +736,39 @@ function deployArgs(dir: string, environment: string = ENVIRONMENT): string[] {
     "--runtime-configurable",
     ...(environment === ENVIRONMENT ? ["--key", keyPath] : []),
   ];
+}
+
+/**
+ * The same deploy with `--canary <weight>` in place of `--flip`.
+ *
+ * The two are refused together, which is what makes this a separate list rather
+ * than an extra flag: a flip puts the new build in front of ALL the traffic and
+ * a canary deliberately leaves the current one serving most of it.
+ */
+function canaryArgs(dir: string, weight: number): string[] {
+  return [
+    "deploy",
+    dir,
+    "--agent",
+    `http://127.0.0.1:${String(agentPort)}`,
+    "--project",
+    PROJECT,
+    "--env",
+    ENVIRONMENT,
+    "--canary",
+    String(weight),
+    "--runtime-configurable",
+    "--key",
+    keyPath,
+  ];
+}
+
+/** The running processes of the production environment, the CI one aside. */
+function production(state: AgentState): ProcessStatus[] {
+  return state.processes.filter(
+    (process) =>
+      process.state === "running" && process.id.startsWith(`${PROJECT}--${ENVIRONMENT}--`),
+  );
 }
 
 /** The bucket settings the CLI reads when it talks to the store directly. */
