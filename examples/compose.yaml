@@ -1,0 +1,146 @@
+# A complete scalo installation on one host: a bucket, one node, and the Caddy
+# it routes through.
+#
+#   docker compose -f examples/compose.yaml up --build -d
+#
+# Then, from a checkout with the CLI built (`pnpm build`). The key is written to
+# ./scalo-operator.json, which is where `deploy` looks for it:
+#
+#   export SCALO_S3_ENDPOINT=http://127.0.0.1:8333 SCALO_S3_BUCKET=scalo \
+#          SCALO_S3_ACCESS_KEY=scalo SCALO_S3_SECRET_KEY=scalo-secret
+#   node dist/cli/index.mjs keygen --register
+#   node dist/cli/index.mjs deploy ./my-app --agent http://127.0.0.1:7400 \
+#     --project shop --env production --flip
+#   curl -H 'Host: shop.scalo.test' http://127.0.0.1
+#
+# The application answers at `<project>--<env>.scalo.test`, at `shop.scalo.test`
+# for the `production` environment, and at `<project>--<build>.scalo.test` for
+# every build that is running. Nothing resolves those names on your machine —
+# send the `Host` header, or add them to /etc/hosts.
+#
+# Scaling this to several hosts is a matter of running this same node service on
+# each of them against the SAME bucket and prefix, on a network they can all
+# reach: see examples/kubernetes/README.md for what that changes.
+
+services:
+  # The registry: every project, build, environment and node record scalo has,
+  # as JSON objects mutated only through conditional writes. SeaweedFS is here
+  # because it is small and honours those writes; any store that does works just
+  # as well, and pointing SCALO_S3_ENDPOINT at one makes this service
+  # unnecessary. The first node to boot proves the bucket honours them before
+  # anything is written for real, so a store that does not fails loudly rather
+  # than corrupting state later.
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.42
+    command: ["server", "-s3"]
+    ports:
+      # Published so the CLI on your host reaches the same bucket the node does.
+      - "127.0.0.1:8333:8333"
+    volumes:
+      - store:/data
+
+  # Creates the one bucket this installation lives in, then exits. A real
+  # installation makes the bucket once, by hand or in its own provisioning.
+  #
+  # ONE BUCKET AND PREFIX IS ONE FLEET. Two installations sharing them share
+  # every record and will fight over the coordinator lease; two that differ in
+  # either share nothing at all.
+  bucket:
+    image: curlimages/curl:latest
+    depends_on:
+      - seaweedfs
+    command:
+      - sh
+      - -c
+      - "until curl -fsS -X PUT http://seaweedfs:8333/scalo; do sleep 1; done"
+
+  # The node: the agent, the celld processes it supervises, and the deploy
+  # intake. One of these per machine.
+  node:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: scalo:local
+    depends_on:
+      bucket:
+        condition: service_completed_successfully
+    # THIRTY-FIVE SECONDS, AND NOT DOCKER'S DEFAULT TEN.
+    #
+    # On SIGTERM the node marks itself as draining so the fleet stops giving it
+    # work, releases the coordinator lease, stops reconciling, and only then
+    # stops the celld processes serving traffic — each of which drains its
+    # in-flight requests for 25s and is given 30s before it is killed. Ten
+    # seconds cuts that off in the middle: requests are dropped mid-flight and
+    # the fleet has to time the node out rather than being told it left.
+    stop_grace_period: 35s
+    ports:
+      # Caddy shares this container's network namespace, so ITS ports are
+      # published here — a container that joins another's namespace has no
+      # network of its own to publish from.
+      - "80:80"
+      # The agent API, on your loopback only: it accepts deploys and commands
+      # this node, so it belongs on a network you trust rather than on 0.0.0.0.
+      - "127.0.0.1:7400:7400"
+    volumes:
+      # A node IS its keypair. The id it registers under and the Ed25519 pair
+      # that signs for it live in this volume; losing it leaves a stale public
+      # key in the registry and every token this node signs rejected for
+      # reasons nothing on it explains. Deleting it is a deliberate act.
+      - state:/var/lib/scalo
+    environment:
+      SCALO_S3_ENDPOINT: ${SCALO_S3_ENDPOINT:-http://seaweedfs:8333}
+      SCALO_S3_BUCKET: ${SCALO_S3_BUCKET:-scalo}
+      SCALO_S3_ACCESS_KEY: ${SCALO_S3_ACCESS_KEY:-scalo}
+      SCALO_S3_SECRET_KEY: ${SCALO_S3_SECRET_KEY:-scalo-secret}
+      # Apex domains this installation serves subdomains under.
+      SCALO_PLATFORM_DOMAINS: scalo.test
+      # Bound wide because the port above is published from outside the
+      # container; the default is loopback, which nothing could reach.
+      SCALO_LISTEN: 0.0.0.0:7400
+      # REQUIRED THE MOMENT ANY ADDRESS LEAVES LOOPBACK, and there is no
+      # default. Every address a node exposes carries traffic that commands it,
+      # so scalo refuses to boot until the operator says what network that is:
+      # `none` states it is already private and trusted — as a single host's own
+      # docker network is — and `wireguard` puts it in a tunnel scalo sets up.
+      # Answering this wrong is the one mistake this file cannot make for you.
+      SCALO_TRANSPORT: none
+      # Where peers should dial this node. A single node's peer is itself, so
+      # loopback is honest here; a fleet advertises the address the other nodes
+      # actually reach it at.
+      SCALO_ADVERTISE: 127.0.0.1:7400
+      # Caddy's admin API, on the loopback the two containers share.
+      SCALO_CADDY_ADMIN: http://127.0.0.1:2019
+
+  # The ingress. It SHARES THE NODE'S NETWORK NAMESPACE, which is the whole
+  # topology in one line: the celld processes bind 127.0.0.1 and nothing else,
+  # Caddy dials them there, and the node converges Caddy's admin API on the same
+  # loopback. Neither ever exposes a runtime port to the network.
+  #
+  # caddy.json carries no comments because Caddy refuses keys it does not know,
+  # so the two things it has to do are here instead:
+  #
+  #   1. Enable the admin API at 127.0.0.1:2019 — the address a node assumes
+  #      when nothing configures one, and the one it PUSHES its routing to after
+  #      every reconcile pass. Caddy allows a loopback admin's own origin
+  #      implicitly; moving the API past loopback means listing `origins` AND
+  #      putting it on a network you trust, since it can rewrite everything.
+  #   2. Define a server named `scalo` (the driver's default; change it with
+  #      `ingress.serverName`). The node adds and removes routes INSIDE that
+  #      server — it does not create it, so an absent one means an ingress
+  #      failure on every pass and nothing routed.
+  #
+  # Routes written into that server by hand are left alone: the node owns only
+  # the ones carrying its own `scalo_` id prefix, so this file stays where an
+  # operator's own hosts, redirects and TLS policies live.
+  caddy:
+    image: caddy:2
+    network_mode: "service:node"
+    depends_on:
+      - node
+    command: ["caddy", "run", "--config", "/etc/caddy/config.json"]
+    volumes:
+      - ./caddy.json:/etc/caddy/config.json:ro
+
+volumes:
+  store:
+  state:

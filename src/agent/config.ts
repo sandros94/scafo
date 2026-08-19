@@ -124,6 +124,15 @@ export interface IngressConfig {
   adminUrl?: string;
   /** Caddy server this node writes its routes into. */
   serverName?: string;
+  /**
+   * Traefik entryPoints the rendered routers attach to — `["web", "websecure"]`
+   * for a Traefik terminating TLS on the second one. The driver's own default
+   * applies when absent, and naming any is only meaningful with that driver.
+   *
+   * The list is never empty: Traefik reads an absent `entryPoints` as "every
+   * entryPoint there is", which includes the ones scalo has no business on.
+   */
+  entryPoints?: string[];
 }
 
 /** Every ingress a node can drive. */
@@ -396,6 +405,11 @@ const ORIGINS = {
   },
   caddyAdmin: { flag: "caddy-admin", env: ["SCALO_CADDY_ADMIN"], file: "ingress.adminUrl" },
   caddyServer: { flag: "caddy-server", env: ["SCALO_CADDY_SERVER"], file: "ingress.serverName" },
+  traefikEntryPoints: {
+    flag: "traefik-entrypoints",
+    env: ["SCALO_TRAEFIK_ENTRYPOINTS"],
+    file: "ingress.entryPoints",
+  },
   varsetKeyFile: {
     flag: "varset-key-file",
     env: ["SCALO_VARSET_KEY_FILE"],
@@ -545,19 +559,24 @@ function resolvePlatformDomains(sources: Sources): string[] {
  * but a server name leaves the ingress off, because nothing says where to reach
  * it.
  *
- * A Caddy setting given alongside another driver is REFUSED rather than ignored.
- * The two ingresses are configured from opposite ends — Caddy is told where its
- * admin API is, Traefik is told nothing here because it is the one doing the
- * asking — so an operator who wrote both has misread which of them applies, and
- * silently dropping half of what they wrote leaves a node routing through an
- * ingress they did not think they had selected.
+ * A setting belonging to the OTHER ingress is REFUSED rather than ignored, in
+ * both directions. The two are configured from opposite ends — Caddy is told
+ * where its admin API is, Traefik is told which of ITS entryPoints the routers
+ * this node publishes should attach to — so an operator who wrote one against
+ * the other has misread which of them applies, and silently dropping half of
+ * what they wrote leaves a node routing through an ingress they did not think
+ * they had selected.
  */
 function resolveIngress(sources: Sources): IngressConfig | undefined {
   const driver = resolve("ingressDriver", sources);
   const adminUrl = resolve("caddyAdmin", sources);
   const serverName = resolve("caddyServer", sources);
+  const entryPoints = resolveEntryPoints(sources);
 
-  if (driver === undefined && adminUrl === undefined) return undefined;
+  /* An entryPoint list turns the ingress on for the same reason an admin URL
+     does — so that naming one under the wrong driver is refused below rather
+     than dropped on the floor. */
+  if (driver === undefined && adminUrl === undefined && entryPoints === undefined) return undefined;
   if (driver !== undefined && !(INGRESS_DRIVERS as string[]).includes(driver)) {
     throw new ScaloError("invalid-input", "Invalid configuration value", {
       detail:
@@ -567,30 +586,89 @@ function resolveIngress(sources: Sources): IngressConfig | undefined {
   }
 
   const selected: IngressDriverName = (driver as IngressDriverName | undefined) ?? "caddy";
-  if (selected !== "caddy") {
-    const caddyOnly: Array<[Origin, string | undefined]> = [
-      [ORIGINS.caddyAdmin, adminUrl],
-      [ORIGINS.caddyServer, serverName],
-    ];
-    const written = caddyOnly.filter(([, value]) => value !== undefined);
-    if (written.length > 0) {
-      const named = written
-        .map(([origin, value]) => `"${origin.file}" (--${origin.flag}) = ${JSON.stringify(value)}`)
-        .join(" and ");
-      throw new ScaloError("invalid-input", "Conflicting ingress configuration", {
-        detail:
-          `${named} configures Caddy, but "${ORIGINS.ingressDriver.file}" selects ` +
-          `"${selected}", which has no admin API this node calls — it reads the routing the ` +
-          `node publishes instead. Drop the Caddy setting, or select "caddy"`,
-      });
-    }
+  if (selected === "caddy") {
+    refuseForeign(
+      [[ORIGINS.traefikEntryPoints, entryPoints]],
+      (named) =>
+        `${named} configures Traefik, but "${ORIGINS.ingressDriver.file}" selects "caddy", ` +
+        `which this node pushes its routing to through the admin API and which has no ` +
+        `entryPoints — those belong to Traefik, whose routers attach to them. Drop the ` +
+        `Traefik setting, or select "traefik"`,
+    );
+  } else {
+    refuseForeign(
+      [
+        [ORIGINS.caddyAdmin, adminUrl],
+        [ORIGINS.caddyServer, serverName],
+      ],
+      (named) =>
+        `${named} configures Caddy, but "${ORIGINS.ingressDriver.file}" selects ` +
+        `"${selected}", which has no admin API this node calls — it reads the routing the ` +
+        `node publishes instead. Drop the Caddy setting, or select "caddy"`,
+    );
   }
 
   return {
     driver: selected,
     ...(adminUrl === undefined ? {} : { adminUrl }),
     ...(serverName === undefined ? {} : { serverName }),
+    ...(entryPoints === undefined ? {} : { entryPoints }),
   };
+}
+
+/**
+ * The Traefik entryPoints this node's routers attach to, or undefined when the
+ * operator named none.
+ *
+ * Two spellings, as the node labels have: a flag and an environment variable can
+ * only carry text, written `web,websecure`, while the config file carries the
+ * array that text parses into.
+ *
+ * A list that parses to nothing is REFUSED rather than left empty, because empty
+ * does not mean empty here: Traefik reads routers with no entryPoints as
+ * attached to EVERY entryPoint it has — a TLS listener scalo holds no
+ * certificate for, the port the dashboard is on — so the quiet reading of a
+ * mistyped list claims far more surface than was offered.
+ */
+function resolveEntryPoints(sources: Sources): string[] | undefined {
+  const origin: Origin = ORIGINS.traefikEntryPoints;
+  const inline = flagOrEnv(origin, sources);
+
+  if (inline === undefined) {
+    const written = fileValue(sources.file, origin.file);
+    if (written === undefined || written === null) return undefined;
+  }
+
+  const names = (
+    inline === undefined ? fileStringList(sources.file, origin.file) : inline.split(",")
+  )
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
+
+  if (names.length === 0) {
+    throw new ScaloError("invalid-input", "Invalid configuration value", {
+      detail:
+        `"${origin.file}" must name at least one Traefik entryPoint, such as "web" or ` +
+        `"web,websecure": routers attached to none are attached to all of them`,
+    });
+  }
+  return names;
+}
+
+/** Refuses the settings that belong to the ingress this node is NOT driving. */
+function refuseForeign(
+  settings: Array<[Origin, string | string[] | undefined]>,
+  detail: (named: string) => string,
+): void {
+  const written = settings.filter(([, value]) => value !== undefined);
+  if (written.length === 0) return;
+
+  const named = written
+    .map(([origin, value]) => `"${origin.file}" (--${origin.flag}) = ${JSON.stringify(value)}`)
+    .join(" and ");
+  throw new ScaloError("invalid-input", "Conflicting ingress configuration", {
+    detail: detail(named),
+  });
 }
 
 /**

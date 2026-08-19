@@ -1,0 +1,16 @@
+# Everything by default: the build stage COPYs the few paths it needs by name
+# (package.json, the lockfile, the workspace file, tsconfig, build.config.ts and
+# src/), so anything not listed below cannot reach the build context at all.
+#
+# Deny-by-default rather than a list of exclusions, because the failure modes of
+# the other order are silent: a host `node_modules` shadowing the one the image
+# installs, a stale `dist/` shipped instead of the one just built, a `.env` or a
+# state directory baked into a layer.
+*
+
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.json
+!build.config.ts
+!src
