@@ -73,6 +73,12 @@ const RESERVED_ENV: string[] = [
   "CELLD_INTERNAL_ADDR",
   "CELLD_ADVERTISE",
   "CELLD_SHUTDOWN_DRAIN_MS",
+  /* Derived from the capacity plan and the ingress topology: a caller silently
+     winning over them would undo the node's own resource and trust decisions.
+     Tuning them belongs in typed configuration, not a raw variable. */
+  "CELLD_MAX_RSS_MB",
+  "CELLD_MAX_RESIDENT_CELLS",
+  "CELLD_TRUST_FORWARDED_HEADERS",
 ];
 
 export interface CelldDriverOptions {

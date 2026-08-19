@@ -1,0 +1,634 @@
+/*
+ * The reconcile loop of a node agent: reading what the registry wants served,
+ * carrying out the plan against a supervisor and a runtime driver, and what it
+ * reports about the pass afterwards.
+ *
+ * The driver and the supervisor are stand-ins that record what they were asked
+ * for, so nothing here starts a process or opens a socket, and the registry is a
+ * memory store seeded through the registry API itself.
+ */
+
+import { describe, expect, it, vi } from "vitest";
+import type { AgentConfig } from "../src/agent/config.ts";
+import type { AgentContext } from "../src/agent/app.ts";
+import { createReconciler, type Reconciler } from "../src/agent/reconcile.ts";
+import type { CapacityPlan } from "../src/core/capacity/compute.ts";
+import { ScaloError } from "../src/core/error.ts";
+import { formatProcessId } from "../src/core/placement/ids.ts";
+import { deleteKey } from "../src/core/registry/cas.ts";
+import type { RegistryContext } from "../src/core/registry/context.ts";
+import { createBuild } from "../src/core/registry/builds.ts";
+import {
+  createEnvironment,
+  flipAlias,
+  setEnvironmentVarset,
+} from "../src/core/registry/environments.ts";
+import { environmentKey } from "../src/core/registry/paths.ts";
+import { createProject } from "../src/core/registry/projects.ts";
+import { importVarsetKey, putVarset, sealVarset } from "../src/core/registry/varsets.ts";
+import type { PlainVarset } from "../src/core/types/registry.ts";
+import type { ProbeOptions, RuntimeDriver, RuntimeProcess } from "../src/core/types/runtime.ts";
+import type { RuntimeSpecInput } from "../src/core/types/runtime.ts";
+import type { CasStore, StoredObject } from "../src/core/types/store.ts";
+import type { ProcessSpec, ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
+import { MemoryCasStore } from "../src/drivers/store/memory.ts";
+import { ctxWith } from "./_helpers.ts";
+
+const PROJECT = "shop";
+const ENVIRONMENT = "prod";
+const BUILD_ONE = "1111aaaa";
+const BUILD_TWO = "2222bbbb";
+
+/** First loopback port pair of this node's range. */
+const PORT_RANGE_START = 42_000;
+
+/** Environment every runtime process would start from. */
+const BASE_ENV = { PATH: "/usr/bin:/bin" };
+
+const STARTED_AT = "2026-01-01T00:00:00.000Z";
+
+/** Id of the process that serves the seeded environment at a given build. */
+function processIdOf(build: string): string {
+  return formatProcessId({ project: PROJECT, env: ENVIRONMENT, build });
+}
+
+describe("one pass over a node that runs nothing yet", () => {
+  it("points the fleet at the aliased build, starts a process for it and gates it", async () => {
+    const world = await seededWorld();
+
+    const plan = await world.reconciler.runOnce();
+
+    expect(world.driver.activations).toEqual([
+      { prefix: `fleets/${PROJECT}/${ENVIRONMENT}`, version: `version-${BUILD_ONE}` },
+    ]);
+    expect(world.supervisor.started).toEqual([world.driver.built[0]]);
+    expect(world.supervisor.started[0].id).toBe(processIdOf(BUILD_ONE));
+    expect(world.driver.probed.map((process) => process.processId)).toEqual([
+      processIdOf(BUILD_ONE),
+    ]);
+    expect(plan.map((action) => action.type)).toEqual(["activate", "start", "await-ready"]);
+  });
+
+  it("reports the process it started as ready, on the pair it allocated for it", async () => {
+    const world = await seededWorld();
+
+    const plan = await world.reconciler.runOnce();
+    const status = world.reconciler.status();
+
+    expect(status.processes).toEqual([
+      {
+        processId: processIdOf(BUILD_ONE),
+        project: PROJECT,
+        env: ENVIRONMENT,
+        build: BUILD_ONE,
+        port: PORT_RANGE_START,
+        internalPort: PORT_RANGE_START + 1,
+        ready: true,
+      },
+    ]);
+    expect(status.failures).toEqual([]);
+    expect(status.lastActions).toEqual(plan);
+    expect(status.running).toBe(false);
+    expect(Date.parse(status.lastRunAt ?? "")).not.toBeNaN();
+  });
+
+  it("materializes the process from this node's own bucket, address and capacity", async () => {
+    const capacity = capacityPlan();
+    const world = await seededWorld({ capacity });
+
+    await world.reconciler.runOnce();
+    const input = world.driver.specs[0];
+
+    expect(input.project).toBe(PROJECT);
+    expect(input.env.name).toBe(ENVIRONMENT);
+    expect(input.build.id).toBe(BUILD_ONE);
+    expect(input.ports).toEqual({
+      public: PORT_RANGE_START,
+      internal: PORT_RANGE_START + 1,
+    });
+    expect(input.node).toEqual({
+      endpoint: "http://store.test:9000",
+      region: "us-east-1",
+      bucket: "registry",
+      keyPrefix: "tenant-a",
+      accessKey: "key-id",
+      secretKey: "key-secret",
+      /* Peers reach this node at the address it advertises, not at its listener. */
+      advertiseHost: "10.0.0.4",
+    });
+    expect(input.capacity).toEqual(capacity);
+    expect(input.baseEnv).toEqual(BASE_ENV);
+  });
+
+  it("gates the process at the path this node is configured to probe", async () => {
+    const world = await seededWorld();
+
+    await world.reconciler.runOnce();
+
+    expect(world.driver.probeOptions[0]).toMatchObject({ path: "/" });
+  });
+
+  it("plans nothing more once the environment is served by the build it should be", async () => {
+    const world = await seededWorld();
+    await world.reconciler.runOnce();
+
+    const second = await world.reconciler.runOnce();
+
+    expect(second).toEqual([]);
+    expect(world.supervisor.started).toHaveLength(1);
+    expect(world.driver.activations).toHaveLength(1);
+  });
+
+  it("reports nothing at all before its first pass", async () => {
+    const world = await seededWorld();
+
+    expect(world.reconciler.status()).toEqual({
+      lastRunAt: null,
+      running: false,
+      lastActions: [],
+      failures: [],
+      processes: [],
+    });
+  });
+});
+
+describe("what the registry says is wanted", () => {
+  it("leaves an environment alone until its alias has been flipped at least once", async () => {
+    const world = await seededWorld({ flip: false });
+
+    const plan = await world.reconciler.runOnce();
+
+    expect(plan).toEqual([]);
+    expect(world.driver.activations).toEqual([]);
+    expect(world.supervisor.started).toEqual([]);
+  });
+
+  it("starts a process without configuration when this node cannot open the varset", async () => {
+    /* Distributing the varset key to nodes is not implemented yet, so a node
+       without one serves the environment with no variables set rather than
+       refusing to serve it at all. */
+    const world = await seededWorld({ varset: true });
+
+    await world.reconciler.runOnce();
+
+    expect(world.driver.specs[0].vars).toBeNull();
+  });
+
+  it("opens the varset when this node holds its key", async () => {
+    const world = await seededWorld({ varset: true, holdVarsetKey: true });
+
+    await world.reconciler.runOnce();
+
+    expect(world.driver.specs[0].vars).toEqual(VARSET);
+  });
+});
+
+describe("a process that does not pass its gate", () => {
+  it("stops the one this pass started and leaves the environment's other process running", async () => {
+    const world = await seededWorld({ build: BUILD_TWO, otherBuild: BUILD_ONE });
+    /* Serving the environment since before this agent came up. */
+    world.supervisor.adopt(processIdOf(BUILD_ONE));
+    world.driver.gate = (): Promise<boolean> => Promise.resolve(false);
+
+    await world.reconciler.runOnce();
+    const status = world.reconciler.status();
+
+    expect(world.supervisor.stopped).toEqual([
+      { id: processIdOf(BUILD_TWO), graceMs: world.driver.stopGraceMs },
+    ]);
+    /* The process that has been answering requests all along is untouched: it is
+       the only thing its environment has. */
+    expect(world.supervisor.stopped.map((call) => call.id)).not.toContain(processIdOf(BUILD_ONE));
+    expect(status.processes.map((process) => process.processId)).toEqual([processIdOf(BUILD_ONE)]);
+    expect(status.failures).toHaveLength(1);
+    expect(status.failures[0]).toMatchObject({
+      action: "await-ready",
+      subject: processIdOf(BUILD_TWO),
+    });
+    expect(status.failures[0].detail).toContain("readiness gate");
+  });
+
+  it("reports a process it did not start rather than probing or stopping it", async () => {
+    /* A running process this agent has no bookkeeping for: its id says what it
+       serves, but not which ports it listens on, so its readiness cannot be
+       established — and it may be the only thing serving its environment. */
+    const world = await seededWorld();
+    world.supervisor.adopt(processIdOf(BUILD_ONE));
+
+    await world.reconciler.runOnce();
+    const status = world.reconciler.status();
+
+    expect(world.driver.probed).toEqual([]);
+    expect(world.supervisor.stopped).toEqual([]);
+    expect(status.failures).toHaveLength(1);
+    expect(status.failures[0].detail).toContain("listeners are unknown");
+    expect(status.processes[0]).toMatchObject({ processId: processIdOf(BUILD_ONE), port: 0 });
+  });
+});
+
+describe("a pass that cannot do everything it planned", () => {
+  it("records a fleet it could not point at a build, and starts nothing for it", async () => {
+    const world = await seededWorld();
+    world.driver.activationError = new ScaloError("cas-conflict", "Conditional write failed");
+
+    await world.reconciler.runOnce();
+    const status = world.reconciler.status();
+
+    expect(world.supervisor.started).toEqual([]);
+    expect(status.failures).toHaveLength(1);
+    expect(status.failures[0]).toMatchObject({
+      action: "activate",
+      subject: `${PROJECT}/${ENVIRONMENT}`,
+    });
+  });
+
+  it("refuses to start a build that carries no runtime version id", async () => {
+    const world = await seededWorld({ celldVersionId: false });
+
+    await world.reconciler.runOnce();
+    const status = world.reconciler.status();
+
+    expect(world.driver.activations).toEqual([]);
+    expect(world.supervisor.started).toEqual([]);
+    expect(status.failures[0]?.detail).toContain("runtime version");
+  });
+
+  it("stops nothing when the registry itself cannot be read", async () => {
+    /* An unreadable registry looks exactly like "every environment was
+       undeployed", so a pass that fails here must plan nothing rather than stop
+       the processes that are still serving traffic. */
+    const supervisor = fakeSupervisor();
+    supervisor.adopt(processIdOf(BUILD_ONE));
+    const driver = fakeDriver();
+    const reconciler = createReconciler(
+      agentContext({ store: new UnreadableStore() }, supervisor),
+      driver,
+      { baseEnv: BASE_ENV },
+    );
+
+    const plan = await reconciler.runOnce();
+
+    expect(plan).toEqual([]);
+    expect(supervisor.stopped).toEqual([]);
+    expect(reconciler.status().failures).toHaveLength(1);
+  });
+});
+
+describe("an environment that is taken out of the registry", () => {
+  it("stops what still runs for it, giving the driver's own grace", async () => {
+    const world = await seededWorld();
+    await world.reconciler.runOnce();
+
+    await deleteKey(world.registry, environmentKey(PROJECT, ENVIRONMENT));
+    const plan = await world.reconciler.runOnce();
+
+    expect(plan).toEqual([
+      {
+        type: "stop",
+        processId: processIdOf(BUILD_ONE),
+        reason: "environment is no longer deployed",
+      },
+    ]);
+    expect(world.supervisor.stopped).toEqual([
+      { id: processIdOf(BUILD_ONE), graceMs: world.driver.stopGraceMs },
+    ]);
+    expect(world.reconciler.status().processes).toEqual([]);
+  });
+});
+
+describe("passes that would overlap", () => {
+  it("skips a pass asked for while another one is still in flight", async () => {
+    const world = await seededWorld();
+    const gate = deferred<boolean>();
+    world.driver.gate = (): Promise<boolean> => gate.promise;
+
+    const inFlight = world.reconciler.runOnce();
+    const skipped = await world.reconciler.runOnce();
+
+    /* Two passes would plan against the same gap and start the environment
+       twice; the second one is answered with an empty plan instead. */
+    expect(skipped).toEqual([]);
+    expect(world.reconciler.status().running).toBe(true);
+
+    gate.resolve(true);
+    const planned = await inFlight;
+
+    expect(planned.map((action) => action.type)).toEqual(["activate", "start", "await-ready"]);
+    expect(world.driver.activations).toHaveLength(1);
+    expect(world.supervisor.started).toHaveLength(1);
+    expect(world.reconciler.status().running).toBe(false);
+  });
+});
+
+describe("the loop on a timer", () => {
+  it("keeps running passes until it is stopped", async () => {
+    const world = await seededWorld({ intervalMs: 5 });
+
+    world.reconciler.start();
+    await vi.waitFor(
+      () => {
+        expect(world.supervisor.listCalls).toBeGreaterThanOrEqual(3);
+      },
+      { timeout: 2000, interval: 5 },
+    );
+    world.reconciler.stop();
+    const afterStop = world.supervisor.listCalls;
+    await sleep(50);
+
+    expect(world.driver.activations).toHaveLength(1);
+    expect(world.supervisor.listCalls).toBe(afterStop);
+  });
+
+  it("runs one loop however often it is started, and stays stopped once stopped", async () => {
+    const world = await seededWorld({ intervalMs: 5 });
+
+    world.reconciler.start();
+    world.reconciler.start();
+    await vi.waitFor(
+      () => {
+        expect(world.supervisor.listCalls).toBeGreaterThanOrEqual(2);
+      },
+      { timeout: 2000, interval: 5 },
+    );
+    world.reconciler.stop();
+    world.reconciler.stop();
+    const afterStop = world.supervisor.listCalls;
+    await sleep(50);
+
+    expect(world.supervisor.listCalls).toBe(afterStop);
+  });
+});
+
+/** The variables the seeded varset holds, when a case asks for one. */
+const VARSET: PlainVarset = {
+  DATABASE_URL: { value: "postgres://db.test/app", secret: true },
+  FEATURE_FLAGS: { value: "beta", secret: false },
+};
+
+interface WorldOptions {
+  /** Build the environment's alias is flipped to. Defaults to the first one. */
+  build?: string;
+  /** A second build recorded alongside it, for cases that need an older one. */
+  otherBuild?: string;
+  /** Whether the alias is flipped at all. Defaults to true. */
+  flip?: boolean;
+  /** Whether the build carries the runtime version id an activation needs. */
+  celldVersionId?: boolean;
+  /** Whether the environment points at a sealed varset. */
+  varset?: boolean;
+  /** Whether this node holds the key that opens it. */
+  holdVarsetKey?: boolean;
+  capacity?: CapacityPlan;
+  intervalMs?: number;
+}
+
+interface World {
+  registry: RegistryContext;
+  supervisor: FakeSupervisor;
+  driver: FakeDriver;
+  reconciler: Reconciler;
+}
+
+/** A node whose registry holds one project, one environment and its builds. */
+async function seededWorld(opts?: WorldOptions): Promise<World> {
+  const { ctx } = ctxWith(new MemoryCasStore());
+  const build = opts?.build ?? BUILD_ONE;
+
+  await createProject(ctx, { slug: PROJECT });
+  await createEnvironment(ctx, PROJECT, { name: ENVIRONMENT });
+  for (const id of opts?.otherBuild === undefined ? [build] : [build, opts.otherBuild]) {
+    await createBuild(ctx, PROJECT, {
+      id,
+      runtimeConfigurable: true,
+      ...(opts?.celldVersionId === false ? {} : { celldVersionId: `version-${id}` }),
+    });
+  }
+  if (opts?.flip !== false) await flipAlias(ctx, PROJECT, ENVIRONMENT, build);
+
+  let varsetKey: CryptoKey | undefined;
+  if (opts?.varset === true) {
+    const key = await importVarsetKey(crypto.getRandomValues(new Uint8Array(32)));
+    const sealed = await sealVarset(VARSET, key);
+    await putVarset(ctx, PROJECT, sealed);
+    await setEnvironmentVarset(ctx, PROJECT, ENVIRONMENT, sealed.id);
+    if (opts.holdVarsetKey === true) varsetKey = key;
+  }
+
+  const supervisor = fakeSupervisor();
+  const driver = fakeDriver();
+  const agent = agentContext(ctx, supervisor, {
+    ...(varsetKey === undefined ? {} : { varsetKey }),
+    ...(opts?.capacity === undefined ? {} : { capacity: opts.capacity }),
+  });
+
+  return {
+    registry: ctx,
+    supervisor,
+    driver,
+    reconciler: createReconciler(agent, driver, {
+      baseEnv: BASE_ENV,
+      ...(opts?.intervalMs === undefined ? {} : { intervalMs: opts.intervalMs }),
+    }),
+  };
+}
+
+interface AgentOptions {
+  varsetKey?: CryptoKey;
+  capacity?: CapacityPlan;
+}
+
+/** Everything the loop acts through, with this node's configuration. */
+function agentContext(
+  registry: RegistryContext,
+  supervisor: Supervisor,
+  opts?: AgentOptions,
+): AgentContext {
+  const config: AgentConfig = {
+    bucket: {
+      endpoint: "http://store.test:9000",
+      region: "us-east-1",
+      bucket: "registry",
+      prefix: "tenant-a",
+      accessKey: "key-id",
+      secretKey: "key-secret",
+    },
+    node: { id: "node-a", listen: "127.0.0.1:7400", advertise: "10.0.0.4:7401" },
+    platformDomains: ["apps.test"],
+    runtime: { binPath: "celld", portRangeStart: PORT_RANGE_START, probePath: "/" },
+  };
+
+  const agent: AgentContext = { config, registry, supervisor, version: "0.0.0-test" };
+  if (opts?.varsetKey !== undefined) agent.varsetKey = opts.varsetKey;
+  if (opts?.capacity !== undefined) agent.capacity = opts.capacity;
+  return agent;
+}
+
+interface FakeSupervisor extends Supervisor {
+  /** Specs it was asked to run, in order. */
+  readonly started: ProcessSpec[];
+  /** Stops it was asked for, with the grace each was given. */
+  readonly stopped: { id: string; graceMs?: number }[];
+  /** Times the loop asked what this node is running; one per pass. */
+  listCalls: number;
+  /** Records a running process this agent never started itself. */
+  adopt(id: string): void;
+}
+
+function fakeSupervisor(): FakeSupervisor {
+  const statuses = new Map<string, ProcessStatus>();
+
+  const supervisor: FakeSupervisor = {
+    started: [],
+    stopped: [],
+    listCalls: 0,
+
+    adopt(id: string): void {
+      statuses.set(id, { id, state: "running", pid: 1000 + statuses.size, startedAt: STARTED_AT });
+    },
+
+    start(spec: ProcessSpec): Promise<ProcessStatus> {
+      supervisor.started.push(spec);
+      const status: ProcessStatus = {
+        id: spec.id,
+        state: "running",
+        pid: 2000 + supervisor.started.length,
+        startedAt: STARTED_AT,
+      };
+      statuses.set(spec.id, status);
+      return Promise.resolve(status);
+    },
+
+    stop(id: string, stopOpts?: { graceMs?: number }): Promise<void> {
+      supervisor.stopped.push({ id, graceMs: stopOpts?.graceMs });
+      const status = statuses.get(id);
+      if (status !== undefined) statuses.set(id, { ...status, state: "exited", exitCode: null });
+      return Promise.resolve();
+    },
+
+    status: (id: string): ProcessStatus | null => statuses.get(id) ?? null,
+
+    list(): ProcessStatus[] {
+      supervisor.listCalls++;
+      return [...statuses.values()].map((status) => ({ ...status }));
+    },
+
+    onExit: (): void => {},
+  };
+  return supervisor;
+}
+
+interface FakeDriver extends RuntimeDriver {
+  /** Fleets it was asked to point at a version, in order. */
+  readonly activations: { prefix: string; version: string }[];
+  /** Inputs it was asked to materialize a process from. */
+  readonly specs: RuntimeSpecInput[];
+  /** The specs it produced for them. */
+  readonly built: ProcessSpec[];
+  /** Processes whose readiness it was asked about, and how it was asked. */
+  readonly probed: RuntimeProcess[];
+  readonly probeOptions: (ProbeOptions | undefined)[];
+  /** Answer the readiness gate gives; replaced by a case that needs another. */
+  gate: (process: RuntimeProcess) => Promise<boolean>;
+  /** Failure every activation raises, when a case asks for one. */
+  activationError: Error | null;
+}
+
+function fakeDriver(): FakeDriver {
+  const driver: FakeDriver = {
+    stopGraceMs: 30_000,
+    activations: [],
+    specs: [],
+    built: [],
+    probed: [],
+    probeOptions: [],
+    gate: (): Promise<boolean> => Promise.resolve(true),
+    activationError: null,
+
+    processSpec(input: RuntimeSpecInput): ProcessSpec {
+      driver.specs.push(input);
+      const spec: ProcessSpec = {
+        id: formatProcessId({
+          project: input.project,
+          env: input.env.name,
+          build: input.build.id,
+        }),
+        command: "runtime-stand-in",
+        args: ["--listen", `127.0.0.1:${String(input.ports.public)}`],
+        env: { ...input.baseEnv },
+      };
+      driver.built.push(spec);
+      return spec;
+    },
+
+    activateVersion(prefix: string, celldVersionId: string): Promise<void> {
+      if (driver.activationError !== null) return Promise.reject(driver.activationError);
+
+      driver.activations.push({ prefix, version: celldVersionId });
+      return Promise.resolve();
+    },
+
+    probeReady(process: RuntimeProcess, probe?: ProbeOptions): Promise<boolean> {
+      driver.probed.push(process);
+      driver.probeOptions.push(probe);
+      return driver.gate(process);
+    },
+  };
+  return driver;
+}
+
+/** A registry this node cannot read at all. */
+class UnreadableStore implements CasStore {
+  get(): Promise<StoredObject | null> {
+    return Promise.reject(this.#down());
+  }
+
+  put(): Promise<{ etag: string }> {
+    return Promise.reject(this.#down());
+  }
+
+  del(): Promise<void> {
+    return Promise.reject(this.#down());
+  }
+
+  list(): Promise<string[]> {
+    return Promise.reject(this.#down());
+  }
+
+  #down(): ScaloError {
+    return new ScaloError("draining", "Store is unreachable", {
+      detail: "the bucket refused the request",
+    });
+  }
+}
+
+function capacityPlan(): CapacityPlan {
+  return {
+    cores: 4,
+    memMb: 16_384,
+    cgroup: false,
+    threads: 4,
+    isolates: 4,
+    rssBudgetMb: 1400,
+    maxRssMbPerProcess: 1400,
+    maxResidentCells: 2000,
+    probedAt: STARTED_AT,
+  };
+}
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+}
+
+/** A promise a case settles by hand, to hold a pass open while it checks on it. */
+function deferred<T>(): Deferred<T> {
+  let resolve: (value: T) => void = () => {};
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
