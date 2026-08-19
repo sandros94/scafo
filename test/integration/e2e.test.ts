@@ -48,9 +48,11 @@ import {
   readMeta,
   type RegistryContext,
   nodeKey,
+  trustKey,
 } from "../../src/core/registry/index.ts";
-import type { NodeRecord } from "../../src/core/types/registry.ts";
+import type { NodeRecord, TrustPolicy } from "../../src/core/types/registry.ts";
 import { createUns3Store } from "../../src/drivers/store/uns3.ts";
+import { startStubIssuer, type StubIssuer } from "./_stub-issuer.ts";
 
 const env = process.env;
 const E2E = env.SCALO_E2E === "1";
@@ -82,6 +84,15 @@ const PROJECT = "app";
 const ENVIRONMENT = "production";
 const NODE_ID = "node-e2e";
 
+/** Environment the CI-shaped deploy creates; it exists nowhere until then. */
+const CI_ENVIRONMENT = "ci";
+/** The subject pattern the project's policy trusts, as an operator would write it. */
+const WORKLOAD_GLOB = "repo:acme/shop:ref:refs/heads/*";
+/** A workload the glob above admits. */
+const WORKLOAD_SUBJECT = "repo:acme/shop:ref:refs/heads/main";
+/** A workload of a repository nothing in the policy names. */
+const HOSTILE_SUBJECT = "repo:evil/other:ref:refs/heads/main";
+
 /*
  * Every container stays on docker's default bridge, and the containers address
  * each other by address on it.
@@ -106,6 +117,8 @@ const POLL_MS = 500;
 let store: StartedTestContainer;
 let caddy: StartedTestContainer;
 let agent: StartedTestContainer;
+/** Stands in for a CI provider; the agent reaches it over the bridge by URL. */
+let issuer: StubIssuer;
 
 /** Endpoints of the one bucket, as the host and as the containers reach it. */
 let storeFromHost: string;
@@ -120,6 +133,7 @@ let keyPath: string;
 let operatorKey: OperatorKeyFile;
 let buildV1: string;
 let buildV2: string;
+let buildCi: string;
 
 const tmpDirs: string[] = [];
 /** Everything the agent container has written, kept for failure messages. */
@@ -227,12 +241,21 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         { bucket: BUCKET, prefix: KEY_PREFIX },
       ),
     };
+
+    /* Its own container on the same bridge, so the agent runs the real discovery
+       and key-set requests against a URL it was handed in a token. */
+    issuer = await startStubIssuer({
+      network: BRIDGE_NETWORK,
+      startupTimeoutMs: BOOT_DEADLINE_MS,
+    });
+    observed.issuer = issuer.iss;
   }, SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
     /* Stopped before Caddy: the agent lives in Caddy's network namespace. */
     await agent?.stop().catch(() => {});
     await caddy?.stop().catch(() => {});
+    await issuer?.stop();
     await store?.stop().catch(() => {});
     for (const dir of tmpDirs) await rm(dir, { recursive: true, force: true });
 
@@ -432,6 +455,126 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
     },
     STEP_TIMEOUT_MS,
   );
+
+  /*
+   * From here on the caller is a CI job, not an operator. Everything above ran
+   * with an operator key on disk and, for the registry-facing commands, the
+   * bucket's credentials in the environment; a CI job has neither, and the
+   * assertions below are worth nothing unless it keeps not having them.
+   */
+
+  it(
+    "records the trust policy that lets a CI job deploy without a key of ours",
+    async () => {
+      const result = await runCli(
+        [
+          "trust",
+          "set",
+          "--project",
+          PROJECT,
+          "--issuer",
+          issuer.iss,
+          "--audience",
+          "scalo",
+          "--subject",
+          WORKLOAD_GLOB,
+        ],
+        storeEnv(),
+      );
+      expectCleanExit(result);
+
+      const policy = await readJson<TrustPolicy>(registry, trustKey(PROJECT));
+      expect(policy?.value.issuers).toEqual([
+        { iss: issuer.iss, aud: "scalo", subjects: [WORKLOAD_GLOB] },
+      ]);
+
+      /* And an operator can read back what they set, glob intact — the pattern
+         is the thing being checked, so it is printed verbatim. */
+      const shown = await runCli(["trust", "show", "--project", PROJECT], storeEnv());
+      expectCleanExit(shown);
+      expect(shown.output).toContain(WORKLOAD_GLOB);
+      expect(shown.output).toContain(issuer.iss);
+      observed.trustPolicy = policy?.value;
+      observed.trustShowOutput = shown.output;
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "deploys a new environment with nothing but a workload token, and serves it",
+    async () => {
+      const token = await issuer.mint({ sub: WORKLOAD_SUBJECT });
+      const args = [...deployArgs(await stageApp("v3"), CI_ENVIRONMENT), "--token", token];
+
+      /*
+       * The claim this whole step exists to make. The CI side holds ONE secret,
+       * the token it was minted, and it is short-lived and scoped to a subject:
+       * no operator key file is named, and the bucket's credentials are not in
+       * the environment the command runs with. If either leaked in, this deploy
+       * would still pass while proving nothing.
+       */
+      expect(args).not.toContain("--key");
+      const ciEnv: Record<string, string> = {};
+      expect(Object.keys(ciEnv).filter((name) => name.startsWith("SCALO_"))).toEqual([]);
+
+      const started = Date.now();
+      const result = await runCli(args, ciEnv);
+      observed.workloadDeployMs = Date.now() - started;
+      observed.workloadDeployOutput = result.output;
+
+      expectCleanExit(result);
+      /* Accepted (202), then carried the whole way: build, flip, and a process
+         through its readiness gate. Every poll re-presented the same token,
+         which a workload token — unlike a node token — survives. */
+      expect(result.output, agentLogTail()).toContain("routed");
+
+      buildCi = buildIdOf(result.output);
+      expect(await listBuilds(registry, PROJECT)).toContain(buildCi);
+      observed.workloadBuild = buildCi;
+      observed.workloadSubject = WORKLOAD_SUBJECT;
+
+      const answer = await untilServes(ciHost(), "v3");
+      expect(JSON.parse(answer.body).url).toContain(ciHost());
+
+      /* The environment the CI job named did not exist before this deploy. */
+      const environment = await getEnvironment(registry, PROJECT, CI_ENVIRONMENT);
+      expect(environment.alias).toMatchObject({ build: buildCi });
+
+      /* And production is untouched: a token scoped to one project deploying a
+         new environment of it must not disturb what was already running. */
+      await untilServes(apexHost(), "v1");
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "refuses a token from a repository the policy does not name, and says which failure it was",
+    async () => {
+      const token = await issuer.mint({ sub: HOSTILE_SUBJECT });
+      const result = await runCli(
+        [...deployArgs(await stageApp("v4"), CI_ENVIRONMENT), "--token", token],
+        {},
+      );
+
+      observed.hostileDeployOutput = result.output;
+      observed.hostileDeployCode = result.code;
+
+      expect(result.code, result.output).not.toBe(0);
+      /*
+       * Distinguishable on purpose, and the only rejection that is: the token
+       * held up as authentication and the project simply does not admit it,
+       * which is authorization and something the caller must be able to act on.
+       */
+      expect(result.output).toContain("urn:scalo:trust-mismatch");
+      expect(result.output).toContain(HOSTILE_SUBJECT);
+
+      /* Nothing was built and the alias did not move. */
+      const environment = await getEnvironment(registry, PROJECT, CI_ENVIRONMENT);
+      expect(environment.alias).toMatchObject({ build: buildCi });
+      await untilServes(ciHost(), "v3");
+    },
+    STEP_TIMEOUT_MS,
+  );
 });
 
 /* ------------------------------------------------------------------ helpers */
@@ -448,8 +591,18 @@ function buildHost(build: string): string {
   return `${PROJECT}--${build}.${PLATFORM_DOMAIN}`;
 }
 
-/** The flags one deploy of the fixture is run with, from the host. */
-function deployArgs(dir: string): string[] {
+function ciHost(): string {
+  return `${PROJECT}--${CI_ENVIRONMENT}.${PLATFORM_DOMAIN}`;
+}
+
+/**
+ * The flags one deploy of the fixture is run with, from the host.
+ *
+ * The operator key is named only for the environment the operator owns. A caller
+ * deploying another environment appends its own `--token` instead, and the
+ * absence of `--key` here is what makes that a real workload deploy.
+ */
+function deployArgs(dir: string, environment: string = ENVIRONMENT): string[] {
   return [
     "deploy",
     dir,
@@ -458,11 +611,10 @@ function deployArgs(dir: string): string[] {
     "--project",
     PROJECT,
     "--env",
-    ENVIRONMENT,
+    environment,
     "--flip",
     "--runtime-configurable",
-    "--key",
-    keyPath,
+    ...(environment === ENVIRONMENT ? ["--key", keyPath] : []),
   ];
 }
 
