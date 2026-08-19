@@ -1,0 +1,36 @@
+# Traefik as an operator would run it in front of a scalo node, for the e2e suite.
+#
+# The whole of the scalo-facing configuration is the `http` provider below: it
+# polls the agent, and whatever it reads there is the entirety of what this
+# provider routes. Nothing about scalo appears in this file except the address
+# it is asked at — which is the difference from the Caddy fixture, where scalo
+# writes into a server this file defines.
+#
+# The poll interval is 2s rather than the 5s default so the suite's assertions
+# are about the product rather than about waiting; a real deployment has no
+# reason to poll that often.
+entryPoints:
+  web:
+    address: ":80"
+  # Carries the API and the ping the suite waits on. Exposed the way the Caddy
+  # fixture exposes its admin API, and for the same reason: the test process, on
+  # the host, has to be able to read what the ingress currently believes.
+  traefik:
+    address: ":8080"
+
+providers:
+  http:
+    endpoint: "http://127.0.0.1:7400/v1/ingress/traefik"
+    pollInterval: "2s"
+
+api:
+  insecure: true
+  dashboard: false
+
+ping:
+  entryPoint: traefik
+
+log:
+  level: INFO
+
+accessLog: {}

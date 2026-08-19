@@ -493,6 +493,76 @@ describe("node identity and defaults", () => {
   });
 });
 
+describe("which ingress the node drives", () => {
+  it("leaves the ingress off when nothing says there is one", async () => {
+    const config = await loadAgentConfig({ env: REQUIRED_ENV });
+
+    expect(config.ingress).toBeUndefined();
+  });
+
+  it("reads a Caddy admin API on its own as asking for Caddy", async () => {
+    /* The setting predates there being a choice, and a configuration that
+       already worked must go on working without naming a driver. */
+    const config = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCALO_CADDY_ADMIN: "http://127.0.0.1:2019" },
+    });
+
+    expect(config.ingress).toEqual({ driver: "caddy", adminUrl: "http://127.0.0.1:2019" });
+  });
+
+  it("takes Traefik by name, and needs nothing else to reach it", async () => {
+    /* Nothing else, because there is nothing to reach: Traefik polls the agent
+       rather than being called by it. */
+    const config = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCALO_INGRESS_DRIVER: "traefik" },
+    });
+
+    expect(config.ingress).toEqual({ driver: "traefik" });
+  });
+
+  it("REFUSES a Caddy setting alongside a driver that has no admin API", async () => {
+    for (const [variable, value] of [
+      ["SCALO_CADDY_ADMIN", "http://127.0.0.1:2019"],
+      ["SCALO_CADDY_SERVER", "scalo"],
+    ]) {
+      const error = await rejectionOf(() =>
+        loadAgentConfig({
+          env: { ...REQUIRED_ENV, SCALO_INGRESS_DRIVER: "traefik", [variable]: value },
+        }),
+      );
+
+      /* Refused rather than ignored: an operator who wrote both has misread
+         which of the two applies, and dropping half of it silently leaves a node
+         routing through an ingress they did not think they had selected. The
+         refusal names both sides of the mismatch. */
+      expect(error.code, variable).toBe("invalid-input");
+      expect(error.detail, variable).toContain("traefik");
+      expect(error.detail, variable).toContain(value);
+    }
+  });
+
+  it("refuses an ingress nothing implements, listing the ones that are", async () => {
+    const error = await rejectionOf(() =>
+      loadAgentConfig({ env: { ...REQUIRED_ENV, SCALO_INGRESS_DRIVER: "nginx" } }),
+    );
+
+    expect(error.code).toBe("invalid-input");
+    expect(error.detail).toContain(`"caddy"`);
+    expect(error.detail).toContain(`"traefik"`);
+  });
+
+  it("lets a flag pick the driver over what the file says", async () => {
+    const config = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { driver: "caddy" } })),
+      env: REQUIRED_ENV,
+      flags: { "ingress-driver": "traefik" },
+    });
+
+    expect(config.ingress).toEqual({ driver: "traefik" });
+  });
+});
+
 /** A reader that resolves the given text for one path, and null for every other. */
 function fileAt(path: string, text: string): (asked: string) => Promise<string | null> {
   return async (asked: string): Promise<string | null> => (asked === path ? text : null);

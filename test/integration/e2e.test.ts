@@ -12,6 +12,12 @@
  * uses the container-internal endpoint while the test process, on the host, uses
  * the published one.
  *
+ * What is not about the topology — the images and deadlines, the bucket, the
+ * staged fixture application, requests that can set a `Host` header, the built
+ * CLI, the poll — lives in `_harness.ts` and is shared with the Traefik suite,
+ * which mirrors this one with the other ingress in Caddy's place. What stays
+ * here is what this suite is: its containers, and what it asserts about them.
+ *
  * Skipped unless SCALO_E2E=1, because it is minutes rather than seconds:
  *
  *   SCALO_E2E=1 pnpm vitest run test/integration/e2e.test.ts
@@ -28,15 +34,11 @@
  * setting.
  */
 
-import { spawn } from "node:child_process";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { request as httpRequest } from "node:http";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
-import { S3Client } from "uns3";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AgentState } from "../../src/agent/app.ts";
 import type { OperatorKeyFile } from "../../src/cli/commands/keygen.ts";
@@ -51,23 +53,36 @@ import {
   trustKey,
 } from "../../src/core/registry/index.ts";
 import type { NodeRecord, TrustPolicy } from "../../src/core/types/registry.ts";
-import { createUns3Store } from "../../src/drivers/store/uns3.ts";
+import {
+  AGENT_IMAGE,
+  BOOT_DEADLINE_MS,
+  BRIDGE_NETWORK,
+  type BucketSettings,
+  buildIdOf,
+  buildRepo,
+  type CommandResult,
+  DEADLINE_MS,
+  FIXTURES,
+  type HttpAnswer,
+  httpGet,
+  httpPost,
+  registryAt,
+  REPO_ROOT,
+  runCli,
+  SETUP_TIMEOUT_MS,
+  stageApp as stageAppIn,
+  type StartedStore,
+  startStore,
+  STEP_TIMEOUT_MS,
+  storeEnv as storeEnvFor,
+  until as untilPolled,
+} from "./_harness.ts";
 import { startStubIssuer, type StubIssuer } from "./_stub-issuer.ts";
 
-const env = process.env;
-const E2E = env.SCALO_E2E === "1";
+const E2E = process.env.SCALO_E2E === "1";
 
-const HERE = fileURLToPath(new URL(".", import.meta.url));
-const REPO_ROOT = resolve(HERE, "../..");
-const FIXTURES = join(HERE, "_e2e-fixtures");
-const CLI = join(REPO_ROOT, "dist/cli/index.mjs");
-
-const STORE_IMAGE = "chrislusf/seaweedfs:4.42";
 const CADDY_IMAGE = "caddy:2";
-/** node24 + celld + esbuild; built locally, see the suite's README note below. */
-const AGENT_IMAGE = "scalo-v13-probe";
 
-const STORE_PORT = 8333;
 const CADDY_HTTP_PORT = 80;
 const CADDY_ADMIN_PORT = 2019;
 /** Published on the Caddy container, because the agent shares its namespace. */
@@ -78,6 +93,16 @@ const KEY_PREFIX = "e2e";
 const ACCESS_KEY = "scalo";
 const SECRET_KEY = "scalo-secret";
 const REGION = "us-east-1";
+
+/** The same four settings the harness starts the store and the CLI with. */
+const BUCKET_SETTINGS: BucketSettings = {
+  bucket: BUCKET,
+  prefix: KEY_PREFIX,
+  accessKey: ACCESS_KEY,
+  secretKey: SECRET_KEY,
+  region: REGION,
+};
+
 const PLATFORM_DOMAIN = "scalo.test";
 const OPERATOR_HOST = "operator.test";
 const PROJECT = "app";
@@ -93,28 +118,7 @@ const WORKLOAD_SUBJECT = "repo:acme/shop:ref:refs/heads/main";
 /** A workload of a repository nothing in the policy names. */
 const HOSTILE_SUBJECT = "repo:evil/other:ref:refs/heads/main";
 
-/*
- * Every container stays on docker's default bridge, and the containers address
- * each other by address on it.
- *
- * Deliberately NOT a user-defined network: testcontainers attaches a container
- * given one to that network AND to the default bridge, and a container on two
- * networks answers a published-port connection from the wrong address, so the
- * host's connection is reset. The bridge alone gives both what this suite needs
- * — the containers reach each other, and the host reaches the published ports.
- */
-const BRIDGE_NETWORK = "bridge";
-
-const SETUP_TIMEOUT_MS = 300_000;
-const STEP_TIMEOUT_MS = 180_000;
-/** Per-assertion ceiling; the reconcile interval is 5s, so this is many passes. */
-const DEADLINE_MS = 120_000;
-const BOOT_DEADLINE_MS = 60_000;
-/** SeaweedFS is the slowest thing here to become useful, by a wide margin. */
-const STORE_DEADLINE_MS = 120_000;
-const POLL_MS = 500;
-
-let store: StartedTestContainer;
+let store: StartedStore;
 let caddy: StartedTestContainer;
 let agent: StartedTestContainer;
 /** Stands in for a CI provider; the agent reaches it over the bridge by URL. */
@@ -145,23 +149,11 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   beforeAll(async () => {
     /* Built first: the agent container runs `dist/` off the bind-mounted
        worktree, so a stale build would test the previous commit. */
-    const built = await run("pnpm", ["build"], REPO_ROOT, env as Record<string, string>);
-    if (built.code !== 0) throw new Error(`"pnpm build" failed:\n${built.output}`);
+    await buildRepo();
 
-    store = await new GenericContainer(STORE_IMAGE)
-      .withCommand(["server", "-s3"])
-      .withExposedPorts(STORE_PORT)
-      /* The S3 gateway starts well after the port it will listen on is bound,
-         so the port alone is not readiness — this line is. */
-      .withWaitStrategy(Wait.forLogMessage(/Start Seaweed S3 API Server/))
-      .withStartupTimeout(STORE_DEADLINE_MS)
-      .start();
-
-    storeFromHost = `http://${store.getHost()}:${String(store.getMappedPort(STORE_PORT))}`;
-    /* By address rather than by name: the agent would resolve a name in Caddy's
-       namespace, and an address needs no resolver at all. */
-    storeFromContainers = `http://${store.getIpAddress(BRIDGE_NETWORK)}:${String(STORE_PORT)}`;
-    await createBucket(storeFromHost, BUCKET);
+    store = await startStore(BUCKET_SETTINGS);
+    storeFromHost = store.fromHost;
+    storeFromContainers = store.fromContainers;
 
     caddy = await new GenericContainer(CADDY_IMAGE)
       .withCopyFilesToContainer([
@@ -229,18 +221,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       .withStartupTimeout(BOOT_DEADLINE_MS)
       .start();
 
-    registry = {
-      store: createUns3Store(
-        new S3Client({
-          endpoint: storeFromHost,
-          region: REGION,
-          credentials: { accessKeyId: ACCESS_KEY, secretAccessKey: SECRET_KEY },
-          bucketStyle: "path",
-          defaultBucket: BUCKET,
-        }),
-        { bucket: BUCKET, prefix: KEY_PREFIX },
-      ),
-    };
+    registry = registryAt(storeFromHost, BUCKET_SETTINGS);
 
     /* Its own container on the same bridge, so the agent runs the real discovery
        and key-set requests against a URL it was handed in a token. */
@@ -256,7 +237,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
     await agent?.stop().catch(() => {});
     await caddy?.stop().catch(() => {});
     await issuer?.stop();
-    await store?.stop().catch(() => {});
+    await store?.container.stop().catch(() => {});
     for (const dir of tmpDirs) await rm(dir, { recursive: true, force: true });
 
     console.log(`\n[e2e] raw observations\n${JSON.stringify(observed, null, 2)}`);
@@ -620,37 +601,12 @@ function deployArgs(dir: string, environment: string = ENVIRONMENT): string[] {
 
 /** The bucket settings the CLI reads when it talks to the store directly. */
 function storeEnv(): Record<string, string> {
-  return {
-    SCALO_S3_ENDPOINT: storeFromHost,
-    SCALO_S3_BUCKET: BUCKET,
-    SCALO_S3_PREFIX: KEY_PREFIX,
-    SCALO_S3_ACCESS_KEY: ACCESS_KEY,
-    SCALO_S3_SECRET_KEY: SECRET_KEY,
-    SCALO_S3_REGION: REGION,
-  };
+  return storeEnvFor(storeFromHost, BUCKET_SETTINGS);
 }
 
 /** A copy of the fixture application with its version variable set to `version`. */
-async function stageApp(version: string): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), `scalo-e2e-app-${version}-`));
-  tmpDirs.push(dir);
-  await cp(join(FIXTURES, "app"), dir, { recursive: true });
-
-  const config = join(dir, "wrangler.jsonc");
-  const text = await readFile(config, "utf8");
-  await writeFile(
-    config,
-    text.replace(/"APP_VERSION": "[^"]*"/, `"APP_VERSION": "${version}"`),
-    "utf8",
-  );
-  return dir;
-}
-
-/** The build id the CLI printed for a settled deploy. */
-function buildIdOf(output: string): string {
-  const build = /scalo: build ([\da-f]{8,64})/.exec(output)?.[1];
-  if (build === undefined) throw new Error(`the deploy named no build:\n${output}`);
-  return build;
+function stageApp(version: string): Promise<string> {
+  return stageAppIn(version, tmpDirs);
 }
 
 /** A fresh single-use operator token; a spent one is refused as a replay. */
@@ -680,30 +636,8 @@ async function caddyRoutes(): Promise<Array<Record<string, unknown>>> {
  * Polls until `probe` returns a value. A deadline that runs out fails with the
  * agent container's logs attached, because nothing else says what the node did.
  */
-async function until<T>(
-  what: string,
-  deadlineMs: number,
-  probe: () => Promise<T | null>,
-): Promise<T> {
-  const giveUp = Date.now() + deadlineMs;
-  let last: unknown = null;
-
-  for (;;) {
-    try {
-      const value = await probe();
-      if (value !== null) return value;
-      last = null;
-    } catch (error) {
-      last = error;
-    }
-    if (Date.now() >= giveUp) {
-      const reason = last === null ? "" : `\nlast failure: ${describeFailure(last)}`;
-      throw new Error(
-        `timed out after ${String(deadlineMs)}ms waiting for ${what}${reason}\n${agentLogTail()}`,
-      );
-    }
-    await delay(POLL_MS);
-  }
+function until<T>(what: string, deadlineMs: number, probe: () => Promise<T | null>): Promise<T> {
+  return untilPolled(what, deadlineMs, probe, { context: agentLogTail });
 }
 
 /**
@@ -720,118 +654,9 @@ function expectStatus(answer: HttpAnswer, status: number): void {
   expect(answer.status, answer.body).toBe(status);
 }
 
-/** A failure as a message, whether or not the thrown value was an `Error`. */
-function describeFailure(error: unknown): string {
-  return error instanceof Error ? error.message : JSON.stringify(error);
-}
-
 /** The tail of the agent container's output, as a failure message carries it. */
 function agentLogTail(limit: number = 12_000): string {
   const text = agentLog.join("");
   const tail = text.length <= limit ? text : `…${text.slice(-limit)}`;
   return `--- agent container logs ---\n${tail}\n--- end agent container logs ---`;
-}
-
-interface HttpAnswer {
-  status: number;
-  body: string;
-}
-
-/**
- * One GET, over `node:http` rather than `fetch` so the `Host` header can be set:
- * every routing assertion in this suite is about which host was asked for.
- */
-function httpGet(port: number, path: string, headers: Record<string, string>): Promise<HttpAnswer> {
-  return send(port, path, "GET", headers, undefined);
-}
-
-function httpPost(port: number, path: string, body: unknown, token: string): Promise<HttpAnswer> {
-  return send(
-    port,
-    path,
-    "POST",
-    { "authorization": `Bearer ${token}`, "content-type": "application/json" },
-    JSON.stringify(body),
-  );
-}
-
-function send(
-  port: number,
-  path: string,
-  method: string,
-  headers: Record<string, string>,
-  body: string | undefined,
-): Promise<HttpAnswer> {
-  return new Promise<HttpAnswer>((settle, fail) => {
-    const request = httpRequest({ host: "127.0.0.1", port, path, method, headers }, (response) => {
-      let text = "";
-      response.setEncoding("utf8");
-      response.on("data", (chunk: string) => (text += chunk));
-      response.on("end", () => settle({ status: response.statusCode ?? 0, body: text }));
-    });
-    request.on("error", fail);
-    if (body !== undefined) request.write(body);
-    request.end();
-  });
-}
-
-interface CommandResult {
-  code: number;
-  output: string;
-}
-
-/** Runs the built CLI the way an operator would, with a deliberately clean environment. */
-function runCli(args: string[], extraEnv: Record<string, string>): Promise<CommandResult> {
-  return run(process.execPath, [CLI, ...args], REPO_ROOT, {
-    PATH: env.PATH ?? "",
-    HOME: env.HOME ?? "",
-    ...extraEnv,
-  });
-}
-
-function run(
-  command: string,
-  args: string[],
-  cwd: string,
-  childEnv: Record<string, string>,
-): Promise<CommandResult> {
-  return new Promise<CommandResult>((settle, fail) => {
-    const child = spawn(command, args, { cwd, env: childEnv, stdio: ["ignore", "pipe", "pipe"] });
-
-    let output = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => (output += chunk));
-    child.stderr.on("data", (chunk: string) => (output += chunk));
-
-    child.on("error", fail);
-    child.on("close", (code) => settle({ code: code ?? -1, output }));
-  });
-}
-
-/**
- * Creates the bucket with an anonymous PUT, retrying because SeaweedFS answers
- * on its S3 port before it is willing to serve bucket operations on it.
- */
-async function createBucket(endpoint: string, bucket: string): Promise<void> {
-  const giveUp = Date.now() + STORE_DEADLINE_MS;
-  let last = "no attempt was made";
-
-  for (;;) {
-    try {
-      const response = await fetch(`${endpoint}/${bucket}`, { method: "PUT" });
-      if (response.ok || response.status === 409) return;
-      last = `answered ${String(response.status)}: ${(await response.text()).slice(0, 200)}`;
-    } catch (error) {
-      last = describeFailure(error);
-    }
-    if (Date.now() >= giveUp) {
-      throw new Error(`could not create bucket "${bucket}" at ${endpoint}; last: ${last}`);
-    }
-    await delay(POLL_MS);
-  }
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((settle) => setTimeout(settle, ms));
 }
