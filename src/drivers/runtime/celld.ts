@@ -28,6 +28,16 @@ import {
 /** Command run when the caller does not name one. */
 export const DEFAULT_CELLD_BIN: string = "celld";
 
+/**
+ * Address a runtime process binds its listeners to when the caller names none.
+ *
+ * Loopback, because it is the only setting that is safe without knowing the
+ * network: the peer listener carries no authentication of its own, so binding it
+ * wider is a decision an operator makes about a network they have classified,
+ * never a default.
+ */
+export const DEFAULT_BIND_HOST: string = "127.0.0.1";
+
 /** Time a stopped runtime process is given between `SIGTERM` and `SIGKILL`. */
 export const DEFAULT_STOP_GRACE_MS: number = 30_000;
 
@@ -126,8 +136,12 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
     processSpec(input: RuntimeSpecInput): ProcessSpec {
       const fleet = fleetPrefix(input.project, input.env.name);
       const objectPrefix = joinPrefix(input.node.keyPrefix, fleet);
-      const listen = `127.0.0.1:${String(input.ports.public)}`;
-      const internalListen = `127.0.0.1:${String(input.ports.internal)}`;
+      /* Both listeners bind the same address: the public one is dialled by this
+         node's ingress and the internal one by peers, and a process reachable at
+         its advertised address must actually be listening on it. */
+      const bindHost = input.node.bindHost ?? DEFAULT_BIND_HOST;
+      const listen = `${bindHost}:${String(input.ports.public)}`;
+      const internalListen = `${bindHost}:${String(input.ports.internal)}`;
 
       return {
         id: formatProcessId({

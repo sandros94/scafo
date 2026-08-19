@@ -39,6 +39,20 @@ export interface RuntimeNodeInput {
   secretKey: string;
   /** Host other nodes reach this one at; advertised together with the internal port. */
   advertiseHost: string;
+  /**
+   * Address the process binds its listeners to. Defaults to loopback, which is
+   * all a single node needs: its ingress and its readiness probe are on the same
+   * host, and nothing else may reach a runtime process directly.
+   *
+   * A multi-node fleet is the case that needs more. Peers dial each other at
+   * {@link RuntimeNodeInput.advertiseHost} and the internal port to reach the
+   * process that owns a cell, and a loopback-bound listener cannot answer a peer
+   * on another host — the advertised address is reachable only if something is
+   * listening on it. Widening this puts an unauthenticated peer listener on that
+   * network, so it belongs behind the same transport decision every other
+   * exposed address is.
+   */
+  bindHost?: string;
 }
 
 /** Everything one runtime process is materialized from. */

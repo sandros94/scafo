@@ -85,10 +85,21 @@ export interface IngressConfig {
 export interface RuntimeConfig {
   /** Executable that runs one environment; resolved against `PATH` unless it is a path. */
   binPath: string;
-  /** First port of the loopback range runtime processes are given pairs from. */
+  /** First port of the range runtime processes are given pairs from. */
   portRangeStart: number;
   /** Path the application-level half of the readiness gate requests. */
   probePath: string;
+  /**
+   * Address runtime processes bind their listeners to. Loopback by default,
+   * which is everything a single node needs.
+   *
+   * A fleet spread over several nodes needs more: one process owns each cell,
+   * and the others reach it at the address this node advertises — which nothing
+   * answers on while the listeners are on loopback. Widening it exposes a peer
+   * listener that carries no authentication of its own, so a non-loopback value
+   * refuses to boot until `transport` says what network that is.
+   */
+  bindHost: string;
 }
 
 export interface LoadConfigOptions {
@@ -116,6 +127,9 @@ export const DEFAULT_RUNTIME_BIN: string = "celld";
 
 /** Path probed for application readiness when none is configured. */
 export const DEFAULT_PROBE_PATH: string = "/";
+
+/** Address runtime processes bind to when none is configured: loopback only. */
+export const DEFAULT_BIND_HOST: string = "127.0.0.1";
 
 /** A `host:port` pair, as written for a listener or an advertised address. */
 export interface HostPort {
@@ -168,6 +182,7 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
       binPath: resolve("celldBin", sources) ?? DEFAULT_RUNTIME_BIN,
       portRangeStart: resolvePort("portRangeStart", sources, DEFAULT_PORT_RANGE_START),
       probePath: resolve("probePath", sources) ?? DEFAULT_PROBE_PATH,
+      bindHost: resolveBindHost(sources),
     },
     ...(ingress === undefined ? {} : { ingress }),
     ...(keyFile === undefined ? {} : { varsets: { keyFile } }),
@@ -269,6 +284,7 @@ const ORIGINS = {
     file: "runtime.portRangeStart",
   },
   probePath: { flag: "probe-path", env: ["SCALO_PROBE_PATH"], file: "runtime.probePath" },
+  bindHost: { flag: "bind-host", env: ["SCALO_BIND_HOST"], file: "runtime.bindHost" },
   ingressDriver: {
     flag: "ingress-driver",
     env: ["SCALO_INGRESS_DRIVER"],
@@ -332,6 +348,26 @@ function resolvePort(setting: Setting, sources: Sources, fallback: number): numb
   if (!Number.isInteger(value) || value < 1 || value > 65_535) {
     throw new ScaloError("invalid-input", "Invalid configuration value", {
       detail: `"${origin.file}" must be a port in 1-65535, got ${JSON.stringify(raw)}`,
+    });
+  }
+  return value;
+}
+
+/**
+ * The address runtime processes bind to. A bare host rather than `host:port`:
+ * the ports come from the allocator, and only the interface is configurable.
+ */
+function resolveBindHost(sources: Sources): string {
+  const value = resolve("bindHost", sources);
+  if (value === undefined) return DEFAULT_BIND_HOST;
+
+  /* `0.0.0.0` and `::` are not DNS names, but they are the whole point of this
+     setting — the wildcards that make a process reachable from another node. */
+  if (value !== "0.0.0.0" && value !== "::" && !isHost(value)) {
+    throw new ScaloError("invalid-input", "Invalid configuration value", {
+      detail:
+        `"${ORIGINS.bindHost.file}" must be an address runtime processes can bind, ` +
+        `such as "127.0.0.1" or "0.0.0.0", got ${JSON.stringify(value)}`,
     });
   }
   return value;

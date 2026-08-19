@@ -47,14 +47,20 @@ export function createRegistry(config: AgentConfig): RegistryContext {
  * network nobody has classified.
  *
  * Every address a node exposes — the agent API, the internal listener, the
- * address it tells its peers to use — carries traffic that commands this node.
- * As soon as one of them reaches past loopback, that traffic crosses a network,
- * and only the operator knows what kind of network it is. `--transport
- * wireguard` puts it in a tunnel; `--transport none` states that the network is
- * already private and trusted, a cloud vRack or a VLAN. There is no default,
- * because the safe-looking one — assume it needs no tunnel — is the one that
- * silently exposes a node, and the other refuses to run perfectly good setups.
- * A node that stays on loopback crosses nothing and needs neither.
+ * address it tells its peers to use, the address its runtime processes bind —
+ * carries traffic that commands this node. As soon as one of them reaches past
+ * loopback, that traffic crosses a network, and only the operator knows what
+ * kind of network it is. `--transport wireguard` puts it in a tunnel;
+ * `--transport none` states that the network is already private and trusted, a
+ * cloud vRack or a VLAN. There is no default, because the safe-looking one —
+ * assume it needs no tunnel — is the one that silently exposes a node, and the
+ * other refuses to run perfectly good setups. A node that stays on loopback
+ * crosses nothing and needs neither.
+ *
+ * `runtime.bindHost` counts for the same reason the others do, and more sharply:
+ * what it exposes is the runtime's peer listener, which authenticates nobody. It
+ * is what a multi-node fleet has to widen for cross-node cell traffic, and that
+ * is exactly when the operator must have said what the network is.
  *
  * Throws `ScaloError("invalid-input")` naming the addresses that made it
  * necessary.
@@ -70,6 +76,10 @@ export function assertTransportConfigured(config: AgentConfig): void {
   const exposed = addresses.filter(
     ([field, value]) => value !== undefined && !isLoopbackHost(parseHostPort(value, field).host),
   );
+  /* A bare host rather than a `host:port`, so it is checked on its own. */
+  if (!isLoopbackHost(config.runtime.bindHost)) {
+    exposed.push(["runtime.bindHost", config.runtime.bindHost]);
+  }
   if (exposed.length === 0) return;
 
   const named = exposed.map(([field, value]) => `${field} "${String(value)}"`).join(", ");

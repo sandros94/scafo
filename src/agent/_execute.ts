@@ -111,6 +111,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
         accessKey: agent.config.bucket.accessKey,
         secretKey: agent.config.bucket.secretKey,
         advertiseHost: advertisedAddress(agent.config.node).host,
+        bindHost: agent.config.runtime.bindHost,
       },
       capacity: agent.capacity,
       baseEnv,
