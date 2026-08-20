@@ -121,7 +121,7 @@ async function runInit(flags: Record<string, unknown>): Promise<void> {
       address: tunnel.settings.address,
     },
   });
-  console.log(
+  console.error(
     `scafo: node "${tunnel.state.id}" is on the tunnel at ${tunnel.settings.address}, ` +
       `reachable at ${tunnel.settings.endpoint}`,
   );
@@ -195,6 +195,9 @@ async function render(tunnel: Tunnel, keys: WireguardKeys, toStdout: boolean): P
   const count = `${String(peerList.length)} peer${peerList.length === 1 ? "" : "s"}`;
 
   if (toStdout) {
+    /* The one artifact this command puts on stdout. Everything else it says is
+       commentary and goes to stderr, so `--stdout > wg0.conf` captures a
+       configuration wg-quick can parse and nothing it cannot. */
     console.log(conf.trimEnd());
     console.error(`scafo: rendered ${count}; nothing was written`);
     return;
@@ -205,9 +208,9 @@ async function render(tunnel: Tunnel, keys: WireguardKeys, toStdout: boolean): P
      is: owner-readable, in a directory nobody else can enter. */
   await writeSecretFile(tunnel.stateDir, path, conf);
 
-  console.log(`scafo: wrote ${path} with ${count}`);
-  console.log(`scafo: bring the tunnel up with "wg-quick up ${path}"`);
-  console.log(
+  console.error(`scafo: wrote ${path} with ${count}`);
+  console.error(`scafo: bring the tunnel up with "wg-quick up ${path}"`);
+  console.error(
     `scafo: re-run "scafo wg peers" on every node whenever one joins or leaves — a node ` +
       `that is not in this file is a node this one cannot reach`,
   );
@@ -216,13 +219,13 @@ async function render(tunnel: Tunnel, keys: WireguardKeys, toStdout: boolean): P
 /** Says where each half of the keypair came from; the operator supplied both. */
 function report(keys: WireguardKeys, stateDir: string): void {
   const privatePath = join(stateDir, WG_PRIVATE_KEY_FILE);
-  console.log(
+  console.error(
     keys.from.privateKey === "state"
       ? `scafo: using the private key already in ${privatePath}`
       : `scafo: generated a private key with "wg genkey" and wrote it to ${privatePath}`,
   );
   if (keys.from.publicKey === "wg") {
-    console.log(`scafo: derived the public key with "wg pubkey"`);
+    console.error(`scafo: derived the public key with "wg pubkey"`);
   }
 }
 
