@@ -49,7 +49,10 @@ const SECRET_KEY = env.S3_SECRET_KEY ?? "";
 const REGION = env.S3_REGION ?? "us-east-1";
 
 const ROUND_TRIPS = 1000;
-const SLOW_TIMEOUT_MS = 120_000;
+/* Sized for a REMOTE bucket, not a local container: a real provider an ocean or
+   a country away answers one operation in 100-300ms, and a thousand sequential
+   round trips are a latency bill, not a conformance question. */
+const SLOW_TIMEOUT_MS = 600_000;
 
 function randomHex(bytes: number): string {
   let hex = "";
@@ -76,14 +79,19 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
   });
 
   afterAll(async () => {
-    for (const key of await store.list("")) {
-      try {
-        await store.del(key);
-      } catch {
-        /* Best effort: the next run works under its own prefix anyway. */
-      }
+    /* Ten at a time: a run leaves a four-digit number of keys behind, and a
+       remote bucket deleting them one by one outlives any reasonable hook. */
+    const keys = await store.list("");
+    for (let at = 0; at < keys.length; at += 10) {
+      await Promise.all(
+        keys.slice(at, at + 10).map(async (key) =>
+          store.del(key).catch(() => {
+            /* Best effort: the next run works under its own prefix anyway. */
+          }),
+        ),
+      );
     }
-  });
+  }, SLOW_TIMEOUT_MS);
 
   describe("conditional writes", () => {
     it("passes the five-step conformance probe", async () => {
