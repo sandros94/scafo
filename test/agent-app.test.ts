@@ -619,14 +619,29 @@ describe("GET /v1/state, on the node that is coordinating", () => {
 });
 
 describe("GET /v1/ingress/ask", () => {
-  it("answers for a label under a platform domain without reading anything", async () => {
-    /* Deliberately read-free: a platform label is a name this installation
-       serves by shape, whether or not an environment exists behind it. */
-    const response = await app.request(
-      `/v1/ingress/ask?domain=${PROJECT}--${ENVIRONMENT}.apps.test`,
-    );
+  it("answers for a platform label only when something real is behind it", async () => {
+    /*
+     * The ask gates CERTIFICATE ISSUANCE, so a well-formed label is not
+     * enough: approving every parseable name would let anyone mint issuance
+     * attempts for junk until the CA's rate limit starves the names that
+     * matter. An environment that exists approves; the same label with
+     * nothing behind it refuses.
+     */
+    await deployable();
+    await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
+    await flipAlias(clock.ctx, PROJECT, ENVIRONMENT, BUILD);
+    const real = await app.request(`/v1/ingress/ask?domain=${PROJECT}--${ENVIRONMENT}.apps.test`);
+    expect(real.status).toBe(200);
 
-    expect(response.status).toBe(200);
+    /* An environment that EXISTS but was never flipped is the same refusal as
+       one that never existed: nothing serves it, nothing wakes for it, and a
+       name that answers nothing has no business holding a certificate. */
+    await createEnvironment(clock.ctx, PROJECT, { name: "unflipped" });
+    const unflipped = await app.request(`/v1/ingress/ask?domain=${PROJECT}--unflipped.apps.test`);
+    expect(unflipped.status).toBe(404);
+
+    const junk = await app.request(`/v1/ingress/ask?domain=${PROJECT}--nothing.apps.test`);
+    expect(junk.status).toBe(404);
   });
 
   it("answers for a custom domain an environment has claimed", async () => {

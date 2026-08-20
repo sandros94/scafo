@@ -10,6 +10,8 @@ import { checkDomain } from "../core/registry/domains.ts";
 import { canarySplit, flipAlias, rollbackAlias, setSplit } from "../core/registry/environments.ts";
 import { isLeaseExpired } from "../core/registry/lease.ts";
 import { setParkPolicy } from "../core/registry/park.ts";
+import { APEX_ENVIRONMENT } from "../core/placement/routes.ts";
+import { resolveWakeTarget } from "./_wake-target.ts";
 import { coordinatorKey, environmentKey, nodeKey } from "../core/registry/paths.ts";
 import { setNodeSelector } from "../core/registry/placement.ts";
 import { retireEnvironment, unretireEnvironment } from "../core/registry/retirement.ts";
@@ -23,7 +25,7 @@ import type {
 } from "../core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../core/types/supervisor.ts";
 import { isHost } from "../core/utils/host.ts";
-import { parseHostLabel } from "../core/utils/slug.ts";
+import { formatHostLabel, parseHostLabel } from "../core/utils/slug.ts";
 import type { AssignmentFailure } from "./_assign.ts";
 import { deleteEnvironmentRequest } from "./_environments.ts";
 import { isPullingIngress } from "./_ingress.ts";
@@ -506,10 +508,27 @@ function coordinatorView(
 async function servesHost(agent: AgentContext, host: string): Promise<boolean> {
   if (!isHost(host)) return false;
 
+  /*
+   * A platform-domain host is approved only when the name resolves to
+   * something real: an environment, a wakeable build, or a process actually
+   * running one. A parseable label alone is NOT enough — the ask gates
+   * CERTIFICATE ISSUANCE, and approving every well-formed name would let
+   * anyone mint issuance attempts for junk labels until the CA's rate limit
+   * starves the names that matter.
+   */
   for (const domain of agent.config.platformDomains) {
     const suffix = `.${domain}`;
     if (!host.endsWith(suffix)) continue;
-    if (parseHostLabel(host.slice(0, -suffix.length)) !== null) return true;
+
+    const label = host.slice(0, -suffix.length);
+    if (parseHostLabel(label) === null) return false;
+    if (servedLabel(agent, label)) return true;
+    const target = await resolveWakeTarget(agent.registry, {
+      host,
+      platformDomains: agent.config.platformDomains,
+      parked: agent.reconciler?.parkedRecords() ?? [],
+    });
+    return target !== null;
   }
 
   const claim = await checkDomain(agent.registry, host);
@@ -520,6 +539,22 @@ async function servesHost(agent: AgentContext, host: string): Promise<boolean> {
     environmentKey(claim.project, claim.environment),
   );
   return environment !== null && environment.value.retiredAt === undefined;
+}
+
+/**
+ * Whether a process this node is RUNNING answers to the label: its build-hash
+ * name, or its environment's own label. Running is what matters here — a
+ * served host needs its certificate whatever its park policy says about
+ * waking it later.
+ */
+function servedLabel(agent: AgentContext, label: string): boolean {
+  const processes = agent.reconciler?.status().processes ?? [];
+  return processes.some(
+    (process) =>
+      label === formatHostLabel(process.project, process.build) ||
+      label === formatHostLabel(process.project, process.env) ||
+      (process.env === APEX_ENVIRONMENT && label === process.project),
+  );
 }
 
 /** The `:project` and `:env` a route was matched on, as a positional pair. */
