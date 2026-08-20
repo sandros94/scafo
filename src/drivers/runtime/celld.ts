@@ -56,14 +56,15 @@ const DRAIN_HEADROOM_MS = 5_000;
 const MIN_DRAIN_MS = 5_000;
 
 /**
- * Idle eviction MUST stay off.
+ * Idle eviction stays off until enabling it is a policy, not a variable.
  *
- * In celld 0.2.1, evicting a cell for being idle corrupts that cell's
- * replication chain in the bucket: writes already acknowledged to the client
- * roll back the next time the cell is restored. A fix is pending upstream. Until
- * it lands the only safe setting is "never evict on idle", which is celld's
- * behaviour when the variable is simply absent — so this driver never sets it,
- * refuses a caller that tries to, and drops it from the environment it inherits.
+ * celld 0.3.0 — the oldest runtime this driver supports — made idle eviction
+ * safe (0.2.x corrupted an evicted cell's replication chain and rolled back
+ * acknowledged writes; denoland/celld#158). Safe is not the same as wanted:
+ * when cells are evicted, and how that composes with placement and readiness,
+ * is a decision this driver must make coherently for the whole node, so it
+ * never sets the variable, refuses a caller that tries to, and drops it from
+ * the environment it inherits — until typed configuration says otherwise.
  */
 const IDLE_EVICT_ENV = "CELLD_IDLE_EVICT_S";
 
@@ -77,6 +78,7 @@ const IDLE_EVICT_ENV = "CELLD_IDLE_EVICT_S";
 const RESERVED_ENV: string[] = [
   "AWS_ACCESS_KEY_ID",
   "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
   "AWS_REGION",
   "CELLD_BUCKET",
   "CELLD_ADDR",
@@ -89,6 +91,16 @@ const RESERVED_ENV: string[] = [
   "CELLD_MAX_RSS_MB",
   "CELLD_MAX_RESIDENT_CELLS",
   "CELLD_TRUST_FORWARDED_HEADERS",
+  /* The durability posture, the replication destination, the node's session
+     identity and its control plane decide when a write is called durable and
+     who may restart the process — the node's decisions, never a deploy's. */
+  "CELLD_DURABILITY",
+  "CELLD_LTX_S3_BUCKET",
+  "CELLD_LTX_S3_ENDPOINT",
+  "CELLD_NODE",
+  "CELLD_CLOUD",
+  "CELLD_CONTROL_URL",
+  "CELLD_UNSAFE_PUBLIC_ADVERTISE",
 ];
 
 export interface CelldDriverOptions {
@@ -231,6 +243,14 @@ function processEnv(input: RuntimeSpecInput, drainMs: number): Record<string, st
   /* The node is reached through an ingress that terminates TLS and rewrites
      both forwarded headers, so the application sees its own public origin. */
   env.CELLD_TRUST_FORWARDED_HEADERS = "1";
+
+  /* An acknowledged write is in the bucket, not merely on a peer's disk.
+     celld 0.3.0 flipped its default to `fleet` (ack at follower fsync, bucket
+     upload behind); on one node the two are identical, on a fleet they are
+     not, and a node whose bucket may lag its acks breaks the recovery
+     assumption everything above this driver builds on. Opting a fleet into
+     write-behind is a typed-configuration decision, not a default. */
+  env.CELLD_DURABILITY = "bucket";
 
   const capacity = input.capacity;
   if (capacity !== undefined) {

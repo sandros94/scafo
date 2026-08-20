@@ -18,8 +18,9 @@
 #
 # Moving to a new celld is an explicit edit of both lines, and belongs with the
 # rules the driver encodes (src/drivers/runtime/celld.ts) — above all that idle
-# eviction stays off in 0.2.x.
-FROM ghcr.io/denoland/celld:0.2.1@sha256:7a4380721b6400073f2a26afe70a828410169f658d31b5ef61383e648ca0c530 AS celld
+# eviction stays off until enabling it becomes a deliberate policy, and that
+# durability stays pinned to the bucket, not to 0.3.0's write-behind default.
+FROM ghcr.io/denoland/celld:0.3.0@sha256:f47d97c2980aa98aef1d9c42205a313442f48acb606c5987dbb9b32983a23aaf AS celld
 
 # ---------------------------------------------------------------------------
 # Build: the repository's own toolchain, which does not survive into the image.

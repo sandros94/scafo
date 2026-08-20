@@ -44,12 +44,20 @@ const FLEET_POINTER = `${FLEET}/deploy/current.json`;
 const RESERVED_ENV = [
   "AWS_ACCESS_KEY_ID",
   "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
   "AWS_REGION",
   "CELLD_BUCKET",
   "CELLD_ADDR",
   "CELLD_INTERNAL_ADDR",
   "CELLD_ADVERTISE",
   "CELLD_SHUTDOWN_DRAIN_MS",
+  "CELLD_DURABILITY",
+  "CELLD_LTX_S3_BUCKET",
+  "CELLD_LTX_S3_ENDPOINT",
+  "CELLD_NODE",
+  "CELLD_CLOUD",
+  "CELLD_CONTROL_URL",
+  "CELLD_UNSAFE_PUBLIC_ADVERTISE",
 ];
 
 /** Never set, in any version of a spec: it corrupts cells that are evicted while idle. */
@@ -133,6 +141,9 @@ describe("the spec one environment runs under", () => {
          mid-flight by the stop that follows. */
       CELLD_SHUTDOWN_DRAIN_MS: "25000",
       CELLD_TRUST_FORWARDED_HEADERS: "1",
+      /* An acknowledged write is in the bucket — never a runtime default's
+         call, whatever that default becomes. */
+      CELLD_DURABILITY: "bucket",
     });
   });
 
