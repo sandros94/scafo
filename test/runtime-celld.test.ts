@@ -147,6 +147,20 @@ describe("the spec one environment runs under", () => {
     });
   });
 
+  it("writes the durability the node configured, over anything the environment inherited", () => {
+    const fleet = createCelldDriver({ store: new MemoryCasStore(), durability: "fleet" });
+
+    const configured = fleet.processSpec(specInput());
+    const inherited = fleet.processSpec(
+      specInput({ baseEnv: { PATH: "/usr/bin", CELLD_DURABILITY: "bucket" } }),
+    );
+
+    /* One value per installation, stated by configuration: a process whose
+       inherited environment says otherwise still runs what the node decided. */
+    expect(configured.env.CELLD_DURABILITY).toBe("fleet");
+    expect(inherited.env.CELLD_DURABILITY).toBe("fleet");
+  });
+
   it("keeps the drain in step with a configured stop grace, never below its floor", () => {
     const cases: [number, string][] = [
       [DEFAULT_STOP_GRACE_MS, "25000"],

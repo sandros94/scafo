@@ -559,7 +559,13 @@ function agentConfig(): AgentConfig {
     },
     node: { id: OPERATOR, listen: "127.0.0.1:7400" },
     platformDomains: ["apps.test"],
-    runtime: { binPath: "celld", portRangeStart: 42_000, probePath: "/", bindHost: "127.0.0.1" },
+    runtime: {
+      binPath: "celld",
+      portRangeStart: 42_000,
+      probePath: "/",
+      bindHost: "127.0.0.1",
+      durability: "bucket",
+    },
   };
 }
 

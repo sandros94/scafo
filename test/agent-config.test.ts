@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_BIND_HOST,
+  DEFAULT_DURABILITY,
   DEFAULT_CONFIG_PATHS,
   DEFAULT_LISTEN,
   DEFAULT_REGION,
@@ -495,6 +496,41 @@ describe("the address runtime processes bind", () => {
     /* A bare host: the ports come from the allocator, and a pair written here
        would be two sources of truth for what a process listens on. */
     expect(error.detail).toContain("runtime.bindHost");
+  });
+});
+
+describe("when a write counts as durable", () => {
+  it("acknowledges against the bucket until the operator trades that away", async () => {
+    const config = await loadAgentConfig({ env: REQUIRED_ENV });
+
+    /* The safe half: with every write in the bucket before it is acknowledged,
+       losing every node at once still loses nothing. */
+    expect(config.runtime.durability).toBe(DEFAULT_DURABILITY);
+    expect(config.runtime.durability).toBe("bucket");
+  });
+
+  it("takes either mode, from any source, flags first", async () => {
+    const fromEnv = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCAFO_DURABILITY: "fleet" },
+    });
+    const flagWins = await loadAgentConfig({
+      flags: { durability: "bucket" },
+      env: { ...REQUIRED_ENV, SCAFO_DURABILITY: "fleet" },
+    });
+
+    expect(fromEnv.runtime.durability).toBe("fleet");
+    expect(flagWins.runtime.durability).toBe("bucket");
+  });
+
+  it("refuses a mode the runtime does not have", async () => {
+    const error = await rejectsWith(
+      () => loadAgentConfig({ env: { ...REQUIRED_ENV, SCAFO_DURABILITY: "quorum" } }),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("runtime.durability");
+    expect(error.detail).toContain('"bucket"');
+    expect(error.detail).toContain('"fleet"');
   });
 });
 

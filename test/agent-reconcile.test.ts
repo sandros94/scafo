@@ -903,6 +903,7 @@ function agentContext(
       portRangeStart: PORT_RANGE_START,
       probePath: "/",
       bindHost: "127.0.0.1",
+      durability: "bucket",
     },
   };
 

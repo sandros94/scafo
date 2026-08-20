@@ -60,6 +60,10 @@ const upArgs: ArgsDef = {
   "celld-bin": { type: "string", description: "Executable that runs an environment" },
   "port-range-start": { type: "string", description: "First port runtime processes use" },
   "bind-host": { type: "string", description: "Address runtime processes bind their listeners to" },
+  "durability": {
+    type: "string",
+    description: 'When a write is durable: "bucket" (default) or "fleet" (ack at follower fsync)',
+  },
   "probe-path": { type: "string", description: "Path the application readiness probe requests" },
   "ingress-driver": { type: "string", description: "Ingress this node drives (caddy, traefik)" },
   "caddy-admin": { type: "string", description: "Base URL of the Caddy admin API" },
@@ -171,7 +175,11 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   /* The driver writes deployment pointers through the same store the registry
      uses, so a configured key prefix applies to fleets exactly as it does to
      records. */
-  const driver = createCelldDriver({ binPath: config.runtime.binPath, store: registry.store });
+  const driver = createCelldDriver({
+    binPath: config.runtime.binPath,
+    store: registry.store,
+    durability: config.runtime.durability,
+  });
   const reconciler = createReconciler(agent, driver, { baseEnv });
   agent.reconciler = reconciler;
 

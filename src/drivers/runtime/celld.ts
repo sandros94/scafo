@@ -119,6 +119,13 @@ export interface CelldDriverOptions {
    * room for the shortest useful drain.
    */
   graceMs?: number;
+  /**
+   * When a runtime process calls a write durable: `"bucket"` (the default)
+   * acknowledges once the write is in the bucket, `"fleet"` at follower fsync
+   * with the bucket upload behind. The trade is the operator's to make in
+   * typed configuration — this is the only door; the raw variable is refused.
+   */
+  durability?: "bucket" | "fleet";
 }
 
 /**
@@ -130,6 +137,7 @@ export interface CelldDriverOptions {
 export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
   const binPath = opts.binPath ?? DEFAULT_CELLD_BIN;
   const graceMs = opts.graceMs ?? DEFAULT_STOP_GRACE_MS;
+  const durability = opts.durability ?? "bucket";
   const ctx: RegistryContext = { store: opts.store };
 
   if (!Number.isInteger(graceMs) || graceMs < MIN_DRAIN_MS + DRAIN_HEADROOM_MS) {
@@ -174,7 +182,7 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
           "--advertise",
           `${input.node.advertiseHost}:${String(input.ports.internal)}`,
         ],
-        env: processEnv(input, drainMs),
+        env: processEnv(input, drainMs, durability),
       };
     },
 
@@ -229,7 +237,11 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
 }
 
 /** Environment of one runtime process, in the order the parts override each other. */
-function processEnv(input: RuntimeSpecInput, drainMs: number): Record<string, string> {
+function processEnv(
+  input: RuntimeSpecInput,
+  drainMs: number,
+  durability: "bucket" | "fleet",
+): Record<string, string> {
   const env: Record<string, string> = { ...input.baseEnv };
 
   env.AWS_ACCESS_KEY_ID = input.node.accessKey;
@@ -244,13 +256,12 @@ function processEnv(input: RuntimeSpecInput, drainMs: number): Record<string, st
      both forwarded headers, so the application sees its own public origin. */
   env.CELLD_TRUST_FORWARDED_HEADERS = "1";
 
-  /* An acknowledged write is in the bucket, not merely on a peer's disk.
-     celld 0.3.0 flipped its default to `fleet` (ack at follower fsync, bucket
-     upload behind); on one node the two are identical, on a fleet they are
-     not, and a node whose bucket may lag its acks breaks the recovery
-     assumption everything above this driver builds on. Opting a fleet into
-     write-behind is a typed-configuration decision, not a default. */
-  env.CELLD_DURABILITY = "bucket";
+  /* Always written, never inherited: which acknowledgement counts as durable
+     must come from this installation's configuration, not from whatever the
+     runtime's own default is this release — celld 0.3.0 flipped its to
+     `fleet` (ack at follower fsync, bucket upload behind). On one node the
+     two are identical; on a fleet they are the RPO trade the operator made. */
+  env.CELLD_DURABILITY = durability;
 
   const capacity = input.capacity;
   if (capacity !== undefined) {

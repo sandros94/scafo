@@ -160,7 +160,21 @@ export interface RuntimeConfig {
    * refuses to boot until `transport` says what network that is.
    */
   bindHost: string;
+  /**
+   * When the runtime calls a write durable. `"bucket"` acknowledges a write
+   * once it is in the bucket, so losing every node at once loses nothing.
+   * `"fleet"` acknowledges at follower fsync and uploads behind — much faster
+   * writes and far fewer storage operations on a fleet of two or more nodes,
+   * paid for by needing at least one holder of the log to survive; on a single
+   * node the two behave identically. A per-installation trade, so it is
+   * configuration here rather than a default anywhere else.
+   */
+  durability: DurabilityMode;
 }
+
+/** The two answers to "when is a write durable", in the order a refusal lists them. */
+export type DurabilityMode = "bucket" | "fleet";
+const DURABILITY_MODES: DurabilityMode[] = ["bucket", "fleet"];
 
 export interface LoadConfigOptions {
   /** Config file to read; defaults to {@link DEFAULT_CONFIG_PATHS}, first readable wins. */
@@ -190,6 +204,9 @@ export const DEFAULT_PROBE_PATH: string = "/";
 
 /** Address runtime processes bind to when none is configured: loopback only. */
 export const DEFAULT_BIND_HOST: string = "127.0.0.1";
+
+/** Durability when none is configured: a write acknowledged is a write in the bucket. */
+export const DEFAULT_DURABILITY: DurabilityMode = "bucket";
 
 /** UDP port a WireGuard interface listens on when none is configured. */
 export const DEFAULT_WIREGUARD_PORT: number = 51_820;
@@ -288,6 +305,7 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
       portRangeStart: resolvePort("portRangeStart", sources, DEFAULT_PORT_RANGE_START),
       probePath: resolve("probePath", sources) ?? DEFAULT_PROBE_PATH,
       bindHost: resolveBindHost(sources) ?? tunnelHost ?? DEFAULT_BIND_HOST,
+      durability: resolveDurability(sources) ?? DEFAULT_DURABILITY,
     },
     ...(ingress === undefined ? {} : { ingress }),
     ...(keyFile === undefined ? {} : { varsets: { keyFile } }),
@@ -398,6 +416,7 @@ const ORIGINS = {
   },
   probePath: { flag: "probe-path", env: ["SCAFO_PROBE_PATH"], file: "runtime.probePath" },
   bindHost: { flag: "bind-host", env: ["SCAFO_BIND_HOST"], file: "runtime.bindHost" },
+  durability: { flag: "durability", env: ["SCAFO_DURABILITY"], file: "runtime.durability" },
   ingressDriver: {
     flag: "ingress-driver",
     env: ["SCAFO_INGRESS_DRIVER"],
@@ -511,6 +530,22 @@ function resolveBindHost(sources: Sources): string | undefined {
     });
   }
   return value;
+}
+
+/** The configured durability mode, or undefined when the operator named none. */
+function resolveDurability(sources: Sources): DurabilityMode | undefined {
+  const value = resolve("durability", sources);
+  if (value === undefined) return undefined;
+
+  if (!(DURABILITY_MODES as string[]).includes(value)) {
+    throw new ScafoError("invalid-input", "Invalid configuration value", {
+      detail:
+        `"${ORIGINS.durability.file}" must be one of ` +
+        `${DURABILITY_MODES.map((mode) => JSON.stringify(mode)).join(", ")}, ` +
+        `got ${JSON.stringify(value)}`,
+    });
+  }
+  return value as DurabilityMode;
 }
 
 /**
