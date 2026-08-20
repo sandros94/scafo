@@ -143,6 +143,14 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   };
   if (varsetKey !== undefined) agent.varsetKey = varsetKey;
 
+  /* What the ingress dials for a process: loopback while processes bind a
+     wildcard (loopback is among what a wildcard answers on), and the EXACT
+     configured address otherwise — a process bound to a tunnel address alone
+     answers nothing on 127.0.0.1, however local the caller is. */
+  const upstreamHost = ["0.0.0.0", "::"].includes(config.runtime.bindHost)
+    ? "127.0.0.1"
+    : config.runtime.bindHost;
+
   const ingress = config.ingress;
   if (ingress === undefined) {
     /* Said once, at boot: a node with no ingress runs its processes and keeps
@@ -150,9 +158,10 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
        worth repeating on every reconcile pass. */
     console.log("scafo: no ingress configured, nothing on this node will be routed to");
   } else if (ingress.driver === "traefik") {
-    agent.ingress = createTraefikDriver(
-      ingress.entryPoints === undefined ? {} : { entryPoints: ingress.entryPoints },
-    );
+    agent.ingress = createTraefikDriver({
+      upstreamHost,
+      ...(ingress.entryPoints === undefined ? {} : { entryPoints: ingress.entryPoints }),
+    });
     /* Worth saying once, because nothing else on this node will: an ingress that
        polls and was never pointed at the agent stays silent rather than failing,
        and the node looks like it is routing when nothing is reading it. The
@@ -168,6 +177,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
     agent.ingress = createCaddyDriver({
       adminUrl: ingress.adminUrl,
       serverName: ingress.serverName,
+      upstreamHost,
     });
   }
 

@@ -59,6 +59,26 @@ beforeEach(() => {
 });
 
 describe("rendering a routing", () => {
+  it("dials the address the node says its processes bound", () => {
+    const config = renderTraefikConfig(
+      {
+        routes: [
+          {
+            host: "a.apps.test",
+            backends: [{ backend: backend(42_000, "aaaa1111"), weight: 100 }],
+          },
+        ],
+      },
+      ["web"],
+      "10.83.0.1",
+    );
+
+    const service = Object.values(config.http?.services ?? {})[0];
+    expect(service).toEqual({
+      loadBalancer: { servers: [{ url: "http://10.83.0.1:42000" }] },
+    });
+  });
+
   it("writes one router and one service per host, under the shared key", async () => {
     await driver.apply(desired([[HOST, 42_000]]));
 

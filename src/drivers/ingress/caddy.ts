@@ -47,6 +47,13 @@ export interface CaddyDriverOptions {
   serverName?: string;
   /** Injected `fetch`; defaults to the global one. */
   fetchFn?: typeof fetch;
+  /**
+   * Address the runtime processes bound, which is what every process upstream
+   * dials. Loopback by default; a node whose processes bind a tunnel address
+   * (`runtime.bindHost`) must hand it in, or the routes dial an address
+   * nothing listens on.
+   */
+  upstreamHost?: string;
 }
 
 /**
@@ -87,6 +94,7 @@ export interface CaddyRoute {
  * the caller.
  */
 export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
+  const upstreamHost = opts?.upstreamHost ?? "127.0.0.1";
   const admin = (opts?.adminUrl ?? DEFAULT_ADMIN_URL).replace(/\/$/, "");
   const server = opts?.serverName ?? DEFAULT_SERVER_NAME;
   const fetchFn: typeof fetch = opts?.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
@@ -180,7 +188,7 @@ export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
         }
       }
 
-      const rendered = renderCaddyRoutes(desired);
+      const rendered = renderCaddyRoutes(desired, upstreamHost);
       const wanted = new Map<string, CaddyRoute>();
       for (const route of rendered) wanted.set(route["@id"], route);
       const catchAlls = rendered.filter((route) => isCatchAll(route["@id"]));
@@ -284,8 +292,11 @@ export function catchAllId(domain: string): string {
  * driver MEANS by a routing can be compared against what another ingress driver
  * means by the same one — which is what `test/ingress-parity.test.ts` does.
  */
-export function renderCaddyRoutes(desired: IngressDesired): CaddyRoute[] {
-  const routes = desired.routes.map(({ host, backends }) => routeFor(host, backends));
+export function renderCaddyRoutes(
+  desired: IngressDesired,
+  upstreamHost = "127.0.0.1",
+): CaddyRoute[] {
+  const routes = desired.routes.map(({ host, backends }) => routeFor(host, backends, upstreamHost));
 
   const wake = desired.wake;
   if (wake === undefined) return routes;
@@ -310,16 +321,19 @@ export function renderCaddyRoutes(desired: IngressDesired): CaddyRoute[] {
  * `weighted_round_robin` and the backends' weights in the SAME ORDER the
  * upstreams are written in — see {@link CaddyLoadBalancing}.
  */
-function routeFor(host: string, backends: WeightedBackend[]): CaddyRoute {
+function routeFor(host: string, backends: WeightedBackend[], upstreamHost: string): CaddyRoute {
   return {
     "@id": routeId(host),
     "match": [{ host: [host] }],
     "handle": [
       {
         handler: "reverse_proxy",
-        /* Runtime processes only ever listen on loopback: the ingress is the one
-           thing that faces the public network. */
-        upstreams: backends.map((leg) => ({ dial: `127.0.0.1:${String(leg.backend.port)}` })),
+        /* Dialled at the address the processes actually bound: loopback on a
+           single node, the tunnel address on a fleet. The ingress is on this
+           node either way; which interface it dials is the node's decision. */
+        upstreams: backends.map((leg) => ({
+          dial: `${upstreamHost}:${String(leg.backend.port)}`,
+        })),
         ...(backends.length < 2
           ? {}
           : {

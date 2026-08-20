@@ -226,6 +226,14 @@ describe("a host divided between several backends", () => {
     expect(Object.keys(route.handle[0])).toEqual(["handler", "upstreams"]);
   });
 
+  it("dials the address the node says its processes bound", () => {
+    /* A fleet's processes bind the tunnel address, and loopback answers nothing
+       for them — the dial follows the node's word, not an assumption. */
+    const [route] = renderCaddyRoutes(desired([[HOST, 42_000]]), "10.83.0.1");
+
+    expect(route.handle[0].upstreams).toEqual([{ dial: "10.83.0.1:42000" }]);
+  });
+
   it("keeps the weights and the upstreams the same length, whatever the split", () => {
     for (const legs of [
       [[42_000, 50] as [number, number], [42_002, 50] as [number, number]],

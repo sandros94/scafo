@@ -130,6 +130,13 @@ export interface TraefikDynamicConfig {
 export interface TraefikDriverOptions {
   /** EntryPoints the routers attach to. Defaults to {@link DEFAULT_ENTRY_POINT}. */
   entryPoints?: string[];
+  /**
+   * Address the runtime processes bound, which is what every process service
+   * dials. Loopback by default; a node whose processes bind a tunnel address
+   * (`runtime.bindHost`) must hand it in, or the services name an address
+   * nothing listens on.
+   */
+  upstreamHost?: string;
 }
 
 /** An {@link IngressDriver} whose configuration is served rather than pushed. */
@@ -147,6 +154,7 @@ export interface TraefikDriver extends IngressDriver {
  * so a node whose agent is briefly down keeps serving what it was serving.
  */
 export function createTraefikDriver(opts?: TraefikDriverOptions): TraefikDriver {
+  const upstreamHost = opts?.upstreamHost ?? "127.0.0.1";
   const entryPoints = opts?.entryPoints ?? [DEFAULT_ENTRY_POINT];
 
   /*
@@ -163,7 +171,7 @@ export function createTraefikDriver(opts?: TraefikDriverOptions): TraefikDriver 
     apply(desired: IngressDesired): Promise<void> {
       /* Synchronous inside; the async signature is the seam's, and keeping it
          means the reconcile loop treats both ingresses identically. */
-      current = renderTraefikConfig(desired, entryPoints);
+      current = renderTraefikConfig(desired, entryPoints, upstreamHost);
       return Promise.resolve();
     },
     snapshot(): TraefikDynamicConfig {
@@ -209,6 +217,7 @@ export function createTraefikDriver(opts?: TraefikDriverOptions): TraefikDriver 
 export function renderTraefikConfig(
   desired: IngressDesired,
   entryPoints: string[] = [DEFAULT_ENTRY_POINT],
+  upstreamHost = "127.0.0.1",
 ): TraefikDynamicConfig {
   const routers: Record<string, TraefikRouter> = {};
   const services: Record<string, TraefikService> = {};
@@ -235,7 +244,9 @@ export function renderTraefikConfig(
        document — which Traefik hashes — for every host on the node. */
     const only = backends.length === 1 ? backends[0] : undefined;
     if (only !== undefined) {
-      services[key] = { loadBalancer: { servers: [{ url: upstreamUrl(only.backend) }] } };
+      services[key] = {
+        loadBalancer: { servers: [{ url: upstreamUrl(only.backend, upstreamHost) }] },
+      };
       continue;
     }
 
@@ -249,7 +260,7 @@ export function renderTraefikConfig(
     };
     for (const leg of backends) {
       services[traefikLegKey(host, leg.backend.build)] = {
-        loadBalancer: { servers: [{ url: upstreamUrl(leg.backend) }] },
+        loadBalancer: { servers: [{ url: upstreamUrl(leg.backend, upstreamHost) }] },
       };
     }
   }
@@ -327,9 +338,10 @@ function subdomainPattern(domain: string): string {
   return `^[^.]+\\.${domain.replaceAll(".", "\\.")}$`;
 }
 
-/** Runtime processes only ever listen on loopback; the ingress faces the network. */
-function upstreamUrl(backend: IngressBackend): string {
-  return `http://127.0.0.1:${String(backend.port)}`;
+/* Dialled at the address the processes actually bound: loopback on a single
+   node, the tunnel address on a fleet. The ingress is on this node either way. */
+function upstreamUrl(backend: IngressBackend, upstreamHost: string): string {
+  return `http://${upstreamHost}:${String(backend.port)}`;
 }
 
 /* Code-unit ordering, so the document does not depend on the node's locale. */
