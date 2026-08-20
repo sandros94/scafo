@@ -14,7 +14,15 @@ import { listBuilds } from "./builds.ts";
 import { releaseDomain } from "./domains.ts";
 import { listEnvironments } from "./environments.ts";
 import { type LeaseHandle, verifyLease } from "./lease.ts";
-import { buildKey, domainKey, environmentKey, fleetPrefix, placementKey } from "./paths.ts";
+import {
+  buildKey,
+  buildWakesPrefix,
+  domainKey,
+  environmentKey,
+  envWakeKey,
+  fleetPrefix,
+  placementKey,
+} from "./paths.ts";
 import { listProjects } from "./projects.ts";
 import {
   assertDeletable,
@@ -22,6 +30,7 @@ import {
   type RetirementOptions,
   retirementState,
 } from "./retirement.ts";
+import type { WakeStamp } from "./wake.ts";
 
 /** Where last-request timestamps come from; the registry itself does not track them. */
 export interface ActivitySource {
@@ -228,9 +237,9 @@ export async function deleteEnvironment(
 
 /**
  * Deletes one environment's records in the only safe order: the domain claims
- * that name it, then its fleet state, then its placement decision, then the
- * environment record itself. `guard` runs before every destructive step and
- * aborts the rest by throwing.
+ * that name it, then its fleet state, then its wake stamps, then its placement
+ * decision, then the environment record itself. `guard` runs before every
+ * destructive step and aborts the rest by throwing.
  *
  * A run cut short — by a crash or by a lost lease — therefore leaves the
  * environment record in place, so the next pass finds it again and the deletion
@@ -262,6 +271,23 @@ async function purgeEnvironment(
     await guard();
     await deleteKey(ctx, fleetKey);
     deleted.push(fleetKey);
+  }
+
+  /* Wake stamps, on the same reading as the fleet keys: they are named after an
+     environment nothing will iterate again, so one left behind is one nothing
+     ever deletes — and a stale stamp would recall a build for an environment
+     that no longer exists. The environment's own stamp first, then every build
+     it ever woke. */
+  const wake = envWakeKey(project, environment.name);
+  if ((await readJson<WakeStamp>(ctx, wake)) !== null) {
+    await guard();
+    await deleteKey(ctx, wake);
+    deleted.push(wake);
+  }
+  for (const stamp of await ctx.store.list(buildWakesPrefix(project, environment.name))) {
+    await guard();
+    await deleteKey(ctx, stamp);
+    deleted.push(stamp);
   }
 
   /* Before the record, because it points AT the record: a placement left behind

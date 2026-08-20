@@ -4,12 +4,14 @@ import { isScafoError, ScafoError } from "../core/error.ts";
 import type { DesiredBuild, DesiredEnvironment } from "../core/placement/reconcile.ts";
 import { getBuild } from "../core/registry/builds.ts";
 import { readJson } from "../core/registry/cas.ts";
-import type { RegistryContext } from "../core/registry/context.ts";
+import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { listEnvironments } from "../core/registry/environments.ts";
 import { environmentKey } from "../core/registry/paths.ts";
+import { type ResolvedParkPolicy, resolveParkPolicy } from "../core/registry/park.ts";
 import { listPlacements } from "../core/registry/placement.ts";
 import { listProjects } from "../core/registry/projects.ts";
 import { getVarsetEnvelope, openVarset } from "../core/registry/varsets.ts";
+import { listBuildWakes, readEnvironmentWake } from "../core/registry/wake.ts";
 import type {
   EnvironmentRecord,
   NodeSelector,
@@ -56,6 +58,18 @@ export interface DesiredState {
    */
   placements: PlacementView[];
   /**
+   * Environments this node reads as PARKED: ephemeral ones that have gone longer
+   * without a wake than their park policy allows, whether or not a recalled build
+   * still runs for them.
+   *
+   * Reported rather than merely left out of {@link DesiredState.environments},
+   * because those two absences are the same absence to `/v1/state` and to an
+   * operator otherwise: an environment nothing runs for because it was never
+   * deployed looks exactly like one nothing runs for because it is waiting to be
+   * woken, and only one of them is answered by sending it a request.
+   */
+  parked: Array<{ project: string; env: string }>;
+  /**
    * Environments that were read but could not be fully resolved, each naming
    * what was missing. The environment is still desired — see
    * {@link readDesired} — so this reports a gap rather than a removal.
@@ -77,6 +91,13 @@ export interface DesiredState {
  * rendered from what this node actually runs, its hosts stop resolving with
  * them. Nothing in the route renderer knows what retirement is, and nothing in
  * it needs to.
+ *
+ * A PARKED environment leaves by that same door and comes back through it: an
+ * ephemeral one that has gone without a wake for longer than its policy allows
+ * is desired for none of its own builds, and a wake makes it desired again on
+ * the next pass. It is named in {@link DesiredState.parked} while it is, because
+ * it is otherwise indistinguishable from an environment nothing was ever
+ * deployed to.
  *
  * MISSING PLACEMENT RECORD → THE ENVIRONMENT IS INCLUDED, UNLESS IT CARRIES A
  * NODE SELECTOR. Both halves of that are deliberate, and they point in opposite
@@ -112,6 +133,7 @@ export async function readDesired(
   return {
     environments: perProject.flatMap((entry) => entry.environments),
     placements: perProject.flatMap((entry) => entry.placements),
+    parked: perProject.flatMap((entry) => entry.parked),
     failures: perProject.flatMap((entry) => entry.failures),
   };
 }
@@ -162,7 +184,7 @@ async function readProject(
     listPlacements(registry, project),
   ]);
 
-  const state: DesiredState = { environments: [], placements: [], failures: [] };
+  const state: DesiredState = { environments: [], placements: [], parked: [], failures: [] };
 
   for (const name of names) {
     /* Read once and used for every question this loop asks: whether the
@@ -188,7 +210,7 @@ async function readProject(
     }
     if (!servedHere(placement, environment, nodeId)) continue;
 
-    const wanted = await resolveEnvironment(registry, project, environment, state.failures);
+    const wanted = await resolveEnvironment(registry, project, environment, state);
     if (wanted !== null) state.environments.push(wanted);
   }
   return state;
@@ -211,7 +233,24 @@ function servedHere(
 
 /**
  * One environment's builds: the alias, then every split leg it does not already
- * name. Null when the environment has nothing to serve at all.
+ * name, then every build a wake has recalled. Null when the environment has
+ * nothing to serve at all.
+ *
+ * PARKED-NESS IS DERIVED HERE AND STORED NOWHERE. An ephemeral environment that
+ * has gone longer than its policy allows without a wake is parked: none of its
+ * alias or split builds are desired, so the next pass stops them and its own
+ * hosts stop resolving with them. It is reported in {@link DesiredState.parked}
+ * rather than merely dropped, and it is NOT undesired by that alone — a build
+ * somebody woke keeps running at its build-hash host while the environment
+ * around it stays parked, which is what recall is for.
+ *
+ * A RECALLED BUILD WHOSE RECORD IS GONE IS DROPPED SILENTLY, and this is the one
+ * place that reads the opposite way to the split legs below. A build the reaper
+ * has taken is a permanent 404 by design — the bucket is the source of truth and
+ * nothing brings the record back — so there is nothing an operator could act on,
+ * and the stamp that named it is the only thing left pointing at it. Recording
+ * it in {@link DesiredEnvironment.unresolved} instead would count it as an
+ * unproven leg and hold back every stop of that environment forever.
  *
  * A SPLIT LEG WHOSE BUILD RECORD IS GONE is recorded against the environment and
  * left in {@link DesiredEnvironment.unresolved} rather than dropped quietly. The
@@ -232,7 +271,7 @@ async function resolveEnvironment(
   registry: RegistryContext,
   project: string,
   env: EnvironmentRecord,
-  failures: DesiredFailure[],
+  state: DesiredState,
 ): Promise<DesiredEnvironment | null> {
   /*
    * On its way out: an environment an operator has retired is served nowhere,
@@ -248,31 +287,45 @@ async function resolveEnvironment(
    */
   if (env.retiredAt !== undefined) return null;
 
-  const aliased = env.alias?.build;
-  if (aliased === undefined) return null;
+  const policy = resolveParkPolicy(env);
+  const parked = policy.afterS > 0 && (await isParked(registry, project, env, policy.afterS));
+  /* Reported only when there is something the clock is keeping stopped: an
+     environment whose alias was never flipped serves nothing either way, and
+     calling it parked would promise that a request wakes something. */
+  if (parked && env.alias !== null) state.parked.push({ project, env: env.name });
 
-  const builds: DesiredBuild[] = [
-    { build: await getBuild(registry, project, aliased), role: "alias" },
-  ];
+  const builds: DesiredBuild[] = [];
   const unresolved: string[] = [];
 
-  for (const entry of env.split ?? []) {
-    if (builds.some((leg) => leg.build.id === entry.build)) continue;
+  /* An alias that was never flipped is not an early exit: whether a build wake
+     is honoured must not depend on the environment around it — recall works the
+     same for a parked environment, an awake one, and one that has nothing of
+     its own to serve yet. */
+  const aliased = parked ? undefined : env.alias?.build;
+  if (aliased !== undefined) {
+    builds.push({ build: await getBuild(registry, project, aliased), role: "alias" });
 
-    try {
-      builds.push({ build: await getBuild(registry, project, entry.build), role: "split" });
-    } catch (error) {
-      if (!isScafoError(error) || error.code !== "not-found") throw error;
-      unresolved.push(entry.build);
-      failures.push({
-        subject: `${project}/${env.name}`,
-        detail:
-          `build "${entry.build}" is a leg of this environment's traffic split but has no ` +
-          `record in the registry, so it cannot be started; nothing this environment runs ` +
-          `is stopped while a leg is unresolved`,
-      });
+    for (const entry of env.split ?? []) {
+      if (builds.some((leg) => leg.build.id === entry.build)) continue;
+
+      try {
+        builds.push({ build: await getBuild(registry, project, entry.build), role: "split" });
+      } catch (error) {
+        if (!isScafoError(error) || error.code !== "not-found") throw error;
+        unresolved.push(entry.build);
+        state.failures.push({
+          subject: `${project}/${env.name}`,
+          detail:
+            `build "${entry.build}" is a leg of this environment's traffic split but has no ` +
+            `record in the registry, so it cannot be started; nothing this environment runs ` +
+            `is stopped while a leg is unresolved`,
+        });
+      }
     }
   }
+
+  await recalledBuilds(registry, project, env, policy, builds);
+  if (builds.length === 0) return null;
 
   return {
     project,
@@ -281,4 +334,60 @@ async function resolveEnvironment(
     ...(unresolved.length === 0 ? {} : { unresolved }),
     varsetId: env.varset,
   };
+}
+
+/**
+ * Whether the environment has gone without a wake for longer than `afterS`.
+ *
+ * The base is its wake stamp, and the FALLBACK for one that has never been
+ * stamped is the reaper's — the alias flip, then the creation — so an
+ * environment deployed before there were stamps does not read as parked the
+ * instant a node that knows about parking picks it up. A base that cannot be
+ * read at all keeps the environment awake: nothing here should stop an
+ * application over a timestamp it could not parse.
+ */
+async function isParked(
+  registry: RegistryContext,
+  project: string,
+  env: EnvironmentRecord,
+  afterS: number,
+): Promise<boolean> {
+  const woken = await readEnvironmentWake(registry, project, env.name);
+  const since =
+    woken === null ? Date.parse(env.alias?.flippedAt ?? env.createdAt) : woken.getTime();
+  if (!Number.isFinite(since)) return false;
+
+  return nowDate(registry).getTime() - since >= afterS * 1000;
+}
+
+/**
+ * Appends the builds a wake has recalled: superseded ones stamped awake less
+ * than `buildIdleS` ago, freshest first, minus whatever already has a leg.
+ *
+ * Appended LAST on purpose — a recalled build serves one caller at its own host,
+ * while the alias and the split legs carry the environment's traffic, and the
+ * planner rolls a build out in the order it is given.
+ */
+async function recalledBuilds(
+  registry: RegistryContext,
+  project: string,
+  env: EnvironmentRecord,
+  policy: ResolvedParkPolicy,
+  builds: DesiredBuild[],
+): Promise<void> {
+  if (!policy.recallBuilds || policy.buildIdleS <= 0) return;
+
+  const now = nowDate(registry).getTime();
+  for (const [id, at] of await listBuildWakes(registry, project, env.name)) {
+    if (now - at.getTime() >= policy.buildIdleS * 1000) continue;
+    if (builds.some((leg) => leg.build.id === id)) continue;
+
+    try {
+      builds.push({ build: await getBuild(registry, project, id), role: "recalled" });
+    } catch (error) {
+      if (!isScafoError(error) || error.code !== "not-found") throw error;
+      /* Reaped: a permanent 404 nobody can act on, so it is not a failure and
+         not an unresolved leg — see {@link resolveEnvironment}. */
+    }
+  }
 }

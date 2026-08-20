@@ -69,6 +69,29 @@ export function placementKey(project: string, env: string): string {
   return `${placementPrefix(project)}${env}.json`;
 }
 
+/**
+ * Where wake stamps live: one per environment, one per woken superseded build.
+ * The environment stamp and the build stamps share the environment's segment
+ * (`<env>.json` beside `<env>/builds/…`), so one listing under the project
+ * finds everything a reaper or a desired-state read could want.
+ */
+export function envWakeKey(project: string, env: string): string {
+  assertSlug(project);
+  assertSlug(env);
+  return `${ROOT}/wake/${project}/${env}.json`;
+}
+
+export function buildWakesPrefix(project: string, env: string): string {
+  assertSlug(project);
+  assertSlug(env);
+  return `${ROOT}/wake/${project}/${env}/builds/`;
+}
+
+export function buildWakeKey(project: string, env: string, build: string): string {
+  assertId(build);
+  return `${buildWakesPrefix(project, env)}${build}.json`;
+}
+
 export function domainsPrefix(): string {
   return `${ROOT}/domains/`;
 }

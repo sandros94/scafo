@@ -13,6 +13,7 @@ import { createEnvironment, flipAlias, getEnvironment } from "../core/registry/e
 import { fleetPrefix } from "../core/registry/paths.ts";
 import { setNodeSelector, setReplicas } from "../core/registry/placement.ts";
 import { createProject } from "../core/registry/projects.ts";
+import { stampEnvironmentWake } from "../core/registry/wake.ts";
 import type { DeployRunner } from "../core/types/deploy.ts";
 import type {
   BuildSource,
@@ -142,6 +143,20 @@ export function createDeployService(
     if (current !== undefined) update(id, { warnings: [...current.warnings, warning] });
   }
 
+  /**
+   * Marks the environment awake, because a deploy is a wake: what a deploy has
+   * just brought into service must not park for having had no request yet.
+   *
+   * A stamp that fails is IGNORED, and deliberately: the deploy has succeeded —
+   * the build exists, and the alias points at it when it was asked to — while
+   * the stamp only delays parking, and the next wake or the next deploy writes
+   * it again. Failing the deploy over it would report a failure that did not
+   * happen.
+   */
+  async function stampAwake(meta: DeployMeta): Promise<void> {
+    await stampEnvironmentWake(agent.registry, meta.project, meta.environment).catch(() => {});
+  }
+
   /** Whether the reconcile loop reports a ready process for this build. */
   function isRouted(meta: DeployMeta, build: string): boolean {
     return (agent.reconciler?.status().processes ?? []).some(
@@ -161,13 +176,14 @@ export function createDeployService(
    * this deploy stopped watching.
    */
   async function awaitRouted(id: string, meta: DeployMeta, build: string): Promise<void> {
-    const giveUp = (detail: string): void => {
+    const giveUp = async (detail: string): Promise<void> => {
+      await stampAwake(meta);
       update(id, { state: "deployed" });
       warn(id, { code: "deploy-not-routed", detail });
     };
 
     if (agent.reconciler === undefined) {
-      giveUp(
+      await giveUp(
         `build "${build}" was deployed and the alias flipped, but this node runs no ` +
           `reconcile loop, so nothing here will start it`,
       );
@@ -177,11 +193,12 @@ export function createDeployService(
     const deadline = Date.now() + routedTimeoutMs;
     for (;;) {
       if (isRouted(meta, build)) {
+        await stampAwake(meta);
         update(id, { state: "routed" });
         return;
       }
       if (Date.now() >= deadline) {
-        giveUp(
+        await giveUp(
           `build "${build}" was deployed and the alias flipped, but no process serving it ` +
             `had passed its readiness gate after ${String(routedTimeoutMs)}ms`,
         );
@@ -225,6 +242,7 @@ export function createDeployService(
       /* A deploy that was not asked to flip is finished: the build is recorded
          and startable, and what the environment serves is deliberately unchanged. */
       if (!meta.flip) {
+        await stampAwake(meta);
         update(id, { state: "deployed" });
         return;
       }

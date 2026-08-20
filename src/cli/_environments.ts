@@ -15,10 +15,20 @@ import { describeSelector } from "../core/placement/selector.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
 import { type CanaryInput, canarySplit, setSplit } from "../core/registry/environments.ts";
 import { acquireLease, type LeaseHandle, releaseLease } from "../core/registry/lease.ts";
+import {
+  type ResolvedParkPolicy,
+  resolveParkPolicy,
+  setParkPolicy,
+} from "../core/registry/park.ts";
 import { setNodeSelector } from "../core/registry/placement.ts";
 import { deleteEnvironment } from "../core/registry/reaper.ts";
 import { retireEnvironment, unretireEnvironment } from "../core/registry/retirement.ts";
-import type { EnvironmentRecord, NodeSelector, SplitEntry } from "../core/types/registry.ts";
+import type {
+  EnvironmentRecord,
+  NodeSelector,
+  ParkPolicy,
+  SplitEntry,
+} from "../core/types/registry.ts";
 import { parseLabels } from "../core/utils/labels.ts";
 import { assertSlug } from "../core/utils/slug.ts";
 import { type AgentCallOptions, agentRequest, type Authorize } from "./_agent.ts";
@@ -45,6 +55,8 @@ export interface EnvironmentOps {
   unretire(target: EnvironmentTarget): Promise<EnvironmentRecord>;
   /** Constrains which nodes may serve the environment; null lifts the constraint. */
   setSelector(target: EnvironmentTarget, selector: NodeSelector | null): Promise<EnvironmentRecord>;
+  /** States how the environment scales to zero; null falls back to what its kind implies. */
+  setPark(target: EnvironmentTarget, policy: ParkPolicy | null): Promise<EnvironmentRecord>;
   /** Weights the environment's traffic over several builds; null clears the split. */
   setSplit(target: EnvironmentTarget, split: SplitEntry[] | null): Promise<EnvironmentRecord>;
   /** Weighs one build against whatever the alias currently points at. */
@@ -122,6 +134,17 @@ export function agentOps(opts: AgentOptions): EnvironmentOps {
       return ((await answer.json()) as { environment: EnvironmentRecord }).environment;
     },
 
+    async setPark(target, policy): Promise<EnvironmentRecord> {
+      const answer = await agentRequest(at(target, "/park"), await opts.authorize(), {
+        ...call("POST"),
+        headers: { "content-type": "application/json" },
+        /* Spelled out for the same reason the selector is: the node refuses a
+           body that says nothing, because clearing a policy must be stated. */
+        body: JSON.stringify({ policy }),
+      });
+      return ((await answer.json()) as { environment: EnvironmentRecord }).environment;
+    },
+
     /* Same shape, same reason: clearing a split has to be said, never implied. */
     setSplit: (target, split) => stateSplit(target, { split }),
     canary: (target, canary) => stateSplit(target, { canary }),
@@ -169,6 +192,7 @@ export function directOps(registry: RegistryContext, opts?: DirectOptions): Envi
     unretire: (target) => unretireEnvironment(registry, target.project, target.env),
     setSelector: (target, selector) =>
       setNodeSelector(registry, target.project, target.env, selector),
+    setPark: (target, policy) => setParkPolicy(registry, target.project, target.env, policy),
     setSplit: (target, split) => setSplit(registry, target.project, target.env, split),
     canary: (target, canary) => canarySplit(registry, target.project, target.env, canary),
 
@@ -334,6 +358,108 @@ export function describeSplit(split: SplitEntry[]): string {
   return split.map((leg) => `"${leg.build}" ${String(leg.weight)}%`).join(", ");
 }
 
+/** The ways `scafo env park` can be told what an environment's scaling to zero is. */
+export interface ParkFlags {
+  /** Seconds without a wake before it parks, or undefined when `--after` was not given. */
+  after: string | undefined;
+  /** Seconds a woken superseded build keeps running, `--build-idle`. */
+  buildIdle: string | undefined;
+  /** Seconds a request held for a wake may wait, `--wake-deadline`. */
+  wakeDeadline: string | undefined;
+  /** Whether superseded builds may be woken at all, `--recall-builds`, `true` or `false`. */
+  recallBuilds: string | undefined;
+  /** Whether `--clear` was given. */
+  clear: boolean;
+}
+
+/**
+ * The park policy an invocation states: the fields it named, or null for
+ * `--clear`.
+ *
+ * ONLY THE FIELDS THAT WERE GIVEN reach the record. A policy states an
+ * operator's decisions and nothing else — every blank falls back to what the
+ * environment's kind implies, and writing a resolved default into the record
+ * would freeze today's default into an environment that never asked for it.
+ *
+ * `--clear` and a field are refused together, on the same reading as
+ * {@link readSelectorFlags}: they are opposite intentions, so a command carrying
+ * both says nothing about which was meant. NEITHER is refused too, rather than
+ * read as "clear", because an accidental `scafo env park` that lifted a policy
+ * would put a whole preview fleet back to running around the clock.
+ */
+export function readParkFlags(flags: ParkFlags): ParkPolicy | null {
+  const stated: Array<[string, string | undefined]> = [
+    ["--after", flags.after],
+    ["--build-idle", flags.buildIdle],
+    ["--wake-deadline", flags.wakeDeadline],
+    ["--recall-builds", flags.recallBuilds],
+  ];
+  const given = stated.filter(([, value]) => value !== undefined).map(([name]) => name);
+
+  if (flags.clear && given.length > 0) {
+    throw new ScafoError("invalid-input", "Conflicting arguments", {
+      detail: `${given.join(", ")} and --clear ask for opposite things; pass one of them`,
+    });
+  }
+  if (flags.clear) return null;
+  if (given.length === 0) {
+    throw new ScafoError("invalid-input", "Missing required argument", {
+      detail:
+        `pass --after <seconds>, --build-idle <seconds>, --wake-deadline <seconds> or ` +
+        `--recall-builds <true|false> to state how this environment scales to zero, or ` +
+        `--clear to fall back to what its kind implies`,
+    });
+  }
+
+  const policy: ParkPolicy = {};
+  if (flags.after !== undefined) policy.afterS = seconds(flags.after, "--after");
+  if (flags.recallBuilds !== undefined) {
+    policy.recallBuilds = truth(flags.recallBuilds, "--recall-builds");
+  }
+  if (flags.buildIdle !== undefined) policy.buildIdleS = seconds(flags.buildIdle, "--build-idle");
+  if (flags.wakeDeadline !== undefined) {
+    policy.wakeDeadlineS = seconds(flags.wakeDeadline, "--wake-deadline");
+  }
+  return policy;
+}
+
+/**
+ * How a park change reads on the terminal: the RESOLVED policy rather than the
+ * fields that were written, because the two differ in the case that surprises
+ * people most — a long-lived environment never parks on a clock, whatever the
+ * record says, and an operator who has just set `--build-idle` on one should see
+ * that as well as what they changed.
+ */
+export function describeParkChange(
+  target: EnvironmentTarget,
+  environment: EnvironmentRecord,
+): string {
+  const name = `"${target.project}/${target.env}"`;
+  const described = describePark(resolveParkPolicy(environment));
+
+  if (environment.park === undefined) {
+    return `scafo: ${name} carries no park policy of its own; as its kind implies, it ${described}`;
+  }
+  return `scafo: ${name} ${described}`;
+}
+
+/** A resolved policy in words, in the order an environment goes through it. */
+function describePark(policy: ResolvedParkPolicy): string {
+  const parks =
+    policy.afterS === 0
+      ? "never parks on a clock"
+      : `parks ${String(policy.afterS)}s after its last wake`;
+  const recall = policy.recallBuilds
+    ? `a superseded build runs again while its own host keeps being asked for, ` +
+      `until ${String(policy.buildIdleS)}s past its last wake`
+    : "superseded builds stay stopped";
+
+  return (
+    `${parks}; ${recall}; a request waiting on a wake is held for up to ` +
+    `${String(policy.wakeDeadlineS)}s`
+  );
+}
+
 /** `build=weight,build2=weight2`, in the order it was written. */
 function parseSplit(stated: string, flag: string): SplitEntry[] {
   const malformed = (detail: string): ScafoError =>
@@ -361,6 +487,26 @@ function parseSplit(stated: string, flag: string): SplitEntry[] {
 
   if (entries.length === 0) throw malformed(`${flag} "${stated}" names no builds at all`);
   return entries;
+}
+
+/** A whole number of seconds, zero included; anything else is the operator's mistake. */
+function seconds(stated: string, flag: string): number {
+  if (!/^\d+$/.test(stated)) {
+    throw new ScafoError("invalid-input", "Malformed park policy", {
+      detail: `${flag} "${stated}" must be a whole number of seconds, zero or more`,
+    });
+  }
+  return Number(stated);
+}
+
+/** `true` or `false` and nothing else: a flag that guesses is a flag that misreads. */
+function truth(stated: string, flag: string): boolean {
+  if (stated !== "true" && stated !== "false") {
+    throw new ScafoError("invalid-input", "Malformed park policy", {
+      detail: `${flag} "${stated}" must be written "true" or "false"`,
+    });
+  }
+  return stated === "true";
 }
 
 async function takeLease(

@@ -9,6 +9,7 @@ import { createReconciler, runtimeBaseEnv } from "../../agent/reconcile.ts";
 import { startAgent } from "../../agent/serve.ts";
 import { probeCapacity } from "../../core/capacity/reader.ts";
 import { initRegistry, readMeta } from "../../core/registry/meta.ts";
+import { wakeActivity } from "../../core/registry/wake.ts";
 import { createDeployService } from "../../agent/deploys.ts";
 import { createCelldDeployRunner } from "../../drivers/deploy/celld.ts";
 import { createNodeHostReader } from "../../drivers/host/node.ts";
@@ -190,8 +191,10 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
 
   /* Every node runs one and competes for the same lease; all but one of them
      stay candidates, and the loser takes over the moment the holder stops
-     renewing. */
-  const coordinator = createCoordinator(agent);
+     renewing. Its reaper reads idleness off the wake stamps, which is the same
+     record parking is derived from: one notion of "last asked for", so an
+     environment is never reaped as idle while something is still waking it. */
+  const coordinator = createCoordinator(agent, { activity: wakeActivity(registry) });
   agent.coordinator = coordinator;
 
   /* What tells the coordinator this node is still there. Without it the node is

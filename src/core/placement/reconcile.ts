@@ -12,8 +12,13 @@ import type { RuntimeProcess } from "../types/runtime.ts";
 /** One build an environment should have a process for, and why. */
 export interface DesiredBuild {
   build: BuildRecord;
-  /** `alias` for the environment's primary pointer, `split` for a weighted leg. */
-  role: "alias" | "split";
+  /**
+   * `alias` for the environment's primary pointer, `split` for a weighted leg,
+   * `recalled` for a superseded build a wake has brought back — one that takes
+   * no share of the environment's own hosts and is reachable at its build-hash
+   * host alone.
+   */
+  role: "alias" | "split" | "recalled";
 }
 
 /** One environment as the registry wants it served, with its builds resolved. */
@@ -22,12 +27,21 @@ export interface DesiredEnvironment {
   env: EnvironmentRecord;
   /**
    * Every build this environment needs a process for, in the order the registry
-   * states them: the alias build FIRST — it is always present, because the alias
-   * stays the primary pointer whether or not a split is active — then each split
-   * leg the alias does not already name.
+   * states them: WHILE THE ENVIRONMENT IS AWAKE the alias build FIRST — it stays
+   * the primary pointer whether or not a split is active — then each split leg
+   * the alias does not already name, then every recalled build.
    *
-   * Never empty: an environment whose alias was never flipped has nothing to
-   * serve and is not desired at all.
+   * A PARKED EPHEMERAL ENVIRONMENT MAY BE DESIRED WITH RECALLED LEGS ALONE, and
+   * therefore with no alias leg at all: its production host is deliberately not
+   * served while it is parked, and only the woken builds' hash hosts are. So the
+   * alias-first rule is a rule about an awake environment, not about the array.
+   *
+   * Recalled legs always come LAST, after the alias and split legs, so the legs
+   * that carry the environment's own traffic are rolled out before the ones a
+   * single request asked for.
+   *
+   * Never empty: an environment with neither a flipped alias nor a recalled
+   * build has nothing to serve and is not desired at all.
    */
   builds: DesiredBuild[];
   /**
@@ -90,7 +104,10 @@ export type ReconcileAction =
  * its start and lands wherever the last rollout of the pass left it — which is
  * correct, because nothing reads it again until the next process starts. Single
  * build or twelve, an environment is rolled out the same way: one code path, and
- * no case where the phasing is only correct by accident.
+ * no case where the phasing is only correct by accident. The same holds for a
+ * RECALLED build, whose rollout can leave the pointer naming a build the alias
+ * moved off long ago: safe for exactly that reason, and undone by the next
+ * rollout, which re-activates whatever it is starting before it starts it.
  *
  * THE OTHER RULE, unchanged in substance and generalized in reach: a process
  * that still serves an environment is never planned for a stop until EVERY build

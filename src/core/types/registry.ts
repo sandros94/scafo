@@ -184,6 +184,27 @@ export interface SplitEntry {
 }
 
 /**
+ * An environment's scale-to-zero decisions, each optional. Parked-ness itself
+ * is never stored: it is derived from these and from the wake stamps, so there
+ * is no state machine to desynchronize.
+ */
+export interface ParkPolicy {
+  /**
+   * Seconds without a wake before an EPHEMERAL environment's processes stop,
+   * `0` to keep them warm. Only ephemeral environments park — a long-lived
+   * environment carries live traffic no clock can see, so until scafo can
+   * measure that traffic this field is refused for one.
+   */
+  afterS?: number;
+  /** Whether superseded builds may be woken at their build-hash hosts. */
+  recallBuilds?: boolean;
+  /** Seconds a woken superseded build runs past its last wake before it parks again. */
+  buildIdleS?: number;
+  /** Seconds a request held for a wake may wait before `503 Retry-After`. */
+  wakeDeadlineS?: number;
+}
+
+/**
  * A deployable environment of a project.
  * Key: `_scafo/projects/<project>/environments/<name>.json`.
  */
@@ -217,6 +238,12 @@ export interface EnvironmentRecord {
    * a selector means every MATCHING node.
    */
   nodeSelector?: NodeSelector;
+  /**
+   * How this environment scales to zero, where it differs from what its kind
+   * implies. Absent fields resolve to platform defaults — see
+   * `resolveParkPolicy` — so a record states only what an operator decided.
+   */
+  park?: ParkPolicy;
   /**
    * When the environment was retired: the first of the two steps that
    * decommission a long-lived environment.

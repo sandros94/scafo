@@ -1,6 +1,7 @@
 /*
  * `scafo env`: taking an environment out of service, putting it back, dividing
- * its traffic between its builds, and deleting it once it is really meant to go.
+ * its traffic between its builds, saying how it scales to zero, and deleting it
+ * once it is really meant to go.
  *
  * Retiring and deleting are two commands rather than one because they are two
  * decisions. Retirement stops an environment being served and is reversible for
@@ -17,12 +18,14 @@ import { agentBaseUrl, operatorSigner } from "../_agent.ts";
 import { createRegistry } from "../_bootstrap.ts";
 import {
   agentOps,
+  describeParkChange,
   describeRetirement,
   describeSelectorChange,
   describeSplitChange,
   directOps,
   type EnvironmentOps,
   type EnvironmentTarget,
+  readParkFlags,
   readSelectorFlags,
   readSplitFlags,
 } from "../_environments.ts";
@@ -68,6 +71,24 @@ const selectorArgs: ArgsDef = {
     description: "Labels a node must carry to serve it (region=eu-west-1,tier=fast)",
   },
   clear: { type: "boolean", description: "Let it run on every node again" },
+};
+
+const parkArgs: ArgsDef = {
+  ...targetArgs,
+  "after": {
+    type: "string",
+    description: "Seconds an ephemeral environment runs past its last wake before it parks",
+  },
+  "build-idle": {
+    type: "string",
+    description: "Seconds a woken superseded build runs past its last wake",
+  },
+  "wake-deadline": { type: "string", description: "Seconds a request held for a wake may wait" },
+  "recall-builds": {
+    type: "string",
+    description: "Whether superseded builds may be woken at their own hosts (true|false)",
+  },
+  "clear": { type: "boolean", description: "Fall back to what the environment's kind implies" },
 };
 
 const splitArgs: ArgsDef = {
@@ -127,6 +148,18 @@ const selector: CommandDef = defineCommand({
   },
 });
 
+const park: CommandDef = defineCommand({
+  meta: { name: "park", description: "Say how an environment scales to zero" },
+  args: parkArgs,
+  async run({ args }): Promise<void> {
+    try {
+      await runPark(args as Record<string, unknown>);
+    } catch (error) {
+      reportFailure(error);
+    }
+  },
+});
+
 const split: CommandDef = defineCommand({
   meta: { name: "split", description: "Weight an environment's traffic over several builds" },
   args: splitArgs,
@@ -140,8 +173,11 @@ const split: CommandDef = defineCommand({
 });
 
 export const env: CommandDef = defineCommand({
-  meta: { name: "env", description: "Retire, restore, target, split and delete environments" },
-  subCommands: { retire, unretire, selector, split, delete: remove },
+  meta: {
+    name: "env",
+    description: "Retire, restore, target, split, park and delete environments",
+  },
+  subCommands: { retire, unretire, selector, park, split, delete: remove },
 });
 
 async function runRetire(flags: Record<string, unknown>): Promise<void> {
@@ -174,6 +210,21 @@ async function runSelector(flags: Record<string, unknown>): Promise<void> {
   const ops = await opsFor(flags);
 
   console.log(describeSelectorChange(target, await ops.setSelector(target, wanted)));
+}
+
+async function runPark(flags: Record<string, unknown>): Promise<void> {
+  const target = environmentTarget(flags);
+  /* Read before anything is contacted, so a malformed number costs no request. */
+  const wanted = readParkFlags({
+    after: text(flags.after),
+    buildIdle: text(flags["build-idle"]),
+    wakeDeadline: text(flags["wake-deadline"]),
+    recallBuilds: text(flags["recall-builds"]),
+    clear: flags.clear === true,
+  });
+  const ops = await opsFor(flags);
+
+  console.log(describeParkChange(target, await ops.setPark(target, wanted)));
 }
 
 async function runSplit(flags: Record<string, unknown>): Promise<void> {

@@ -9,6 +9,7 @@ import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { checkDomain } from "../core/registry/domains.ts";
 import { canarySplit, flipAlias, rollbackAlias, setSplit } from "../core/registry/environments.ts";
 import { isLeaseExpired } from "../core/registry/lease.ts";
+import { setParkPolicy } from "../core/registry/park.ts";
 import { coordinatorKey, environmentKey, nodeKey } from "../core/registry/paths.ts";
 import { setNodeSelector } from "../core/registry/placement.ts";
 import { retireEnvironment, unretireEnvironment } from "../core/registry/retirement.ts";
@@ -30,6 +31,7 @@ import {
   type DeployVerifiers,
   readAliasRequest,
   readDeployRequest,
+  readParkRequest,
   readSelectorRequest,
   readSplitRequest,
   tryNodeToken,
@@ -141,7 +143,7 @@ export interface EnvironmentDeleted {
   deleted: string[];
 }
 
-/** Body of the retire, unretire, selector and split routes: the environment as it now stands. */
+/** Body of the retire, unretire, selector, park and split routes: the environment as it now stands. */
 export interface EnvironmentResult {
   environment: EnvironmentRecord;
 }
@@ -301,6 +303,27 @@ export function createAgentApp(agent: AgentContext): H3 {
       const [project, name] = target(event);
       return {
         environment: await setNodeSelector(agent.registry, project, name, request.selector),
+      };
+    },
+    { middleware: [authenticated] },
+  );
+
+  /*
+   * How an environment scales to zero, set or cleared. A plain CAS update on one
+   * record, so ANY node carries it out itself, exactly as the selector does.
+   *
+   * It states an intent and nothing more: parked-ness is never stored, so every
+   * node derives it from this policy and the environment's wake stamps on its
+   * next pass — and a policy that parks an environment already past its window
+   * takes effect there rather than here.
+   */
+  app.post(
+    "/v1/environments/:project/:env/park",
+    async (event): Promise<EnvironmentResult> => {
+      const request = await readParkRequest(event);
+      const [project, name] = target(event);
+      return {
+        environment: await setParkPolicy(agent.registry, project, name, request.policy),
       };
     },
     { middleware: [authenticated] },
