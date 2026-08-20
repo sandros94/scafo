@@ -170,6 +170,7 @@ describe("one pass over a node that runs nothing yet", () => {
       failures: [],
       processes: [],
       placements: [],
+      parked: [],
     });
   });
 });
@@ -732,6 +733,58 @@ describe("passes that would overlap", () => {
   });
 });
 
+describe("a pass asked for NOW", () => {
+  it("runs one straight away when nothing is in flight", async () => {
+    const world = await seededWorld();
+
+    world.reconciler.kick();
+
+    /* A kick returns immediately and reports nothing: whatever the pass achieves
+       is read back from the status. */
+    await vi.waitFor(() => {
+      expect(world.reconciler.status().lastRunAt).not.toBeNull();
+    });
+    expect(world.supervisor.listCalls).toBe(1);
+    expect(world.supervisor.started).toHaveLength(1);
+  });
+
+  it("collapses every kick that arrives during a pass into exactly ONE more", async () => {
+    const world = await seededWorld();
+    const gate = deferred<boolean>();
+    world.driver.gate = (): Promise<boolean> => gate.promise;
+
+    const held = world.reconciler.runOnce();
+    await vi.waitFor(() => {
+      expect(world.driver.probed).toHaveLength(1);
+    });
+
+    world.reconciler.kick();
+    world.reconciler.kick();
+    world.reconciler.kick();
+
+    /* Not one of them started a pass of its own. Two passes would plan against
+       the same gap and start the environment twice, so every way in — the timer,
+       a kick, a caller awaiting one pass — goes through the same gate. */
+    expect(world.supervisor.listCalls).toBe(1);
+    expect(world.reconciler.status().running).toBe(true);
+
+    gate.resolve(true);
+    await held;
+
+    await vi.waitFor(() => {
+      expect(world.reconciler.status().running).toBe(false);
+    });
+    /* Three kicks, one follow-up: they all asked for the same thing, which is a
+       pass that starts after the state they stamped was written. */
+    expect(world.supervisor.listCalls).toBe(2);
+
+    await sleep(50);
+    expect(world.supervisor.listCalls).toBe(2);
+    expect(world.driver.activations).toHaveLength(1);
+    expect(world.supervisor.started).toHaveLength(1);
+  });
+});
+
 describe("the loop on a timer", () => {
   it("keeps running passes until it is stopped", async () => {
     const world = await seededWorld({ intervalMs: 5 });
@@ -1079,6 +1132,7 @@ function capacityPlan(): CapacityPlan {
     rssBudgetMb: 1400,
     maxRssMbPerProcess: 1400,
     maxResidentCells: 2000,
+    maxConcurrentWakes: 2,
     probedAt: STARTED_AT,
   };
 }

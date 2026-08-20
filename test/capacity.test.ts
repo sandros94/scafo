@@ -197,6 +197,52 @@ describe("the capacity formulas", () => {
   });
 });
 
+describe("maxConcurrentWakes", () => {
+  /*
+   * A wake IS a process boot — starting a runtime, loading a build, waiting on a
+   * readiness gate — and boots are CPU-bound bursts rather than steady load, so
+   * the ceiling comes off the thread count and not off memory. Half of them, so
+   * a node waking a batch keeps enough of itself to answer for what it already
+   * serves.
+   */
+  it("wakes half the node's threads, rounded up", () => {
+    expect(wakesFor(1)).toBe(1);
+    expect(wakesFor(2)).toBe(1);
+    expect(wakesFor(3)).toBe(2);
+    expect(wakesFor(4)).toBe(2);
+    expect(wakesFor(8)).toBe(4);
+    expect(wakesFor(12)).toBe(6);
+  });
+
+  it("allows ONE whatever the hardware says", () => {
+    /* A node that could wake nothing would park an environment permanently the
+       first time it was asked for. */
+    expect(wakesFor(1)).toBe(1);
+    expect(planFor(1024 * 1024).maxConcurrentWakes).toBeGreaterThanOrEqual(1);
+  });
+
+  it("stops at EIGHT however big the node is", () => {
+    /* A courtesy ceiling rather than a hardware one: a crawler walking a
+       platform domain touches every parked environment there is, and without a
+       cap a big node would answer by turning itself into a boot farm. */
+    expect(wakesFor(16)).toBe(8);
+    expect(wakesFor(32)).toBe(8);
+    expect(wakesFor(256)).toBe(8);
+  });
+
+  it("counts the threads a cgroup leaves, not the machine's", () => {
+    const plan = computeCapacity({
+      cgroup: { memoryMax: null, cpuMax: "200000 100000" },
+      host: { cores: 64, memBytes: 16 * GIB },
+    });
+
+    /* A containerized node wakes what its quota can boot, not what the host
+       could: two threads is one concurrent wake. */
+    expect(plan.threads).toBe(2);
+    expect(plan.maxConcurrentWakes).toBe(1);
+  });
+});
+
 describe("computeCapacity refuses a degenerate probe", () => {
   it("refuses non-positive host values", async () => {
     for (const cores of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
@@ -267,6 +313,12 @@ function fixedNow(): Date {
 
 function planFor(memBytes: number, opts?: CapacityOverrides): ReturnType<typeof computeCapacity> {
   return computeCapacity({ cgroup: NO_CGROUP, host: { cores: 4, memBytes } }, opts);
+}
+
+/** Concurrent wakes an uncontained node of `cores` cores plans for. */
+function wakesFor(cores: number): number {
+  return computeCapacity({ cgroup: NO_CGROUP, host: { cores, memBytes: 16 * GIB } })
+    .maxConcurrentWakes;
 }
 
 function readerFor(inputs: CapacityInputs): HostReader {

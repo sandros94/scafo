@@ -358,36 +358,29 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expect(buildV2).not.toBe(buildV1);
       observed.buildV2 = buildV2;
 
-      /*
-       * Recorded, not asserted. The planner only stops the superseded process on
-       * the pass AFTER the replacement passes its gate, so whether the old build
-       * host still answers here depends on where in the 5s interval the deploy
-       * settled — a race no assertion should depend on.
-       */
-      observed.v1BuildHostRightAfterFlip = await httpGet(caddyHttpPort, "/", {
-        host: buildHost(buildV1),
-      });
-
       await untilServes(envHost(), "v2");
       await untilServes(apexHost(), "v2");
       await untilServes(buildHost(buildV2), "v2");
 
-      /* What the implementation actually does: the stop is planned once v2 is
-         ready, the route goes with the process, and Caddy is left with no match
-         for the old build host. */
-      const withdrawn = await until(
-        `${buildHost(buildV1)} to stop being routed`,
-        DEADLINE_MS,
-        async () => {
-          const answer = await httpGet(caddyHttpPort, "/", { host: buildHost(buildV1) });
-          return answer.body.includes(`"v1"`) ? null : answer;
-        },
-      );
-      observed.v1BuildHostAfterReconcile = withdrawn;
+      /*
+       * The withdrawal is watched through the ADMIN API and never by requesting
+       * the host: a request for a superseded build's host is a WAKE now — it
+       * would restart the very process this test is waiting to see stopped, and
+       * the poll would hold its own condition false until the deadline. The one
+       * deliberate wake of a superseded build is the last test of this suite.
+       */
+      await until(`${buildHost(buildV1)} to stop being routed`, DEADLINE_MS, async () => {
+        const routes = await caddyRoutes();
+        return routes.some((route) => route["@id"] === `scafo_${buildHost(buildV1)}`)
+          ? null
+          : routes;
+      });
 
       const routes = await caddyRoutes();
-      expect(routes.map((route) => route["@id"])).not.toContain(`scafo_${buildHost(buildV1)}`);
       expect(routes.map((route) => route["@id"])).toContain("operator_authored");
+      /* Withdrawn from its own route, but not into nothing: the catch-all that
+         hands unmatched platform hosts to the agent is what answers for it now. */
+      expect(routes.map((route) => route["@id"])).toContain(`scafo_catchall_${PLATFORM_DOMAIN}`);
     },
     STEP_TIMEOUT_MS,
   );
@@ -692,6 +685,55 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expect(routes.map((route) => route["@id"])).not.toContain(`scafo_${buildHost(buildV1)}`);
       /* And the operator's own route is still there, after all of it. */
       expect(routes.map((route) => route["@id"])).toContain("operator_authored");
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "wakes a superseded build at its own host, and answers 404 for a name nobody owns",
+    async () => {
+      /*
+       * THE ONE DELIBERATE WAKE, run last because it is not free: the recalled
+       * build runs for `buildIdleS` after this, and every earlier test counts
+       * processes. The request lands on the catch-all, the agent starts the
+       * superseded build against its own fleet, holds the request through the
+       * readiness gate, and answers with the very version that was retired —
+       * G2's "every build recallable at its own host", observed end to end.
+       */
+      const woken = await until(
+        `${buildHost(buildV1)} to wake and serve v1 again`,
+        DEADLINE_MS,
+        async () => {
+          const answer = await httpGet(caddyHttpPort, "/", { host: buildHost(buildV1) });
+          return answer.status === 200 && answer.body.includes(`"v1"`) ? answer : null;
+        },
+      );
+      expect(JSON.parse(woken.body).version).toBe("v1");
+      observed.wokenBuildAnswer = woken;
+
+      /* And the node says so: the wake surface admitted at least this one. */
+      const state = await httpGet(agentPort, "/v1/state", {
+        authorization: `Bearer ${await operatorToken()}`,
+      });
+      expect((JSON.parse(state.body) as AgentState).wakes?.admitted).toBeGreaterThanOrEqual(1);
+
+      /*
+       * A name nothing owns is a 404 FROM THE AGENT, in the same problem
+       * document every API refusal wears — which retires the old behaviour
+       * where an unrouted host got Caddy's bare 200-empty. One answer, whether
+       * the name never existed or its build was reaped: the bucket is the
+       * source of truth, and what it does not hold is not discussed.
+       */
+      const unknown = await httpGet(caddyHttpPort, "/", {
+        host: `${PROJECT}--deadbeef.${PLATFORM_DOMAIN}`,
+      });
+      expect(unknown.status).toBe(404);
+      expect(unknown.body).toContain("urn:scafo:not-found");
+
+      const unknownProject = await httpGet(caddyHttpPort, "/", {
+        host: `nobody-home.${PLATFORM_DOMAIN}`,
+      });
+      expect(unknownProject.status).toBe(404);
     },
     STEP_TIMEOUT_MS,
   );

@@ -445,6 +445,7 @@ describe("what a node publishes about its place on the tunnel", () => {
         rssBudgetMb: 6144,
         maxRssMbPerProcess: 768,
         maxResidentCells: 8,
+        maxConcurrentWakes: 2,
         probedAt: "2026-01-01T00:00:00.000Z",
       },
     });

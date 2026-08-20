@@ -20,10 +20,12 @@ import type { IngressDesired, IngressDriver } from "../src/core/types/ingress.ts
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { createCaddyDriver } from "../src/drivers/ingress/caddy.ts";
 import {
+  CATCHALL_PRIORITY,
   createTraefikDriver,
   DEFAULT_ENTRY_POINT,
   renderTraefikConfig,
   TRAEFIK_KEY_PREFIX,
+  traefikCatchAllKey,
   traefikLegKey,
   type TraefikDriver,
   type TraefikDynamicConfig,
@@ -37,6 +39,16 @@ const HOST = "shop.apps.test";
 const OTHER_HOST = "shop--staging.apps.test";
 const BUILD = "aaaa1111";
 const OTHER_BUILD = "bbbb2222";
+
+/** The platform domains this node serves, and the host of something parked under one. */
+const DOMAIN = "apps.test";
+const OTHER_DOMAIN = "apps.example";
+const PARKED_HOST = "shop--preview.apps.test";
+const PARKED_CUSTOM = "shop.example.com";
+
+/** Where the node's own agent answers, as a Traefik server url. */
+const AGENT_PORT = 7400;
+const AGENT_URL = `http://127.0.0.1:${String(AGENT_PORT)}`;
 
 let clock: ManualClock;
 let driver: TraefikDriver;
@@ -330,6 +342,179 @@ describe("a host divided between several backends", () => {
   });
 });
 
+describe("the hosts and domains that reach the agent", () => {
+  it("renders a parked host as a plain Host router over the agent", () => {
+    const config = renderTraefikConfig(waking([], { hosts: [PARKED_HOST], domains: [] }));
+
+    /* An ordinary router over an ordinary service: it names one host and dials
+       the agent instead of a runtime process. */
+    expect(config).toEqual({
+      http: {
+        routers: {
+          [`${TRAEFIK_KEY_PREFIX}${PARKED_HOST}`]: {
+            rule: `Host(\`${PARKED_HOST}\`)`,
+            service: `${TRAEFIK_KEY_PREFIX}${PARKED_HOST}`,
+            entryPoints: [DEFAULT_ENTRY_POINT],
+          },
+        },
+        services: {
+          [`${TRAEFIK_KEY_PREFIX}${PARKED_HOST}`]: {
+            loadBalancer: { servers: [{ url: AGENT_URL }] },
+          },
+        },
+      },
+    });
+  });
+
+  it("ranks every catch-all at the lowest priority a router may carry", () => {
+    const config = renderTraefikConfig(waking([[HOST, 42_000]], { domains: [DOMAIN] }));
+
+    /*
+     * TRAEFIK RANKS BY RULE LENGTH WHEN A ROUTER NAMES NO PRIORITY, and the
+     * longest rule wins: `^[^.]+\.apps\.test$` is easily longer than
+     * `shop.apps.test`, so the default ranking would have the catch-all answer
+     * for a host an explicit router was written for — a whole platform domain's
+     * live traffic going to the agent. `1` is the lowest a priority may be,
+     * which puts every explicit router ahead of it whatever its rule turns out
+     * to be.
+     */
+    expect(config.http?.routers[traefikCatchAllKey(DOMAIN)]).toEqual({
+      rule: "HostRegexp(`^[^.]+\\.apps\\.test$`)",
+      service: traefikCatchAllKey(DOMAIN),
+      entryPoints: [DEFAULT_ENTRY_POINT],
+      priority: CATCHALL_PRIORITY,
+    });
+    expect(CATCHALL_PRIORITY).toBe(1);
+    /* And nothing else states a rank at all: between routers that each match one
+       host, Traefik's own default cannot pick wrong. */
+    expect(config.http?.routers[`${TRAEFIK_KEY_PREFIX}${HOST}`]?.priority).toBeUndefined();
+  });
+
+  it("matches exactly the names Caddy's `*.<domain>` matches, and no others", () => {
+    const matcher = catchAllMatcher(DOMAIN);
+
+    expect(matcher.test(`shop.${DOMAIN}`)).toBe(true);
+    expect(matcher.test(`shop--preview.${DOMAIN}`)).toBe(true);
+    /* ONE label, so it is never the domain itself and never a subdomain of a
+       subdomain — which is what makes the two ingresses fall through on the
+       same set of names. */
+    expect(matcher.test(DOMAIN)).toBe(false);
+    expect(matcher.test(`deep.sub.${DOMAIN}`)).toBe(false);
+    /* The domain's dots are escaped: a bare `.` in a regexp matches anything,
+       and this router would then claim names under domains nobody configured. */
+    expect(matcher.test("shop.appsXtest")).toBe(false);
+    expect(matcher.test(`shop.${DOMAIN}.evil.example`)).toBe(false);
+  });
+
+  it("points every agent-bound service at the agent's own port", () => {
+    const config = renderTraefikConfig(
+      waking([[HOST, 42_000]], { hosts: [PARKED_HOST], domains: [DOMAIN, OTHER_DOMAIN] }),
+    );
+
+    for (const key of [
+      `${TRAEFIK_KEY_PREFIX}${PARKED_HOST}`,
+      traefikCatchAllKey(DOMAIN),
+      traefikCatchAllKey(OTHER_DOMAIN),
+    ]) {
+      expect(config.http?.services[key], key).toEqual({
+        loadBalancer: { servers: [{ url: AGENT_URL }] },
+      });
+    }
+    /* And the host something is serving still reaches the process serving it. */
+    expect(config.http?.services[`${TRAEFIK_KEY_PREFIX}${HOST}`]).toEqual({
+      loadBalancer: { servers: [{ url: "http://127.0.0.1:42000" }] },
+    });
+  });
+
+  it("renders the same document byte for byte, whatever order it was given", () => {
+    const routing = waking(
+      [
+        [HOST, 42_000],
+        [OTHER_HOST, 42_002],
+      ],
+      {
+        hosts: [PARKED_HOST, PARKED_CUSTOM],
+        domains: [DOMAIN, OTHER_DOMAIN],
+      },
+    );
+    const backwards = waking(
+      [
+        [OTHER_HOST, 42_002],
+        [HOST, 42_000],
+      ],
+      {
+        hosts: [PARKED_CUSTOM, PARKED_HOST],
+        domains: [OTHER_DOMAIN, DOMAIN],
+      },
+    );
+
+    /* Byte-for-byte rather than deep-equal: Traefik hashes the body it polls and
+       does nothing at all when the bytes are unchanged, so a document whose key
+       order wandered would look like a change on every single pass. */
+    const rendered = JSON.stringify(renderTraefikConfig(routing));
+    expect(JSON.stringify(renderTraefikConfig(routing))).toBe(rendered);
+    expect(JSON.stringify(renderTraefikConfig(backwards))).toBe(rendered);
+  });
+
+  it("emits the catch-alls on a node running NO processes at all", () => {
+    const config = renderTraefikConfig({
+      routes: [],
+      wake: { port: AGENT_PORT, hosts: [], domains: [DOMAIN] },
+    });
+
+    /* The empty document is for a node with nothing to say. This one has a
+       catch-all to publish, and publishing nothing would leave every unmatched
+       name under the platform domain to whatever Traefik does with a host it has
+       no route for. */
+    expect(config).not.toEqual({});
+    expect(Object.keys(config.http?.routers ?? {})).toEqual([traefikCatchAllKey(DOMAIN)]);
+    expect(config.http?.services[traefikCatchAllKey(DOMAIN)]).toEqual({
+      loadBalancer: { servers: [{ url: AGENT_URL }] },
+    });
+  });
+
+  it("is an empty document again when there is nothing to catch either", () => {
+    expect(
+      renderTraefikConfig({ routes: [], wake: { port: AGENT_PORT, hosts: [], domains: [] } }),
+    ).toEqual({});
+  });
+
+  it("never emits an empty map in any section it writes", () => {
+    const cases: Array<[string, TraefikDynamicConfig]> = [
+      ["parked hosts only", renderTraefikConfig(waking([], { hosts: [PARKED_HOST], domains: [] }))],
+      ["catch-alls only", renderTraefikConfig(waking([], { domains: [DOMAIN] }))],
+      [
+        "everything at once",
+        renderTraefikConfig(
+          waking([[HOST, 42_000]], { hosts: [PARKED_HOST], domains: [DOMAIN, OTHER_DOMAIN] }),
+        ),
+      ],
+    ];
+
+    for (const [name, config] of cases) {
+      /* Traefik's decoder REFUSES a map with no entries — "routers cannot be a
+         standalone element" — which makes the poll a failed one, and a failed
+         poll leaves the configuration Traefik last read in place. */
+      expect(config.http, name).toBeDefined();
+      expect(Object.keys(config.http?.routers ?? {}).length, name).toBeGreaterThan(0);
+      expect(Object.keys(config.http?.services ?? {}).length, name).toBeGreaterThan(0);
+    }
+  });
+
+  it("refuses a wake host or a domain that could be read as something else", async () => {
+    /* Asserted for the same reason every routed host is: a rule is a small
+       language carried in a string, and a name holding a backtick would be a
+       different rule rather than a malformed name. */
+    const injected = "evil`) || Host(`admin.test";
+
+    await rejectsWith(
+      () => driver.apply(waking([], { hosts: [injected], domains: [] })),
+      "invalid-slug",
+    );
+    await rejectsWith(() => driver.apply(waking([], { domains: [injected] })), "invalid-slug");
+  });
+});
+
 describe("GET /v1/ingress/traefik", () => {
   it("serves what the driver last rendered, to a caller holding no token", async () => {
     const app = appWith(driver);
@@ -396,6 +581,28 @@ function split(host: string, legs: Array<[string, number, number]>): IngressDesi
       },
     ],
   };
+}
+
+/** The same routing, plus the hosts and domains that fall through to the agent. */
+function waking(
+  entries: Array<[string, number]>,
+  wake: { hosts?: string[]; domains?: string[] },
+): IngressDesired {
+  return {
+    ...desired(entries),
+    wake: { port: AGENT_PORT, hosts: wake.hosts ?? [], domains: wake.domains ?? [DOMAIN] },
+  };
+}
+
+/** The catch-all's Go pattern, read back off the rule and compiled as a regexp. */
+function catchAllMatcher(domain: string): RegExp {
+  const rule = renderTraefikConfig(waking([], { domains: [domain] })).http?.routers[
+    traefikCatchAllKey(domain)
+  ]?.rule;
+  const pattern = /^HostRegexp\(`(?<pattern>.+)`\)$/.exec(rule ?? "")?.groups?.pattern;
+  if (pattern === undefined) throw new Error(`rule "${String(rule)}" is not a HostRegexp`);
+
+  return new RegExp(pattern);
 }
 
 function backend(

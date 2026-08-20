@@ -511,20 +511,24 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       const served = await untilServes(labelled, targetedHost(), "v1");
       expect(JSON.parse(served.body).version).toBe("v1");
 
-      /* And the unlabelled one runs no process for it and answers the empty 200
-         Caddy gives any host it has no route for. */
-      const empty = await until(
-        `${plain.id} to answer nothing for ${TARGETED}`,
+      /* And the unlabelled one runs no process for it — and still answers for
+         it: the host lands on its agent, which forwards the held request to the
+         labelled node. A selector decides where a process may run, never which
+         door reaches it. */
+      await until(`${plain.id} to run nothing for ${TARGETED}`, DEADLINE_MS, async () => {
+        const state = await stateOf(plain);
+        return state.processes.some(runsTargeted) ? null : state;
+      });
+      const forwarded = await until(
+        `${plain.id} to forward ${TARGETED} to the labelled node`,
         DEADLINE_MS,
         async () => {
-          const state = await stateOf(plain);
-          if (state.processes.some(runsTargeted)) return null;
           const answer = await httpGet(plain.httpPort, "/", { host: targetedHost() });
-          return answer.status === 200 && !answer.body.includes('"v1"') ? answer : null;
+          return answer.status === 200 && answer.body.includes('"v1"') ? answer : null;
         },
       );
-      expect(empty.status).toBe(200);
-      expect(empty.body).not.toContain('"v1"');
+      expect(JSON.parse(forwarded.body).version).toBe("v1");
+      expect((await stateOf(plain)).processes.some(runsTargeted)).toBe(false);
 
       /* The constraint is reported beside the decision, so an operator looking at
          a one-node placement can see that one node is what was asked for. */
@@ -562,7 +566,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         placedOn: labelled.id,
         excluded: plain.id,
         placedMs,
-        excludedAnswer: { status: empty.status, body: empty.body.slice(0, 120) },
+        excludedAnswer: { status: forwarded.status, body: forwarded.body.slice(0, 120) },
         clearedThrough: plain.id,
         spreadMs,
         clearedOutput: cleared.output.trim().slice(0, 300),
@@ -609,20 +613,24 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       const served = await untilServes(holder, soloHost(), "v1");
       expect(JSON.parse(served.body).version).toBe("v1");
 
-      /* And the other one stops: no process, and no route, so its Caddy answers
-         the empty 200 it gives any host it has no route for. */
-      const empty = await until(
-        `${unassigned.id} to stop answering for ${SOLO}`,
+      /* And the other one stops RUNNING it without stopping ANSWERING for it:
+         the host lands on its agent, which forwards the held request to the
+         node the placement names. Scaling down decides where a process runs,
+         never which door reaches it. */
+      await until(`${unassigned.id} to run nothing for ${SOLO}`, DEADLINE_MS, async () => {
+        const state = await stateOf(unassigned);
+        return state.processes.some(runsSolo) ? null : state;
+      });
+      const forwarded = await until(
+        `${unassigned.id} to forward ${SOLO} to its holder`,
         DEADLINE_MS,
         async () => {
-          const state = await stateOf(unassigned);
-          if (state.processes.some(runsSolo)) return null;
           const answer = await httpGet(unassigned.httpPort, "/", { host: soloHost() });
-          return answer.status === 200 && !answer.body.includes('"v1"') ? answer : null;
+          return answer.status === 200 && answer.body.includes('"v1"') ? answer : null;
         },
       );
-      expect(empty.status).toBe(200);
-      expect(empty.body).not.toContain('"v1"');
+      expect(JSON.parse(forwarded.body).version).toBe("v1");
+      expect((await stateOf(unassigned)).processes.some(runsSolo)).toBe(false);
       expect(placedNodes(await stateOf(unassigned), SOLO)).toEqual([holder.id]);
 
       soloHolder = holder;
@@ -631,7 +639,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         heldBy: holder.id,
         unassigned: unassigned.id,
         scaledDownMs: Date.now() - scaledAt,
-        unassignedAnswer: { status: empty.status, body: empty.body.slice(0, 120) },
+        forwardedAnswer: { status: forwarded.status, body: forwarded.body.slice(0, 120) },
       };
     },
     STEP_TIMEOUT_MS,
@@ -764,14 +772,18 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expectCleanExit(retired);
       expect(retired.output).toContain("retired");
 
-      /* It leaves by the same door a reassignment uses: no process, no route,
-         so each Caddy answers the empty 200 it gives any host it has none for. */
+      /* It leaves by the same door a reassignment uses: no process, no route —
+         and its host falls through each Caddy's catch-all to the agent, which
+         answers a retired name with the one 404 every refusal wears. Safe to
+         poll: a retired environment refuses to wake and nothing is stamped. */
       for (const node of nodes) {
         await until(`${node.id} to stop serving ${SUNSET}`, DEADLINE_MS, async () => {
           const state = await stateOf(node);
           if (state.processes.some(runsSunset)) return null;
           const answer = await httpGet(node.httpPort, "/", { host: sunsetHost() });
-          return answer.status === 200 && !answer.body.includes('"v1"') ? answer : null;
+          return answer.status === 404 && answer.body.includes("urn:scafo:not-found")
+            ? answer
+            : null;
         });
       }
       const stoppedMs = Date.now() - retiredAt;

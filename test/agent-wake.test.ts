@@ -1,0 +1,838 @@
+/*
+ * The wake surface, reached the way a request off the wire reaches it: through
+ * the agent app, decided by the `Host` header alone.
+ *
+ * HOST DISPATCH COMES BEFORE EVERYTHING, and that is what most of this file is
+ * about. A host the ingress had nothing else to do with never reaches a route —
+ * no API path, no token, and no fall into an API 404 either — while the node's
+ * own API is untouched by any of it.
+ *
+ * WHICH NODE BOOTS is the other half. A wake lands wherever the routing put it,
+ * and the node that starts the process is one the placement chose: this node
+ * serves what it was given, hands what it was not to a live node that was, and
+ * never passes on a request another node already forwarded to it.
+ *
+ * Nothing binds a socket. The app is driven through its fetch interface, the
+ * reconcile loop is a stand-in whose processes a case brings up by hand, and
+ * both hops a held request can take — down to a process, across to a peer's
+ * agent — are the agent's injected `fetch`.
+ */
+
+import type { H3 } from "h3";
+import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
+import { generateJWK } from "unjwt/jwk";
+import { beforeEach, describe, expect, it } from "vitest";
+import type { ParkedEnvironment } from "../src/agent/_desired.ts";
+import { type AgentContext, type AgentState, createAgentApp } from "../src/agent/app.ts";
+import type { AgentConfig } from "../src/agent/config.ts";
+import type { Reconciler } from "../src/agent/reconcile.ts";
+import {
+  FALLBACK_MAX_CONCURRENT_WAKES,
+  WAKE_POLL_INTERVAL_MS,
+  WAKE_RETRY_AFTER_S,
+  type WakeCounters,
+} from "../src/agent/wake.ts";
+import type { CapacityPlan } from "../src/core/capacity/compute.ts";
+import type { ProblemDetails } from "../src/core/error.ts";
+import { signNodeToken } from "../src/core/auth/index.ts";
+import {
+  acquireLease,
+  claimDomain,
+  createBuild,
+  createEnvironment,
+  createProject,
+  drainNode,
+  flipAlias,
+  getEnvironment,
+  type LeaseHandle,
+  listBuildWakes,
+  readEnvironmentWake,
+  registerNode,
+  retireEnvironment,
+  setNodeSelector,
+  setParkPolicy,
+  writePlacement,
+} from "../src/core/registry/index.ts";
+import type { RuntimeProcess } from "../src/core/types/runtime.ts";
+import type { Supervisor } from "../src/core/types/supervisor.ts";
+import { MemoryCasStore } from "../src/drivers/store/memory.ts";
+import { ctxWith, type ManualClock } from "./_helpers.ts";
+
+const NODE_ID = "node-a";
+/** A second node of the same installation, and where its agent is reached. */
+const PEER = "node-b";
+const SELF_ADDRESS = { internal: "10.0.0.4", agentPort: 7400 };
+const PEER_ADDRESS = { internal: "10.0.0.5", agentPort: 7500 };
+const VERSION = "0.0.0-test";
+const DOMAIN = "apps.test";
+const PROJECT = "shop";
+/** Two parked environments: one to wake, one to be turned away while it is. */
+const PREVIEW = "preview";
+const OTHER_PREVIEW = "staging";
+/** An environment on its way out, and a build recorded before builds named a fleet. */
+const RETIRED = "gone";
+const ORPHAN_BUILD = "cccc3333";
+const BUILD = "aaaa1111";
+const SUPERSEDED = "bbbb2222";
+const CUSTOM = "shop.example.com";
+
+const PARKED_HOST = `${PROJECT}--${PREVIEW}.${DOMAIN}`;
+const OTHER_PARKED_HOST = `${PROJECT}--${OTHER_PREVIEW}.${DOMAIN}`;
+
+/** What the process a wake brings up answers with; the surface must relay it whole. */
+const UPSTREAM_BODY = "served by the build";
+/** What the PEER's agent answers a forwarded wake with; the surface relays that whole too. */
+const PEER_BODY = "served by node-b";
+
+/** One call a hop made — to a loopback process or to a peer — as the stand-in saw it. */
+interface UpstreamCall {
+  url: string;
+  method: string;
+  headers: Headers;
+  /** What was streamed on, or null when the request had no body. */
+  body: string | null;
+}
+
+let clock: ManualClock;
+let keys: { privateKey: JWK_OKP_Private<"EdDSA">; publicKey: JWK_OKP_Public<"EdDSA"> };
+let lease: LeaseHandle;
+let loop: FakeReconciler;
+let upstream: UpstreamCall[];
+let app: H3;
+
+beforeEach(async () => {
+  clock = ctxWith(new MemoryCasStore());
+  keys = await generateJWK("EdDSA", { kid: NODE_ID });
+  await registerNode(clock.ctx, {
+    v: 1,
+    id: NODE_ID,
+    publicKey: { kty: "OKP", crv: "Ed25519", x: keys.publicKey.x },
+    addresses: SELF_ADDRESS,
+  });
+  /* A live peer: a placement is only forwarded to a node that has reported in. */
+  await registerNode(clock.ctx, {
+    v: 1,
+    id: PEER,
+    publicKey: { kty: "OKP", crv: "Ed25519", x: "b".repeat(43) },
+    addresses: PEER_ADDRESS,
+    heartbeatAt: new Date(clock.nowMs()).toISOString(),
+  });
+
+  const acquired = await acquireLease(clock.ctx, NODE_ID);
+  if (acquired === null) throw new Error("the fixture could not take the lease");
+  lease = acquired;
+
+  loop = fakeReconciler();
+  upstream = [];
+  app = appWith({});
+  await seed();
+});
+
+describe("which surface a request lands on", () => {
+  it("answers a wake host on EVERY path, with no route and no token", async () => {
+    loop.onKick = (): void => {
+      loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+    };
+
+    for (const path of ["/", "/v1/health", "/v1/state", "/deep/path?id=7"]) {
+      const response = await ask(PARKED_HOST, path);
+
+      /* `/v1/state` is a 401 on the API surface and `/v1/health` a 200 of its
+         own, so the body is what says which surface answered. */
+      expect(response.status, path).toBe(200);
+      await expect(response.text(), path).resolves.toBe(UPSTREAM_BODY);
+    }
+    expect(upstream.map((call) => new URL(call.url).pathname)).toEqual([
+      "/",
+      "/v1/health",
+      "/v1/state",
+      "/deep/path",
+    ]);
+  });
+
+  it("leaves the node's own API to the API", async () => {
+    const health = await app.request("/v1/health");
+    const state = await app.request("/v1/state");
+
+    expect(health.status).toBe(200);
+    await expect(health.json()).resolves.toMatchObject({ node: NODE_ID });
+    expect(state.status).toBe(401);
+    /* Nothing was proxied and nothing was woken on the way. */
+    expect(upstream).toEqual([]);
+    expect(loop.kicks).toBe(0);
+  });
+
+  it("keeps the platform domain ITSELF on the API surface", async () => {
+    /* The catch-all covers exactly one label, so the apex domain is nobody's
+       project and a request for it is not asking for one. */
+    const response = await ask(DOMAIN, "/v1/health");
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ node: NODE_ID });
+  });
+
+  it("reads x-forwarded-host ONLY on a hop another node marked", async () => {
+    const spoofed = await app.request("/v1/health", {
+      headers: {
+        "host": `${SELF_ADDRESS.internal}:${String(SELF_ADDRESS.agentPort)}`,
+        "x-forwarded-host": PARKED_HOST,
+      },
+    });
+
+    /*
+     * An ingress in front of the agent sets `x-forwarded-host` on every request
+     * it proxies, Caddy included. Honouring it unmarked would let that ingress
+     * decide which surface answers, so the node's own API answers here.
+     */
+    expect(spoofed.status).toBe(200);
+    await expect(spoofed.json()).resolves.toMatchObject({ node: NODE_ID });
+    expect(upstream).toEqual([]);
+    expect(loop.kicks).toBe(0);
+
+    /* The same request marked as one node's hop to another: now the name in the
+       header is the one the surface answers for, API path or not. */
+    loop.onKick = (): void => {
+      loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+    };
+    const hop = await forwardedAsk(PARKED_HOST, "/v1/health");
+
+    expect(hop.status).toBe(200);
+    await expect(hop.text()).resolves.toBe(UPSTREAM_BODY);
+  });
+
+  it("takes a parked environment's custom domain, which is under no platform domain", async () => {
+    loop.onKick = (): void => {
+      loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+    };
+
+    const response = await ask(CUSTOM, "/");
+
+    expect(response.status).toBe(200);
+    await expect(response.text()).resolves.toBe(UPSTREAM_BODY);
+  });
+});
+
+describe("a name this installation has nothing to serve at", () => {
+  it("answers 404 as a problem document, with nothing to come back for", async () => {
+    const host = `${PROJECT}--ghost.${DOMAIN}`;
+
+    const response = await ask(host, "/whatever");
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("content-type")).toBe("application/problem+json");
+    /* No `Retry-After`: this is not a wait, it is an answer. */
+    expect(response.headers.get("retry-after")).toBeNull();
+    await expect(response.json()).resolves.toEqual({
+      type: "urn:scafo:not-found",
+      title: "Nothing is served at this host",
+      status: 404,
+      detail: `"${host}" names nothing this installation serves`,
+    });
+    expect(loop.kicks).toBe(0);
+  });
+
+  it("gives every way of getting there the SAME document", async () => {
+    const ways: Array<[host: string, why: string]> = [
+      [`${PROJECT}--ghost.${DOMAIN}`, "an environment that was never deployed"],
+      [`${PROJECT}--deadbeef.${DOMAIN}`, "a build the reaper has taken"],
+      [`${PROJECT}--${RETIRED}.${DOMAIN}`, "an environment that was retired"],
+      [`${PROJECT}--${ORPHAN_BUILD}.${DOMAIN}`, "a build that predates recall"],
+      [`ghost--${PREVIEW}.${DOMAIN}`, "a project that does not exist"],
+    ];
+
+    const shapes = new Set<string>();
+    for (const [host, why] of ways) {
+      const response = await ask(host, "/");
+      const problem = (await response.json()) as ProblemDetails;
+
+      expect(response.status, why).toBe(404);
+      shapes.add(JSON.stringify({ ...problem, detail: String(problem.detail).replace(host, "") }));
+    }
+
+    /*
+     * It says nothing about which way that was — never deployed, retired,
+     * reaped, recall turned off — and it is permanent by design rather than by
+     * omission: the bucket is the source of truth, and a record deleted from it
+     * does not come back.
+     */
+    expect([...shapes]).toHaveLength(1);
+  });
+});
+
+describe("waking what this node has parked", () => {
+  it("stamps, kicks, and hands the request to the process that comes up", async () => {
+    loop.onKick = (): void => {
+      loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+    };
+
+    const response = await ask(PARKED_HOST, "/cart?id=7");
+
+    expect(response.status).toBe(200);
+    await expect(response.text()).resolves.toBe(UPSTREAM_BODY);
+    /* Converge NOW rather than at the end of the interval: the whole of a wake's
+       latency that scafo controls is the gap between the stamp and the pass that
+       reads it. */
+    expect(loop.kicks).toBe(1);
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.toEqual(
+      new Date(clock.nowMs()),
+    );
+
+    expect(upstream).toHaveLength(1);
+    expect(upstream[0].url).toBe("http://127.0.0.1:42004/cart?id=7");
+    /* The process is dialled by address, so the name that was asked for travels
+       as the header the ingress would have sent. */
+    expect(upstream[0].headers.get("x-forwarded-host")).toBe(PARKED_HOST);
+    expect(upstream[0].headers.get("host")).toBeNull();
+  });
+
+  it("holds the request until something is ready, rather than answering early", async () => {
+    const held = ask(PARKED_HOST, "/");
+    await sleep(WAKE_POLL_INTERVAL_MS / 2);
+
+    /* Polled rather than subscribed to: readiness is a fact about a process the
+       loop re-establishes on every pass, and there is nothing here to keep in
+       sync. */
+    expect(upstream).toEqual([]);
+    loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+
+    expect((await held).status).toBe(200);
+    expect(upstream).toHaveLength(1);
+  });
+
+  it("stamps the BUILD when a build's own host is what was asked for", async () => {
+    loop.onKick = (): void => {
+      loop.processes = [ready(PREVIEW, SUPERSEDED, 42_006)];
+    };
+
+    const response = await ask(`${PROJECT}--${SUPERSEDED}.${DOMAIN}`, "/");
+
+    expect(response.status).toBe(200);
+    expect(upstream[0].url).toBe("http://127.0.0.1:42006/");
+    /* A recall keeps ONE build awake at its own host; the environment around it
+       is not woken by it and is not stamped. */
+    expect([...(await listBuildWakes(clock.ctx, PROJECT, PREVIEW)).keys()]).toEqual([SUPERSEDED]);
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.toBeNull();
+  });
+
+  it("says to come back when nothing was ready in time", async () => {
+    await setParkPolicy(clock.ctx, PROJECT, PREVIEW, { wakeDeadlineS: 1 });
+
+    const response = await ask(PARKED_HOST, "/");
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe(String(WAKE_RETRY_AFTER_S));
+    await expect(response.json()).resolves.toMatchObject({
+      type: "urn:scafo:wake-unavailable",
+      title: "Not woken in time",
+    });
+    /* It keeps starting, so asking again is what this waits for: the stamp
+       stands and the loop was told to converge. */
+    expect(loop.kicks).toBe(1);
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.not.toBeNull();
+    /* Admitted and left admitted: `refused` counts the wakes turned away AT the
+       cap, which this one was not. */
+    await expect(counters()).resolves.toEqual({
+      inFlight: 0,
+      admitted: 1,
+      refused: 0,
+      forwarded: 0,
+    });
+  });
+
+  it("refuses a wake AT the cap, and starts NOTHING for it", async () => {
+    app = appWith({ maxConcurrentWakes: 1 });
+    const held = ask(PARKED_HOST, "/");
+    await sleep(WAKE_POLL_INTERVAL_MS / 2);
+
+    const refused = await ask(OTHER_PARKED_HOST, "/");
+
+    expect(refused.status).toBe(503);
+    expect(refused.headers.get("retry-after")).toBe(String(WAKE_RETRY_AFTER_S));
+    await expect(refused.json()).resolves.toMatchObject({
+      type: "urn:scafo:wake-unavailable",
+      title: "This node is already waking as much as it can",
+    });
+    /*
+     * THE CAP IS ON ADMISSION, NOT ON BOOTS. A refused wake writes NO stamp, so
+     * nothing is started on behalf of a request that was already turned away —
+     * which is what keeps a crawler walking a platform domain from turning a
+     * node into a boot farm, since the loop only ever starts what a stamp asked
+     * for.
+     */
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, OTHER_PREVIEW)).resolves.toBeNull();
+    expect(loop.kicks).toBe(1);
+
+    loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+    expect((await held).status).toBe(200);
+    /* And the slot comes back however the request that held it ended. */
+    await expect(counters()).resolves.toEqual({
+      inFlight: 0,
+      admitted: 1,
+      refused: 1,
+      forwarded: 0,
+    });
+  });
+
+  it("wakes one thing at a time on a node that never probed its hardware", async () => {
+    app = appWith({ capacity: false });
+    const held = ask(PARKED_HOST, "/");
+    await sleep(WAKE_POLL_INTERVAL_MS / 2);
+
+    const refused = await ask(OTHER_PARKED_HOST, "/");
+
+    /* The floor the capacity formula itself guarantees: a node that knows
+       nothing about its hardware wakes one thing at a time rather than guessing. */
+    expect(FALLBACK_MAX_CONCURRENT_WAKES).toBe(1);
+    expect(refused.status).toBe(503);
+
+    loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+    expect((await held).status).toBe(200);
+  });
+
+  it("refuses on a node that runs no reconcile loop at all", async () => {
+    app = appWith({ reconciler: false });
+
+    const response = await ask(PARKED_HOST, "/");
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe(String(WAKE_RETRY_AFTER_S));
+    await expect(response.json()).resolves.toMatchObject({
+      type: "urn:scafo:wake-unavailable",
+      title: "This node cannot wake anything",
+    });
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.toBeNull();
+  });
+});
+
+describe("which node a wake runs on", () => {
+  it("wakes it here when the placement names this node", async () => {
+    await placedOn(PREVIEW, [NODE_ID, PEER]);
+    loop.onKick = (): void => {
+      loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+    };
+
+    const response = await ask(PARKED_HOST, "/cart?id=7");
+
+    /* The local flow, unchanged: stamp, kick, hand it to the process. */
+    expect(response.status).toBe(200);
+    await expect(response.text()).resolves.toBe(UPSTREAM_BODY);
+    expect(upstream.map((call) => call.url)).toEqual(["http://127.0.0.1:42004/cart?id=7"]);
+    expect(loop.kicks).toBe(1);
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.not.toBeNull();
+  });
+
+  it("wakes it here when no coordinator has placed it at all", async () => {
+    loop.onKick = (): void => {
+      loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+    };
+
+    const response = await ask(PARKED_HOST, "/");
+
+    /*
+     * THE FALLBACK THE WHOLE FEATURE HANGS FROM, and the reason a single-node
+     * installation never leaves this line: a missing placement record means
+     * nothing has been decided, which is what a bootstrap, a lone node and every
+     * rolling upgrade from a build that predates placement all look like.
+     */
+    expect(response.status).toBe(200);
+    expect(upstream.map((call) => call.url)).toEqual(["http://127.0.0.1:42004/"]);
+    expect(loop.kicks).toBe(1);
+    await expect(counters()).resolves.toEqual({
+      inFlight: 0,
+      admitted: 1,
+      refused: 0,
+      forwarded: 0,
+    });
+  });
+
+  it("holds a selector-bearing environment nobody has placed, then says to come back", async () => {
+    await setNodeSelector(clock.ctx, PROJECT, PREVIEW, { tier: "fast" });
+    await setParkPolicy(clock.ctx, PROJECT, PREVIEW, { wakeDeadlineS: 1 });
+
+    const response = await ask(PARKED_HOST, "/");
+
+    /*
+     * An explicit constraint and no decision yet: nobody serves it, this node
+     * least of all. It is held here under the environment's own deadline rather
+     * than answered at once, because the stamp below is what the coordinator's
+     * next pass has to place — and when that lands in time, the node it lands on
+     * is what this request is handed to.
+     */
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe(String(WAKE_RETRY_AFTER_S));
+    await expect(response.json()).resolves.toMatchObject({
+      type: "urn:scafo:wake-unavailable",
+      title: "Not woken in time",
+    });
+    expect(upstream).toEqual([]);
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.not.toBeNull();
+    expect(loop.kicks).toBe(1);
+  });
+
+  it("forwards to the node the placement named, and relays its answer whole", async () => {
+    await placedOn(PREVIEW, [PEER]);
+
+    const response = await app.request("/cart?id=7", {
+      method: "POST",
+      body: "one order",
+      headers: { "host": PARKED_HOST, "content-type": "text/plain" },
+    });
+
+    /* The peer's answer IS the answer: status, body and headers as it wrote
+       them, because what answers a wake is the application, not a summary. */
+    expect(response.status).toBe(201);
+    await expect(response.text()).resolves.toBe(PEER_BODY);
+    expect(response.headers.get("x-served-by")).toBe(PEER);
+
+    expect(upstream).toHaveLength(1);
+    const hop = upstream[0];
+    expect(hop.url).toBe(
+      `http://${PEER_ADDRESS.internal}:${String(PEER_ADDRESS.agentPort)}/cart?id=7`,
+    );
+    expect(hop.method).toBe("POST");
+    expect(hop.body).toBe("one order");
+    expect(hop.headers.get("content-type")).toBe("text/plain");
+    /* One hop and no further: the node that receives this answers or refuses. */
+    expect(hop.headers.get("x-scafo-proxied")).toBe("1");
+    /* The peer is dialled by ADDRESS, so the name the wake was asked at travels
+       as the header its host dispatch reads — `fetch` forbids setting `host`. */
+    expect(hop.headers.get("x-forwarded-host")).toBe(PARKED_HOST);
+    expect(hop.headers.get("host")).toBeNull();
+
+    /* Nothing was stamped and nothing was started HERE: the node it went to
+       admits it, stamps it and boots it as its own wake. */
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.toBeNull();
+    expect(loop.kicks).toBe(0);
+    await expect(counters()).resolves.toEqual({
+      inFlight: 0,
+      admitted: 0,
+      refused: 0,
+      forwarded: 1,
+    });
+  });
+
+  it("wakes a request a peer forwarded, under the name the forward carried", async () => {
+    await placedOn(PREVIEW, [NODE_ID]);
+    loop.onKick = (): void => {
+      loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+    };
+
+    const response = await forwardedAsk(PARKED_HOST, "/cart");
+
+    /* The far end of the hop above, and it needs no token: the request arrives
+       on the ordinary wake surface, matched by the name it carries. */
+    expect(response.status).toBe(200);
+    await expect(response.text()).resolves.toBe(UPSTREAM_BODY);
+    expect(upstream.map((call) => call.url)).toEqual(["http://127.0.0.1:42004/cart"]);
+    expect(upstream[0].headers.get("x-forwarded-host")).toBe(PARKED_HOST);
+    expect(loop.kicks).toBe(1);
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.toEqual(
+      new Date(clock.nowMs()),
+    );
+    await expect(counters()).resolves.toEqual({
+      inFlight: 0,
+      admitted: 1,
+      refused: 0,
+      forwarded: 0,
+    });
+  });
+
+  it("refuses a forwarded wake it was not given either, rather than passing it on", async () => {
+    await placedOn(PREVIEW, [PEER]);
+
+    const response = await forwardedAsk(PARKED_HOST, "/");
+
+    /* The decision moved while the request was in flight. A placement being
+       changed settles within a pass, so the caller is told to come back — a ring
+       of nodes each convinced the next one owns it would forward forever. */
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe(String(WAKE_RETRY_AFTER_S));
+    await expect(response.json()).resolves.toMatchObject({
+      type: "urn:scafo:wake-unavailable",
+      title: "This node was not given this environment",
+    });
+    expect(upstream).toEqual([]);
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.toBeNull();
+    expect(loop.kicks).toBe(0);
+  });
+
+  it("refuses when no node the placement named is live", async () => {
+    await placedOn(PREVIEW, [PEER]);
+    await drainNode(clock.ctx, PEER);
+
+    const response = await ask(PARKED_HOST, "/");
+
+    /*
+     * A node on its way out is counted out here exactly as it is in placement,
+     * and nothing is started here in its place: serving an environment the
+     * placement put elsewhere is what placement exists to prevent, and this node
+     * has the least claim of any to it.
+     */
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe(String(WAKE_RETRY_AFTER_S));
+    await expect(response.json()).resolves.toMatchObject({
+      type: "urn:scafo:wake-unavailable",
+      title: "No node that could wake this is live",
+    });
+    expect(upstream).toEqual([]);
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.toBeNull();
+    expect(loop.kicks).toBe(0);
+    await expect(counters()).resolves.toEqual({
+      inFlight: 0,
+      admitted: 0,
+      refused: 0,
+      forwarded: 0,
+    });
+  });
+});
+
+describe("GET /v1/state", () => {
+  it("reports what is parked and what this node has done about wakes", async () => {
+    loop.onKick = (): void => {
+      loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+    };
+    await ask(PARKED_HOST, "/");
+
+    const response = await app.request("/v1/state", { headers: await bearer() });
+    const state = (await response.json()) as AgentState;
+
+    /* An environment nothing runs for because it was never deployed looks
+       exactly like one nothing runs for because it is waiting to be woken, and
+       only one of them is answered by sending it a request. */
+    expect(state.parked).toEqual([
+      { project: PROJECT, env: PREVIEW },
+      { project: PROJECT, env: OTHER_PREVIEW },
+    ]);
+    /* Node-local soft state, exactly like the deploy map: nothing here is in the
+       registry, and a restarted agent counts from zero again. */
+    expect(state.wakes).toEqual({ inFlight: 0, admitted: 1, refused: 0, forwarded: 0 });
+  });
+});
+
+/* ------------------------------------------------------------------ helpers */
+
+/** One request as it arrives off the wire: the `Host` header is what decides. */
+function ask(host: string, path: string): Promise<Response> {
+  return Promise.resolve(app.request(path, { headers: { host } }));
+}
+
+/**
+ * One request as a PEER's forward delivers it: dialled at this node's own
+ * address, so `Host` names that address, with the name the wake was asked at in
+ * `x-forwarded-host` and the mark that says this is already a second hop.
+ */
+function forwardedAsk(host: string, path: string): Promise<Response> {
+  return Promise.resolve(
+    app.request(path, {
+      headers: {
+        "host": `${SELF_ADDRESS.internal}:${String(SELF_ADDRESS.agentPort)}`,
+        "x-forwarded-host": host,
+        "x-scafo-proxied": "1",
+      },
+    }),
+  );
+}
+
+/** Records the coordinator's decision about one environment, as it would. */
+async function placedOn(env: string, nodes: string[]): Promise<void> {
+  const write = await writePlacement(clock.ctx, PROJECT, env, nodes, lease);
+  if (write.outcome !== "written") throw new Error(`the placement was ${write.outcome}`);
+}
+
+/** What this node has done about wakes, read back through its own API. */
+async function counters(): Promise<WakeCounters> {
+  const response = await app.request("/v1/state", { headers: await bearer() });
+  return ((await response.json()) as AgentState).wakes;
+}
+
+interface AppOptions {
+  /** Concurrent wakes this node's capacity allows. Defaults to two. */
+  maxConcurrentWakes?: number;
+  /** Whether this node has probed its own hardware at all. */
+  capacity?: boolean;
+  /** Whether this node runs a reconcile loop. */
+  reconciler?: boolean;
+}
+
+/** This node's agent app, over the shared registry, loop and upstream stand-in. */
+function appWith(opts: AppOptions): H3 {
+  const agent: AgentContext = {
+    config: agentConfig(),
+    nodeId: NODE_ID,
+    registry: clock.ctx,
+    supervisor: idleSupervisor(),
+    version: VERSION,
+    fetchFn: stubFetch,
+  };
+  if (opts.capacity !== false) agent.capacity = capacityPlan(opts.maxConcurrentWakes ?? 2);
+  if (opts.reconciler !== false) agent.reconciler = loop;
+
+  return createAgentApp(agent);
+}
+
+/**
+ * Records the hop and answers as whatever is at the other end of it would: the
+ * peer's agent when it was dialled at the peer's address, the woken process when
+ * it was dialled on loopback.
+ */
+const stubFetch: typeof fetch = async (input, init) => {
+  const url = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
+  const body = init?.body ?? null;
+  upstream.push({
+    url,
+    method: init?.method ?? "GET",
+    headers: new Headers(init?.headers),
+    body: body === null ? null : await new Response(body).text(),
+  });
+
+  if (url.startsWith(`http://${PEER_ADDRESS.internal}:`)) {
+    return new Response(PEER_BODY, {
+      status: 201,
+      headers: { "content-type": "text/plain", "x-served-by": PEER },
+    });
+  }
+  return new Response(UPSTREAM_BODY, { status: 200, headers: { "content-type": "text/plain" } });
+};
+
+interface FakeReconciler extends Reconciler {
+  /** Passes asked for NOW; one wake kicks exactly one. */
+  kicks: number;
+  /** What the loop reports as running, which a case moves by hand. */
+  processes: RuntimeProcess[];
+  /** What its last pass read as parked. */
+  parked: ParkedEnvironment[];
+  /** What a kick does to this node, for a case that brings a process up with one. */
+  onKick?: () => void;
+}
+
+/** A loop that runs no pass; what it reports is whatever the case put there. */
+function fakeReconciler(): FakeReconciler {
+  const fake: FakeReconciler = {
+    kicks: 0,
+    processes: [],
+    parked: [],
+
+    runOnce: () => Promise.resolve([]),
+
+    kick(): void {
+      fake.kicks++;
+      fake.onKick?.();
+    },
+
+    start: (): void => {},
+    stop: (): void => {},
+    parkedRecords: (): ParkedEnvironment[] => fake.parked.map((entry) => ({ ...entry })),
+
+    status: () => ({
+      lastRunAt: null,
+      running: false,
+      lastActions: [],
+      failures: [],
+      processes: [...fake.processes],
+      placements: [],
+      parked: fake.parked.map((entry) => ({ project: entry.project, env: entry.env.name })),
+    }),
+  };
+  return fake;
+}
+
+/** A process that has passed its gate, which is the only kind a wake is handed to. */
+function ready(env: string, build: string, port: number): RuntimeProcess {
+  return {
+    processId: `${PROJECT}--${env}--${build}`,
+    project: PROJECT,
+    env,
+    build,
+    port,
+    internalPort: port + 1,
+    ready: true,
+  };
+}
+
+/**
+ * Two parked environments of one project, a build each of them once served, and
+ * an environment on its way out beside them.
+ */
+async function seed(): Promise<void> {
+  await createProject(clock.ctx, { slug: PROJECT });
+  for (const name of [PREVIEW, OTHER_PREVIEW, RETIRED]) {
+    await createEnvironment(clock.ctx, PROJECT, { name, ephemeral: true });
+  }
+  for (const id of [BUILD, SUPERSEDED]) {
+    await createBuild(clock.ctx, PROJECT, {
+      id,
+      runtimeConfigurable: true,
+      environment: PREVIEW,
+    });
+  }
+  /* Recorded before builds said which fleet holds their code: not wakeable. */
+  await createBuild(clock.ctx, PROJECT, { id: ORPHAN_BUILD, runtimeConfigurable: true });
+
+  await flipAlias(clock.ctx, PROJECT, PREVIEW, SUPERSEDED);
+  await flipAlias(clock.ctx, PROJECT, PREVIEW, BUILD);
+  await flipAlias(clock.ctx, PROJECT, OTHER_PREVIEW, BUILD);
+  await flipAlias(clock.ctx, PROJECT, RETIRED, BUILD);
+  await claimDomain(clock.ctx, CUSTOM, PROJECT, PREVIEW);
+  await retireEnvironment(clock.ctx, PROJECT, RETIRED);
+
+  loop.parked = [
+    { project: PROJECT, env: await getEnvironment(clock.ctx, PROJECT, PREVIEW) },
+    { project: PROJECT, env: await getEnvironment(clock.ctx, PROJECT, OTHER_PREVIEW) },
+  ];
+}
+
+function agentConfig(): AgentConfig {
+  return {
+    bucket: {
+      endpoint: "http://store.test:9000",
+      region: "us-east-1",
+      bucket: "registry",
+      accessKey: "key",
+      secretKey: "secret",
+    },
+    node: { id: NODE_ID, listen: "127.0.0.1:7400" },
+    platformDomains: [DOMAIN],
+    runtime: {
+      binPath: "celld",
+      portRangeStart: 42_000,
+      probePath: "/",
+      bindHost: "127.0.0.1",
+      durability: "bucket",
+      cellIdleEvictS: 900,
+    },
+  };
+}
+
+function capacityPlan(maxConcurrentWakes: number): CapacityPlan {
+  return {
+    cores: 4,
+    memMb: 16_384,
+    cgroup: false,
+    threads: 4,
+    isolates: 4,
+    rssBudgetMb: 1400,
+    maxRssMbPerProcess: 1400,
+    maxResidentCells: 2000,
+    maxConcurrentWakes,
+    probedAt: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+/** Runs nothing: every process a wake finds was put there by the case. */
+function idleSupervisor(): Supervisor {
+  return {
+    start: (spec) => Promise.reject(new Error(`unexpected start of "${spec.id}"`)),
+    stop: () => Promise.resolve(),
+    status: () => null,
+    list: () => [],
+    onExit: () => {},
+  };
+}
+
+async function bearer(): Promise<Record<string, string>> {
+  return { authorization: `Bearer ${await signNodeToken(keys.privateKey, NODE_ID)}` };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

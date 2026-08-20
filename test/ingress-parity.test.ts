@@ -24,11 +24,14 @@ import { HOST_LABEL_RE, isHost } from "../src/core/utils/host.ts";
 import { isSlug } from "../src/core/utils/slug.ts";
 import {
   type CaddyRoute,
+  CATCHALL_ID_PREFIX,
   renderCaddyRoutes,
   ROUTE_ID_PREFIX,
 } from "../src/drivers/ingress/caddy.ts";
 import {
+  CATCHALL_PRIORITY,
   renderTraefikConfig,
+  TRAEFIK_CATCHALL_PREFIX,
   TRAEFIK_KEY_PREFIX,
   type TraefikDynamicConfig,
   type TraefikService,
@@ -42,6 +45,9 @@ const BUILD = "aaaa1111";
 const OTHER_BUILD = "bbbb2222";
 const THIRD_BUILD = "cccc3333";
 const CUSTOM_DOMAIN = "shop.example.com";
+
+/** Where the node's own agent answers, for the routing that falls through to it. */
+const AGENT_PORT = 7400;
 
 /**
  * One host, one process it reaches, and the share of its traffic that goes
@@ -160,6 +166,71 @@ const FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
   },
 ];
 
+/**
+ * The same states, with an agent for the traffic nothing else answers: a node
+ * holding a parked environment's hosts open, and the platform domains whose
+ * unmatched names fall through to it.
+ */
+const WAKE_FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
+  {
+    name: "a node serving nothing and holding its domains open",
+    desired: renderRoutes({
+      platformDomains: [DOMAIN, OTHER_DOMAIN],
+      environments: [],
+      processes: [],
+      claims: [],
+      wake: { port: AGENT_PORT, parked: [] },
+    }),
+  },
+  {
+    name: "one parked environment, on its label and its apex",
+    desired: renderRoutes({
+      platformDomains: [DOMAIN],
+      environments: [],
+      processes: [],
+      claims: [],
+      wake: { port: AGENT_PORT, parked: [environment(PROJECT, APEX_ENVIRONMENT, BUILD)] },
+    }),
+  },
+  {
+    name: "a parked environment with a custom domain, beside one that is serving",
+    desired: renderRoutes({
+      platformDomains: [DOMAIN, OTHER_DOMAIN],
+      environments: [environment(OTHER_PROJECT, APEX_ENVIRONMENT, BUILD)],
+      processes: [process(OTHER_PROJECT, APEX_ENVIRONMENT, BUILD, 42_000)],
+      claims: [],
+      wake: {
+        port: AGENT_PORT,
+        parked: [environment(PROJECT, "preview", OTHER_BUILD, [CUSTOM_DOMAIN])],
+      },
+    }),
+  },
+  {
+    name: "a 90/10 split serving beside a parked environment, under two platform domains",
+    desired: renderRoutes({
+      platformDomains: [DOMAIN, OTHER_DOMAIN],
+      environments: [
+        environment(
+          PROJECT,
+          APEX_ENVIRONMENT,
+          BUILD,
+          [CUSTOM_DOMAIN],
+          [
+            { build: BUILD, weight: 90 },
+            { build: OTHER_BUILD, weight: 10 },
+          ],
+        ),
+      ],
+      processes: [
+        process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000),
+        process(PROJECT, APEX_ENVIRONMENT, OTHER_BUILD, 42_002),
+      ],
+      claims: [{ host: CUSTOM_DOMAIN, project: PROJECT, environment: APEX_ENVIRONMENT }],
+      wake: { port: AGENT_PORT, parked: [environment(OTHER_PROJECT, "preview", THIRD_BUILD)] },
+    }),
+  },
+];
+
 describe("the two drivers say the same thing about the same routing", () => {
   for (const { name, desired } of FIXTURES) {
     it(`agrees on ${name}`, () => {
@@ -169,17 +240,7 @@ describe("the two drivers say the same thing about the same routing", () => {
       expect(traefik).toEqual(caddy);
       /* And what they agree on is the routing itself, rather than both being
          empty because both failed to render anything. */
-      expect(caddy).toEqual(
-        desired.routes
-          .flatMap((route) =>
-            route.backends.map((leg) => ({
-              host: route.host,
-              upstream: `127.0.0.1:${String(leg.backend.port)}`,
-              weight: leg.weight,
-            })),
-          )
-          .sort(byUpstream),
-      );
+      expect(caddy).toEqual(essenceOf(desired));
     });
   }
 
@@ -220,8 +281,67 @@ describe("the two drivers say the same thing about the same routing", () => {
   });
 });
 
+describe("the two drivers agree on what reaches the agent", () => {
+  for (const { name, desired } of WAKE_FIXTURES) {
+    it(`agrees on ${name}`, () => {
+      const caddy = caddyUpstreams(renderCaddyRoutes(desired));
+      const traefik = traefikUpstreams(renderTraefikConfig(desired));
+
+      /* One vocabulary for both: a Caddy `*.<domain>` host matcher and the
+         single-label `HostRegexp` Traefik is given cover the same set of names,
+         so both are reduced to `*.<domain>` and compared like any other host. */
+      expect(traefik).toEqual(caddy);
+      expect(caddy).toEqual(essenceOf(desired));
+    });
+  }
+
+  it("names the same wake hosts and the same catch-all domains, at the same agent", () => {
+    for (const { name, desired } of WAKE_FIXTURES) {
+      const caddy = agentSurface(caddyUpstreams(renderCaddyRoutes(desired)));
+      const traefik = agentSurface(traefikUpstreams(renderTraefikConfig(desired)));
+
+      /* The port is DERIVED from each document rather than assumed, so a driver
+         that dialled the wrong agent would fail here rather than agree. */
+      expect(traefik, name).toEqual(caddy);
+      expect(caddy, name).toEqual({
+        agent: [`127.0.0.1:${String(AGENT_PORT)}`],
+        hosts: [...(desired.wake?.hosts ?? [])].sort(),
+        domains: [...(desired.wake?.domains ?? [])].sort(),
+      });
+    }
+  });
+
+  it("consults its catch-alls last, in whatever way its own format ranks", () => {
+    /*
+     * PRECEDENCE IS THE WHOLE CONTRACT, and the two formats keep it in opposite
+     * ways: Caddy matches in array order, so the catch-alls are rendered last;
+     * Traefik scores rules and would rank a domain regexp ABOVE a host under it,
+     * so the rank is stated outright. Getting it wrong does not misroute one
+     * host — it sends a whole platform domain's live traffic to the agent.
+     */
+    for (const { name, desired } of WAKE_FIXTURES) {
+      const caddy = renderCaddyRoutes(desired);
+      const first = caddy.findIndex((route) => route["@id"].startsWith(CATCHALL_ID_PREFIX));
+
+      expect(first, name).toBeGreaterThanOrEqual(0);
+      expect(
+        caddy.slice(first).every((route) => route["@id"].startsWith(CATCHALL_ID_PREFIX)),
+        name,
+      ).toBe(true);
+
+      for (const [key, router] of Object.entries(
+        renderTraefikConfig(desired).http?.routers ?? {},
+      )) {
+        expect(router.priority, `${name}: ${key}`).toBe(
+          key.startsWith(TRAEFIK_CATCHALL_PREFIX) ? CATCHALL_PRIORITY : undefined,
+        );
+      }
+    }
+  });
+});
+
 describe("both renders are deterministic", () => {
-  for (const { name, desired } of FIXTURES) {
+  for (const { name, desired } of [...FIXTURES, ...WAKE_FIXTURES]) {
     it(`renders ${name} identically twice`, () => {
       expect(renderCaddyRoutes(desired)).toEqual(renderCaddyRoutes(desired));
       expect(renderTraefikConfig(desired)).toEqual(renderTraefikConfig(desired));
@@ -283,6 +403,58 @@ describe("neither namespace can collide with a host", () => {
 });
 
 /**
+ * What a routing MEANS, straight off the input both drivers were handed — what
+ * each of them is then held to.
+ *
+ * A wake host and a catch-all are upstreams like any other: they name a host and
+ * reach the node's own agent, and a whole platform domain is written the way
+ * Caddy writes it, `*.<domain>`.
+ */
+function essenceOf(desired: IngressDesired): Upstream[] {
+  const wake = desired.wake;
+  const agent = wake === undefined ? "" : `127.0.0.1:${String(wake.port)}`;
+
+  return [
+    ...desired.routes.flatMap((route) =>
+      route.backends.map((leg) => ({
+        host: route.host,
+        upstream: `127.0.0.1:${String(leg.backend.port)}`,
+        weight: leg.weight,
+      })),
+    ),
+    ...(wake?.hosts ?? []).map((host) => ({ host, upstream: agent, weight: FULL_WEIGHT })),
+    ...(wake?.domains ?? []).map((domain) => ({
+      host: `*.${domain}`,
+      upstream: agent,
+      weight: FULL_WEIGHT,
+    })),
+  ].sort(byUpstream);
+}
+
+/**
+ * The wake surface of a rendered routing, read back without being told where the
+ * agent is: the catch-alls say which upstream that is, and everything else
+ * dialling it is a host being held open.
+ */
+function agentSurface(upstreams: Upstream[]): {
+  agent: string[];
+  hosts: string[];
+  domains: string[];
+} {
+  const caught = upstreams.filter((leg) => leg.host.startsWith("*."));
+  const agent = [...new Set(caught.map((leg) => leg.upstream))].sort();
+
+  return {
+    agent,
+    hosts: upstreams
+      .filter((leg) => !leg.host.startsWith("*.") && agent.includes(leg.upstream))
+      .map((leg) => leg.host)
+      .sort(),
+    domains: caught.map((leg) => leg.host.slice("*.".length)).sort(),
+  };
+}
+
+/**
  * What a Caddy route says: the host it matches, the upstreams it dials and the
  * share each takes.
  *
@@ -330,9 +502,7 @@ function traefikUpstreams(config: TraefikDynamicConfig): Upstream[] {
 
   return Object.values(config.http?.routers ?? {})
     .flatMap((router) => {
-      const host = /^Host\(`([^`]+)`\)$/.exec(router.rule)?.[1];
-      if (host === undefined) throw new Error(`rule "${router.rule}" is not a plain host match`);
-
+      const host = ruleHost(router.rule);
       const service = resolve(router.service);
       const legs =
         "weighted" in service
@@ -354,6 +524,24 @@ function traefikUpstreams(config: TraefikDynamicConfig): Upstream[] {
       });
     })
     .sort(byUpstream);
+}
+
+/**
+ * The names a Traefik rule matches, said in the vocabulary both formats share.
+ *
+ * A `Host` rule is the name itself. The single-label `HostRegexp` a catch-all
+ * carries covers exactly the set Caddy's `*.<domain>` matcher does, and is read
+ * back as that — reading it any other way would be comparing the two drivers'
+ * SYNTAX rather than what either of them routes.
+ */
+function ruleHost(rule: string): string {
+  const exact = /^Host\(`(?<host>[^`]+)`\)$/.exec(rule)?.groups?.host;
+  if (exact !== undefined) return exact;
+
+  const domain = /^HostRegexp\(`\^\[\^\.\]\+\\\.(?<domain>.+)\$`\)$/.exec(rule)?.groups?.domain;
+  if (domain === undefined) throw new Error(`rule "${rule}" is neither a host nor a catch-all`);
+
+  return `*.${domain.replaceAll("\\.", ".")}`;
 }
 
 function byUpstream(a: Upstream, b: Upstream): number {

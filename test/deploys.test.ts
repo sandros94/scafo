@@ -652,6 +652,8 @@ function fakeSupervisor(): Supervisor {
 function fakeReconciler(): Reconciler {
   return {
     runOnce: () => Promise.resolve([]),
+    kick: () => {},
+    parkedRecords: () => [],
     start: () => {},
     stop: () => {},
     status: () => ({
@@ -661,6 +663,7 @@ function fakeReconciler(): Reconciler {
       failures: [],
       processes: running,
       placements: [],
+      parked: [],
     }),
   };
 }

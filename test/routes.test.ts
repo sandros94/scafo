@@ -393,6 +393,149 @@ describe("labels that do not fit", () => {
   });
 });
 
+describe("the hosts a parked environment holds open", () => {
+  const AGENT_PORT = 7400;
+  const CUSTOM = "shop.example";
+
+  it("claims its label under every platform domain, and the apex when it has one", () => {
+    const desired = renderRoutes(
+      input({
+        platformDomains: [DOMAIN, OTHER_DOMAIN],
+        wake: { port: AGENT_PORT, parked: [environment(PROJECT, APEX_ENVIRONMENT, BUILD)] },
+      }),
+    );
+
+    /* Nothing is running for it, so it has no routes at all — its hosts name
+       the node's own agent, to be woken by the request that asked for them. */
+    expect(desired.routes).toEqual([]);
+    expect(desired.wake).toEqual({
+      port: AGENT_PORT,
+      hosts: [
+        `${PROJECT}--${APEX_ENVIRONMENT}.${OTHER_DOMAIN}`,
+        `${PROJECT}--${APEX_ENVIRONMENT}.${DOMAIN}`,
+        `${PROJECT}.${OTHER_DOMAIN}`,
+        `${PROJECT}.${DOMAIN}`,
+      ],
+      domains: [DOMAIN, OTHER_DOMAIN],
+    });
+  });
+
+  it("gives every other environment its label and no apex", () => {
+    const desired = renderRoutes(
+      input({ wake: { port: AGENT_PORT, parked: [environment(PROJECT, "preview", BUILD)] } }),
+    );
+
+    expect(desired.wake?.hosts).toEqual([`${PROJECT}--preview.${DOMAIN}`]);
+  });
+
+  it("claims every custom domain its record mirrors", () => {
+    /* A parked environment is reached by its custom names exactly as it is by
+       its own, and the record mirrors every domain claimed for it. */
+    const desired = renderRoutes(
+      input({
+        wake: {
+          port: AGENT_PORT,
+          parked: [environment(PROJECT, "preview", BUILD, [CUSTOM, `www.${CUSTOM}`])],
+        },
+      }),
+    );
+
+    expect(desired.wake?.hosts).toEqual([`${PROJECT}--preview.${DOMAIN}`, CUSTOM, `www.${CUSTOM}`]);
+  });
+
+  it("sorts and deduplicates, whatever order the parked records arrive in", () => {
+    const parked = [
+      environment(PROJECT, "preview", BUILD, [CUSTOM]),
+      environment(PROJECT, "staging", BUILD, [CUSTOM]),
+    ];
+    const wakeOf = (records: typeof parked): string[] =>
+      renderRoutes(
+        input({
+          platformDomains: [DOMAIN, OTHER_DOMAIN],
+          wake: { port: AGENT_PORT, parked: records },
+        }),
+      ).wake?.hosts ?? [];
+
+    /* A claim that has moved between environments is mirrored by both records
+       until the one it left is rewritten; it is one host either way. */
+    const forwards = wakeOf(parked);
+    expect(wakeOf([...parked].reverse())).toEqual(forwards);
+    expect(forwards).toEqual([...new Set(forwards)].sort());
+    expect(forwards.filter((host) => host === CUSTOM)).toHaveLength(1);
+  });
+
+  it("leaves a host to the process already answering on it", () => {
+    /*
+     * Mid-wake, and the two overlap for a whole pass: the record still reads
+     * parked to a node that has not re-read it, while the process it started is
+     * already ready. The ready process is the better answer of the two — routing
+     * the host to the agent would hold a request for something that is up.
+     */
+    const parked = environment(PROJECT, APEX_ENVIRONMENT, BUILD, [CUSTOM]);
+    const desired = renderRoutes(
+      input({
+        environments: [parked],
+        processes: [process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000, true)],
+        wake: { port: AGENT_PORT, parked: [parked] },
+      }),
+    );
+
+    expect(hosts(desired)).toEqual([
+      `${PROJECT}--${BUILD}.${DOMAIN}`,
+      `${PROJECT}--${APEX_ENVIRONMENT}.${DOMAIN}`,
+      `${PROJECT}.${DOMAIN}`,
+    ]);
+    /* No claim was passed for the custom domain, so nothing routes it and it is
+       the one host still held open. */
+    expect(desired.wake?.hosts).toEqual([CUSTOM]);
+    for (const host of hosts(desired)) expect(desired.wake?.hosts).not.toContain(host);
+  });
+
+  it("mirrors the platform domains it was given, in the order it was given them", () => {
+    const platformDomains = [DOMAIN, OTHER_DOMAIN];
+
+    const desired = renderRoutes(
+      input({ platformDomains, wake: { port: AGENT_PORT, parked: [] } }),
+    );
+
+    expect(desired.wake?.domains).toEqual(platformDomains);
+    /* A copy: a routing a caller is holding must not change when the node's own
+       configuration array does. */
+    expect(desired.wake?.domains).not.toBe(platformDomains);
+  });
+
+  it("holds the domains open with nothing parked at all", () => {
+    const desired = renderRoutes(input({ wake: { port: AGENT_PORT, parked: [] } }));
+
+    /* An unmatched host under a platform domain is a name scafo knows nothing
+       about, and the agent answers it 404 — which is why the domains are routed
+       at all rather than left to whatever the ingress does with an unknown host. */
+    expect(desired.wake).toEqual({ port: AGENT_PORT, hosts: [], domains: [DOMAIN] });
+  });
+});
+
+describe("a routing rendered with no wake at all", () => {
+  it("carries no wake member, which is what scafo rendered before this existed", () => {
+    const desired = renderRoutes(
+      input({
+        environments: [environment(PROJECT, APEX_ENVIRONMENT, BUILD, ["shop.example"])],
+        processes: [process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000, true)],
+        claims: [{ host: "shop.example", project: PROJECT, environment: APEX_ENVIRONMENT }],
+      }),
+    );
+
+    /* A caller with no agent address to hand out renders routes and nothing
+       else — not an empty wake, which would claim the platform domains. */
+    expect(Object.keys(desired)).toEqual(["routes"]);
+    expect(hosts(desired)).toEqual([
+      `${PROJECT}--${BUILD}.${DOMAIN}`,
+      `${PROJECT}--${APEX_ENVIRONMENT}.${DOMAIN}`,
+      `${PROJECT}.${DOMAIN}`,
+      "shop.example",
+    ]);
+  });
+});
+
 describe("determinism", () => {
   it("renders the same routing whatever order its inputs arrive in", () => {
     const environments = [

@@ -113,6 +113,10 @@ describe("GET /v1/state", () => {
       /* No coordinator has placed anything, which is exactly the state in which
          every node serves every environment. */
       placements: [],
+      /* No reconcile loop here, so nothing has been read as parked. */
+      parked: [],
+      /* Node-local counters, from a node that has been asked to wake nothing. */
+      wakes: { inFlight: 0, admitted: 0, refused: 0, forwarded: 0 },
     });
   });
 

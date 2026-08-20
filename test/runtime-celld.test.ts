@@ -640,6 +640,7 @@ function capacityPlan(): CapacityPlan {
     rssBudgetMb: 1400,
     maxRssMbPerProcess: 1400,
     maxResidentCells: 2000,
+    maxConcurrentWakes: 2,
     probedAt: "2026-01-01T00:00:00.000Z",
   };
 }

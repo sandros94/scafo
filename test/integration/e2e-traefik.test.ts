@@ -98,15 +98,6 @@ const PROJECT = "app";
 const ENVIRONMENT = "production";
 const NODE_ID = "node-e2e-traefik";
 
-/**
- * What Traefik answers for a host no router matches, pinned against the image
- * this suite runs. Its Caddy counterpart is an EMPTY 200 — Caddy's server exists
- * and simply matches nothing — which is the sharpest difference between the two
- * from a client's point of view, and the reason a health check written against
- * one of them says nothing about the other.
- */
-const TRAEFIK_NO_ROUTE_BODY = "404 page not found";
-
 let store: StartedStore;
 let traefik: StartedTestContainer;
 let agent: StartedTestContainer;
@@ -258,14 +249,24 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   );
 
   it(
-    "answers 404 for a host nothing routes, which is NOT what Caddy answers",
+    "answers 404 from the agent for a host nothing owns — the same answer Caddy gives now",
     async () => {
-      const answer = await httpGet(httpPort, "/", { host: "unrouted.scafo.test" });
-
-      expect(answer.status).toBe(404);
-      expect(answer.body.trim()).toBe(TRAEFIK_NO_ROUTE_BODY);
-      /* Recorded verbatim: an operator moving between the two ingresses gets a
-         different answer for the same request, and nothing else says so. */
+      /*
+       * The divergence this test used to document is retired: an unmatched
+       * platform host no longer stops at the ingress — the catch-all hands it
+       * to the agent, and the agent answers the same problem document behind
+       * either driver. What is asserted here is therefore Traefik POLLING the
+       * catch-all at all, waited out because the provider poll runs on its own
+       * clock.
+       */
+      const answer = await wait(
+        "the catch-all to hand unknowns to the agent",
+        DEADLINE_MS,
+        async () => {
+          const got = await httpGet(httpPort, "/", { host: "unrouted.scafo.test" });
+          return got.status === 404 && got.body.includes("urn:scafo:not-found") ? got : null;
+        },
+      );
       observed.routelessHost = { status: answer.status, body: answer.body };
     },
     STEP_TIMEOUT_MS,
@@ -319,22 +320,38 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   it(
     "serves the first build through TRAEFIK on the environment host, the apex and the build host",
     async () => {
+      /*
+       * The ROUTERS are waited for FIRST, through Traefik's API and before any
+       * request touches a host — and that ordering is load-bearing twice over.
+       * The catch-all answers for these hosts the moment the processes are
+       * ready, polls or no polls, so a request-side wait would pass through the
+       * WAKE surface while Traefik still holds only the catch-all — proving
+       * nothing about the routing this test is about. And a request for the
+       * BUILD host that goes that way is a build WAKE: it stamps the build,
+       * which keeps it recalled for `buildIdleS` after the flip below retires
+       * it, and the flip's own withdrawal assertions then wait on a window this
+       * test opened. Routing first, traffic second.
+       */
+      const expected = [
+        ...[envHost(), apexHost(), buildHost(buildV1)].map((host) => `scafo_${host}`),
+        `scafo_catchall_${PLATFORM_DOMAIN}`,
+      ].sort();
+      await wait("Traefik to hold the three v1 routers", DEADLINE_MS, async () => {
+        const routers = (await scafoRouters()).sort();
+        return routers.join(",") === expected.map((name) => `${name}@http`).join(",")
+          ? routers
+          : null;
+      });
+
       for (const host of [envHost(), apexHost(), buildHost(buildV1)]) {
         const answer = await untilServes(host, "v1");
         expect(JSON.parse(answer.body).url, `the url ${host} saw`).toContain(host);
       }
 
       /* The document the node published, and the routers Traefik built from it:
-         the same three hosts, arrived at from opposite ends of the poll. */
+         the same names, arrived at from opposite ends of the poll. */
       const snapshot = await snapshotNow();
-      expect(Object.keys(snapshot.http?.routers ?? {}).sort()).toEqual(
-        [envHost(), apexHost(), buildHost(buildV1)].map((host) => `scafo_${host}`).sort(),
-      );
-      expect((await scafoRouters()).sort()).toEqual(
-        Object.keys(snapshot.http?.routers ?? {})
-          .map((name) => `${name}@http`)
-          .sort(),
-      );
+      expect(Object.keys(snapshot.http?.routers ?? {}).sort()).toEqual(expected);
       observed.v1Snapshot = snapshot;
       observed.v1TraefikRouters = await scafoRouters();
     },
@@ -382,33 +399,26 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
        * and a shorter one in practice, since removing the route is part of the
        * same pass that stopped the process.
        */
+      /*
+       * Watched through the SNAPSHOT and Traefik's own API, never by requesting
+       * the host: a request for a superseded build's host is a WAKE now, and a
+       * poll that asked would restart the very process this test is watching
+       * being stopped. The 502-then-gone window the pull model has is still
+       * there in principle; observing it costs a wake, so it is prose here and
+       * an assertion nowhere. The one deliberate wake is this suite's last test.
+       */
       const unpublishedAt = await wait(
         `the node to stop publishing ${buildHost(buildV1)}`,
         DEADLINE_MS,
         async () => {
           const routers = (await snapshotNow()).http?.routers ?? {};
-          if (`scafo_${buildHost(buildV1)}` in routers) return null;
-          /* Read in the same breath, so the answer belongs to the window. */
-          return {
-            at: Date.now(),
-            stale: await httpGet(httpPort, "/", { host: buildHost(buildV1) }),
-          };
+          return `scafo_${buildHost(buildV1)}` in routers ? null : Date.now();
         },
       );
-      const withdrawn = await wait(
-        `${buildHost(buildV1)} to stop being routed by Traefik`,
-        DEADLINE_MS,
-        async () => {
-          const answer = await httpGet(httpPort, "/", { host: buildHost(buildV1) });
-          return answer.status === 404 ? answer : null;
-        },
+      await wait(`${buildHost(buildV1)} to leave Traefik's routers`, DEADLINE_MS, async () =>
+        (await scafoRouters()).includes(`scafo_${buildHost(buildV1)}@http`) ? null : true,
       );
-
-      expect(withdrawn.body.trim()).toBe(TRAEFIK_NO_ROUTE_BODY);
-      expect(await scafoRouters()).not.toContain(`scafo_${buildHost(buildV1)}@http`);
-      observed.withdrawPullLatencyMs = Date.now() - unpublishedAt.at;
-      observed.v1BuildHostDuringWithdrawal = unpublishedAt.stale;
-      observed.v1BuildHostAfterWithdrawal = withdrawn;
+      observed.withdrawPullLatencyMs = Date.now() - unpublishedAt;
     },
     STEP_TIMEOUT_MS,
   );
@@ -594,18 +604,38 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       );
       observed.promotedSample = settled;
 
-      /* The leg that lost is retired the way every superseded build is, and its
-         host stops resolving with the process that served it. */
-      const withdrawn = await wait(
-        `${buildHost(buildV2)} to stop being routed by Traefik`,
+      /* The leg that lost is retired the way every superseded build is. Watched
+         through Traefik's API rather than by requesting its host, which would
+         now wake the very build the promotion just retired. */
+      await wait(`${buildHost(buildV2)} to leave Traefik's routers`, DEADLINE_MS, async () =>
+        (await scafoRouters()).includes(`scafo_${buildHost(buildV2)}@http`) ? null : true,
+      );
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "wakes the retired leg through the catch-all, serving it at its own host again",
+    async () => {
+      /*
+       * THE ONE DELIBERATE WAKE, and on this driver it is the catch-all's whole
+       * journey under test: the host matches no router, the HostRegexp hands it
+       * to the agent, the agent starts the superseded build against its own
+       * fleet and holds the request through the readiness gate. Run before the
+       * retirement below on purpose — a retired environment refuses to wake,
+       * and the recalled process this leaves behind is exactly what retirement
+       * is then shown to stop.
+       */
+      const woken = await wait(
+        `${buildHost(buildV2)} to wake and serve v2 again`,
         DEADLINE_MS,
         async () => {
-          const got = await httpGet(httpPort, "/", { host: buildHost(buildV2) });
-          return got.status === 404 ? got : null;
+          const answer = await httpGet(httpPort, "/", { host: buildHost(buildV2) });
+          return answer.status === 200 && answer.body.includes(`"v2"`) ? answer : null;
         },
       );
-      expect(withdrawn.body.trim()).toBe(TRAEFIK_NO_ROUTE_BODY);
-      expect(await scafoRouters()).not.toContain(`scafo_${buildHost(buildV2)}@http`);
+      expect(JSON.parse(woken.body).version).toBe("v2");
+      observed.wokenThroughCatchAll = woken;
     },
     STEP_TIMEOUT_MS,
   );
@@ -644,30 +674,46 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
        * the 5s interval), and Traefik's next poll (up to the 2s this fixture
        * sets). Only the second half is what choosing a polled ingress costs.
        */
-      const emptyAt = await wait(
-        "the node to publish an empty configuration",
+      /*
+       * The snapshot never empties any more: the catch-alls that hand unmatched
+       * platform hosts to the agent stay whatever is retired, so "nothing served"
+       * now reads as "nothing but catch-alls". The empty-document spelling the
+       * driver keeps is for the node that has no platform domains at all.
+       *
+       * SAFE TO REQUEST, unlike a superseded build's host: a retired environment
+       * is a 404 the wake surface answers without stamping anything, so the poll
+       * cannot keep alive what it is watching leave.
+       */
+      const settledAt = await wait(
+        "the node to publish nothing but the catch-alls",
         DEADLINE_MS,
-        async () => (Object.keys(await snapshotNow()).length === 0 ? Date.now() : null),
+        async () => {
+          const routers = Object.keys((await snapshotNow()).http?.routers ?? { absent: true });
+          return routers.every((name) => name.startsWith("scafo_catchall_")) ? Date.now() : null;
+        },
       );
       const gone = await wait(`${envHost()} to stop being served`, DEADLINE_MS, async () => {
         const answer = await httpGet(httpPort, "/", { host: envHost() });
         return answer.status === 404 ? answer : null;
       });
-      observed.retireToEmptySnapshotMs = emptyAt - retiredAt;
-      observed.emptySnapshotToUnroutedMs = Date.now() - emptyAt;
+      observed.retireToCatchAllSnapshotMs = settledAt - retiredAt;
       observed.retireToUnroutedMs = Date.now() - retiredAt;
-      expect(gone.body.trim()).toBe(TRAEFIK_NO_ROUTE_BODY);
+      /* From the agent, in the same problem document every refusal wears. */
+      expect(gone.body).toContain("urn:scafo:not-found");
 
-      /* The apex and the build host go with it; nothing of this node is left. */
+      /* The apex and the build host go with it; every name of the retired
+         environment gets the agent's one answer. */
       for (const host of [apexHost(), buildHost(buildV2)]) {
         const answer = await httpGet(httpPort, "/", { host });
         expect(answer.status, host).toBe(404);
+        expect(answer.body, host).toContain("urn:scafo:not-found");
       }
 
-      /* Read from both ends: the node publishes the empty document, and Traefik
-         holds no scafo router at all. */
-      expect(await snapshotNow()).toEqual({});
-      expect(await scafoRouters()).toEqual([]);
+      /* Read from both ends: Traefik holds nothing of this node but the
+         catch-alls that keep its platform domains answered. */
+      const remaining = await scafoRouters();
+      expect(remaining.every((name) => name.startsWith("scafo_catchall_"))).toBe(true);
+      expect(remaining).not.toHaveLength(0);
 
       const record = await getEnvironment(registry, PROJECT, ENVIRONMENT);
       expect(record.retiredAt).toBeDefined();

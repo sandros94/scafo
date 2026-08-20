@@ -8,7 +8,7 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { readDesired } from "../src/agent/_desired.ts";
+import { type DesiredState, readDesired } from "../src/agent/_desired.ts";
 import {
   acquireLease,
   buildKey,
@@ -478,7 +478,7 @@ describe("an ephemeral environment that has gone quiet", () => {
     /* Reported rather than merely left out: an environment nothing runs for
        because it was never deployed looks exactly like one waiting to be woken,
        and only one of them is answered by sending it a request. */
-    expect(state.parked).toEqual([{ project: PROJECT, env: PREVIEW }]);
+    expect(parkedNames(state)).toEqual([{ project: PROJECT, env: PREVIEW }]);
     expect(state.failures).toEqual([]);
   });
 
@@ -493,7 +493,7 @@ describe("an ephemeral environment that has gone quiet", () => {
     expect((await readDesired(registry, { nodeId: SELF })).parked).toEqual([]);
 
     clock.tick(PARK_AFTER_MS);
-    expect((await readDesired(registry, { nodeId: SELF })).parked).toEqual([
+    expect(parkedNames(await readDesired(registry, { nodeId: SELF }))).toEqual([
       { project: PROJECT, env: PREVIEW },
     ]);
   });
@@ -580,7 +580,7 @@ describe("an ephemeral environment that has gone quiet", () => {
        host somebody actually asked for comes back. Parked and desired at once,
        which is why the report is not simply "absent from desired state". */
     expect(await legsOf(PREVIEW)).toEqual([{ id: THIRD_BUILD, role: "recalled" }]);
-    expect(state.parked).toEqual([{ project: PROJECT, env: PREVIEW }]);
+    expect(parkedNames(state)).toEqual([{ project: PROJECT, env: PREVIEW }]);
   });
 });
 
@@ -690,6 +690,11 @@ async function deployed(project: string, name: string): Promise<void> {
 async function parkable(name: string): Promise<void> {
   await createEnvironment(registry, PROJECT, { name, ephemeral: true });
   await flipAlias(registry, PROJECT, name, BUILD);
+}
+
+/** The parked environments by name; the state carries their whole records. */
+function parkedNames(state: DesiredState): Array<{ project: string; env: string }> {
+  return state.parked.map((entry) => ({ project: entry.project, env: entry.env.name }));
 }
 
 /** The builds this node would run for `name`, in the order it would roll them out. */
