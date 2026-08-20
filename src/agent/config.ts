@@ -170,6 +170,15 @@ export interface RuntimeConfig {
    * configuration here rather than a default anywhere else.
    */
   durability: DurabilityMode;
+  /**
+   * Seconds a cell may sit idle before the runtime evicts it from memory,
+   * `0` to never evict. Eviction is transparent to the application — the
+   * cell's state is in the bucket and the next request restores it — so this
+   * is a RAM-density dial, paid for with a sub-second restore on the first
+   * request after a quiet spell. The runtime's own default is "never", a
+   * default set when eviction was still unsafe; here it is on.
+   */
+  cellIdleEvictS: number;
 }
 
 /** The two answers to "when is a write durable", in the order a refusal lists them. */
@@ -207,6 +216,9 @@ export const DEFAULT_BIND_HOST: string = "127.0.0.1";
 
 /** Durability when none is configured: a write acknowledged is a write in the bucket. */
 export const DEFAULT_DURABILITY: DurabilityMode = "bucket";
+
+/** Idle-cell eviction age when none is configured: fifteen minutes. */
+export const DEFAULT_CELL_IDLE_EVICT_S: number = 900;
 
 /** UDP port a WireGuard interface listens on when none is configured. */
 export const DEFAULT_WIREGUARD_PORT: number = 51_820;
@@ -306,6 +318,7 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
       probePath: resolve("probePath", sources) ?? DEFAULT_PROBE_PATH,
       bindHost: resolveBindHost(sources) ?? tunnelHost ?? DEFAULT_BIND_HOST,
       durability: resolveDurability(sources) ?? DEFAULT_DURABILITY,
+      cellIdleEvictS: resolveCellIdleEvict(sources),
     },
     ...(ingress === undefined ? {} : { ingress }),
     ...(keyFile === undefined ? {} : { varsets: { keyFile } }),
@@ -417,6 +430,11 @@ const ORIGINS = {
   probePath: { flag: "probe-path", env: ["SCAFO_PROBE_PATH"], file: "runtime.probePath" },
   bindHost: { flag: "bind-host", env: ["SCAFO_BIND_HOST"], file: "runtime.bindHost" },
   durability: { flag: "durability", env: ["SCAFO_DURABILITY"], file: "runtime.durability" },
+  cellIdleEvictS: {
+    flag: "cell-idle-evict",
+    env: ["SCAFO_CELL_IDLE_EVICT"],
+    file: "runtime.cellIdleEvictS",
+  },
   ingressDriver: {
     flag: "ingress-driver",
     env: ["SCAFO_INGRESS_DRIVER"],
@@ -527,6 +545,23 @@ function resolveBindHost(sources: Sources): string | undefined {
       detail:
         `"${ORIGINS.bindHost.file}" must be an address runtime processes can bind, ` +
         `such as "127.0.0.1" or "0.0.0.0", got ${JSON.stringify(value)}`,
+    });
+  }
+  return value;
+}
+
+/** The idle-cell eviction age in seconds, `0` for never, defaulted when unnamed. */
+function resolveCellIdleEvict(sources: Sources): number {
+  const origin: Origin = ORIGINS.cellIdleEvictS;
+  const raw = flagOrEnv(origin, sources) ?? fileValue(sources.file, origin.file);
+  if (raw === undefined || raw === null || raw === "") return DEFAULT_CELL_IDLE_EVICT_S;
+
+  const value = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN;
+  if (!Number.isInteger(value) || value < 0) {
+    throw new ScafoError("invalid-input", "Invalid configuration value", {
+      detail:
+        `"${origin.file}" must be a whole number of seconds, ` +
+        `with 0 meaning cells are never evicted for being idle, got ${JSON.stringify(raw)}`,
     });
   }
   return value;

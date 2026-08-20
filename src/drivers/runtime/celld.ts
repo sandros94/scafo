@@ -56,15 +56,14 @@ const DRAIN_HEADROOM_MS = 5_000;
 const MIN_DRAIN_MS = 5_000;
 
 /**
- * Idle eviction stays off until enabling it is a policy, not a variable.
+ * Idle eviction is a node policy, never a variable.
  *
  * celld 0.3.0 — the oldest runtime this driver supports — made idle eviction
  * safe (0.2.x corrupted an evicted cell's replication chain and rolled back
- * acknowledged writes; denoland/celld#158). Safe is not the same as wanted:
- * when cells are evicted, and how that composes with placement and readiness,
- * is a decision this driver must make coherently for the whole node, so it
- * never sets the variable, refuses a caller that tries to, and drops it from
- * the environment it inherits — until typed configuration says otherwise.
+ * acknowledged writes; denoland/celld#158). The age now comes from the
+ * driver's `cellIdleEvictS` option and nowhere else: the variable is refused
+ * from a caller and dropped from the inherited environment, so every process
+ * on a node evicts on the one clock its operator configured.
  */
 const IDLE_EVICT_ENV = "CELLD_IDLE_EVICT_S";
 
@@ -126,6 +125,12 @@ export interface CelldDriverOptions {
    * typed configuration — this is the only door; the raw variable is refused.
    */
   durability?: "bucket" | "fleet";
+  /**
+   * Seconds a cell may sit idle before its process evicts it from memory;
+   * absent or `0`, cells are never evicted for being idle. Transparent to the
+   * application — state is in the bucket, the next request restores it.
+   */
+  cellIdleEvictS?: number;
 }
 
 /**
@@ -138,6 +143,7 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
   const binPath = opts.binPath ?? DEFAULT_CELLD_BIN;
   const graceMs = opts.graceMs ?? DEFAULT_STOP_GRACE_MS;
   const durability = opts.durability ?? "bucket";
+  const cellIdleEvictS = opts.cellIdleEvictS ?? 0;
   const ctx: RegistryContext = { store: opts.store };
 
   if (!Number.isInteger(graceMs) || graceMs < MIN_DRAIN_MS + DRAIN_HEADROOM_MS) {
@@ -182,7 +188,7 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
           "--advertise",
           `${input.node.advertiseHost}:${String(input.ports.internal)}`,
         ],
-        env: processEnv(input, drainMs, durability),
+        env: processEnv(input, drainMs, durability, cellIdleEvictS),
       };
     },
 
@@ -241,6 +247,7 @@ function processEnv(
   input: RuntimeSpecInput,
   drainMs: number,
   durability: "bucket" | "fleet",
+  cellIdleEvictS: number,
 ): Record<string, string> {
   const env: Record<string, string> = { ...input.baseEnv };
 
@@ -283,8 +290,10 @@ function processEnv(
 
   Object.assign(env, checkedExtraEnv(input.extraEnv));
 
-  /* Last word on idle eviction, whatever the inherited environment carried. */
+  /* Last word on idle eviction, whatever the inherited environment carried:
+     the node's one clock, or nothing at all. */
   delete env[IDLE_EVICT_ENV];
+  if (cellIdleEvictS > 0) env[IDLE_EVICT_ENV] = String(cellIdleEvictS);
   return env;
 }
 
@@ -293,11 +302,10 @@ function checkedExtraEnv(extraEnv?: Record<string, string>): Record<string, stri
   if (extraEnv === undefined) return {};
 
   if (IDLE_EVICT_ENV in extraEnv) {
-    throw new ScafoError("invalid-input", "Idle eviction cannot be enabled", {
+    throw new ScafoError("invalid-input", "Idle eviction is not set this way", {
       detail:
-        `"${IDLE_EVICT_ENV}" must not be set: in this runtime version, evicting an ` +
-        `idle cell corrupts its replication chain in the bucket and rolls back writes ` +
-        `that were already acknowledged to the client`,
+        `"${IDLE_EVICT_ENV}" must not be set by a caller: cells on a node evict on ` +
+        `the one clock its operator configured, "runtime.cellIdleEvictS"`,
     });
   }
 

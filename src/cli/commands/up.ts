@@ -64,6 +64,10 @@ const upArgs: ArgsDef = {
     type: "string",
     description: 'When a write is durable: "bucket" (default) or "fleet" (ack at follower fsync)',
   },
+  "cell-idle-evict": {
+    type: "string",
+    description: "Seconds a cell may sit idle before eviction frees its memory (0 = never)",
+  },
   "probe-path": { type: "string", description: "Path the application readiness probe requests" },
   "ingress-driver": { type: "string", description: "Ingress this node drives (caddy, traefik)" },
   "caddy-admin": { type: "string", description: "Base URL of the Caddy admin API" },
@@ -179,6 +183,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
     binPath: config.runtime.binPath,
     store: registry.store,
     durability: config.runtime.durability,
+    cellIdleEvictS: config.runtime.cellIdleEvictS,
   });
   const reconciler = createReconciler(agent, driver, { baseEnv });
   agent.reconciler = reconciler;

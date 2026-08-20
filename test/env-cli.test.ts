@@ -637,6 +637,7 @@ function agentConfig(): AgentConfig {
       probePath: "/",
       bindHost: "127.0.0.1",
       durability: "bucket",
+      cellIdleEvictS: 900,
     },
   };
 }

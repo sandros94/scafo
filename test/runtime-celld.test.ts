@@ -60,7 +60,7 @@ const RESERVED_ENV = [
   "CELLD_UNSAFE_PUBLIC_ADVERTISE",
 ];
 
-/** Never set, in any version of a spec: it corrupts cells that are evicted while idle. */
+/** Comes only from the driver's own option; a caller may never set it. */
 const IDLE_EVICT_ENV = "CELLD_IDLE_EVICT_S";
 
 describe("the spec one environment runs under", () => {
@@ -145,6 +145,21 @@ describe("the spec one environment runs under", () => {
          call, whatever that default becomes. */
       CELLD_DURABILITY: "bucket",
     });
+  });
+
+  it("evicts idle cells on the configured clock, whatever the environment inherited", () => {
+    const evicting = createCelldDriver({ store: new MemoryCasStore(), cellIdleEvictS: 900 });
+
+    const configured = evicting.processSpec(specInput());
+    const inherited = evicting.processSpec(
+      specInput({ baseEnv: { PATH: "/usr/bin", [IDLE_EVICT_ENV]: "60" } }),
+    );
+    const off = driver().processSpec(specInput());
+
+    /* One clock per node: the option's value, an inherited variable never. */
+    expect(configured.env[IDLE_EVICT_ENV]).toBe("900");
+    expect(inherited.env[IDLE_EVICT_ENV]).toBe("900");
+    expect(Object.hasOwn(off.env, IDLE_EVICT_ENV)).toBe(false);
   });
 
   it("writes the durability the node configured, over anything the environment inherited", () => {
@@ -253,13 +268,14 @@ describe("the spec one environment runs under", () => {
 });
 
 describe("what a caller may not put in a process's environment", () => {
-  it("refuses to enable idle eviction, which would corrupt a cell that is evicted", async () => {
+  it("refuses idle eviction from a caller, which is the node's clock to set", async () => {
     const error = await rejectsWith(
       async () => driver().processSpec(specInput({ extraEnv: { [IDLE_EVICT_ENV]: "60" } })),
       "invalid-input",
     );
 
     expect(error.detail).toContain(IDLE_EVICT_ENV);
+    expect(error.detail).toContain("runtime.cellIdleEvictS");
   });
 
   it("refuses every variable it derives from the node and from the process's listeners", async () => {

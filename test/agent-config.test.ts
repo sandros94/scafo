@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_BIND_HOST,
+  DEFAULT_CELL_IDLE_EVICT_S,
   DEFAULT_DURABILITY,
   DEFAULT_CONFIG_PATHS,
   DEFAULT_LISTEN,
@@ -531,6 +532,41 @@ describe("when a write counts as durable", () => {
     expect(error.detail).toContain("runtime.durability");
     expect(error.detail).toContain('"bucket"');
     expect(error.detail).toContain('"fleet"');
+  });
+});
+
+describe("how long a cell may sit idle", () => {
+  it("evicts on the platform default until the operator says otherwise", async () => {
+    const config = await loadAgentConfig({ env: REQUIRED_ENV });
+
+    expect(config.runtime.cellIdleEvictS).toBe(DEFAULT_CELL_IDLE_EVICT_S);
+    expect(config.runtime.cellIdleEvictS).toBe(900);
+  });
+
+  it("takes a configured age, and zero for never", async () => {
+    const cases: [string, number][] = [
+      ["300", 300],
+      ["0", 0],
+    ];
+
+    for (const [given, expected] of cases) {
+      const config = await loadAgentConfig({
+        env: { ...REQUIRED_ENV, SCAFO_CELL_IDLE_EVICT: given },
+      });
+
+      expect(config.runtime.cellIdleEvictS, given).toBe(expected);
+    }
+  });
+
+  it("refuses an age that is not a whole number of seconds", async () => {
+    for (const bad of ["-5", "soon", "1.5"]) {
+      const error = await rejectsWith(
+        () => loadAgentConfig({ env: { ...REQUIRED_ENV, SCAFO_CELL_IDLE_EVICT: bad } }),
+        "invalid-input",
+      );
+
+      expect(error.detail, bad).toContain("runtime.cellIdleEvictS");
+    }
   });
 });
 
