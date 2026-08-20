@@ -1,8 +1,8 @@
-/* `scalo deploy`: pack a built project, hand it to a node, and watch it land. */
+/* `scafo deploy`: pack a built project, hand it to a node, and watch it land. */
 
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import type { DeployStatus } from "../../agent/deploys.ts";
-import { ScaloError } from "../../core/error.ts";
+import { ScafoError } from "../../core/error.ts";
 import { parseReplicas } from "../../core/placement/replicas.ts";
 import { parseLabels } from "../../core/utils/labels.ts";
 import { packDirectory } from "../../drivers/archive/tar-zst.ts";
@@ -80,7 +80,7 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
     wantedSelector === undefined ? undefined : parseLabels(wantedSelector, "--node-selector");
   const canary = readCanaryFlag(flags);
 
-  console.log(`scalo: packing ${dir}`);
+  console.log(`scafo: packing ${dir}`);
   const artifact = await packDirectory(dir);
 
   const meta = {
@@ -93,7 +93,7 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
     ...(text(flags.script) === undefined ? {} : { script: text(flags.script) }),
     /* Only when they were asked for: a deploy that names no replica count and no
        selector must leave whatever the environment already carries exactly as it
-       is. Neither flag can lift a constraint — that is `scalo env selector`. */
+       is. Neither flag can lift a constraint — that is `scafo env selector`. */
     ...(replicas === undefined ? {} : { replicas }),
     ...(nodeSelector === undefined ? {} : { nodeSelector }),
   };
@@ -109,13 +109,13 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
   const status = (await accepted.json()) as DeployStatus;
   const location = accepted.headers.get("location") ?? `/v1/deploys/${status.id}`;
 
-  console.log(`scalo: deploy ${status.id} ${status.state}`);
+  console.log(`scafo: deploy ${status.id} ${status.state}`);
   const settled = await watch(new URL(location, `${agent}/`).href, authorize, status);
   if (canary === undefined) return;
 
   const build = settled.build;
   if (build === undefined) {
-    throw new ScaloError("invalid-input", "Nothing to send the canary traffic to", {
+    throw new ScafoError("invalid-input", "Nothing to send the canary traffic to", {
       detail: `deploy ${settled.id} settled as "${settled.state}" without recording a build`,
     });
   }
@@ -144,16 +144,16 @@ async function watch(url: string, authorize: Authorize, from: DeployStatus): Pro
     await delay(DEFAULT_POLL_MS);
 
     const status = (await (await agentRequest(url, await authorize())).json()) as DeployStatus;
-    if (status.state !== last.state) console.log(`scalo: deploy ${status.id} ${status.state}`);
+    if (status.state !== last.state) console.log(`scafo: deploy ${status.id} ${status.state}`);
     last = status;
     if (!SETTLED.includes(status.state)) continue;
 
     for (const warning of status.warnings)
-      console.warn(`scalo: ${warning.code}: ${warning.detail}`);
+      console.warn(`scafo: ${warning.code}: ${warning.detail}`);
     if (status.state === "failed") {
-      throw new ScaloError("invalid-input", "Deploy failed", { detail: status.detail });
+      throw new ScafoError("invalid-input", "Deploy failed", { detail: status.detail });
     }
-    if (status.build !== undefined) console.log(`scalo: build ${status.build}`);
+    if (status.build !== undefined) console.log(`scafo: build ${status.build}`);
     return status;
   }
 }
@@ -172,14 +172,14 @@ function readCanaryFlag(flags: Record<string, unknown>): number | undefined {
   if (stated === undefined) return undefined;
 
   if (flags.flip === true) {
-    throw new ScaloError("invalid-input", "Conflicting arguments", {
+    throw new ScafoError("invalid-input", "Conflicting arguments", {
       detail:
         `--flip puts the new build in front of all of this environment's traffic and ` +
         `--canary ${stated} puts it in front of some; pass one of them`,
     });
   }
   if (!/^\d+$/.test(stated)) {
-    throw new ScaloError("invalid-input", "Invalid canary weight", {
+    throw new ScafoError("invalid-input", "Invalid canary weight", {
       detail: `--canary "${stated}" must be a whole number of percent, such as --canary 10`,
     });
   }

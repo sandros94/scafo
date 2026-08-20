@@ -1,5 +1,5 @@
 /*
- * Internal: what `scalo trust` does once its flags have been read — editing the
+ * Internal: what `scafo trust` does once its flags have been read — editing the
  * set of CI issuers a project admits, and printing it.
  *
  * The policy is one document per project, so every edit here is a read, a merge
@@ -9,7 +9,7 @@
  */
 
 import { OIDC_AUDIENCE } from "../core/auth/oidc.ts";
-import { ScaloError } from "../core/error.ts";
+import { ScafoError } from "../core/error.ts";
 import { readJson } from "../core/registry/cas.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
 import { trustKey } from "../core/registry/paths.ts";
@@ -45,7 +45,7 @@ export async function setTrustIssuer(
 ): Promise<TrustPolicy> {
   assertIssuerUrl(opts.iss);
   if (opts.subjects.length === 0) {
-    throw new ScaloError("invalid-input", "No subject given", {
+    throw new ScafoError("invalid-input", "No subject given", {
       detail:
         `--subject must name at least one subject the issuer is trusted for, such as ` +
         `"repo:acme/shop:ref:refs/heads/*"; an issuer with no subject admits nothing and ` +
@@ -75,7 +75,7 @@ export async function setTrustIssuer(
  * one deny the same tokens, and one that is there says the project has a policy
  * somebody has looked at.
  *
- * Throws `ScaloError("not-found")` when the project does not trust that issuer
+ * Throws `ScafoError("not-found")` when the project does not trust that issuer
  * at all — a mistyped URL that reported success would leave the issuer it was
  * meant to revoke still trusted.
  */
@@ -88,7 +88,7 @@ export async function removeTrustIssuer(
   const issuers = current.issuers.filter((issuer) => issuer.iss !== iss);
 
   if (issuers.length === current.issuers.length) {
-    throw new ScaloError("not-found", "Issuer is not trusted", {
+    throw new ScafoError("not-found", "Issuer is not trusted", {
       detail:
         `"${project}" does not trust "${iss}"; it trusts ` +
         `${current.issuers.length === 0 ? "no issuer at all" : current.issuers.map((issuer) => `"${issuer.iss}"`).join(", ")}`,
@@ -173,8 +173,8 @@ function assertIssuerUrl(iss: string): void {
   }
 }
 
-function invalidIssuer(iss: string, why: string): ScaloError {
-  return new ScaloError("invalid-input", "Invalid issuer", {
+function invalidIssuer(iss: string, why: string): ScafoError {
+  return new ScafoError("invalid-input", "Invalid issuer", {
     detail:
       `--issuer must be the URL the tokens carry in their "iss" claim, because that is what ` +
       `"<iss>/.well-known/openid-configuration" is asked for, and ${why}: got "${iss}"`,

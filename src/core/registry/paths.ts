@@ -1,11 +1,11 @@
 /* Every bucket key the registry uses. Inputs are validated at the key builder. */
 
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import { assertHost } from "../utils/host.ts";
 import { assertSlug } from "../utils/slug.ts";
 
 /** Prefix all registry documents live under. */
-const ROOT = "_scalo";
+const ROOT = "_scafo";
 
 /** Content ids (builds, varsets) are lowercase hex digests. */
 export const ID_RE: RegExp = /^[a-f\d]{8,64}$/;
@@ -13,19 +13,19 @@ export const ID_RE: RegExp = /^[a-f\d]{8,64}$/;
 /** Node ids double as celld session ids, which may contain underscores. */
 export const NODE_ID_RE: RegExp = /^[a-z\d_-]{1,128}$/;
 
-/** Throws `ScaloError("invalid-slug")` when `id` is not a content id. */
+/** Throws `ScafoError("invalid-slug")` when `id` is not a content id. */
 export function assertId(id: string): void {
   if (!ID_RE.test(id)) {
-    throw new ScaloError("invalid-slug", "Invalid content id", {
+    throw new ScafoError("invalid-slug", "Invalid content id", {
       detail: `"${id}" must be 8-64 lowercase hexadecimal characters`,
     });
   }
 }
 
-/** Throws `ScaloError("invalid-slug")` when `id` is not a node id. */
+/** Throws `ScafoError("invalid-slug")` when `id` is not a node id. */
 export function assertNodeId(id: string): void {
   if (!NODE_ID_RE.test(id)) {
-    throw new ScaloError("invalid-slug", "Invalid node id", {
+    throw new ScafoError("invalid-slug", "Invalid node id", {
       detail: `"${id}" must be 1-128 lowercase alphanumerics, hyphens or underscores`,
     });
   }
@@ -122,7 +122,7 @@ export function varsetKey(project: string, id: string): string {
   return `${varsetsPrefix(project)}${id}.json`;
 }
 
-/** Where a build's uploaded bundle lives. Outside `_scalo/`: it is not a record. */
+/** Where a build's uploaded bundle lives. Outside `_scafo/`: it is not a record. */
 export function artifactKey(project: string, buildId: string): string {
   assertSlug(project);
   assertId(buildId);

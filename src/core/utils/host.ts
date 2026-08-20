@@ -1,4 +1,4 @@
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 
 /**
  * A single DNS label: lowercase alphanumerics and inner hyphens, at most 63
@@ -76,10 +76,10 @@ export function parseInterfaceAddress(value: string): InterfaceAddress | null {
   return { host, prefix, hostPrefix };
 }
 
-/** Throws `ScaloError("invalid-slug")` when `s` is not a valid host. */
+/** Throws `ScafoError("invalid-slug")` when `s` is not a valid host. */
 export function assertHost(s: string): void {
   if (!isHost(s)) {
-    throw new ScaloError("invalid-slug", "Invalid host", {
+    throw new ScafoError("invalid-slug", "Invalid host", {
       detail:
         `"${s}" must be a lowercase DNS name of up to ${HOST_MAX_LENGTH} characters, ` +
         `each dot-separated label 1-63 alphanumerics optionally containing hyphens`,

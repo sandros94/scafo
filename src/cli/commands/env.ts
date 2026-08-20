@@ -1,5 +1,5 @@
 /*
- * `scalo env`: taking an environment out of service, putting it back, dividing
+ * `scafo env`: taking an environment out of service, putting it back, dividing
  * its traffic between its builds, and deleting it once it is really meant to go.
  *
  * Retiring and deleting are two commands rather than one because they are two
@@ -12,7 +12,7 @@
 
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import { loadAgentConfig } from "../../agent/config.ts";
-import { ScaloError } from "../../core/error.ts";
+import { ScafoError } from "../../core/error.ts";
 import { agentBaseUrl, operatorSigner } from "../_agent.ts";
 import { createRegistry } from "../_bootstrap.ts";
 import {
@@ -29,11 +29,11 @@ import {
 import { readTextFile, reportFailure } from "../_utils.ts";
 import { DEFAULT_KEY_PATH } from "./keygen.ts";
 
-/* The bucket the registry lives in, exactly as `scalo up` takes it. Only read
+/* The bucket the registry lives in, exactly as `scafo up` takes it. Only read
    when no --agent is given: with one, the node holds the bucket credentials and
    the operator needs none of their own. */
 const bucketArgs: ArgsDef = {
-  "config": { type: "string", description: "Path to scalo.config.jsonc" },
+  "config": { type: "string", description: "Path to scafo.config.jsonc" },
   "endpoint": { type: "string", description: "S3-compatible endpoint URL" },
   "region": { type: "string", description: "Signing region of the bucket" },
   "bucket": { type: "string", description: "Bucket holding the registry" },
@@ -157,12 +157,12 @@ async function runUnretire(flags: Record<string, unknown>): Promise<void> {
   const environment = await ops.unretire(target);
 
   if (environment.retiredAt !== undefined) {
-    throw new ScaloError("cas-conflict", "Environment is still retired", {
+    throw new ScafoError("cas-conflict", "Environment is still retired", {
       detail: `"${target.project}/${target.env}" still carries ${environment.retiredAt}`,
     });
   }
   console.log(
-    `scalo: "${target.project}/${target.env}" is no longer retired; the nodes that should ` +
+    `scafo: "${target.project}/${target.env}" is no longer retired; the nodes that should ` +
       `serve it start it again on their next pass`,
   );
 }
@@ -193,7 +193,7 @@ async function runDelete(flags: Record<string, unknown>): Promise<void> {
   const deleted = await ops.delete(target, { force });
   const count = deleted.length;
   console.log(
-    `scalo: deleted "${target.project}/${target.env}" through ${ops.via}, ` +
+    `scafo: deleted "${target.project}/${target.env}" through ${ops.via}, ` +
       `${String(count)} object${count === 1 ? "" : "s"}`,
   );
   for (const key of deleted) console.log(`  ${key}`);
@@ -202,7 +202,7 @@ async function runDelete(flags: Record<string, unknown>): Promise<void> {
 /**
  * Which way this invocation reaches the installation. `--agent` picks the node,
  * and everything else falls back to the bucket — which is what an installation
- * with no node running has, and what `scalo trust` and `scalo varset` do too.
+ * with no node running has, and what `scafo trust` and `scafo varset` do too.
  */
 async function opsFor(flags: Record<string, unknown>): Promise<EnvironmentOps> {
   const url = text(flags.agent);
@@ -230,7 +230,7 @@ function required(flags: Record<string, unknown>, name: string): string {
   const value = text(flags[name]);
   if (value !== undefined) return value;
 
-  throw new ScaloError("invalid-input", "Missing required argument", {
+  throw new ScafoError("invalid-input", "Missing required argument", {
     detail: `--${name} must be given`,
   });
 }

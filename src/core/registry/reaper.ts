@@ -1,6 +1,6 @@
 /* Garbage collection: what is safe to delete, and the lease-gated deletion itself. */
 
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import type {
   BuildRecord,
   DomainClaim,
@@ -200,7 +200,7 @@ export async function executeReap(
  * Which environments it will act on is {@link assertDeletable}'s to decide:
  * ephemeral ones, ones retired for longer than the grace, and — bypassing both —
  * ones the caller has explicitly forced. Anything else is refused with
- * `ScaloError("invalid-input")` at status 409, and the refusal names the route
+ * `ScafoError("invalid-input")` at status 409, and the refusal names the route
  * that applies rather than only the rule that was broken: a long-lived
  * environment is the one name that outlives every build it ever served, and
  * nothing here can tell a deliberate request from a typo in a path.
@@ -209,8 +209,8 @@ export async function executeReap(
  * been superseded mid-run stops rather than racing the node that replaced it —
  * the partial deletion it leaves is the same self-repairing state a crash leaves.
  *
- * Throws `ScaloError("not-found")` when there is no such environment, and
- * `ScaloError("lease-lost")` once the lease is gone.
+ * Throws `ScafoError("not-found")` when there is no such environment, and
+ * `ScafoError("lease-lost")` once the lease is gone.
  */
 export async function deleteEnvironment(
   ctx: RegistryContext,
@@ -358,7 +358,7 @@ async function idleReason(
 
 async function assertLease(ctx: RegistryContext, lease: LeaseHandle): Promise<void> {
   if (!(await verifyLease(ctx, lease))) {
-    throw new ScaloError("lease-lost", "Coordinator lease is no longer held", {
+    throw new ScafoError("lease-lost", "Coordinator lease is no longer held", {
       detail: `fence ${String(lease.lease.fence)} held by "${lease.lease.node}" was superseded`,
     });
   }

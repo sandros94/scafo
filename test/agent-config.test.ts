@@ -19,20 +19,20 @@ import { rejectionOf, rejectsWith } from "./_helpers.ts";
 
 /** The four settings with no default; every case starts from these. */
 const REQUIRED_ENV: Record<string, string> = {
-  SCALO_S3_ENDPOINT: "http://store.test:9000",
-  SCALO_S3_BUCKET: "registry",
-  SCALO_S3_ACCESS_KEY: "key",
-  SCALO_S3_SECRET_KEY: "secret",
+  SCAFO_S3_ENDPOINT: "http://store.test:9000",
+  SCAFO_S3_BUCKET: "registry",
+  SCAFO_S3_ACCESS_KEY: "key",
+  SCAFO_S3_SECRET_KEY: "secret",
 };
 
-const CONFIG_PATH = "/etc/scalo/scalo.config.jsonc";
+const CONFIG_PATH = "/etc/scafo/scafo.config.jsonc";
 
 describe("source precedence", () => {
   it("lets a flag override both the environment and the file", async () => {
     const config = await loadAgentConfig({
       configPath: CONFIG_PATH,
       readFile: fileAt(CONFIG_PATH, JSON.stringify({ bucket: { bucket: "from-file" } })),
-      env: { ...REQUIRED_ENV, SCALO_S3_BUCKET: "from-env" },
+      env: { ...REQUIRED_ENV, SCAFO_S3_BUCKET: "from-env" },
       flags: { bucket: "from-flag" },
     });
 
@@ -43,7 +43,7 @@ describe("source precedence", () => {
     const config = await loadAgentConfig({
       configPath: CONFIG_PATH,
       readFile: fileAt(CONFIG_PATH, JSON.stringify({ bucket: { bucket: "from-file" } })),
-      env: { ...REQUIRED_ENV, SCALO_S3_BUCKET: "from-env" },
+      env: { ...REQUIRED_ENV, SCAFO_S3_BUCKET: "from-env" },
     });
 
     expect(config.bucket.bucket).toBe("from-env");
@@ -77,7 +77,7 @@ describe("source precedence", () => {
     expect(config.node).toMatchObject({ id: "node-from-file", listen: "0.0.0.0:7500" });
   });
 
-  it("prefers a SCALO variable to the generic name accepted beside it", async () => {
+  it("prefers a SCAFO variable to the generic name accepted beside it", async () => {
     const config = await loadAgentConfig({
       env: {
         ...REQUIRED_ENV,
@@ -94,11 +94,11 @@ describe("source precedence", () => {
     });
   });
 
-  it("accepts the generic bucket variables when no SCALO name is set", async () => {
+  it("accepts the generic bucket variables when no SCAFO name is set", async () => {
     const config = await loadAgentConfig({
       env: {
         S3_ENDPOINT: "http://generic.test:9000",
-        SCALO_S3_BUCKET: "registry",
+        SCAFO_S3_BUCKET: "registry",
         AWS_ACCESS_KEY_ID: "generic-key",
         AWS_SECRET_ACCESS_KEY: "generic-secret",
         AWS_REGION: "eu-west-1",
@@ -115,7 +115,7 @@ describe("source precedence", () => {
 
   it("treats a blank value as unset, whichever source wrote it", async () => {
     const config = await loadAgentConfig({
-      env: { ...REQUIRED_ENV, SCALO_S3_REGION: "   ", SCALO_NODE_ID: "" },
+      env: { ...REQUIRED_ENV, SCAFO_S3_REGION: "   ", SCAFO_NODE_ID: "" },
       flags: { listen: "  " },
     });
 
@@ -231,7 +231,7 @@ describe("reading the config file", () => {
 
     const config = await loadAgentConfig({
       readFile: fileAt(second, JSON.stringify({ bucket: { bucket: "from-second-path" } })),
-      env: { ...REQUIRED_ENV, SCALO_S3_BUCKET: undefined },
+      env: { ...REQUIRED_ENV, SCAFO_S3_BUCKET: undefined },
     });
 
     expect(config.bucket.bucket).toBe("from-second-path");
@@ -242,17 +242,17 @@ describe("required settings", () => {
   it("names the file key, the environment variables and the flag that could supply it", async () => {
     const error = await rejectsWith(() => loadAgentConfig({ env: {} }), "invalid-input");
 
-    for (const source of ["bucket.endpoint", "SCALO_S3_ENDPOINT", "S3_ENDPOINT", "--endpoint"]) {
+    for (const source of ["bucket.endpoint", "SCAFO_S3_ENDPOINT", "S3_ENDPOINT", "--endpoint"]) {
       expect(error.detail, `error detail should mention ${source}`).toContain(source);
     }
   });
 
   it("reports every required setting the same way", async () => {
     const cases: [string, string[]][] = [
-      ["SCALO_S3_ENDPOINT", ["bucket.endpoint", "--endpoint"]],
-      ["SCALO_S3_BUCKET", ["bucket.bucket", "--bucket"]],
-      ["SCALO_S3_ACCESS_KEY", ["bucket.accessKey", "--access-key"]],
-      ["SCALO_S3_SECRET_KEY", ["bucket.secretKey", "--secret-key"]],
+      ["SCAFO_S3_ENDPOINT", ["bucket.endpoint", "--endpoint"]],
+      ["SCAFO_S3_BUCKET", ["bucket.bucket", "--bucket"]],
+      ["SCAFO_S3_ACCESS_KEY", ["bucket.accessKey", "--access-key"]],
+      ["SCAFO_S3_SECRET_KEY", ["bucket.secretKey", "--secret-key"]],
     ];
 
     for (const [missing, mentions] of cases) {
@@ -271,9 +271,9 @@ describe("addresses", () => {
     const config = await loadAgentConfig({
       env: {
         ...REQUIRED_ENV,
-        SCALO_LISTEN: "0.0.0.0:7400",
-        SCALO_INTERNAL_LISTEN: "10.0.0.4:7401",
-        SCALO_ADVERTISE: "node4.internal:7401",
+        SCAFO_LISTEN: "0.0.0.0:7400",
+        SCAFO_INTERNAL_LISTEN: "10.0.0.4:7401",
+        SCAFO_ADVERTISE: "node4.internal:7401",
       },
     });
 
@@ -297,9 +297,9 @@ describe("addresses", () => {
     ];
     /* Every address setting is checked, and each names itself in the failure. */
     const settings: [string, string][] = [
-      ["SCALO_LISTEN", "node.listen"],
-      ["SCALO_INTERNAL_LISTEN", "node.internalListen"],
-      ["SCALO_ADVERTISE", "node.advertise"],
+      ["SCAFO_LISTEN", "node.listen"],
+      ["SCAFO_INTERNAL_LISTEN", "node.internalListen"],
+      ["SCAFO_ADVERTISE", "node.advertise"],
     ];
 
     for (const value of invalid) {
@@ -316,7 +316,7 @@ describe("addresses", () => {
 
   it("quotes the address it could not parse back to the operator", async () => {
     const error = await rejectsWith(
-      () => loadAgentConfig({ env: { ...REQUIRED_ENV, SCALO_LISTEN: "store.test" } }),
+      () => loadAgentConfig({ env: { ...REQUIRED_ENV, SCAFO_LISTEN: "store.test" } }),
       "invalid-input",
     );
 
@@ -346,7 +346,7 @@ describe("addresses", () => {
 describe("platform domains", () => {
   it("splits a comma-separated list, ignoring the spacing around it", async () => {
     const config = await loadAgentConfig({
-      env: { ...REQUIRED_ENV, SCALO_PLATFORM_DOMAINS: " apps.test, edge.example.com ,," },
+      env: { ...REQUIRED_ENV, SCAFO_PLATFORM_DOMAINS: " apps.test, edge.example.com ,," },
     });
 
     expect(config.platformDomains).toEqual(["apps.test", "edge.example.com"]);
@@ -365,7 +365,7 @@ describe("platform domains", () => {
   it("refuses the whole list when any one host is malformed", async () => {
     const error = await rejectionOf(() =>
       loadAgentConfig({
-        env: { ...REQUIRED_ENV, SCALO_PLATFORM_DOMAINS: "apps.test,NOT A HOST" },
+        env: { ...REQUIRED_ENV, SCAFO_PLATFORM_DOMAINS: "apps.test,NOT A HOST" },
       }),
     );
 
@@ -398,7 +398,7 @@ describe("platform domains", () => {
 describe("the labels a node carries", () => {
   it("reads the comma syntax a flag and an environment variable carry", async () => {
     const config = await loadAgentConfig({
-      env: { ...REQUIRED_ENV, SCALO_NODE_LABELS: " tier=fast, region = eu-west-1 ,," },
+      env: { ...REQUIRED_ENV, SCAFO_NODE_LABELS: " tier=fast, region = eu-west-1 ,," },
     });
 
     expect(config.node.labels).toEqual({ tier: "fast", region: "eu-west-1" });
@@ -440,7 +440,7 @@ describe("the labels a node carries", () => {
     "refuses %p, naming the setting",
     async (value) => {
       const error = await rejectsWith(
-        () => loadAgentConfig({ env: { ...REQUIRED_ENV, SCALO_NODE_LABELS: value } }),
+        () => loadAgentConfig({ env: { ...REQUIRED_ENV, SCAFO_NODE_LABELS: value } }),
         "invalid-input",
       );
 
@@ -479,7 +479,7 @@ describe("the address runtime processes bind", () => {
   it("takes the wildcard addresses a multi-node fleet needs", async () => {
     for (const host of ["0.0.0.0", "::", "10.0.0.4"]) {
       const config = await loadAgentConfig({
-        env: { ...REQUIRED_ENV, SCALO_BIND_HOST: host },
+        env: { ...REQUIRED_ENV, SCAFO_BIND_HOST: host },
       });
 
       expect(config.runtime.bindHost, host).toBe(host);
@@ -488,7 +488,7 @@ describe("the address runtime processes bind", () => {
 
   it("refuses an address no process could bind", async () => {
     const error = await rejectsWith(
-      () => loadAgentConfig({ env: { ...REQUIRED_ENV, SCALO_BIND_HOST: "0.0.0.0:8080" } }),
+      () => loadAgentConfig({ env: { ...REQUIRED_ENV, SCAFO_BIND_HOST: "0.0.0.0:8080" } }),
       "invalid-input",
     );
 
@@ -524,7 +524,7 @@ describe("node identity and defaults", () => {
 
   it("keeps a configured node id, which pins the identity the node keeps", async () => {
     const config = await loadAgentConfig({
-      env: { ...REQUIRED_ENV, SCALO_NODE_ID: "node_west-1" },
+      env: { ...REQUIRED_ENV, SCAFO_NODE_ID: "node_west-1" },
     });
 
     expect(config.node.id).toBe("node_west-1");
@@ -532,13 +532,13 @@ describe("node identity and defaults", () => {
 
   it("takes the state directory from a flag, the environment or the file", async () => {
     const fromFlag = await loadAgentConfig({
-      env: { ...REQUIRED_ENV, SCALO_STATE_DIR: "/from/env" },
+      env: { ...REQUIRED_ENV, SCAFO_STATE_DIR: "/from/env" },
       flags: { "state-dir": "/from/flag" },
     });
     const fromEnv = await loadAgentConfig({
       configPath: CONFIG_PATH,
       readFile: fileAt(CONFIG_PATH, JSON.stringify({ node: { stateDir: "/from/file" } })),
-      env: { ...REQUIRED_ENV, SCALO_STATE_DIR: "/from/env" },
+      env: { ...REQUIRED_ENV, SCAFO_STATE_DIR: "/from/env" },
     });
     const fromFile = await loadAgentConfig({
       configPath: CONFIG_PATH,
@@ -556,7 +556,7 @@ describe("node identity and defaults", () => {
   it("refuses a node id that could not address a registry record", async () => {
     for (const id of ["NODE-1", "node/1", "node 1", "node.1", "n".repeat(129)]) {
       const error = await rejectionOf(() =>
-        loadAgentConfig({ env: { ...REQUIRED_ENV, SCALO_NODE_ID: id } }),
+        loadAgentConfig({ env: { ...REQUIRED_ENV, SCAFO_NODE_ID: id } }),
       );
 
       expect(error.code, `for node id "${id}"`).toBe("invalid-slug");
@@ -575,7 +575,7 @@ describe("which ingress the node drives", () => {
     /* The setting predates there being a choice, and a configuration that
        already worked must go on working without naming a driver. */
     const config = await loadAgentConfig({
-      env: { ...REQUIRED_ENV, SCALO_CADDY_ADMIN: "http://127.0.0.1:2019" },
+      env: { ...REQUIRED_ENV, SCAFO_CADDY_ADMIN: "http://127.0.0.1:2019" },
     });
 
     expect(config.ingress).toEqual({ driver: "caddy", adminUrl: "http://127.0.0.1:2019" });
@@ -585,7 +585,7 @@ describe("which ingress the node drives", () => {
     /* Nothing else, because there is nothing to reach: Traefik polls the agent
        rather than being called by it. */
     const config = await loadAgentConfig({
-      env: { ...REQUIRED_ENV, SCALO_INGRESS_DRIVER: "traefik" },
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_DRIVER: "traefik" },
     });
 
     expect(config.ingress).toEqual({ driver: "traefik" });
@@ -593,12 +593,12 @@ describe("which ingress the node drives", () => {
 
   it("REFUSES a Caddy setting alongside a driver that has no admin API", async () => {
     for (const [variable, value] of [
-      ["SCALO_CADDY_ADMIN", "http://127.0.0.1:2019"],
-      ["SCALO_CADDY_SERVER", "scalo"],
+      ["SCAFO_CADDY_ADMIN", "http://127.0.0.1:2019"],
+      ["SCAFO_CADDY_SERVER", "scafo"],
     ]) {
       const error = await rejectionOf(() =>
         loadAgentConfig({
-          env: { ...REQUIRED_ENV, SCALO_INGRESS_DRIVER: "traefik", [variable]: value },
+          env: { ...REQUIRED_ENV, SCAFO_INGRESS_DRIVER: "traefik", [variable]: value },
         }),
       );
 
@@ -614,7 +614,7 @@ describe("which ingress the node drives", () => {
 
   it("refuses an ingress nothing implements, listing the ones that are", async () => {
     const error = await rejectionOf(() =>
-      loadAgentConfig({ env: { ...REQUIRED_ENV, SCALO_INGRESS_DRIVER: "nginx" } }),
+      loadAgentConfig({ env: { ...REQUIRED_ENV, SCAFO_INGRESS_DRIVER: "nginx" } }),
     );
 
     expect(error.code).toBe("invalid-input");
@@ -635,11 +635,11 @@ describe("which ingress the node drives", () => {
 });
 
 describe("the Traefik entryPoints the routers attach to", () => {
-  const TRAEFIK_ENV: Record<string, string> = { ...REQUIRED_ENV, SCALO_INGRESS_DRIVER: "traefik" };
+  const TRAEFIK_ENV: Record<string, string> = { ...REQUIRED_ENV, SCAFO_INGRESS_DRIVER: "traefik" };
 
   it("reads a comma-separated list from the environment", async () => {
     const config = await loadAgentConfig({
-      env: { ...TRAEFIK_ENV, SCALO_TRAEFIK_ENTRYPOINTS: "web, websecure" },
+      env: { ...TRAEFIK_ENV, SCAFO_TRAEFIK_ENTRYPOINTS: "web, websecure" },
     });
 
     expect(config.ingress).toEqual({ driver: "traefik", entryPoints: ["web", "websecure"] });
@@ -647,7 +647,7 @@ describe("the Traefik entryPoints the routers attach to", () => {
 
   it("lets a flag override what the environment names", async () => {
     const config = await loadAgentConfig({
-      env: { ...TRAEFIK_ENV, SCALO_TRAEFIK_ENTRYPOINTS: "web" },
+      env: { ...TRAEFIK_ENV, SCAFO_TRAEFIK_ENTRYPOINTS: "web" },
       flags: { "traefik-entrypoints": "websecure" },
     });
 
@@ -669,7 +669,7 @@ describe("the Traefik entryPoints the routers attach to", () => {
 
   it("leaves them absent when nothing names any, so the driver's default applies", async () => {
     const config = await loadAgentConfig({
-      env: { ...REQUIRED_ENV, SCALO_INGRESS_DRIVER: "traefik" },
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_DRIVER: "traefik" },
     });
 
     expect(config.ingress?.entryPoints).toBeUndefined();
@@ -677,11 +677,11 @@ describe("the Traefik entryPoints the routers attach to", () => {
 
   it("refuses a list that names nothing, because Traefik reads it as everything", async () => {
     /* Routers with no entryPoints attach to EVERY entryPoint Traefik has —
-       including a TLS listener scalo holds no certificate for — so a mistyped
+       including a TLS listener scafo holds no certificate for — so a mistyped
        list must fail the boot rather than claim the whole surface. */
     const error = await rejectionOf(() =>
       loadAgentConfig({
-        env: { ...REQUIRED_ENV, SCALO_INGRESS_DRIVER: "traefik", SCALO_TRAEFIK_ENTRYPOINTS: " , " },
+        env: { ...REQUIRED_ENV, SCAFO_INGRESS_DRIVER: "traefik", SCAFO_TRAEFIK_ENTRYPOINTS: " , " },
       }),
     );
 
@@ -694,11 +694,11 @@ describe("the Traefik entryPoints the routers attach to", () => {
        setting under Caddy has misread which ingress applies, and dropping it
        silently leaves a node routing through one they did not select. */
     for (const env of [
-      { SCALO_TRAEFIK_ENTRYPOINTS: "websecure" },
+      { SCAFO_TRAEFIK_ENTRYPOINTS: "websecure" },
       {
-        SCALO_INGRESS_DRIVER: "caddy",
-        SCALO_CADDY_ADMIN: "http://127.0.0.1:2019",
-        SCALO_TRAEFIK_ENTRYPOINTS: "websecure",
+        SCAFO_INGRESS_DRIVER: "caddy",
+        SCAFO_CADDY_ADMIN: "http://127.0.0.1:2019",
+        SCAFO_TRAEFIK_ENTRYPOINTS: "websecure",
       },
     ]) {
       const error = await rejectionOf(() => loadAgentConfig({ env: { ...REQUIRED_ENV, ...env } }));

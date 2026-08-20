@@ -2,7 +2,7 @@
  * Internal: the tunnel a node runs on — the settings that describe it, and the
  * X25519 keypair that speaks for it.
  *
- * scalo NEVER computes a WireGuard key. The private half comes from a file the
+ * scafo NEVER computes a WireGuard key. The private half comes from a file the
  * operator put in the state directory, or from `wg genkey` run once as a child
  * process; the public half comes from a file beside it, or from `wg pubkey`.
  * With neither the file nor the binary, this refuses and says which command to
@@ -16,7 +16,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentConfig } from "../agent/config.ts";
 import { DEFAULT_WIREGUARD_PORT, describeWireguardSetting } from "../agent/config.ts";
-import { ScaloError } from "../core/error.ts";
+import { ScafoError } from "../core/error.ts";
 import { parseInterfaceAddress } from "../core/utils/host.ts";
 import { resolveDefaultStateDir, writeSecretFile } from "./_utils.ts";
 
@@ -32,7 +32,7 @@ export const WG_CONF_FILE: string = "wg0.conf";
 /** The tool this reaches for, resolved through `PATH`. */
 export const WG_BINARY: string = "wg";
 
-/** Where one half of the keypair came from, as `scalo wg init` reports it. */
+/** Where one half of the keypair came from, as `scafo wg init` reports it. */
 export type WireguardKeySource = "state" | "wg";
 
 /** The keypair this node's tunnel runs on, and where each half was found. */
@@ -77,7 +77,7 @@ export function wireguardStateDir(config: AgentConfig, opts?: WireguardOptions):
 /**
  * The tunnel this node runs on, or undefined when it runs none.
  *
- * Throws `ScaloError("invalid-input")` naming the missing setting when
+ * Throws `ScafoError("invalid-input")` naming the missing setting when
  * `transport.driver` is `wireguard` and this node has not been told where it
  * sits: a node that registered itself without an address or an endpoint would
  * be a peer nothing else can build a route to.
@@ -95,7 +95,7 @@ export function resolveWireguardSettings(
   if (config.transport?.driver !== "wireguard") {
     if (configured !== undefined) {
       (opts?.warn ?? console.warn)(
-        `scalo: warning: this node's WireGuard settings are ignored because ` +
+        `scafo: warning: this node's WireGuard settings are ignored because ` +
           `${describeWireguardSetting("address")} only applies to a node whose transport is ` +
           `"wireguard"; set --transport wireguard to run the tunnel, or remove them`,
       );
@@ -125,10 +125,10 @@ export function resolveWireguardSettings(
  * The keypair as it stands on disk, or null when this node has none yet.
  *
  * Reads only. Nothing here starts a process or writes a file, because this is
- * what `scalo up` calls: a node coming back up must not quietly mint an identity
+ * what `scafo up` calls: a node coming back up must not quietly mint an identity
  * its peers have never been told about.
  *
- * Throws `ScaloError("invalid-input")` when a key file exists but does not hold
+ * Throws `ScafoError("invalid-input")` when a key file exists but does not hold
  * a key, rather than replacing it.
  */
 export async function readWireguardKeys(stateDir: string): Promise<WireguardKeys | null> {
@@ -150,7 +150,7 @@ export async function readWireguardKeys(stateDir: string): Promise<WireguardKeys
  * again — a node whose tunnel is set up boots on a host that has never had
  * wireguard-tools installed.
  *
- * Throws `ScaloError("invalid-input")` when a half is missing and there is no
+ * Throws `ScafoError("invalid-input")` when a half is missing and there is no
  * `wg` on `PATH`, naming the command that would produce it.
  */
 export async function ensureWireguardKeys(stateDir: string): Promise<WireguardKeys> {
@@ -197,11 +197,11 @@ export function isWireguardKey(value: string): boolean {
 async function generatePrivateKey(path: string): Promise<string> {
   const generated = await runWg(["genkey"]);
   if (generated === null) {
-    throw new ScaloError("invalid-input", "No WireGuard private key", {
+    throw new ScafoError("invalid-input", "No WireGuard private key", {
       detail:
         `this node has no key at "${path}" and no "${WG_BINARY}" on PATH to make one with: ` +
         `run "${WG_BINARY} genkey > ${path}" and "chmod 600 ${path}", or install ` +
-        `wireguard-tools and run "scalo wg init" again — scalo never derives an X25519 key ` +
+        `wireguard-tools and run "scafo wg init" again — scafo never derives an X25519 key ` +
         `itself, so the key material is only ever the operator's own`,
     });
   }
@@ -215,12 +215,12 @@ async function derivePublicKey(
 ): Promise<string> {
   const derived = await runWg(["pubkey"], `${privateKey}\n`);
   if (derived === null) {
-    throw new ScaloError("invalid-input", "No WireGuard public key", {
+    throw new ScafoError("invalid-input", "No WireGuard public key", {
       detail:
         `"${privatePath}" holds this node's private key, but there is no "${publicPath}" and ` +
         `no "${WG_BINARY}" on PATH to derive the public half with: run ` +
         `"${WG_BINARY} pubkey < ${privatePath} > ${publicPath}", or install wireguard-tools ` +
-        `and run "scalo wg init" again`,
+        `and run "scafo wg init" again`,
     });
   }
   return assertKey(derived, `"${WG_BINARY} pubkey"`);
@@ -245,7 +245,7 @@ async function assertPair(
   const derived = await runWg(["pubkey"], `${privateKey}\n`);
   if (derived === null || derived.trim() === publicKey) return;
 
-  throw new ScaloError("invalid-input", "WireGuard keys are not a pair", {
+  throw new ScafoError("invalid-input", "WireGuard keys are not a pair", {
     detail:
       `"${publicPath}" does not hold the public half of the private key in "${privatePath}": ` +
       `"${WG_BINARY} pubkey" derives "${derived.trim()}" from it. Peers told the key in the ` +
@@ -270,7 +270,7 @@ function assertKey(text: string, what: string): string {
   const key = text.trim();
   if (isWireguardKey(key)) return key;
 
-  throw new ScaloError("invalid-input", "WireGuard key is unusable", {
+  throw new ScafoError("invalid-input", "WireGuard key is unusable", {
     detail:
       `${what} does not hold a WireGuard key: one is 32 bytes written as 44 base64 ` +
       `characters, exactly as "${WG_BINARY} genkey" prints it`,
@@ -309,7 +309,7 @@ function runWg(args: string[], input?: string): Promise<string | null> {
         return;
       }
       fail(
-        new ScaloError("invalid-input", "WireGuard tooling failed", {
+        new ScafoError("invalid-input", "WireGuard tooling failed", {
           detail:
             `"${WG_BINARY} ${args.join(" ")}" exited with code ${String(code)}` +
             `${err.trim() === "" ? "" : `: ${err.trim()}`}`,
@@ -328,7 +328,7 @@ function runWg(args: string[], input?: string): Promise<string | null> {
   });
 }
 
-function missing(setting: "address" | "endpoint"): ScaloError {
+function missing(setting: "address" | "endpoint"): ScafoError {
   const what =
     setting === "address"
       ? `the address this node's own tunnel interface takes, with its prefix length ` +
@@ -336,7 +336,7 @@ function missing(setting: "address" | "endpoint"): ScaloError {
       : `the "host:port" this node's peers send its tunnel traffic to ` +
         `(such as "203.0.113.7:51820")`;
 
-  return new ScaloError("invalid-input", "Incomplete WireGuard configuration", {
+  return new ScafoError("invalid-input", "Incomplete WireGuard configuration", {
     detail:
       `this node's transport is "wireguard", so ${describeWireguardSetting(setting)} must give ` +
       `${what}; without it this node would register itself as a peer nothing can route to`,

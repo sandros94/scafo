@@ -9,7 +9,7 @@
  * everywhere.
  */
 
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import type {
   EnvironmentRecord,
   NodeSelector,
@@ -142,7 +142,7 @@ export async function deletePlacement(
   if ((await readJson<PlacementRecord>(ctx, key)) === null) return null;
 
   if (!(await verifyLease(ctx, lease))) {
-    throw new ScaloError("lease-lost", "Coordinator lease is no longer held", {
+    throw new ScafoError("lease-lost", "Coordinator lease is no longer held", {
       detail: `refusing to remove the placement of "${project}/${env}"`,
     });
   }
@@ -152,7 +152,7 @@ export async function deletePlacement(
 
 /**
  * Sets how many nodes serve an environment. `"all"` or a whole number of at
- * least 1; anything else is `ScaloError("invalid-input")`.
+ * least 1; anything else is `ScafoError("invalid-input")`.
  *
  * Takes effect on the coordinator's next assignment pass rather than here: this
  * states the intent, and which nodes it lands on stays the coordinator's to

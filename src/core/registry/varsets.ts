@@ -1,6 +1,6 @@
 /* Varsets: AES-256-GCM sealed configuration, stored as content-addressed envelopes. */
 
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import type { PlainVarset, VarsetEnvelope } from "../types/registry.ts";
 import { fromBase64Url, toBase64Url } from "../utils/base64.ts";
 import { sha256Hex } from "../utils/hash.ts";
@@ -22,7 +22,7 @@ export async function importVarsetKey(raw: Uint8Array | CryptoKey): Promise<Cryp
   if (!(raw instanceof Uint8Array)) return raw;
 
   if (raw.byteLength !== 32) {
-    throw new ScaloError("invalid-varset", "Invalid varset key", {
+    throw new ScafoError("invalid-varset", "Invalid varset key", {
       detail: `AES-256-GCM needs a 32-byte key, got ${String(raw.byteLength)}`,
     });
   }
@@ -59,7 +59,7 @@ export async function sealVarset(
 export async function openVarset(envelope: VarsetEnvelope, key: CryptoKey): Promise<PlainVarset> {
   const { v, alg } = envelope as { v: number; alg: string };
   if (v !== 1 || alg !== "A256GCM") {
-    throw new ScaloError("invalid-varset", "Unsupported varset envelope", {
+    throw new ScafoError("invalid-varset", "Unsupported varset envelope", {
       detail: `expected v 1 and alg "A256GCM", got v ${String(v)} and alg "${alg}"`,
     });
   }
@@ -72,7 +72,7 @@ export async function openVarset(envelope: VarsetEnvelope, key: CryptoKey): Prom
       fromBase64Url(envelope.ct),
     );
   } catch (error) {
-    throw new ScaloError("invalid-varset", "Varset could not be decrypted", {
+    throw new ScafoError("invalid-varset", "Varset could not be decrypted", {
       detail: "wrong key, or the envelope has been altered",
       cause: error,
     });
@@ -81,7 +81,7 @@ export async function openVarset(envelope: VarsetEnvelope, key: CryptoKey): Prom
   try {
     return JSON.parse(new TextDecoder().decode(plaintext)) as PlainVarset;
   } catch (error) {
-    throw new ScaloError("invalid-varset", "Varset plaintext is not valid JSON", { cause: error });
+    throw new ScafoError("invalid-varset", "Varset plaintext is not valid JSON", { cause: error });
   }
 }
 
@@ -103,7 +103,7 @@ export async function putVarset(
 
     const existing = await requireJson<VarsetEnvelope>(ctx, key);
     if (deepEqual(existing.value, sealed.envelope)) return;
-    throw new ScaloError("immutable", "Varset already exists", {
+    throw new ScafoError("immutable", "Varset already exists", {
       detail: `"${sealed.id}" in project "${project}" holds different bytes`,
       cause: error,
     });

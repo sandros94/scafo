@@ -11,7 +11,7 @@
  * explicitly forces it.
  */
 
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import type { EnvironmentRecord } from "../types/registry.ts";
 import { formatDuration } from "./_shared.ts";
 import { updateJson } from "./cas.ts";
@@ -56,7 +56,7 @@ export interface RetirementOptions {
  * because the first run scrolled past — would silently push the deletion a full
  * day out, and a scripted "retire then delete" would never reach its second half.
  *
- * Throws `ScaloError("not-found")` when there is no such environment.
+ * Throws `ScafoError("not-found")` when there is no such environment.
  */
 export async function retireEnvironment(
   ctx: RegistryContext,
@@ -138,7 +138,7 @@ export function retirementState(
  *   deleted the way it has always been.
  * - retired past its grace — the two-step decommission, completed.
  *
- * Throws `ScaloError("invalid-input")` at status 409 otherwise: the request is
+ * Throws `ScafoError("invalid-input")` at status 409 otherwise: the request is
  * well-formed, the environment is simply not yet in a state this call may act
  * on. The detail is the point of the refusal — it says which route applies and,
  * for an environment already retired, how much of the grace is left to wait.
@@ -157,22 +157,22 @@ export function assertDeletable(
   if (state?.expired === true) return;
 
   if (state === null) {
-    throw new ScaloError("invalid-input", "Environment is not retired", {
+    throw new ScafoError("invalid-input", "Environment is not retired", {
       status: 409,
       detail:
         `${target} is neither ephemeral nor retired, and deleting a long-lived environment ` +
         `takes two steps so the decision to discard it is made once and on its own: retire it ` +
-        `("scalo env retire"), then delete it after the ${formatDuration(graceMs)} grace — or ` +
+        `("scafo env retire"), then delete it after the ${formatDuration(graceMs)} grace — or ` +
         `delete it now with force, which skips both`,
     });
   }
 
-  throw new ScaloError("invalid-input", "Environment is still within its retirement grace", {
+  throw new ScafoError("invalid-input", "Environment is still within its retirement grace", {
     status: 409,
     detail:
       `${target} was retired at ${state.retiredAt} and ${formatDuration(state.remainingMs)} of ` +
       `its ${formatDuration(graceMs)} grace remains, during which it stays reversible ` +
-      `("scalo env unretire"): wait for the grace to run out and delete it then, or delete it ` +
+      `("scafo env unretire"): wait for the grace to run out and delete it then, or delete it ` +
       `now with force`,
   });
 }

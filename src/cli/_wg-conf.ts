@@ -8,7 +8,7 @@
  * re-render after a new node joins is the only step left to the operator.
  *
  * Nothing here applies the configuration. Bringing an interface up needs a
- * kernel module and NET_ADMIN, which is the operator's to give: scalo writes the
+ * kernel module and NET_ADMIN, which is the operator's to give: scafo writes the
  * file and prints the command.
  */
 

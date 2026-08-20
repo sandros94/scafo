@@ -8,7 +8,7 @@
 import { createRequire } from "node:module";
 import { promisify } from "node:util";
 import { gunzip, zstdCompress, zstdDecompress } from "node:zlib";
-import { ScaloError } from "../../core/error.ts";
+import { ScafoError } from "../../core/error.ts";
 
 /*
  * `tar` reaches into `node:fs` and is loaded through a CommonJS require, which
@@ -63,7 +63,7 @@ export async function packDirectory(dir: string): Promise<Uint8Array> {
  * the other way still deploys. Entries that would escape `dir` — absolute paths,
  * `..` segments — are refused by the reader; nothing is ever written outside it.
  *
- * Throws `ScaloError("invalid-input")` when the bytes are neither compression,
+ * Throws `ScafoError("invalid-input")` when the bytes are neither compression,
  * or when what they decompress to is not a tar.
  */
 export async function unpackArchive(archive: Uint8Array, dir: string): Promise<void> {
@@ -79,7 +79,7 @@ export async function unpackArchive(archive: Uint8Array, dir: string): Promise<v
     const unpack = tar.extract({ cwd: dir });
     unpack.on("error", (error: Error) => {
       reject(
-        new ScaloError("invalid-input", "Artifact is not a readable archive", {
+        new ScafoError("invalid-input", "Artifact is not a readable archive", {
           detail: "the decompressed bytes could not be read as a tar",
           cause: error,
         }),
@@ -92,8 +92,8 @@ export async function unpackArchive(archive: Uint8Array, dir: string): Promise<v
 
 /** Decompresses an artifact, choosing the algorithm by its magic bytes. */
 async function decompress(archive: Uint8Array): Promise<Buffer> {
-  const failed = (detail: string, cause?: unknown): ScaloError =>
-    new ScaloError("invalid-input", "Artifact is not a readable archive", { detail, cause });
+  const failed = (detail: string, cause?: unknown): ScafoError =>
+    new ScafoError("invalid-input", "Artifact is not a readable archive", { detail, cause });
 
   const inflate = startsWith(archive, ZSTD_MAGIC)
     ? decompressAsync

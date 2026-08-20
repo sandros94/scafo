@@ -26,7 +26,7 @@ export interface ProcessIdentity {
  * project/environment/build, which is what makes a second build of the same
  * environment a second process rather than a restart of the first.
  *
- * Throws `ScaloError("invalid-slug")` when a part is not a slug or a content id,
+ * Throws `ScafoError("invalid-slug")` when a part is not a slug or a content id,
  * so an id can never name something the registry would refuse to address.
  */
 export function formatProcessId(identity: ProcessIdentity): string {

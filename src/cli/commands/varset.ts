@@ -1,8 +1,8 @@
-/* `scalo varset`: seal an environment's variables into the registry, and list what it carries. */
+/* `scafo varset`: seal an environment's variables into the registry, and list what it carries. */
 
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import { loadAgentConfig } from "../../agent/config.ts";
-import { ScaloError } from "../../core/error.ts";
+import { ScafoError } from "../../core/error.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
 import { createRegistry } from "../_bootstrap.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
@@ -17,9 +17,9 @@ import {
   toPlainVarset,
 } from "../_varset.ts";
 
-/* The bucket the registry lives in, exactly as `scalo up` takes it. */
+/* The bucket the registry lives in, exactly as `scafo up` takes it. */
 const bucketArgs: ArgsDef = {
-  "config": { type: "string", description: "Path to scalo.config.jsonc" },
+  "config": { type: "string", description: "Path to scafo.config.jsonc" },
   "endpoint": { type: "string", description: "S3-compatible endpoint URL" },
   "region": { type: "string", description: "Signing region of the bucket" },
   "bucket": { type: "string", description: "Bucket holding the registry" },
@@ -88,7 +88,7 @@ async function runSet(flags: Record<string, unknown>): Promise<void> {
 
   const contents = await readTextFile(path);
   if (contents === null) {
-    throw new ScaloError("invalid-input", "Variable file not found", {
+    throw new ScafoError("invalid-input", "Variable file not found", {
       detail: `"${path}" could not be read`,
     });
   }
@@ -103,11 +103,11 @@ async function runSet(flags: Record<string, unknown>): Promise<void> {
 
   const count = Object.keys(plain).length;
   console.log(
-    `scalo: sealed ${String(count)} variable${count === 1 ? "" : "s"} as varset "${result.id}" ` +
+    `scafo: sealed ${String(count)} variable${count === 1 ? "" : "s"} as varset "${result.id}" ` +
       `for "${target.project}/${target.env}"`,
   );
   for (const warning of result.warnings) {
-    console.warn(`scalo: warning: ${warning.code}: ${warning.detail}`);
+    console.warn(`scafo: warning: ${warning.code}: ${warning.detail}`);
   }
 }
 
@@ -121,7 +121,7 @@ async function runShow(flags: Record<string, unknown>): Promise<void> {
 
   /* Secret values are never printed, key in hand or not: this output is read
      over shoulders, pasted into issues and captured by CI logs. */
-  console.log(`scalo: "${target.project}/${target.env}" uses varset "${shown.id}"`);
+  console.log(`scafo: "${target.project}/${target.env}" uses varset "${shown.id}"`);
   const listed = formatVarset(shown.described);
   if (listed !== "") console.log(listed);
 }
@@ -144,9 +144,9 @@ async function resolveTarget(flags: Record<string, unknown>): Promise<Target> {
 
   const keyFile = text(flags["key-file"]) ?? config.varsets?.keyFile;
   if (keyFile === undefined) {
-    throw new ScaloError("invalid-input", "Missing required configuration", {
+    throw new ScafoError("invalid-input", "Missing required configuration", {
       detail:
-        `"varsets.keyFile" has no value: pass --key-file, set SCALO_VARSET_KEY_FILE in the ` +
+        `"varsets.keyFile" has no value: pass --key-file, set SCAFO_VARSET_KEY_FILE in the ` +
         `environment, or set it in the config file`,
     });
   }
@@ -163,7 +163,7 @@ function required(flags: Record<string, unknown>, name: string): string {
   const value = text(flags[name]);
   if (value !== undefined) return value;
 
-  throw new ScaloError("invalid-input", "Missing required argument", {
+  throw new ScafoError("invalid-input", "Missing required argument", {
     detail: `--${name} must be given`,
   });
 }

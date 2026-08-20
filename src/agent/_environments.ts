@@ -2,7 +2,7 @@
 
 import type { H3Event } from "h3";
 import { signNodeToken } from "../core/auth/node-token.ts";
-import { ScaloError } from "../core/error.ts";
+import { ScafoError } from "../core/error.ts";
 import { readJson } from "../core/registry/cas.ts";
 import { nowDate } from "../core/registry/context.ts";
 import { isLeaseExpired } from "../core/registry/lease.ts";
@@ -17,7 +17,7 @@ import type { AgentContext, EnvironmentDeleted } from "./app.ts";
  * it is never forwarded again: the mesh is one hop between peers, and a ring of
  * nodes each convinced the next one coordinates would forward forever.
  */
-export const PROXIED_HEADER: string = "x-scalo-proxied";
+export const PROXIED_HEADER: string = "x-scafo-proxied";
 
 /**
  * Whether the request asked for a forced deletion, which bypasses both the
@@ -74,7 +74,7 @@ export async function deleteEnvironmentRequest(
   }
 
   if (lease === null) {
-    throw new ScaloError("draining", "No node is coordinating", {
+    throw new ScafoError("draining", "No node is coordinating", {
       detail:
         `no node holds the coordinator lease, and this one could not take it, so there is ` +
         `nowhere to carry out the deletion of "${project}/${env}" right now`,
@@ -86,7 +86,7 @@ export async function deleteEnvironmentRequest(
        reading it, so the forward landed on a node that does not coordinate
        either. Refused rather than forwarded on: the caller retries against a
        settled lease, and no request circles the mesh. */
-    throw new ScaloError("draining", "Not the coordinator", {
+    throw new ScafoError("draining", "Not the coordinator", {
       detail:
         `this request was already forwarded once, and node "${agent.nodeId}" does not hold ` +
         `the coordinator lease — node "${lease.node}" does as of this read`,
@@ -116,7 +116,7 @@ async function forwardToCoordinator(
 ): Promise<Response> {
   const signingKey = agent.signingKey;
   if (signingKey === undefined) {
-    throw new ScaloError("capability-missing", "This node cannot reach the coordinator", {
+    throw new ScafoError("capability-missing", "This node cannot reach the coordinator", {
       detail:
         `it holds no signing key, so it cannot present a node token to node "${nodeId}"; ` +
         `send the request to the coordinator directly`,

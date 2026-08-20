@@ -12,7 +12,7 @@ import {
   parseMemoryMax,
   probeCapacity,
 } from "../src/core/capacity/index.ts";
-import type { ScaloError } from "../src/core/error.ts";
+import type { ScafoError } from "../src/core/error.ts";
 import { CLOCK_START_MS, rejectionOf } from "./_helpers.ts";
 
 const GIB = 1024 * 1024 * 1024;
@@ -273,6 +273,6 @@ function readerFor(inputs: CapacityInputs): HostReader {
   return { capacityInputs: (): Promise<CapacityInputs> => Promise.resolve(inputs) };
 }
 
-function refusal(inputs: CapacityInputs, opts?: CapacityOverrides): Promise<ScaloError> {
+function refusal(inputs: CapacityInputs, opts?: CapacityOverrides): Promise<ScafoError> {
   return rejectionOf(() => Promise.resolve(computeCapacity(inputs, opts)));
 }

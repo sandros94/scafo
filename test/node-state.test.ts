@@ -193,22 +193,22 @@ describe("where the state lives when nothing configures it", () => {
 
     expect(resolved.startsWith("/")).toBe(true);
     expect(resolved.startsWith(process.cwd())).toBe(false);
-    expect(resolved).toMatch(/scalo$/);
+    expect(resolved).toMatch(/scafo$/);
   });
 
   it("prefers XDG_STATE_HOME when it is absolute, and the system directory for root", async () => {
     const xdg = resolveDefaultStateDir({ XDG_STATE_HOME: "/xdg/state" });
 
-    expect(xdg).toBe(process.getuid?.() === 0 ? SYSTEM_STATE_DIR : "/xdg/state/scalo");
+    expect(xdg).toBe(process.getuid?.() === 0 ? SYSTEM_STATE_DIR : "/xdg/state/scafo");
     expect(resolveDefaultStateDir({})).toMatch(
-      process.getuid?.() === 0 ? /^\/var\/lib\/scalo$/ : /\.local\/state\/scalo$/,
+      process.getuid?.() === 0 ? /^\/var\/lib\/scafo$/ : /\.local\/state\/scafo$/,
     );
   });
 });
 
 /** A directory that does not exist yet, inside a temporary root of this run's own. */
 async function stateDir(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "scalo-node-state-"));
+  const root = await mkdtemp(join(tmpdir(), "scafo-node-state-"));
   roots.push(root);
   return join(root, "state");
 }

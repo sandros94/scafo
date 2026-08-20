@@ -6,7 +6,7 @@
  * WHICH nodes is `rendezvous.ts`; this only answers HOW MANY.
  */
 
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import type { EnvironmentRecord, ReplicaCount } from "../types/registry.ts";
 
 /**
@@ -28,7 +28,7 @@ export function resolveReplicas(env: EnvironmentRecord): ReplicaCount {
 }
 
 /**
- * Throws `ScaloError("invalid-input")` unless `value` is `"all"` or a whole
+ * Throws `ScafoError("invalid-input")` unless `value` is `"all"` or a whole
  * number of at least 1.
  *
  * Zero is refused rather than read as "run nowhere": an environment nothing runs
@@ -39,7 +39,7 @@ export function assertReplicas(value: unknown): asserts value is ReplicaCount {
   if (value === "all") return;
   if (typeof value === "number" && Number.isInteger(value) && value >= 1) return;
 
-  throw new ScaloError("invalid-input", "Invalid replica count", {
+  throw new ScafoError("invalid-input", "Invalid replica count", {
     detail: `${describe(value)} must be "all" or a whole number of at least 1`,
   });
 }
@@ -47,7 +47,7 @@ export function assertReplicas(value: unknown): asserts value is ReplicaCount {
 /**
  * Reads a replica count written as text — a command-line flag, an environment
  * variable — into the value the registry stores. Refuses anything else with
- * `ScaloError("invalid-input")`, so a typo never becomes a placement decision.
+ * `ScafoError("invalid-input")`, so a typo never becomes a placement decision.
  */
 export function parseReplicas(text: string): ReplicaCount {
   const trimmed = text.trim();

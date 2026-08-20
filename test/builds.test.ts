@@ -15,7 +15,7 @@ const BUILD: BuildInput = {
   builtWithVarset: "aaaaaaaa",
   source: {
     provider: "github",
-    repo: "sandros94/scalo",
+    repo: "sandros94/scafo",
     ref: "refs/heads/main",
     commit: "cafe1234",
   },

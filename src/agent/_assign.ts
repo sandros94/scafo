@@ -8,7 +8,7 @@
  * did without inheriting any state from it.
  */
 
-import { ScaloError } from "../core/error.ts";
+import { ScafoError } from "../core/error.ts";
 import { assignNodes } from "../core/placement/rendezvous.ts";
 import { resolveReplicas } from "../core/placement/replicas.ts";
 import { describeSelector, eligibleNodes } from "../core/placement/selector.ts";
@@ -74,7 +74,7 @@ export interface AssignmentOptions {
 /**
  * Decides and records the placement of every environment in the installation.
  *
- * Throws `ScaloError("placement-unavailable")` when NO node is live, having
+ * Throws `ScafoError("placement-unavailable")` when NO node is live, having
  * written nothing. That refusal is the point: a bucket that briefly cannot be
  * reached, a clock that jumped, a fleet mid-restart — each of them reads as an
  * empty node list, and the decision that follows from an empty node list is
@@ -88,7 +88,7 @@ export interface AssignmentOptions {
  * in the pass is decided normally, and the failure is answered in
  * {@link AssignmentResult.unplaced}.
  *
- * Throws `ScaloError("lease-lost")` when the lease goes while it works; the
+ * Throws `ScafoError("lease-lost")` when the lease goes while it works; the
  * caller stops being the coordinator at that point.
  */
 export async function runAssignment(
@@ -107,7 +107,7 @@ export async function runAssignment(
   const live = fleet.map((record) => record.id);
 
   if (live.length === 0) {
-    throw new ScaloError("placement-unavailable", "No node is live", {
+    throw new ScafoError("placement-unavailable", "No node is live", {
       detail:
         `no registered node has reported in recently enough to be given work, so every ` +
         `placement is left exactly as it stands: deciding that nothing is served anywhere ` +

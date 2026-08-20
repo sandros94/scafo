@@ -1,5 +1,5 @@
 {
-  "name": "scalo",
+  "name": "scafo",
   "version": "0.0.0",
   "description": "Self-hosted serverless deployment platform for JS apps",
   "license": "Apache-2.0",
@@ -9,10 +9,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sandros94/scalo.git"
+    "url": "git+https://github.com/sandros94/scafo.git"
   },
   "bin": {
-    "scalo": "./dist/cli/index.mjs"
+    "scafo": "./dist/cli/index.mjs"
   },
   "files": [
     "dist"

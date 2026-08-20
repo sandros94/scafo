@@ -3,7 +3,7 @@
  * `wg0.conf` says, what it publishes about itself in the registry, and what a
  * node whose transport is a tunnel refuses to boot without.
  *
- * scalo never computes an X25519 key, so neither does this suite: the keypair
+ * scafo never computes an X25519 key, so neither does this suite: the keypair
  * comes out of a state directory, or out of a `wg` that is a shell script on a
  * temporary PATH. No interface is ever brought up — that needs a kernel module
  * and NET_ADMIN, and is the operator's step by design.
@@ -34,10 +34,10 @@ import { ctxWith, rejectsWith } from "./_helpers.ts";
 
 /** Bucket settings every configuration in this suite needs and none of it uses. */
 const REQUIRED_ENV: Record<string, string> = {
-  SCALO_S3_ENDPOINT: "http://store.test:9000",
-  SCALO_S3_BUCKET: "registry",
-  SCALO_S3_ACCESS_KEY: "key",
-  SCALO_S3_SECRET_KEY: "secret",
+  SCAFO_S3_ENDPOINT: "http://store.test:9000",
+  SCAFO_S3_BUCKET: "registry",
+  SCAFO_S3_ACCESS_KEY: "key",
+  SCAFO_S3_SECRET_KEY: "secret",
 };
 
 /** What the fake `wg` on PATH prints, so every assertion knows the answer. */
@@ -66,7 +66,7 @@ describe("where a node's tunnel keys come from", () => {
     const dir = await stateDir();
     await writeKeys(dir, STORED_PRIVATE, STORED_PUBLIC);
     /* Nothing on PATH at all: a node whose keys are on disk must never need the
-       tool that made them, so `scalo up` works on a host without it. */
+       tool that made them, so `scafo up` works on a host without it. */
     await usePath(await emptyDir());
 
     const keys = await ensureWireguardKeys(dir);
@@ -97,7 +97,7 @@ describe("where a node's tunnel keys come from", () => {
 
   it("derives only the public half when the private one was supplied by hand", async () => {
     /* The documented path: an operator runs `wg genkey > wg-private.key`, and
-       scalo works out the rest without ever choosing key material itself. */
+       scafo works out the rest without ever choosing key material itself. */
     const dir = await stateDir();
     await writeFile(join(dir, WG_PRIVATE_KEY_FILE), `${STORED_PRIVATE}\n`);
     await useShim();
@@ -131,7 +131,7 @@ describe("where a node's tunnel keys come from", () => {
     /* Actionable on its own: the exact command, the exact path, the mode. */
     expect(error.detail).toContain(`wg genkey > ${join(dir, WG_PRIVATE_KEY_FILE)}`);
     expect(error.detail).toContain("chmod 600");
-    expect(error.detail).toContain("scalo never derives an X25519 key");
+    expect(error.detail).toContain("scafo never derives an X25519 key");
   });
 
   it("refuses when it holds a private key it cannot derive the public half of", async () => {
@@ -204,7 +204,7 @@ describe("where a node's tunnel keys come from", () => {
   });
 });
 
-describe("what `scalo up` reads back, and what it will not do", () => {
+describe("what `scafo up` reads back, and what it will not do", () => {
   it("reads a complete pair without touching PATH", async () => {
     const dir = await stateDir();
     await writeKeys(dir, STORED_PRIVATE, STORED_PUBLIC);
@@ -227,18 +227,18 @@ describe("what `scalo up` reads back, and what it will not do", () => {
 
   it("refuses to boot a node whose transport is a tunnel it has not been set up on", async () => {
     const dir = await stateDir();
-    const config = await tunnelConfig({ SCALO_STATE_DIR: dir });
+    const config = await tunnelConfig({ SCAFO_STATE_DIR: dir });
 
     const error = await rejectsWith(() => loadWireguardRecord(config), "invalid-input");
 
-    expect(error.detail).toContain("scalo wg init");
+    expect(error.detail).toContain("scafo wg init");
     expect(error.detail).toContain(dir);
   });
 
   it("publishes the key, endpoint and address once it has been", async () => {
     const dir = await stateDir();
     await writeKeys(dir, STORED_PRIVATE, STORED_PUBLIC);
-    const config = await tunnelConfig({ SCALO_STATE_DIR: dir });
+    const config = await tunnelConfig({ SCAFO_STATE_DIR: dir });
 
     await expect(loadWireguardRecord(config)).resolves.toEqual({
       publicKey: STORED_PUBLIC,
@@ -252,9 +252,9 @@ describe("what `scalo up` reads back, and what it will not do", () => {
     const config = await loadAgentConfig({
       env: {
         ...REQUIRED_ENV,
-        SCALO_TRANSPORT: "none",
-        SCALO_WG_ADDRESS: "10.83.0.1/24",
-        SCALO_WG_ENDPOINT: "203.0.113.7:51820",
+        SCAFO_TRANSPORT: "none",
+        SCAFO_WG_ADDRESS: "10.83.0.1/24",
+        SCAFO_WG_ENDPOINT: "203.0.113.7:51820",
       },
     });
 
@@ -271,14 +271,14 @@ describe("what `scalo up` reads back, and what it will not do", () => {
 
   it("names the setting a tunnel node is missing, and what it is for", async () => {
     const cases: [string, Record<string, string>, string][] = [
-      ["no address", { SCALO_WG_ENDPOINT: "203.0.113.7:51820" }, "wireguard.address"],
-      ["no endpoint", { SCALO_WG_ADDRESS: "10.83.0.1/24" }, "wireguard.endpoint"],
+      ["no address", { SCAFO_WG_ENDPOINT: "203.0.113.7:51820" }, "wireguard.address"],
+      ["no endpoint", { SCAFO_WG_ADDRESS: "10.83.0.1/24" }, "wireguard.endpoint"],
       ["neither", {}, "wireguard.address"],
     ];
 
     for (const [what, env, expected] of cases) {
       const config = await loadAgentConfig({
-        env: { ...REQUIRED_ENV, SCALO_TRANSPORT: "wireguard", ...env },
+        env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "wireguard", ...env },
       });
 
       const error = await rejectsWith(
@@ -287,7 +287,7 @@ describe("what `scalo up` reads back, and what it will not do", () => {
       );
       expect(error.detail, what).toContain(expected);
       /* Every way it can be given, so the message needs no documentation. */
-      expect(error.detail, what).toContain("SCALO_WG_");
+      expect(error.detail, what).toContain("SCAFO_WG_");
       expect(error.detail, what).toContain("--wg-");
     }
   });
@@ -296,7 +296,7 @@ describe("what `scalo up` reads back, and what it will not do", () => {
     const address = await rejectsWith(
       () =>
         loadAgentConfig({
-          env: { ...REQUIRED_ENV, SCALO_TRANSPORT: "wireguard", SCALO_WG_ADDRESS: "10.83.0.1" },
+          env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "wireguard", SCAFO_WG_ADDRESS: "10.83.0.1" },
         }),
       "invalid-input",
     );
@@ -307,9 +307,9 @@ describe("what `scalo up` reads back, and what it will not do", () => {
         loadAgentConfig({
           env: {
             ...REQUIRED_ENV,
-            SCALO_TRANSPORT: "wireguard",
-            SCALO_WG_ADDRESS: "10.83.0.1/24",
-            SCALO_WG_ENDPOINT: "203.0.113.7",
+            SCAFO_TRANSPORT: "wireguard",
+            SCAFO_WG_ADDRESS: "10.83.0.1/24",
+            SCAFO_WG_ENDPOINT: "203.0.113.7",
           },
         }),
       "invalid-input",
@@ -325,7 +325,7 @@ describe("the addresses a tunnelled node uses", () => {
      * loopback is unreachable from the other nodes, and the wildcard the agent
      * listener binds names no interface a peer could dial.
      */
-    const config = await tunnelConfig({ SCALO_LISTEN: "0.0.0.0:7400" });
+    const config = await tunnelConfig({ SCAFO_LISTEN: "0.0.0.0:7400" });
 
     expect(config.runtime.bindHost).toBe("10.83.0.1");
     expect(config.node.advertise).toBe("10.83.0.1:7400");
@@ -348,7 +348,7 @@ describe("the addresses a tunnelled node uses", () => {
       const error = await rejectsWith(
         () =>
           loadAgentConfig({
-            env: { ...REQUIRED_ENV, SCALO_TRANSPORT: "wireguard", SCALO_WG_ADDRESS: address },
+            env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "wireguard", SCAFO_WG_ADDRESS: address },
           }),
         "invalid-input",
       );
@@ -358,8 +358,8 @@ describe("the addresses a tunnelled node uses", () => {
 
   it("takes the port from the internal listener when there is one", async () => {
     const config = await tunnelConfig({
-      SCALO_LISTEN: "0.0.0.0:7400",
-      SCALO_INTERNAL_LISTEN: "0.0.0.0:7401",
+      SCAFO_LISTEN: "0.0.0.0:7400",
+      SCAFO_INTERNAL_LISTEN: "0.0.0.0:7401",
     });
 
     expect(config.node.advertise).toBe("10.83.0.1:7401");
@@ -367,9 +367,9 @@ describe("the addresses a tunnelled node uses", () => {
 
   it("still lets the operator say otherwise, on either", async () => {
     const config = await tunnelConfig({
-      SCALO_LISTEN: "0.0.0.0:7400",
-      SCALO_BIND_HOST: "0.0.0.0",
-      SCALO_ADVERTISE: "node-a.internal:7400",
+      SCAFO_LISTEN: "0.0.0.0:7400",
+      SCAFO_BIND_HOST: "0.0.0.0",
+      SCAFO_ADVERTISE: "node-a.internal:7400",
     });
 
     expect(config.runtime.bindHost).toBe("0.0.0.0");
@@ -378,7 +378,7 @@ describe("the addresses a tunnelled node uses", () => {
 
   it("changes nothing for a node that runs no tunnel", async () => {
     const config = await loadAgentConfig({
-      env: { ...REQUIRED_ENV, SCALO_TRANSPORT: "none", SCALO_LISTEN: "0.0.0.0:7400" },
+      env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "none", SCAFO_LISTEN: "0.0.0.0:7400" },
     });
 
     expect(config.runtime.bindHost).toBe("127.0.0.1");
@@ -389,7 +389,7 @@ describe("the addresses a tunnelled node uses", () => {
 describe("what a node publishes about its place on the tunnel", () => {
   it("writes the wireguard field into its own record, alongside everything else", async () => {
     const { ctx } = ctxWith(new MemoryCasStore());
-    const config = await tunnelConfig({ SCALO_LISTEN: "0.0.0.0:7400" });
+    const config = await tunnelConfig({ SCAFO_LISTEN: "0.0.0.0:7400" });
 
     const record = await registerThisNode(ctx, {
       config,
@@ -423,7 +423,7 @@ describe("what a node publishes about its place on the tunnel", () => {
 
   it("changes nothing but the tunnel field of a record the agent already wrote", async () => {
     /*
-     * `scalo wg init` is run from an operator's shell, not from the agent's
+     * `scafo wg init` is run from an operator's shell, not from the agent's
      * environment, so the configuration it resolves may not be the one the node
      * is running on. Rewriting the record from it would move the node's
      * advertised address and capacity along with its tunnel details, and nothing
@@ -431,7 +431,7 @@ describe("what a node publishes about its place on the tunnel", () => {
      */
     const { ctx } = ctxWith(new MemoryCasStore());
     const running = await loadAgentConfig({
-      env: { ...REQUIRED_ENV, SCALO_TRANSPORT: "none", SCALO_ADVERTISE: "10.0.0.4:9000" },
+      env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "none", SCAFO_ADVERTISE: "10.0.0.4:9000" },
     });
     const before = await registerThisNode(ctx, {
       config: running,
@@ -467,7 +467,7 @@ describe("what a node publishes about its place on the tunnel", () => {
   });
 
   it("registers a node outright when it has no record yet", async () => {
-    /* `scalo wg init` before the first `scalo up` is the order the setup
+    /* `scafo wg init` before the first `scafo up` is the order the setup
        instructions ask for, so there is nothing to narrow an update to. */
     const { ctx } = ctxWith(new MemoryCasStore());
     const config = await tunnelConfig();
@@ -596,9 +596,9 @@ async function tunnelConfig(env: Record<string, string> = {}): Promise<AgentConf
   return loadAgentConfig({
     env: {
       ...REQUIRED_ENV,
-      SCALO_TRANSPORT: "wireguard",
-      SCALO_WG_ADDRESS: "10.83.0.1/24",
-      SCALO_WG_ENDPOINT: "203.0.113.7:51820",
+      SCAFO_TRANSPORT: "wireguard",
+      SCAFO_WG_ADDRESS: "10.83.0.1/24",
+      SCAFO_WG_ENDPOINT: "203.0.113.7:51820",
       ...env,
     },
   });
@@ -649,7 +649,7 @@ async function writeKeys(dir: string, privateKey: string, publicKey: string): Pr
 
 /** A state directory of this run's own, created the way the node would create it. */
 async function stateDir(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "scalo-wg-"));
+  const root = await mkdtemp(join(tmpdir(), "scafo-wg-"));
   roots.push(root);
   const dir = join(root, "state");
   await mkdir(dir, { mode: 0o700 });
@@ -657,7 +657,7 @@ async function stateDir(): Promise<string> {
 }
 
 async function emptyDir(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "scalo-wg-path-"));
+  const root = await mkdtemp(join(tmpdir(), "scafo-wg-path-"));
   roots.push(root);
   return root;
 }
@@ -670,7 +670,7 @@ async function usePath(dir: string): Promise<void> {
 /**
  * Puts a `wg` on PATH that prints fixed keys.
  *
- * A script rather than a mocked module: what is under test is that scalo shells
+ * A script rather than a mocked module: what is under test is that scafo shells
  * out to the operator's own tool for key material and computes none itself, and
  * a stub of the child process would test the opposite.
  */

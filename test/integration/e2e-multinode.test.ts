@@ -11,18 +11,18 @@
  * anything the nodes do to each other has to cross a network, which is the whole
  * point of running two of them.
  *
- * Skipped unless SCALO_E2E=1, because it is minutes rather than seconds:
+ * Skipped unless SCAFO_E2E=1, because it is minutes rather than seconds:
  *
- *   SCALO_E2E=1 pnpm vitest run test/integration/e2e-multinode.test.ts
+ *   SCAFO_E2E=1 pnpm vitest run test/integration/e2e-multinode.test.ts
  *
  * Every assertion polls until a deadline, and any timeout dumps BOTH agents'
  * container logs — with two nodes, the account of what went wrong is as often on
  * the other one.
  *
- * NOTE on `SCALO_BIND_HOST`: runtime processes bind loopback by default, which
+ * NOTE on `SCAFO_BIND_HOST`: runtime processes bind loopback by default, which
  * no peer on another host can reach. Cross-node cell traffic therefore needs
  * them bound wider, and because that exposes an unauthenticated peer listener it
- * only happens where the operator has classified the network — `SCALO_TRANSPORT`
+ * only happens where the operator has classified the network — `SCAFO_TRANSPORT`
  * below is that statement.
  */
 
@@ -57,7 +57,7 @@ import type { ProcessStatus } from "../../src/core/types/supervisor.ts";
 import { createUns3Store } from "../../src/drivers/store/uns3.ts";
 
 const env = process.env;
-const E2E = env.SCALO_E2E === "1";
+const E2E = env.SCAFO_E2E === "1";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const REPO_ROOT = resolve(HERE, "../..");
@@ -67,7 +67,7 @@ const CLI = join(REPO_ROOT, "dist/cli/index.mjs");
 const STORE_IMAGE = "chrislusf/seaweedfs:4.42";
 const CADDY_IMAGE = "caddy:2";
 /** node24 + celld + esbuild; the same image the single-node suite needs. */
-const AGENT_IMAGE = "scalo-v13-probe";
+const AGENT_IMAGE = "scafo-probe";
 
 const STORE_PORT = 8333;
 const CADDY_HTTP_PORT = 80;
@@ -75,12 +75,12 @@ const CADDY_ADMIN_PORT = 2019;
 /** Published on each Caddy container, because its agent has no network of its own. */
 const AGENT_PORT = 7400;
 
-const BUCKET = "scalo-e2e-multinode";
+const BUCKET = "scafo-e2e-multinode";
 const KEY_PREFIX = "e2e";
-const ACCESS_KEY = "scalo";
-const SECRET_KEY = "scalo-secret";
+const ACCESS_KEY = "scafo";
+const SECRET_KEY = "scafo-secret";
 const REGION = "us-east-1";
-const PLATFORM_DOMAIN = "scalo.test";
+const PLATFORM_DOMAIN = "scafo.test";
 const PROJECT = "app";
 const ENVIRONMENT = "production";
 /** Deployed, deleted through the coordinator, and reaped: the ephemeral one. */
@@ -234,7 +234,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       ),
     };
 
-    const dir = await mkdtemp(join(tmpdir(), "scalo-e2e-multi-key-"));
+    const dir = await mkdtemp(join(tmpdir(), "scafo-e2e-multi-key-"));
     tmpDirs.push(dir);
     keyPath = join(dir, "operator.json");
     expectCleanExit(await runCli(["keygen", "--out", keyPath, "--register"], storeEnv()));
@@ -971,7 +971,7 @@ async function startNode(id: string, labels?: string): Promise<Node> {
     .withCommand(["caddy", "run", "--config", "/etc/caddy/config.json"])
     .withExposedPorts(CADDY_HTTP_PORT, CADDY_ADMIN_PORT, AGENT_PORT)
     .withWaitStrategy(
-      Wait.forHttp(`/config/apps/http/servers/scalo/routes`, CADDY_ADMIN_PORT).forStatusCode(200),
+      Wait.forHttp(`/config/apps/http/servers/scafo/routes`, CADDY_ADMIN_PORT).forStatusCode(200),
     )
     .start();
 
@@ -983,32 +983,32 @@ async function startNode(id: string, labels?: string): Promise<Node> {
     .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "rw" }])
     .withWorkingDir("/work")
     .withEnvironment({
-      SCALO_S3_ENDPOINT: storeFromContainers,
-      SCALO_S3_BUCKET: BUCKET,
-      SCALO_S3_PREFIX: KEY_PREFIX,
-      SCALO_S3_ACCESS_KEY: ACCESS_KEY,
-      SCALO_S3_SECRET_KEY: SECRET_KEY,
-      SCALO_S3_REGION: REGION,
-      SCALO_NODE_ID: id,
+      SCAFO_S3_ENDPOINT: storeFromContainers,
+      SCAFO_S3_BUCKET: BUCKET,
+      SCAFO_S3_PREFIX: KEY_PREFIX,
+      SCAFO_S3_ACCESS_KEY: ACCESS_KEY,
+      SCAFO_S3_SECRET_KEY: SECRET_KEY,
+      SCAFO_S3_REGION: REGION,
+      SCAFO_NODE_ID: id,
       /* Both the agent listener and the runtime processes bind every interface
          here, and the peer listener authenticates nobody: on a private docker
          network that is the trusted-network case, stated rather than assumed. */
-      SCALO_TRANSPORT: "none",
+      SCAFO_TRANSPORT: "none",
       /* Distinct per node, and container-local: the working directory is this
          repository bind-mounted at /work, and an identity must never be written
          into a checkout — let alone one two nodes would then share. */
-      SCALO_STATE_DIR: `/var/lib/scalo-${id}`,
-      SCALO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
-      SCALO_CADDY_ADMIN: `http://127.0.0.1:${String(CADDY_ADMIN_PORT)}`,
+      SCAFO_STATE_DIR: `/var/lib/scafo-${id}`,
+      SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
+      SCAFO_CADDY_ADMIN: `http://127.0.0.1:${String(CADDY_ADMIN_PORT)}`,
       /* The address on the bridge, which is what the other node dials — both for
          the agent API and, with the internal port, for cell traffic. */
-      SCALO_ADVERTISE: `${bridgeAddress}:${String(AGENT_PORT)}`,
+      SCAFO_ADVERTISE: `${bridgeAddress}:${String(AGENT_PORT)}`,
       /* THE multi-node setting. Runtime processes bind loopback by default,
          which nothing on the other node can reach; the advertised address above
          is only useful if something is listening on it. */
-      SCALO_BIND_HOST: "0.0.0.0",
+      SCAFO_BIND_HOST: "0.0.0.0",
       ESBUILD_BINARY_PATH: "/usr/local/bin/esbuild",
-      ...(labels === undefined ? {} : { SCALO_NODE_LABELS: labels }),
+      ...(labels === undefined ? {} : { SCAFO_NODE_LABELS: labels }),
     })
     .withCommand(["node", "dist/cli/index.mjs", "up", "--listen", `0.0.0.0:${String(AGENT_PORT)}`])
     .withLogConsumer((stream: Readable) => {
@@ -1067,7 +1067,7 @@ function runsSunset(process: ProcessStatus): boolean {
   return process.state === "running" && process.id.startsWith(`${PROJECT}--${SUNSET}--`);
 }
 
-/** One `scalo env <action>` run from the host against `node`'s agent API. */
+/** One `scafo env <action>` run from the host against `node`'s agent API. */
 function envArgs(action: string, environment: string, node: Node, extra: string[] = []): string[] {
   return [
     "env",
@@ -1150,18 +1150,18 @@ function deployArgs(
 
 function storeEnv(): Record<string, string> {
   return {
-    SCALO_S3_ENDPOINT: storeFromHost,
-    SCALO_S3_BUCKET: BUCKET,
-    SCALO_S3_PREFIX: KEY_PREFIX,
-    SCALO_S3_ACCESS_KEY: ACCESS_KEY,
-    SCALO_S3_SECRET_KEY: SECRET_KEY,
-    SCALO_S3_REGION: REGION,
+    SCAFO_S3_ENDPOINT: storeFromHost,
+    SCAFO_S3_BUCKET: BUCKET,
+    SCAFO_S3_PREFIX: KEY_PREFIX,
+    SCAFO_S3_ACCESS_KEY: ACCESS_KEY,
+    SCAFO_S3_SECRET_KEY: SECRET_KEY,
+    SCAFO_S3_REGION: REGION,
   };
 }
 
 /** A copy of the fixture application with its version variable set to `version`. */
 async function stageApp(version: string): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), `scalo-e2e-multi-app-${version}-`));
+  const dir = await mkdtemp(join(tmpdir(), `scafo-e2e-multi-app-${version}-`));
   tmpDirs.push(dir);
   await cp(join(FIXTURES, "app"), dir, { recursive: true });
 
@@ -1176,7 +1176,7 @@ async function stageApp(version: string): Promise<string> {
 }
 
 function buildIdOf(output: string): string {
-  const build = /scalo: build ([\da-f]{8,64})/.exec(output)?.[1];
+  const build = /scafo: build ([\da-f]{8,64})/.exec(output)?.[1];
   if (build === undefined) throw new Error(`the deploy named no build:\n${output}`);
   return build;
 }

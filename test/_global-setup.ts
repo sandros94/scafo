@@ -4,7 +4,7 @@ import { signRequest } from "uns3/core";
 /*
  * Starts a disposable S3-compatible store for the integration suite, unless
  * S3_ENDPOINT already points at one (CI override, real provider, local
- * playground). Pick the store with SCALO_TEST_STORE (seaweedfs | rustfs;
+ * playground). Pick the store with SCAFO_TEST_STORE (seaweedfs | rustfs;
  * default seaweedfs). Without docker the container fails to start and the
  * integration suite simply stays skipped.
  */
@@ -24,8 +24,8 @@ const STORES: Record<string, StoreSpec> = {
     image: "chrislusf/seaweedfs:4.42",
     port: 8333,
     command: ["server", "-s3"],
-    accessKey: "scalo",
-    secretKey: "scalo-secret",
+    accessKey: "scafo",
+    secretKey: "scafo-secret",
     signedBucketCreate: false,
   },
   rustfs: {
@@ -37,16 +37,16 @@ const STORES: Record<string, StoreSpec> = {
   },
 };
 
-const BUCKET = "scalo-test";
+const BUCKET = "scafo-test";
 
 export default async function setup(): Promise<() => Promise<void>> {
   if (process.env.S3_ENDPOINT !== undefined) return async () => {};
 
-  const storeName = process.env.SCALO_TEST_STORE ?? "seaweedfs";
+  const storeName = process.env.SCAFO_TEST_STORE ?? "seaweedfs";
   const spec = STORES[storeName];
   if (spec === undefined) {
     throw new Error(
-      `unknown SCALO_TEST_STORE "${storeName}", expected one of: ${Object.keys(STORES).join(", ")}`,
+      `unknown SCAFO_TEST_STORE "${storeName}", expected one of: ${Object.keys(STORES).join(", ")}`,
     );
   }
 

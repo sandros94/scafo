@@ -106,7 +106,7 @@ describe("assigning environments to nodes", () => {
 
     /* The lease renewal is the only write a settled installation makes on a
        tick; rewriting every placement each time would churn the whole registry. */
-    expect(written.filter((key) => key.startsWith("_scalo/placement/"))).toEqual([]);
+    expect(written.filter((key) => key.startsWith("_scafo/placement/"))).toEqual([]);
     expect(coordinator.status().lastAssignment?.skipped).toEqual([
       { target: `${PROJECT}/prod`, reason: "unchanged" },
     ]);
@@ -350,7 +350,7 @@ describe("what the coordinator refuses to decide", () => {
      */
     expect(coordinator.status().lastAssignFailure).toContain("No node is live");
     expect(coordinator.status().lastAssignment).toBeNull();
-    expect(written.filter((key) => key.startsWith("_scalo/placement/"))).toEqual([]);
+    expect(written.filter((key) => key.startsWith("_scafo/placement/"))).toEqual([]);
     expect(await readPlacement(clock.ctx, PROJECT, "prod")).toEqual(before);
   });
 
@@ -378,7 +378,7 @@ describe("what the coordinator refuses to decide", () => {
     await coordinator.runOnce();
 
     expect(coordinator.status().holding).toBe(false);
-    expect(written.filter((key) => key.startsWith("_scalo/placement/"))).toEqual([]);
+    expect(written.filter((key) => key.startsWith("_scafo/placement/"))).toEqual([]);
   });
 
   it("keeps the lease and reaps anyway when the assignment fails", async () => {
@@ -492,7 +492,7 @@ describe("placements of environments that are retired", () => {
     await coordinator.runOnce();
 
     expect(await readPlacement(clock.ctx, PROJECT, "prod")).toBeNull();
-    expect(written.filter((key) => key.startsWith("_scalo/placement/"))).toEqual([]);
+    expect(written.filter((key) => key.startsWith("_scafo/placement/"))).toEqual([]);
   });
 
   it("places it again on the next tick after it is taken back", async () => {
@@ -570,7 +570,7 @@ async function register(id: string, labels?: Record<string, string>): Promise<No
 
 /** The placement keys a pass wrote, which is what "wrote nothing" is asserted against. */
 function placementWrites(): string[] {
-  return written.filter((key) => key.startsWith("_scalo/placement/"));
+  return written.filter((key) => key.startsWith("_scafo/placement/"));
 }
 
 /** The decision the competing coordinator wrote, at the same fence. */

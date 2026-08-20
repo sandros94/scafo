@@ -4,7 +4,7 @@ import type { JWK_OKP_Private, JWK_OKP_SIGN } from "unjwt/jwk";
 import { importKey } from "unjwt/jwk";
 import { sign as signJws, verify as verifyJws } from "unjwt/jws";
 import { isCryptoKey } from "unjwt/utils";
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import type { RegistryContext } from "../registry/context.ts";
 import { toBase64Url } from "../utils/base64.ts";
 import { createNodeKeyCache } from "./_key-cache.ts";
@@ -15,7 +15,7 @@ import { asClaims, authInvalid, decodeCompactHeader, numberClaim, stringClaim } 
 const ALG = "EdDSA";
 
 /** Audience of every token addressed to a node agent. */
-export const NODE_TOKEN_AUDIENCE: string = "scalo-agent";
+export const NODE_TOKEN_AUDIENCE: string = "scafo-agent";
 
 /** Hard ceiling on a node token's lifetime; longer tokens are refused at both ends. */
 export const NODE_TOKEN_MAX_LIFETIME_S: number = 60;
@@ -59,7 +59,7 @@ export interface NodeIdentity {
 }
 
 export interface NodeVerifier {
-  /** Resolves the caller's identity, or throws `ScaloError("auth-invalid")`. */
+  /** Resolves the caller's identity, or throws `ScafoError("auth-invalid")`. */
   verify(token: string): Promise<NodeIdentity>;
 }
 
@@ -67,7 +67,7 @@ export interface NodeVerifier {
  * Signs a token for `kid`, the signer's node id. Tokens are single-use: each
  * carries a fresh `jti` that a verifier records once and refuses thereafter.
  *
- * Throws `ScaloError("invalid-input")` for a lifetime outside
+ * Throws `ScafoError("invalid-input")` for a lifetime outside
  * `(0, NODE_TOKEN_MAX_LIFETIME_S]` or a key that is not an Ed25519 private key.
  */
 export async function signNodeToken(
@@ -77,7 +77,7 @@ export async function signNodeToken(
 ): Promise<string> {
   const lifetimeS = opts?.lifetimeS ?? NODE_TOKEN_MAX_LIFETIME_S;
   if (!Number.isFinite(lifetimeS) || lifetimeS <= 0 || lifetimeS > NODE_TOKEN_MAX_LIFETIME_S) {
-    throw new ScaloError("invalid-input", "Invalid node token lifetime", {
+    throw new ScafoError("invalid-input", "Invalid node token lifetime", {
       detail:
         `"lifetimeS" must be greater than 0 and at most ${String(NODE_TOKEN_MAX_LIFETIME_S)}, ` +
         `got ${String(lifetimeS)}`,
@@ -98,10 +98,10 @@ export async function signNodeToken(
 
 /**
  * Builds a verifier for node tokens presented to this agent. Keys come from the
- * registry (`_scalo/nodes/<id>.json`) and are cached, so a deregistered node is
+ * registry (`_scafo/nodes/<id>.json`) and are cached, so a deregistered node is
  * rejected at most `keyTtlS` seconds later.
  *
- * Every rejection is `ScaloError("auth-invalid")`, whatever the cause.
+ * Every rejection is `ScafoError("auth-invalid")`, whatever the cause.
  */
 export function createNodeVerifier(ctx: RegistryContext, opts?: NodeVerifierOptions): NodeVerifier {
   const aud = opts?.aud ?? NODE_TOKEN_AUDIENCE;
@@ -158,14 +158,14 @@ async function importSigningKey(key: NodeSigningKey): Promise<CryptoKey> {
   try {
     imported = await importKey(key, { alg: ALG, expect: "private" });
   } catch (error) {
-    throw new ScaloError("invalid-input", "Invalid node signing key", {
+    throw new ScafoError("invalid-input", "Invalid node signing key", {
       detail: `the key could not be imported as ${ALG}`,
       cause: error,
     });
   }
 
   if (!isCryptoKey(imported)) {
-    throw new ScaloError("invalid-input", "Invalid node signing key", {
+    throw new ScafoError("invalid-input", "Invalid node signing key", {
       detail: `${ALG} needs an asymmetric key, got symmetric key material`,
     });
   }

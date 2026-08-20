@@ -1,7 +1,7 @@
 /* Supervisor backed by `node:child_process`: one OS process per supervised id. */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { ScaloError } from "../../core/error.ts";
+import { ScafoError } from "../../core/error.ts";
 import type {
   ProcessSpec,
   ProcessStatus,
@@ -28,7 +28,7 @@ export function createChildSupervisor(): Supervisor {
     async start(spec: ProcessSpec): Promise<ProcessStatus> {
       const current = supervised.get(spec.id);
       if (current !== undefined && current.status.state === "running") {
-        throw new ScaloError("invalid-input", "Process id is already running", {
+        throw new ScafoError("invalid-input", "Process id is already running", {
           detail: `"${spec.id}" must be stopped before it can be started under that id again`,
         });
       }
@@ -79,7 +79,7 @@ export function createChildSupervisor(): Supervisor {
           supervised.delete(spec.id);
           exit.resolve();
           reject(
-            new ScaloError("invalid-input", "Process could not be spawned", {
+            new ScafoError("invalid-input", "Process could not be spawned", {
               detail: `"${spec.id}" could not run "${spec.command}"`,
               cause,
             }),

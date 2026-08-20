@@ -166,7 +166,7 @@ describe("DELETE /v1/environments/:project/:env", () => {
     const { app } = await agentApp();
     await givenCoordinatorIs(OTHER);
     const problem: ProblemDetails = {
-      type: "urn:scalo:invalid-input",
+      type: "urn:scafo:invalid-input",
       title: "Environment is not ephemeral",
       status: 409,
       detail: "the coordinator's own words",
@@ -189,14 +189,14 @@ describe("DELETE /v1/environments/:project/:env", () => {
 
     const response = await app.request(DELETE_PATH, {
       method: "DELETE",
-      headers: { ...(await operatorBearer()), "x-scalo-proxied": "1" },
+      headers: { ...(await operatorBearer()), "x-scafo-proxied": "1" },
     });
     const problem = (await response.json()) as ProblemDetails;
 
     /* The hop was decided against a lease that moved. Answering keeps the
        request from circling a mesh of nodes each forwarding to the next. */
     expect(response.status).toBe(503);
-    expect(problem.type).toBe("urn:scalo:draining");
+    expect(problem.type).toBe("urn:scafo:draining");
     expect(forwarded).toEqual([]);
   });
 
@@ -212,7 +212,7 @@ describe("DELETE /v1/environments/:project/:env", () => {
     /* Refusal over silence: there is nowhere to carry this out right now, and
        the caller is told so instead of getting a 200 that deleted nothing. */
     expect(response.status).toBe(503);
-    expect(problem.type).toBe("urn:scalo:draining");
+    expect(problem.type).toBe("urn:scafo:draining");
     await expect(getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toMatchObject({
       name: ENVIRONMENT,
     });
@@ -229,7 +229,7 @@ describe("DELETE /v1/environments/:project/:env", () => {
     const problem = (await response.json()) as ProblemDetails;
 
     expect(response.status).toBe(409);
-    expect(problem.type).toBe("urn:scalo:capability-missing");
+    expect(problem.type).toBe("urn:scafo:capability-missing");
     expect(forwarded).toEqual([]);
   });
 
@@ -240,7 +240,7 @@ describe("DELETE /v1/environments/:project/:env", () => {
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({
-      type: "urn:scalo:auth-invalid",
+      type: "urn:scafo:auth-invalid",
       title: "Authentication failed",
       status: 401,
     });
@@ -325,7 +325,7 @@ const stubFetch: typeof fetch = (input, init) => {
     url: input instanceof URL ? input.href : typeof input === "string" ? input : input.url,
     method: init?.method ?? "GET",
     authorization: headers.get("authorization") ?? "",
-    proxied: headers.get("x-scalo-proxied"),
+    proxied: headers.get("x-scafo-proxied"),
   });
   return Promise.resolve(answerWith.clone());
 };

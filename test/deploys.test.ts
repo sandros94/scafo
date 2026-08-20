@@ -52,7 +52,7 @@ const SUBJECT = "repo:acme/shop:ref:refs/heads/main";
 
 /** Every problem body a rejected caller may see, whatever was wrong with its token. */
 const AUTH_INVALID_PROBLEM = {
-  type: "urn:scalo:auth-invalid",
+  type: "urn:scafo:auth-invalid",
   title: "Authentication failed",
   status: 401,
 };
@@ -72,7 +72,7 @@ beforeAll(async () => {
   issuerKeys = await generateJWK("RS256", { kid: KID });
   operatorKeys = await generateJWK("EdDSA", { kid: OPERATOR });
 
-  const dir = await mkdtemp(join(tmpdir(), "scalo-artifact-"));
+  const dir = await mkdtemp(join(tmpdir(), "scafo-artifact-"));
   await writeFile(join(dir, "wrangler.jsonc"), '{ "name": "shop" /* the app */ }');
   await writeFile(join(dir, "index.mjs"), "export default { fetch: () => new Response('hi') };");
   artifact = await packDirectory(dir);
@@ -170,7 +170,7 @@ describe("who may deploy", () => {
     const response = await upload(await workloadToken(), { ...meta(), project: RIVAL });
 
     expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toMatchObject({ type: "urn:scalo:trust-mismatch" });
+    await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:trust-mismatch" });
     expect(runs).toEqual([]);
   });
 
@@ -178,7 +178,7 @@ describe("who may deploy", () => {
     const response = await upload(await workloadToken({ sub: "repo:evil/app" }));
 
     expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toMatchObject({ type: "urn:scalo:trust-mismatch" });
+    await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:trust-mismatch" });
     expect(runs).toEqual([]);
   });
 });
@@ -192,7 +192,7 @@ describe("what an upload must carry", () => {
     });
 
     await expect(problemOf(response)).resolves.toMatchObject({
-      type: "urn:scalo:invalid-input",
+      type: "urn:scafo:invalid-input",
       status: 400,
     });
   });
@@ -376,7 +376,7 @@ describe("what happens to an accepted deploy", () => {
     /* Where an application runs is an operational decision. A deploy that
        silently lifted a constraint would spread it across a fleet because
        somebody re-ran a pipeline that never mentioned placement — and lifting
-       one is `scalo env selector --clear`, which says so out loud. */
+       one is `scafo env selector --clear`, which says so out loud. */
     await createEnvironment(clock.ctx, PROJECT, {
       name: "targeted",
       nodeSelector: { tier: "fast" },
@@ -469,7 +469,7 @@ describe("polling a deploy", () => {
     const response = await get("/v1/deploys/0000000000000000", await operatorToken());
 
     await expect(problemOf(response)).resolves.toMatchObject({
-      type: "urn:scalo:not-found",
+      type: "urn:scafo:not-found",
       status: 404,
     });
   });
@@ -532,7 +532,7 @@ describe("moving an environment's alias", () => {
     });
 
     expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toMatchObject({ type: "urn:scalo:trust-mismatch" });
+    await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:trust-mismatch" });
   });
 
   it("refuses a flip that names no build", async () => {

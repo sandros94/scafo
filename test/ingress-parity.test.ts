@@ -237,7 +237,7 @@ describe("both renders are deterministic", () => {
 describe("neither namespace can collide with a host", () => {
   /*
    * Both drivers put their own prefix in front of a host to name what they own —
-   * `scalo_<host>` as a Caddy `@id`, `scalo_<host>` as a Traefik router and
+   * `scafo_<host>` as a Caddy `@id`, `scafo_<host>` as a Traefik router and
    * service key. That is only unambiguous while the separator cannot occur in a
    * host, so the property is asserted against the validators every host has
    * already passed rather than against a list of examples.

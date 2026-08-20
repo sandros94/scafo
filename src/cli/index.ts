@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* The `scalo` binary: one executable for the node agent and its operator commands. */
+/* The `scafo` binary: one executable for the node agent and its operator commands. */
 
 import { defineCommand, runMain } from "citty";
 import { readPackageVersion } from "./_utils.ts";
@@ -13,7 +13,7 @@ import { wg } from "./commands/wg.ts";
 
 const main = defineCommand({
   meta: async () => ({
-    name: "scalo",
+    name: "scafo",
     version: await readPackageVersion(),
     description: "Self-hosted serverless deployment platform for JS apps",
   }),

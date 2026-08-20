@@ -1,4 +1,4 @@
-/* `scalo keygen`: mint the operator key that signs tokens to a node's API. */
+/* `scafo keygen`: mint the operator key that signs tokens to a node's API. */
 
 import { chmod, writeFile } from "node:fs/promises";
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
@@ -12,10 +12,10 @@ import { createRegistry } from "../_bootstrap.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
 
 /** Where the key is written when the caller names no file. */
-export const DEFAULT_KEY_PATH: string = "scalo-operator.json";
+export const DEFAULT_KEY_PATH: string = "scafo-operator.json";
 
 /**
- * The key file, as written and as `scalo deploy` reads it back.
+ * The key file, as written and as `scafo deploy` reads it back.
  *
  * Both halves live in one file: the public half so `--register` can be re-run
  * from it, the private half because it is what signs. The file is created
@@ -32,7 +32,7 @@ const keygenArgs: ArgsDef = {
   "out": { type: "string", description: `File to write the key pair to (${DEFAULT_KEY_PATH})` },
   "id": { type: "string", description: "Id to register the key under (op-<hex>)" },
   "register": { type: "boolean", description: "Record the public half in the registry" },
-  "config": { type: "string", description: "Path to scalo.config.jsonc, for --register" },
+  "config": { type: "string", description: "Path to scafo.config.jsonc, for --register" },
   "endpoint": { type: "string", description: "S3-compatible endpoint URL" },
   "region": { type: "string", description: "Signing region of the bucket" },
   "bucket": { type: "string", description: "Bucket holding the registry" },
@@ -65,15 +65,15 @@ async function runKeygen(flags: Record<string, unknown>): Promise<void> {
   /* Written first, then narrowed: a key that briefly existed world-readable is
      a key that has to be assumed read. */
   await chmod(out, 0o600);
-  console.log(`scalo: wrote operator key "${id}" to ${out}`);
+  console.log(`scafo: wrote operator key "${id}" to ${out}`);
 
   if (flags.register !== true) {
-    console.log(`scalo: register it with "scalo keygen --id ${id} --register" once configured`);
+    console.log(`scafo: register it with "scafo keygen --id ${id} --register" once configured`);
     return;
   }
 
   await register(flags, file);
-  console.log(`scalo: registered "${id}"; tokens it signs are now accepted by every node`);
+  console.log(`scafo: registered "${id}"; tokens it signs are now accepted by every node`);
 }
 
 /**

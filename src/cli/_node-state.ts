@@ -11,7 +11,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
-import { ScaloError } from "../core/error.ts";
+import { ScafoError } from "../core/error.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
 import { writeSecretFile } from "./_utils.ts";
 
@@ -40,7 +40,7 @@ export interface NodeStateOptions {
 /**
  * Reads this node's identity, generating and persisting one on first boot.
  *
- * Throws `ScaloError("invalid-input")` when the file exists but cannot be read
+ * Throws `ScafoError("invalid-input")` when the file exists but cannot be read
  * as an identity. A corrupted state file is never silently replaced: doing so
  * would hand the node a new keypair while the registry still holds the old
  * public key, and every token it signed would start being rejected for reasons
@@ -60,7 +60,7 @@ export async function loadOrCreateNodeState(
     if (pinned === undefined || pinned === stored.id) return stored;
 
     (opts?.log ?? console.log)(
-      `scalo: node id "${stored.id}" in ${path} was replaced by the configured "${pinned}"; ` +
+      `scafo: node id "${stored.id}" in ${path} was replaced by the configured "${pinned}"; ` +
         `a new key was generated, so this node must be registered again`,
     );
   }
@@ -70,7 +70,7 @@ export async function loadOrCreateNodeState(
   return state;
 }
 
-/** A fresh identity, unwritten. Mirrors the key `scalo keygen` mints for an operator. */
+/** A fresh identity, unwritten. Mirrors the key `scafo keygen` mints for an operator. */
 async function generateNodeState(id: string): Promise<NodeState> {
   assertNodeId(id);
   const { privateKey, publicKey } = await generateJWK("EdDSA", { kid: id });
@@ -130,8 +130,8 @@ function assertEd25519(
   }
 }
 
-function unreadable(path: string, why: string, cause?: unknown): ScaloError {
-  return new ScaloError("invalid-input", "Node state file is unusable", {
+function unreadable(path: string, why: string, cause?: unknown): ScafoError {
+  return new ScafoError("invalid-input", "Node state file is unusable", {
     detail:
       `"${path}" holds this node's identity but ${why}; delete the file to have the node ` +
       `generate a new one, knowing it then registers under a new key and every token ` +

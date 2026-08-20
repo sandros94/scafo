@@ -1,6 +1,6 @@
 /* Internal: carrying out one reconcile plan against this node. */
 
-import { isScaloError, ScaloError } from "../core/error.ts";
+import { isScafoError, ScafoError } from "../core/error.ts";
 import { formatProcessId, parseProcessId } from "../core/placement/ids.ts";
 import type { DesiredEnvironment, ReconcileAction } from "../core/placement/reconcile.ts";
 import { fleetPrefix } from "../core/registry/paths.ts";
@@ -89,7 +89,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
 
     const version = leg.build.celldVersionId;
     if (version === undefined) {
-      throw new ScaloError("invalid-input", "Build has no runtime version", {
+      throw new ScafoError("invalid-input", "Build has no runtime version", {
         detail:
           `build "${action.build}" of "${key}" carries no runtime version id, ` +
           `so the fleet cannot be pointed at it`,
@@ -292,9 +292,9 @@ function subjectOf(action: ReconcileAction): string {
     : action.processId;
 }
 
-/** The specifics a scalo failure carries are the useful half; keep both. */
+/** The specifics a scafo failure carries are the useful half; keep both. */
 function describe(error: unknown): string {
-  if (isScaloError(error)) {
+  if (isScafoError(error)) {
     return error.detail === undefined ? error.message : `${error.message}: ${error.detail}`;
   }
   return error instanceof Error ? error.message : String(error);

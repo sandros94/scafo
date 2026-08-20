@@ -1,17 +1,17 @@
 /*
- * `scalo trust`: which CI issuers may deploy a project, and which of their
+ * `scafo trust`: which CI issuers may deploy a project, and which of their
  * subjects.
  *
  * This is the operator's half of the workload-deploy path: a CI job holds
  * nothing but its own OIDC token — no operator key, no bucket credential — and
  * what admits it is the policy edited here. Written straight into the bucket the
- * way `scalo keygen --register` and `scalo varset` are, because a trust policy
+ * way `scafo keygen --register` and `scafo varset` are, because a trust policy
  * is usually set up before there is a node to ask.
  */
 
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import { loadAgentConfig } from "../../agent/config.ts";
-import { ScaloError } from "../../core/error.ts";
+import { ScafoError } from "../../core/error.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
 import { createRegistry } from "../_bootstrap.ts";
 import {
@@ -24,9 +24,9 @@ import {
 } from "../_trust.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
 
-/* The bucket the registry lives in, exactly as `scalo up` takes it. */
+/* The bucket the registry lives in, exactly as `scafo up` takes it. */
 const bucketArgs: ArgsDef = {
-  "config": { type: "string", description: "Path to scalo.config.jsonc" },
+  "config": { type: "string", description: "Path to scafo.config.jsonc" },
   "endpoint": { type: "string", description: "S3-compatible endpoint URL" },
   "region": { type: "string", description: "Signing region of the bucket" },
   "bucket": { type: "string", description: "Bucket holding the registry" },
@@ -119,7 +119,7 @@ async function runSet(flags: Record<string, unknown>): Promise<void> {
 
   const count = subjects.length;
   console.log(
-    `scalo: "${project}" now trusts ${iss} for ${String(count)} ` +
+    `scafo: "${project}" now trusts ${iss} for ${String(count)} ` +
       `subject${count === 1 ? "" : "s"}`,
   );
   console.log(formatTrustPolicy(policy));
@@ -130,7 +130,7 @@ async function runShow(flags: Record<string, unknown>): Promise<void> {
   const policy = await readTrustPolicy(await registryFor(flags), project);
 
   const count = policy.issuers.length;
-  console.log(`scalo: "${project}" trusts ${String(count)} issuer${count === 1 ? "" : "s"}`);
+  console.log(`scafo: "${project}" trusts ${String(count)} issuer${count === 1 ? "" : "s"}`);
   console.log(formatTrustPolicy(policy));
 }
 
@@ -139,7 +139,7 @@ async function runRemove(flags: Record<string, unknown>): Promise<void> {
   const iss = required(flags, "issuer");
   const policy = await removeTrustIssuer(await registryFor(flags), project, iss);
 
-  console.log(`scalo: "${project}" no longer trusts ${iss}`);
+  console.log(`scafo: "${project}" no longer trusts ${iss}`);
   console.log(formatTrustPolicy(policy));
 }
 
@@ -157,7 +157,7 @@ function required(flags: Record<string, unknown>, name: string): string {
   const value = text(flags[name]);
   if (value !== undefined) return value;
 
-  throw new ScaloError("invalid-input", "Missing required argument", {
+  throw new ScafoError("invalid-input", "Missing required argument", {
     detail: `--${name} must be given`,
   });
 }

@@ -18,7 +18,7 @@ const ENTRY = "export default { fetch: () => new Response('hi') };";
 let source: string;
 
 beforeEach(async () => {
-  source = await mkdtemp(join(tmpdir(), "scalo-pack-"));
+  source = await mkdtemp(join(tmpdir(), "scafo-pack-"));
   await writeFile(join(source, "wrangler.jsonc"), CONFIG);
   await writeFile(join(source, "index.mjs"), ENTRY);
   await mkdir(join(source, "assets"));
@@ -103,5 +103,5 @@ describe("what is not an artifact", () => {
 });
 
 function scratch(): Promise<string> {
-  return mkdtemp(join(tmpdir(), "scalo-unpack-"));
+  return mkdtemp(join(tmpdir(), "scafo-unpack-"));
 }

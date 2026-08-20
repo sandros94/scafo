@@ -1,6 +1,6 @@
 /* Custom domains: one claim per host, mirrored on the environment that serves it. */
 
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import type { DomainClaim, EnvironmentRecord } from "../types/registry.ts";
 import { isCasConflict, isNotFound } from "./_shared.ts";
 import { createJson, deleteKey, readJson, requireJson, updateJson } from "./cas.ts";
@@ -9,7 +9,7 @@ import { domainKey, environmentKey } from "./paths.ts";
 
 /**
  * Claims `host` for an environment. Re-claiming for the same environment is
- * idempotent; a claim held by anyone else throws `ScaloError("reference-held")`.
+ * idempotent; a claim held by anyone else throws `ScafoError("reference-held")`.
  *
  * Writes go referent-first: the environment is checked, then the claim is
  * created, then the environment lists the host. A crash in between leaves a
@@ -33,7 +33,7 @@ export async function claimDomain(
 
     const existing = await requireJson<DomainClaim>(ctx, key);
     if (existing.value.project !== project || existing.value.environment !== env) {
-      throw new ScaloError("reference-held", "Domain is claimed by another environment", {
+      throw new ScafoError("reference-held", "Domain is claimed by another environment", {
         detail:
           `"${host}" is held by environment "${existing.value.environment}" ` +
           `of project "${existing.value.project}"`,

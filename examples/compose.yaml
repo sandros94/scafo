@@ -1,20 +1,20 @@
-# A complete scalo installation on one host: a bucket, one node, and the Caddy
+# A complete scafo installation on one host: a bucket, one node, and the Caddy
 # it routes through.
 #
 #   docker compose -f examples/compose.yaml up --build -d
 #
 # Then, from a checkout with the CLI built (`pnpm build`). The key is written to
-# ./scalo-operator.json, which is where `deploy` looks for it:
+# ./scafo-operator.json, which is where `deploy` looks for it:
 #
-#   export SCALO_S3_ENDPOINT=http://127.0.0.1:8333 SCALO_S3_BUCKET=scalo \
-#          SCALO_S3_ACCESS_KEY=scalo SCALO_S3_SECRET_KEY=scalo-secret
+#   export SCAFO_S3_ENDPOINT=http://127.0.0.1:8333 SCAFO_S3_BUCKET=scafo \
+#          SCAFO_S3_ACCESS_KEY=scafo SCAFO_S3_SECRET_KEY=scafo-secret
 #   node dist/cli/index.mjs keygen --register
 #   node dist/cli/index.mjs deploy ./my-app --agent http://127.0.0.1:7400 \
 #     --project shop --env production --flip
-#   curl -H 'Host: shop.scalo.test' http://127.0.0.1
+#   curl -H 'Host: shop.scafo.test' http://127.0.0.1
 #
-# The application answers at `<project>--<env>.scalo.test`, at `shop.scalo.test`
-# for the `production` environment, and at `<project>--<build>.scalo.test` for
+# The application answers at `<project>--<env>.scafo.test`, at `shop.scafo.test`
+# for the `production` environment, and at `<project>--<build>.scafo.test` for
 # every build that is running. Nothing resolves those names on your machine —
 # send the `Host` header, or add them to /etc/hosts.
 #
@@ -23,10 +23,10 @@
 # reach: see examples/kubernetes/README.md for what that changes.
 
 services:
-  # The registry: every project, build, environment and node record scalo has,
+  # The registry: every project, build, environment and node record scafo has,
   # as JSON objects mutated only through conditional writes. SeaweedFS is here
   # because it is small and honours those writes; any store that does works just
-  # as well, and pointing SCALO_S3_ENDPOINT at one makes this service
+  # as well, and pointing SCAFO_S3_ENDPOINT at one makes this service
   # unnecessary. The first node to boot proves the bucket honours them before
   # anything is written for real, so a store that does not fails loudly rather
   # than corrupting state later.
@@ -52,7 +52,7 @@ services:
     command:
       - sh
       - -c
-      - "until curl -fsS -X PUT http://seaweedfs:8333/scalo; do sleep 1; done"
+      - "until curl -fsS -X PUT http://seaweedfs:8333/scafo; do sleep 1; done"
 
   # The node: the agent, the celld processes it supervises, and the deploy
   # intake. One of these per machine.
@@ -60,7 +60,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: scalo:local
+    image: scafo:local
     depends_on:
       bucket:
         condition: service_completed_successfully
@@ -86,30 +86,30 @@ services:
       # that signs for it live in this volume; losing it leaves a stale public
       # key in the registry and every token this node signs rejected for
       # reasons nothing on it explains. Deleting it is a deliberate act.
-      - state:/var/lib/scalo
+      - state:/var/lib/scafo
     environment:
-      SCALO_S3_ENDPOINT: ${SCALO_S3_ENDPOINT:-http://seaweedfs:8333}
-      SCALO_S3_BUCKET: ${SCALO_S3_BUCKET:-scalo}
-      SCALO_S3_ACCESS_KEY: ${SCALO_S3_ACCESS_KEY:-scalo}
-      SCALO_S3_SECRET_KEY: ${SCALO_S3_SECRET_KEY:-scalo-secret}
+      SCAFO_S3_ENDPOINT: ${SCAFO_S3_ENDPOINT:-http://seaweedfs:8333}
+      SCAFO_S3_BUCKET: ${SCAFO_S3_BUCKET:-scafo}
+      SCAFO_S3_ACCESS_KEY: ${SCAFO_S3_ACCESS_KEY:-scafo}
+      SCAFO_S3_SECRET_KEY: ${SCAFO_S3_SECRET_KEY:-scafo-secret}
       # Apex domains this installation serves subdomains under.
-      SCALO_PLATFORM_DOMAINS: scalo.test
+      SCAFO_PLATFORM_DOMAINS: scafo.test
       # Bound wide because the port above is published from outside the
       # container; the default is loopback, which nothing could reach.
-      SCALO_LISTEN: 0.0.0.0:7400
+      SCAFO_LISTEN: 0.0.0.0:7400
       # REQUIRED THE MOMENT ANY ADDRESS LEAVES LOOPBACK, and there is no
       # default. Every address a node exposes carries traffic that commands it,
-      # so scalo refuses to boot until the operator says what network that is:
+      # so scafo refuses to boot until the operator says what network that is:
       # `none` states it is already private and trusted — as a single host's own
-      # docker network is — and `wireguard` puts it in a tunnel scalo sets up.
+      # docker network is — and `wireguard` puts it in a tunnel scafo sets up.
       # Answering this wrong is the one mistake this file cannot make for you.
-      SCALO_TRANSPORT: none
+      SCAFO_TRANSPORT: none
       # Where peers should dial this node. A single node's peer is itself, so
       # loopback is honest here; a fleet advertises the address the other nodes
       # actually reach it at.
-      SCALO_ADVERTISE: 127.0.0.1:7400
+      SCAFO_ADVERTISE: 127.0.0.1:7400
       # Caddy's admin API, on the loopback the two containers share.
-      SCALO_CADDY_ADMIN: http://127.0.0.1:2019
+      SCAFO_CADDY_ADMIN: http://127.0.0.1:2019
 
   # The ingress. It SHARES THE NODE'S NETWORK NAMESPACE, which is the whole
   # topology in one line: the celld processes bind 127.0.0.1 and nothing else,
@@ -124,13 +124,13 @@ services:
   #      every reconcile pass. Caddy allows a loopback admin's own origin
   #      implicitly; moving the API past loopback means listing `origins` AND
   #      putting it on a network you trust, since it can rewrite everything.
-  #   2. Define a server named `scalo` (the driver's default; change it with
+  #   2. Define a server named `scafo` (the driver's default; change it with
   #      `ingress.serverName`). The node adds and removes routes INSIDE that
   #      server — it does not create it, so an absent one means an ingress
   #      failure on every pass and nothing routed.
   #
   # Routes written into that server by hand are left alone: the node owns only
-  # the ones carrying its own `scalo_` id prefix, so this file stays where an
+  # the ones carrying its own `scafo_` id prefix, so this file stays where an
   # operator's own hosts, redirects and TLS policies live.
   caddy:
     image: caddy:2

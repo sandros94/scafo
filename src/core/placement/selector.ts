@@ -13,7 +13,7 @@
  * Pure: nothing here reads the registry or knows what is live.
  */
 
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import type { NodeRecord, NodeSelector } from "../types/registry.ts";
 import { assertLabels, formatLabels } from "../utils/labels.ts";
 
@@ -56,7 +56,7 @@ export function eligibleNodes(candidates: NodeRecord[], selector?: NodeSelector)
 }
 
 /**
- * Throws `ScaloError("invalid-input")` unless `value` is a usable selector: an
+ * Throws `ScafoError("invalid-input")` unless `value` is a usable selector: an
  * object whose every key and value is a label.
  *
  * An EMPTY selector is refused here even though {@link matchesSelector} reads
@@ -69,7 +69,7 @@ export function assertSelector(value: unknown): asserts value is NodeSelector {
   assertLabels(value, "a node selector");
 
   if (Object.keys(value).length === 0) {
-    throw new ScaloError("invalid-input", "Invalid node selector", {
+    throw new ScafoError("invalid-input", "Invalid node selector", {
       detail:
         `an empty node selector constrains nothing, which is not the same as storing one: ` +
         `clear the selector instead to let the environment run on every node`,

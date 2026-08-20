@@ -1,6 +1,6 @@
 /* JSON documents over the conditional-write store: read, create, update, delete. */
 
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import type { CasHeaders } from "../types/store.ts";
 import { type RetryOptions, withRetry } from "../utils/backoff.ts";
 import type { RegistryContext } from "./context.ts";
@@ -20,7 +20,7 @@ export async function readJson<T>(ctx: RegistryContext, key: string): Promise<Ve
   try {
     value = JSON.parse(object.body) as T;
   } catch (error) {
-    throw new ScaloError("store-nonconforming", "Stored object is not valid JSON", {
+    throw new ScafoError("store-nonconforming", "Stored object is not valid JSON", {
       detail: `"${key}" could not be parsed`,
       cause: error,
     });
@@ -28,11 +28,11 @@ export async function readJson<T>(ctx: RegistryContext, key: string): Promise<Ve
   return { value, etag: object.etag };
 }
 
-/** Like {@link readJson}, but throws `ScaloError("not-found")` when absent. */
+/** Like {@link readJson}, but throws `ScafoError("not-found")` when absent. */
 export async function requireJson<T>(ctx: RegistryContext, key: string): Promise<Versioned<T>> {
   const found = await readJson<T>(ctx, key);
   if (found === null) {
-    throw new ScaloError("not-found", "Object not found", { detail: `"${key}" does not exist` });
+    throw new ScafoError("not-found", "Object not found", { detail: `"${key}" does not exist` });
   }
   return found;
 }
@@ -47,7 +47,7 @@ export async function putJson<T>(
   return ctx.store.put(key, serialize(value), cas);
 }
 
-/** Creates `key`; throws `ScaloError("cas-conflict")` when it already exists. */
+/** Creates `key`; throws `ScafoError("cas-conflict")` when it already exists. */
 export async function createJson<T>(
   ctx: RegistryContext,
   key: string,

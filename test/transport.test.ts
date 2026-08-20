@@ -14,29 +14,29 @@ import { isLoopbackHost } from "../src/core/utils/host.ts";
 import { rejectionOf, rejectsWith } from "./_helpers.ts";
 
 const REQUIRED_ENV: Record<string, string> = {
-  SCALO_S3_ENDPOINT: "http://store.test:9000",
-  SCALO_S3_BUCKET: "registry",
-  SCALO_S3_ACCESS_KEY: "key",
-  SCALO_S3_SECRET_KEY: "secret",
+  SCAFO_S3_ENDPOINT: "http://store.test:9000",
+  SCAFO_S3_BUCKET: "registry",
+  SCAFO_S3_ACCESS_KEY: "key",
+  SCAFO_S3_SECRET_KEY: "secret",
 };
 
 /** Every address that reaches past this machine, one per setting that carries it. */
 const EXPOSED: Record<string, Record<string, string>> = {
-  "a listener bound to every interface": { SCALO_LISTEN: "0.0.0.0:7400" },
-  "a listener bound to one real interface": { SCALO_LISTEN: "10.0.0.4:7400" },
+  "a listener bound to every interface": { SCAFO_LISTEN: "0.0.0.0:7400" },
+  "a listener bound to one real interface": { SCAFO_LISTEN: "10.0.0.4:7400" },
   "an internal listener off loopback": {
-    SCALO_LISTEN: "127.0.0.1:7400",
-    SCALO_INTERNAL_LISTEN: "10.0.0.4:7401",
+    SCAFO_LISTEN: "127.0.0.1:7400",
+    SCAFO_INTERNAL_LISTEN: "10.0.0.4:7401",
   },
   "an advertised address off loopback": {
-    SCALO_LISTEN: "127.0.0.1:7400",
-    SCALO_ADVERTISE: "node-a.internal:7400",
+    SCAFO_LISTEN: "127.0.0.1:7400",
+    SCAFO_ADVERTISE: "node-a.internal:7400",
   },
   /* What a fleet spread over several nodes has to widen for cross-node cell
      traffic, and what puts an unauthenticated peer listener on that network. */
   "runtime processes bound past loopback": {
-    SCALO_LISTEN: "127.0.0.1:7400",
-    SCALO_BIND_HOST: "0.0.0.0",
+    SCAFO_LISTEN: "127.0.0.1:7400",
+    SCAFO_BIND_HOST: "0.0.0.0",
   },
 };
 
@@ -59,9 +59,9 @@ describe("a node that would reach past loopback", () => {
     const config = await loadAgentConfig({
       env: {
         ...REQUIRED_ENV,
-        SCALO_LISTEN: "127.0.0.1:7400",
-        SCALO_INTERNAL_LISTEN: "10.0.0.4:7401",
-        SCALO_ADVERTISE: "10.0.0.4:7401",
+        SCAFO_LISTEN: "127.0.0.1:7400",
+        SCAFO_INTERNAL_LISTEN: "10.0.0.4:7401",
+        SCAFO_ADVERTISE: "10.0.0.4:7401",
       },
     });
 
@@ -74,7 +74,7 @@ describe("a node that would reach past loopback", () => {
 
   it("names the runtime's bind address when that is what exposed the node", async () => {
     const config = await loadAgentConfig({
-      env: { ...REQUIRED_ENV, SCALO_LISTEN: "127.0.0.1:7400", SCALO_BIND_HOST: "0.0.0.0" },
+      env: { ...REQUIRED_ENV, SCAFO_LISTEN: "127.0.0.1:7400", SCAFO_BIND_HOST: "0.0.0.0" },
     });
 
     const error = await rejectionOf(() => Promise.resolve(assertTransportConfigured(config)));
@@ -87,7 +87,7 @@ describe("a node that would reach past loopback", () => {
     for (const [what, env] of Object.entries(EXPOSED)) {
       for (const driver of ["wireguard", "none"]) {
         const config = await loadAgentConfig({
-          env: { ...REQUIRED_ENV, ...env, SCALO_TRANSPORT: driver },
+          env: { ...REQUIRED_ENV, ...env, SCAFO_TRANSPORT: driver },
         });
 
         expect(config.transport, `${what} with ${driver}`).toEqual({ driver });
@@ -101,13 +101,13 @@ describe("a node that stays on this machine", () => {
   it("boots with no transport configured at all", async () => {
     const loopback = [
       {},
-      { SCALO_LISTEN: "127.0.0.1:7400" },
-      { SCALO_LISTEN: "localhost:7400" },
-      { SCALO_LISTEN: "[::1]:7400" },
-      { SCALO_LISTEN: "127.0.0.1:7400", SCALO_INTERNAL_LISTEN: "127.0.0.1:7401" },
-      { SCALO_LISTEN: "127.0.0.1:7400", SCALO_ADVERTISE: "127.0.0.53:7400" },
+      { SCAFO_LISTEN: "127.0.0.1:7400" },
+      { SCAFO_LISTEN: "localhost:7400" },
+      { SCAFO_LISTEN: "[::1]:7400" },
+      { SCAFO_LISTEN: "127.0.0.1:7400", SCAFO_INTERNAL_LISTEN: "127.0.0.1:7401" },
+      { SCAFO_LISTEN: "127.0.0.1:7400", SCAFO_ADVERTISE: "127.0.0.53:7400" },
       /* The default, stated: a single node's processes need nothing wider. */
-      { SCALO_LISTEN: "127.0.0.1:7400", SCALO_BIND_HOST: "127.0.0.1" },
+      { SCAFO_LISTEN: "127.0.0.1:7400", SCAFO_BIND_HOST: "127.0.0.1" },
     ];
 
     for (const env of loopback) {
@@ -142,20 +142,20 @@ describe("what counts as staying on this machine", () => {
 
 describe("the transport setting itself", () => {
   it("comes from a flag, the environment or the file, in that order", async () => {
-    const configPath = "/etc/scalo/scalo.config.jsonc";
+    const configPath = "/etc/scafo/scafo.config.jsonc";
     const readFile = (path: string): Promise<string | null> =>
       Promise.resolve(
         path === configPath ? JSON.stringify({ transport: { driver: "wireguard" } }) : null,
       );
 
     const fromFlag = await loadAgentConfig({
-      env: { ...REQUIRED_ENV, SCALO_TRANSPORT: "wireguard" },
+      env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "wireguard" },
       flags: { transport: "none" },
     });
     const fromEnv = await loadAgentConfig({
       configPath,
       readFile,
-      env: { ...REQUIRED_ENV, SCALO_TRANSPORT: "none" },
+      env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "none" },
     });
     const fromFile = await loadAgentConfig({ configPath, readFile, env: REQUIRED_ENV });
 
@@ -168,7 +168,7 @@ describe("the transport setting itself", () => {
 
   it("refuses a transport it does not implement rather than falling back to one", async () => {
     const error = await rejectsWith(
-      () => loadAgentConfig({ env: { ...REQUIRED_ENV, SCALO_TRANSPORT: "tailscale" } }),
+      () => loadAgentConfig({ env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "tailscale" } }),
       "invalid-input",
     );
 
@@ -179,7 +179,7 @@ describe("the transport setting itself", () => {
 
   it("has no default: saying nothing is a distinct answer from saying none", async () => {
     const silent = await loadAgentConfig({ env: REQUIRED_ENV });
-    const explicit = await loadAgentConfig({ env: { ...REQUIRED_ENV, SCALO_TRANSPORT: "none" } });
+    const explicit = await loadAgentConfig({ env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "none" } });
 
     expect(silent.transport).toBeUndefined();
     expect(explicit.transport).toEqual({ driver: "none" });

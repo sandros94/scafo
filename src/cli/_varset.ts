@@ -1,10 +1,10 @@
 /*
- * Internal: what `scalo varset` does once its flags have been read — parsing a
+ * Internal: what `scafo varset` does once its flags have been read — parsing a
  * dotenv file, sealing it into the registry, and describing what an environment
  * carries without ever printing a secret.
  */
 
-import { ScaloError } from "../core/error.ts";
+import { ScafoError } from "../core/error.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
 import { getEnvironment, setEnvironmentVarset } from "../core/registry/environments.ts";
 import {
@@ -15,12 +15,12 @@ import {
   sealVarset,
   type VarsetDescription,
 } from "../core/registry/varsets.ts";
-import type { PlainVarset, ScaloWarning } from "../core/types/registry.ts";
+import type { PlainVarset, ScafoWarning } from "../core/types/registry.ts";
 
 /** What a variable name may look like: the shell's own rule, so a process can read it. */
 const VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-/** The dotenv dialect, as `scalo varset set --help` states it. */
+/** The dotenv dialect, as `scafo varset set --help` states it. */
 export const DOTENV_SYNTAX: string =
   "one KEY=VALUE per line; blank lines and lines starting with # are skipped; " +
   "the value is everything after the first = with surrounding spaces trimmed, " +
@@ -38,7 +38,7 @@ export interface SetVarsetOptions {
 export interface SetVarsetResult {
   /** Id the sealed envelope is stored under, and what the environment now points at. */
   id: string;
-  warnings: ScaloWarning[];
+  warnings: ScafoWarning[];
 }
 
 /** Seals the variables, stores them and points the environment at them. */
@@ -68,7 +68,7 @@ export interface ShownVarset {
 /**
  * Opens the varset an environment points at and describes it.
  *
- * Throws `ScaloError("not-found")` when the environment has no varset at all.
+ * Throws `ScafoError("not-found")` when the environment has no varset at all.
  */
 export async function showVarset(
   registry: RegistryContext,
@@ -77,7 +77,7 @@ export async function showVarset(
   const environment = await getEnvironment(registry, opts.project, opts.env);
   const id = environment.varset;
   if (id === undefined) {
-    throw new ScaloError("not-found", "Environment has no varset", {
+    throw new ScafoError("not-found", "Environment has no varset", {
       detail: `"${opts.project}/${opts.env}" points at no variable set`,
     });
   }
@@ -136,7 +136,7 @@ export function toPlainVarset(
   const shown = new Set(publicNames);
   const unknown = [...shown].filter((name) => !(name in vars));
   if (unknown.length > 0) {
-    throw new ScaloError("invalid-input", "Unknown variable marked public", {
+    throw new ScafoError("invalid-input", "Unknown variable marked public", {
       detail: `${unknown.map((name) => `"${name}"`).join(", ")} is not in the file being sealed`,
     });
   }
@@ -151,7 +151,7 @@ export function toPlainVarset(
 /**
  * Parses a dotenv file: see {@link DOTENV_SYNTAX}.
  *
- * Throws `ScaloError("invalid-input")` naming the line for anything that is not
+ * Throws `ScafoError("invalid-input")` naming the line for anything that is not
  * a variable — a line without `=`, an unusable name, a name given twice.
  * Guessing at those is how a deployment ends up with a variable nobody wrote.
  */
@@ -180,7 +180,7 @@ export function parseDotenv(text: string, source: string): Record<string, string
     if (name in vars) {
       throw invalidLine(
         at,
-        `"${name}" is set twice, and which one wins is not for scalo to decide`,
+        `"${name}" is set twice, and which one wins is not for scafo to decide`,
       );
     }
 
@@ -189,8 +189,8 @@ export function parseDotenv(text: string, source: string): Record<string, string
   return vars;
 }
 
-function invalidLine(at: string, why: string): ScaloError {
-  return new ScaloError("invalid-input", "Invalid variable file", {
+function invalidLine(at: string, why: string): ScafoError {
+  return new ScafoError("invalid-input", "Invalid variable file", {
     detail: `${at}: ${why}; ${DOTENV_SYNTAX}`,
   });
 }

@@ -1,5 +1,5 @@
 import { S3Error, type S3Client } from "uns3";
-import { ScaloError } from "../../core/error.ts";
+import { ScafoError } from "../../core/error.ts";
 import type { CasStore, StoredObject } from "../../core/types/store.ts";
 
 export interface Uns3StoreOptions {
@@ -97,15 +97,15 @@ function etagOf(response: Response, objectKey: string): string {
   /* Kept verbatim, quotes included, so it round-trips into a later `ifMatch`. */
   const etag = response.headers.get("etag");
   if (etag === null) {
-    throw new ScaloError("store-nonconforming", "The store returned no ETag", {
+    throw new ScafoError("store-nonconforming", "The store returned no ETag", {
       detail: `"${objectKey}" was answered without an ETag header, conditional writes are impossible`,
     });
   }
   return etag;
 }
 
-function casConflict(objectKey: string, cause?: unknown): ScaloError {
-  return new ScaloError("cas-conflict", `Conditional write failed for "${objectKey}"`, {
+function casConflict(objectKey: string, cause?: unknown): ScafoError {
+  return new ScafoError("cas-conflict", `Conditional write failed for "${objectKey}"`, {
     status: 412,
     detail: "the object changed since it was read",
     cause,

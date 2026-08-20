@@ -1,4 +1,4 @@
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import type { NodeRecord } from "../types/registry.ts";
 import { isCasConflict, namesFromKeys } from "./_shared.ts";
 import { createJson, deleteKey, readJson, requireJson, updateJson } from "./cas.ts";
@@ -37,7 +37,7 @@ export async function registerNode(ctx: RegistryContext, record: NodeRecord): Pr
 
     const updated = await updateJson<NodeRecord>(ctx, key, (current) => {
       if (current.id !== record.id) {
-        throw new ScaloError("immutable", "Node id cannot be changed", {
+        throw new ScafoError("immutable", "Node id cannot be changed", {
           detail: `"${key}" holds node "${current.id}"`,
         });
       }
@@ -79,7 +79,7 @@ export async function listNodeRecords(ctx: RegistryContext): Promise<NodeRecord[
  *
  * Narrow on purpose: a node re-registering rewrites its record wholesale from
  * its own configuration, and a heartbeat is not the moment to restate an
- * address or a capacity. Throws `ScaloError("not-found")` when the node has no
+ * address or a capacity. Throws `ScafoError("not-found")` when the node has no
  * record — a heartbeat cannot bring one into being, because the record says what
  * this node IS and only registration knows that.
  */
@@ -100,7 +100,7 @@ export async function heartbeatNode(ctx: RegistryContext, id: string): Promise<s
  * A node that says it is leaving is counted out on the coordinator's very next
  * assignment pass instead.
  *
- * Throws `ScaloError("not-found")` when the node has no record, for the same
+ * Throws `ScafoError("not-found")` when the node has no record, for the same
  * reason {@link heartbeatNode} does: this states something ABOUT a record, and
  * cannot bring one into being.
  */
@@ -141,7 +141,7 @@ export function isNodeLive(record: NodeRecord, now: Date, opts?: { windowMs?: nu
 
 /**
  * Deregisters a node. Deletes cannot be conditional, so this is gated on the
- * caller still holding the coordinator lease; otherwise `ScaloError("lease-lost")`.
+ * caller still holding the coordinator lease; otherwise `ScafoError("lease-lost")`.
  */
 export async function removeNode(
   ctx: RegistryContext,
@@ -149,7 +149,7 @@ export async function removeNode(
   lease: LeaseHandle,
 ): Promise<void> {
   if (!(await verifyLease(ctx, lease))) {
-    throw new ScaloError("lease-lost", "Coordinator lease is no longer held", {
+    throw new ScafoError("lease-lost", "Coordinator lease is no longer held", {
       detail: `refusing to remove node "${id}"`,
     });
   }

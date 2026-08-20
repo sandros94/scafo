@@ -13,7 +13,7 @@ import type { AgentConfig } from "../src/agent/config.ts";
 import type { AgentContext } from "../src/agent/app.ts";
 import { createReconciler, type Reconciler } from "../src/agent/reconcile.ts";
 import type { CapacityPlan } from "../src/core/capacity/compute.ts";
-import { ScaloError } from "../src/core/error.ts";
+import { ScafoError } from "../src/core/error.ts";
 import { formatProcessId } from "../src/core/placement/ids.ts";
 import { deleteKey } from "../src/core/registry/cas.ts";
 import type { RegistryContext } from "../src/core/registry/context.ts";
@@ -219,7 +219,7 @@ describe("publishing what the node serves", () => {
     const world = await seededWorld({
       ingress: {
         apply: () =>
-          Promise.reject(new ScaloError("capability-missing", "Ingress could not be configured")),
+          Promise.reject(new ScafoError("capability-missing", "Ingress could not be configured")),
       },
     });
 
@@ -458,7 +458,7 @@ describe("an environment split between two builds", () => {
     const world = await splitWorld();
     await world.reconciler.runOnce();
 
-    /* `scalo env split --clear`: the environment is wanted at its alias alone. */
+    /* `scafo env split --clear`: the environment is wanted at its alias alone. */
     await setSplit(world.registry, PROJECT, ENVIRONMENT, null);
     const plan = await world.reconciler.runOnce();
 
@@ -562,7 +562,7 @@ describe("a process that does not pass its gate", () => {
 describe("a pass that cannot do everything it planned", () => {
   it("records a fleet it could not point at a build, and starts nothing for it", async () => {
     const world = await seededWorld();
-    world.driver.activationError = new ScaloError("cas-conflict", "Conditional write failed");
+    world.driver.activationError = new ScafoError("cas-conflict", "Conditional write failed");
 
     await world.reconciler.runOnce();
     const status = world.reconciler.status();
@@ -1060,8 +1060,8 @@ class UnreadableStore implements CasStore {
     return Promise.reject(this.#down());
   }
 
-  #down(): ScaloError {
-    return new ScaloError("draining", "Store is unreachable", {
+  #down(): ScafoError {
+    return new ScafoError("draining", "Store is unreachable", {
       detail: "the bucket refused the request",
     });
   }

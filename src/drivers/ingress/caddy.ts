@@ -7,7 +7,7 @@
  * driver only owns the routes inside that server, and only its own.
  */
 
-import { ScaloError } from "../../core/error.ts";
+import { ScafoError } from "../../core/error.ts";
 import type { IngressDesired, IngressDriver, WeightedBackend } from "../../core/types/ingress.ts";
 import { stableStringify } from "../../core/utils/json.ts";
 
@@ -15,7 +15,7 @@ import { stableStringify } from "../../core/utils/json.ts";
 export const DEFAULT_ADMIN_URL: string = "http://127.0.0.1:2019";
 
 /** Name of the HTTP server inside Caddy's config this driver writes routes into. */
-export const DEFAULT_SERVER_NAME: string = "scalo";
+export const DEFAULT_SERVER_NAME: string = "scafo";
 
 /**
  * Namespace of every route this driver owns. Routes without it are the
@@ -27,7 +27,7 @@ export const DEFAULT_SERVER_NAME: string = "scalo";
  * and cannot be reached at all. An underscore cannot occur in a DNS name, so the
  * boundary between the namespace and the host stays unambiguous.
  */
-export const ROUTE_ID_PREFIX: string = "scalo_";
+export const ROUTE_ID_PREFIX: string = "scafo_";
 
 export interface CaddyDriverOptions {
   /** Base URL of Caddy's admin API. Defaults to {@link DEFAULT_ADMIN_URL}. */
@@ -69,7 +69,7 @@ export interface CaddyRoute {
 /**
  * Builds the driver that routes traffic through Caddy.
  *
- * Every admin call that fails is `ScaloError("capability-missing")` with status
+ * Every admin call that fails is `ScafoError("capability-missing")` with status
  * 502: no code names "the thing this node drives refused a command", and of the
  * ones there are, a capability the node needs and does not have is the closest —
  * the status is what says the failure came from behind the node rather than from
@@ -187,7 +187,7 @@ export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
 /**
  * Origin of the admin API, which every call to it presents as its own.
  *
- * Throws `ScaloError("invalid-input")` when the configured admin URL is not a
+ * Throws `ScafoError("invalid-input")` when the configured admin URL is not a
  * URL: an ingress that cannot be addressed must fail the node's boot, not the
  * first reconcile pass that tries to publish a route through it.
  */
@@ -195,7 +195,7 @@ function originOf(adminUrl: string): string {
   try {
     return new URL(adminUrl).origin;
   } catch (error) {
-    throw new ScaloError("invalid-input", "Ingress admin URL is not a URL", {
+    throw new ScafoError("invalid-input", "Ingress admin URL is not a URL", {
       detail: `"${adminUrl}" is not the base URL of a Caddy admin API`,
       cause: error,
     });
@@ -268,8 +268,8 @@ function sameRoute(current: Record<string, unknown>, wanted: CaddyRoute): boolea
   return projection(current) === projection(wanted as unknown as Record<string, unknown>);
 }
 
-function adminFailed(method: string, url: string, what: string, cause?: unknown): ScaloError {
-  return new ScaloError("capability-missing", "Ingress could not be configured", {
+function adminFailed(method: string, url: string, what: string, cause?: unknown): ScafoError {
+  return new ScafoError("capability-missing", "Ingress could not be configured", {
     status: 502,
     detail: `the Caddy admin API ${what} for ${method} ${url}`,
     cause,

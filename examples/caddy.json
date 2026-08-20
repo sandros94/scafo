@@ -5,7 +5,7 @@
   "apps": {
     "http": {
       "servers": {
-        "scalo": {
+        "scafo": {
           "listen": [":80"],
           "routes": []
         }

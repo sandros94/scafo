@@ -9,7 +9,7 @@ import { generateJWK } from "unjwt/jwk";
 import { sign as signJws } from "unjwt/jws";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createOidcVerifier, OIDC_AUDIENCE, type OidcVerifier } from "../src/core/auth/index.ts";
-import type { ScaloError } from "../src/core/error.ts";
+import type { ScafoError } from "../src/core/error.ts";
 import { createProject, setTrustPolicy } from "../src/core/registry/index.ts";
 import type { TrustPolicy } from "../src/core/types/registry.ts";
 import { fromBase64Url, toBase64Url } from "../src/core/utils/base64.ts";
@@ -265,7 +265,7 @@ function mint(overrides?: Record<string, unknown>, kid: string = KID): Promise<s
   return signJws(claims(overrides), keys.privateKey, { alg: "RS256", protectedHeader: { kid } });
 }
 
-function refusal(token: string, project: string = TRUSTING): Promise<ScaloError> {
+function refusal(token: string, project: string = TRUSTING): Promise<ScafoError> {
   return rejectionOf(() => verifier.verify(token, project));
 }
 

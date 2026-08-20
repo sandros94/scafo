@@ -105,7 +105,7 @@ describe("releaseDomain", () => {
 
   it("tolerates an environment that is already gone", async () => {
     await claimDomain(clock.ctx, HOST, PROJECT, "prod");
-    await inner.del(`_scalo/projects/${PROJECT}/environments/prod.json`);
+    await inner.del(`_scafo/projects/${PROJECT}/environments/prod.json`);
 
     await expect(releaseDomain(clock.ctx, HOST)).resolves.toBeUndefined();
     await expect(checkDomain(clock.ctx, HOST)).resolves.toBeNull();

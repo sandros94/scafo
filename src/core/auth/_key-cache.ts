@@ -2,7 +2,7 @@
 
 import { importKey } from "unjwt/jwk";
 import { isCryptoKey } from "unjwt/utils";
-import { isScaloError } from "../error.ts";
+import { isScafoError } from "../error.ts";
 import type { RegistryContext } from "../registry/context.ts";
 import { getNode } from "../registry/nodes.ts";
 import { createBoundedMap } from "./_cache.ts";
@@ -58,7 +58,7 @@ async function load(ctx: RegistryContext, kid: string): Promise<CryptoKey | null
   try {
     ({ publicKey } = await getNode(ctx, kid));
   } catch (error) {
-    if (isScaloError(error) && (error.code === "not-found" || error.code === "invalid-slug")) {
+    if (isScafoError(error) && (error.code === "not-found" || error.code === "invalid-slug")) {
       return null;
     }
     throw error;

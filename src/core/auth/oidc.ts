@@ -2,7 +2,7 @@
 
 import type { JWSAlgorithm } from "unjwt/jws";
 import { verify as verifyJws } from "unjwt/jws";
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import type { TrustIssuer, TrustPolicy } from "../types/registry.ts";
 import { readJson } from "../registry/cas.ts";
 import type { RegistryContext } from "../registry/context.ts";
@@ -12,7 +12,7 @@ import { createJwksCache } from "./_jwks.ts";
 import { asClaims, authInvalid, decodeCompactClaims, numberClaim, stringClaim } from "./_shared.ts";
 
 /** Audience a workload must request its token for. */
-export const OIDC_AUDIENCE: string = "scalo";
+export const OIDC_AUDIENCE: string = "scafo";
 
 /**
  * Asymmetric signatures only. An `HS*` token would be "verified" against a
@@ -56,8 +56,8 @@ export interface OidcIdentity {
 export interface OidcVerifier {
   /**
    * Resolves the workload's identity for `project`. Throws
-   * `ScaloError("auth-invalid")` when the token itself does not hold up, and
-   * `ScaloError("trust-mismatch")` when it does but the project's trust policy
+   * `ScafoError("auth-invalid")` when the token itself does not hold up, and
+   * `ScafoError("trust-mismatch")` when it does but the project's trust policy
    * does not name its issuer or subject.
    */
   verify(token: string, project: string): Promise<OidcIdentity>;
@@ -128,6 +128,6 @@ function assertWindow(claims: Record<string, unknown>, nowS: number, skewS: numb
   }
 }
 
-function trustMismatch(detail: string): ScaloError {
-  return new ScaloError("trust-mismatch", "Trust policy does not admit this token", { detail });
+function trustMismatch(detail: string): ScafoError {
+  return new ScafoError("trust-mismatch", "Trust policy does not admit this token", { detail });
 }

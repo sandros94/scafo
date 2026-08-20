@@ -5,7 +5,7 @@
  */
 
 import { expect } from "vitest";
-import { ScaloError, type ScaloErrorCode } from "../src/core/error.ts";
+import { ScafoError, type ScafoErrorCode } from "../src/core/error.ts";
 import {
   coordinatorKey,
   domainKey,
@@ -114,7 +114,7 @@ export class FaultStore implements CasStore {
     this.#budget = n;
     this.#error =
       error ??
-      new ScaloError("draining", "Injected fault", {
+      new ScafoError("draining", "Injected fault", {
         detail: `write ${String(n + 1)} was killed`,
       });
   }
@@ -215,25 +215,25 @@ export async function invariants(store: CasStore, opts?: InvariantOptions): Prom
 }
 
 /**
- * Runs `fn` and returns the {@link ScaloError} it threw. Synchronous throws count
+ * Runs `fn` and returns the {@link ScafoError} it threw. Synchronous throws count
  * as rejections, which `MemoryCasStore.put` relies on.
  */
-export async function rejectionOf(fn: () => Promise<unknown>): Promise<ScaloError> {
+export async function rejectionOf(fn: () => Promise<unknown>): Promise<ScafoError> {
   const run = async (): Promise<unknown> => fn();
   const caught: unknown = await run().then(
     (): unknown => null,
     (error: unknown): unknown => error,
   );
 
-  expect(caught, "expected the call to reject").toBeInstanceOf(ScaloError);
-  return caught as ScaloError;
+  expect(caught, "expected the call to reject").toBeInstanceOf(ScafoError);
+  return caught as ScafoError;
 }
 
 /** Asserts `fn` rejects with `code`, and hands the error back for further checks. */
 export async function rejectsWith(
   fn: () => Promise<unknown>,
-  code: ScaloErrorCode,
-): Promise<ScaloError> {
+  code: ScafoErrorCode,
+): Promise<ScafoError> {
   const error = await rejectionOf(fn);
   expect(error.code).toBe(code);
   return error;

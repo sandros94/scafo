@@ -1,5 +1,5 @@
 /*
- * `scalo trust`: the operator's half of the workload-deploy path — which CI
+ * `scafo trust`: the operator's half of the workload-deploy path — which CI
  * issuers a project admits, which of their subjects, and what an edit does to
  * the grants already in the policy.
  *
@@ -211,7 +211,7 @@ describe("no longer trusting an issuer", () => {
   });
 });
 
-describe("what `scalo trust show` puts on the terminal", () => {
+describe("what `scafo trust show` puts on the terminal", () => {
   it("prints every subject verbatim, globs and all", async () => {
     /* An operator checking a policy is checking the pattern: a `*` rendered as
        anything else would hide exactly the mistake they are looking for. */
@@ -253,7 +253,7 @@ function emptyRegistry(): RegistryContext {
   return ctxWith(new MemoryCasStore()).ctx;
 }
 
-/** One `scalo trust set` on {@link PROJECT}, with the default audience. */
+/** One `scafo trust set` on {@link PROJECT}, with the default audience. */
 function trust(
   registry: RegistryContext,
   iss: string,

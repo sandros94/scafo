@@ -367,7 +367,7 @@ describe("GET /v1/ingress/traefik", () => {
     const response = await app.request("/v1/ingress/traefik");
 
     expect(response.status).toBe(404);
-    await expect(response.json()).resolves.toMatchObject({ type: "urn:scalo:not-found" });
+    await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:not-found" });
   });
 
   it("answers 404 on a node with no ingress at all", async () => {

@@ -1,5 +1,5 @@
 /*
- * `scalo env retire|unretire|delete`, and the two ways it reaches an
+ * `scafo env retire|unretire|delete`, and the two ways it reaches an
  * installation.
  *
  * Both are driven against the same registry: the agent route runs the REAL
@@ -192,7 +192,7 @@ describe("what --set and --clear are read as", () => {
   });
 
   it("refuses NEITHER rather than reading it as a clear", async () => {
-    /* An accidental `scalo env selector` that lifted a constraint would move an
+    /* An accidental `scafo env selector` that lifted a constraint would move an
        application across a fleet without anyone having asked it to. */
     const error = await rejectsWith(
       () => Promise.resolve(readSelectorFlags({ set: undefined, clear: false })),
@@ -345,7 +345,7 @@ describe("what --set and --clear are read as, for a split", () => {
   });
 
   it("refuses NEITHER rather than reading it as a clear", async () => {
-    /* An accidental `scalo env split` that collapsed a canary onto the alias
+    /* An accidental `scafo env split` that collapsed a canary onto the alias
        would move an application's whole traffic without anyone having asked. */
     const error = await rejectsWith(
       () => Promise.resolve(readSplitFlags({ set: undefined, clear: false })),
@@ -395,7 +395,7 @@ describe("deleting through a node agent", () => {
      * operator is the route forward, not "the agent said no".
      */
     expect(error.status).toBe(409);
-    expect(error.detail).toContain("scalo env retire");
+    expect(error.detail).toContain("scafo env retire");
     expect(error.detail).toContain("force");
   });
 
@@ -406,7 +406,7 @@ describe("deleting through a node agent", () => {
     const error = await rejectsWith(() => throughAgent().delete(PROD), "invalid-input");
 
     expect(error.detail).toContain("18h");
-    expect(error.detail).toContain("scalo env unretire");
+    expect(error.detail).toContain("scafo env unretire");
   });
 
   it("deletes it once the grace has run out", async () => {

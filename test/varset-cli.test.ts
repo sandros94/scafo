@@ -1,5 +1,5 @@
 /*
- * `scalo varset`: reading a variable file, deciding what is secret, reading the
+ * `scafo varset`: reading a variable file, deciding what is secret, reading the
  * key that seals it, and the round trip through the registry that an
  * environment's variables make.
  *
@@ -95,12 +95,12 @@ describe("reading a variable file", () => {
 
     for (const [text, expected] of cases) {
       const error = await rejectsWith(
-        () => Promise.resolve(parseDotenv(text, "/etc/scalo/app.env")),
+        () => Promise.resolve(parseDotenv(text, "/etc/scafo/app.env")),
         "invalid-input",
       );
       expect(error.detail, text).toContain(expected);
       /* Actionable: which file, which line, and what the dialect is. */
-      expect(error.detail, text).toContain("/etc/scalo/app.env:");
+      expect(error.detail, text).toContain("/etc/scafo/app.env:");
     }
   });
 });
@@ -188,7 +188,7 @@ describe("reading the key file", () => {
 
   it("refuses a file that is not there, rather than serving without variables", async () => {
     const error = await rejectsWith(
-      () => readVarsetKeyFile(join(tmpdir(), "scalo-no-such-key-file")),
+      () => readVarsetKeyFile(join(tmpdir(), "scafo-no-such-key-file")),
       "invalid-input",
     );
 
@@ -197,23 +197,23 @@ describe("reading the key file", () => {
 
   it("takes the key file from a flag, the environment or the file", async () => {
     const required = {
-      SCALO_S3_ENDPOINT: "http://store.test:9000",
-      SCALO_S3_BUCKET: "registry",
-      SCALO_S3_ACCESS_KEY: "key",
-      SCALO_S3_SECRET_KEY: "secret",
+      SCAFO_S3_ENDPOINT: "http://store.test:9000",
+      SCAFO_S3_BUCKET: "registry",
+      SCAFO_S3_ACCESS_KEY: "key",
+      SCAFO_S3_SECRET_KEY: "secret",
     };
-    const configPath = "/etc/scalo/scalo.config.jsonc";
+    const configPath = "/etc/scafo/scafo.config.jsonc";
     const readConfig = (path: string): Promise<string | null> =>
       Promise.resolve(path === configPath ? JSON.stringify({ varsets: { keyFile: "/f" } }) : null);
 
     const fromFlag = await loadAgentConfig({
-      env: { ...required, SCALO_VARSET_KEY_FILE: "/e" },
+      env: { ...required, SCAFO_VARSET_KEY_FILE: "/e" },
       flags: { "varset-key-file": "/k" },
     });
     const fromEnv = await loadAgentConfig({
       configPath,
       readFile: readConfig,
-      env: { ...required, SCALO_VARSET_KEY_FILE: "/e" },
+      env: { ...required, SCAFO_VARSET_KEY_FILE: "/e" },
     });
     const fromFile = await loadAgentConfig({ configPath, readFile: readConfig, env: required });
     const absent = await loadAgentConfig({ env: required });
@@ -317,7 +317,7 @@ describe("the round trip an environment's variables make", () => {
   });
 });
 
-describe("what `scalo varset show` puts on the terminal", () => {
+describe("what `scafo varset show` puts on the terminal", () => {
   it("never prints a secret value, key in hand or not", async () => {
     const world = await seededRegistry();
     await setVarset(world.registry, {
@@ -388,7 +388,7 @@ async function keyBytes(path: string): Promise<Uint8Array> {
 }
 
 async function keyFile(name: string, contents: Uint8Array | string): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "scalo-varset-key-"));
+  const root = await mkdtemp(join(tmpdir(), "scafo-varset-key-"));
   roots.push(root);
   const path = join(root, name);
   await writeFile(path, contents);

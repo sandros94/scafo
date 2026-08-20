@@ -1,16 +1,16 @@
 /*
- * Internal: what `scalo env retire|unretire|delete` does, and the two ways it
+ * Internal: what `scafo env retire|unretire|delete` does, and the two ways it
  * can reach the installation.
  *
  * Through a NODE (`--agent`) is the ordinary one: the node is already running,
  * already holds the coordinator lease or knows who does, and the operator needs
  * nothing but their own key. Through the BUCKET is the fallback for the
- * installation that has no node to ask — the same shape `scalo trust` and
- * `scalo varset` are written in, because a registry is often edited before or
+ * installation that has no node to ask — the same shape `scafo trust` and
+ * `scafo varset` are written in, because a registry is often edited before or
  * after there is an agent to edit it through.
  */
 
-import { ScaloError } from "../core/error.ts";
+import { ScafoError } from "../core/error.ts";
 import { describeSelector } from "../core/placement/selector.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
 import { type CanaryInput, canarySplit, setSplit } from "../core/registry/environments.ts";
@@ -24,7 +24,7 @@ import { assertSlug } from "../core/utils/slug.ts";
 import { type AgentCallOptions, agentRequest, type Authorize } from "./_agent.ts";
 
 /** Node id the CLI takes the coordinator lease under; see {@link directOps}. */
-export const CLI_NODE_ID: string = "scalo-cli";
+export const CLI_NODE_ID: string = "scafo-cli";
 
 /** The environment a subcommand was pointed at. */
 export interface EnvironmentTarget {
@@ -157,7 +157,7 @@ export interface DirectOptions {
  * soon as the deletion is over, successful or not, so the fleet takes it back at
  * once instead of waiting out the TTL.
  *
- * Throws `ScaloError("lease-lost")` when the lease could not be taken at all,
+ * Throws `ScafoError("lease-lost")` when the lease could not be taken at all,
  * which means a live coordinator is holding it and the request belongs there.
  */
 export function directOps(registry: RegistryContext, opts?: DirectOptions): EnvironmentOps {
@@ -198,16 +198,16 @@ export function describeRetirement(
   environment: EnvironmentRecord,
 ): string {
   const name = `"${target.project}/${target.env}"`;
-  if (environment.retiredAt === undefined) return `scalo: ${name} is not retired`;
+  if (environment.retiredAt === undefined) return `scafo: ${name} is not retired`;
 
   return (
-    `scalo: ${name} is retired as of ${environment.retiredAt}; every node stops serving it on ` +
-    `its next pass, "scalo env unretire" puts it straight back, and it can be deleted once ` +
+    `scafo: ${name} is retired as of ${environment.retiredAt}; every node stops serving it on ` +
+    `its next pass, "scafo env unretire" puts it straight back, and it can be deleted once ` +
     `its grace has run out`
   );
 }
 
-/** The two ways `scalo env selector` can be told what to do. */
+/** The two ways `scafo env selector` can be told what to do. */
 export interface SelectorFlags {
   /** Labels written `k=v,k2=v2`, or undefined when `--set` was not given. */
   set: string | undefined;
@@ -219,22 +219,22 @@ export interface SelectorFlags {
  * The selector an invocation states: the labels of `--set`, or null for
  * `--clear`.
  *
- * Exactly one of them, and `ScaloError("invalid-input")` otherwise. They are
+ * Exactly one of them, and `ScafoError("invalid-input")` otherwise. They are
  * opposite intentions, so a command carrying BOTH says nothing about which was
  * meant; and NEITHER is refused rather than read as "clear", because an
- * accidental `scalo env selector` that lifted a constraint would move an
+ * accidental `scafo env selector` that lifted a constraint would move an
  * application across a fleet without anyone asking it to.
  */
 export function readSelectorFlags(flags: SelectorFlags): NodeSelector | null {
   if (flags.set !== undefined && flags.clear) {
-    throw new ScaloError("invalid-input", "Conflicting arguments", {
+    throw new ScafoError("invalid-input", "Conflicting arguments", {
       detail: `--set "${flags.set}" and --clear ask for opposite things; pass one of them`,
     });
   }
   if (flags.clear) return null;
   if (flags.set !== undefined) return parseLabels(flags.set, "--set");
 
-  throw new ScaloError("invalid-input", "Missing required argument", {
+  throw new ScafoError("invalid-input", "Missing required argument", {
     detail:
       `pass --set "key=value,key2=value2" to choose which nodes may serve it, ` +
       `or --clear to let it run on every node again`,
@@ -255,18 +255,18 @@ export function describeSelectorChange(
 
   if (selector === undefined) {
     return (
-      `scalo: ${name} selects no nodes any more; the coordinator places it over the whole ` +
+      `scafo: ${name} selects no nodes any more; the coordinator places it over the whole ` +
       `fleet again on its next assignment pass`
     );
   }
   return (
-    `scalo: ${name} runs only on nodes labelled ${describeSelector(selector)}; the coordinator ` +
+    `scafo: ${name} runs only on nodes labelled ${describeSelector(selector)}; the coordinator ` +
     `places it on the next assignment pass, and reports the environment as unplaced — leaving ` +
     `whatever serves it now running — if no live node carries them`
   );
 }
 
-/** The two ways `scalo env split` can be told what to do. */
+/** The two ways `scafo env split` can be told what to do. */
 export interface SplitFlags {
   /** Legs written `build=weight,build2=weight2`, or undefined when `--set` was not given. */
   set: string | undefined;
@@ -279,7 +279,7 @@ export interface SplitFlags {
  *
  * Exactly one of them, on the same reading as {@link readSelectorFlags}: BOTH
  * says nothing about which was meant, and NEITHER is refused rather than read as
- * "clear", because an accidental `scalo env split` that collapsed a canary onto
+ * "clear", because an accidental `scafo env split` that collapsed a canary onto
  * the alias would move an application's whole traffic without anyone asking.
  *
  * Only the SHAPE is checked here — `build=weight` pairs over whole numbers. What
@@ -292,14 +292,14 @@ export interface SplitFlags {
  */
 export function readSplitFlags(flags: SplitFlags): SplitEntry[] | null {
   if (flags.set !== undefined && flags.clear) {
-    throw new ScaloError("invalid-input", "Conflicting arguments", {
+    throw new ScafoError("invalid-input", "Conflicting arguments", {
       detail: `--set "${flags.set}" and --clear ask for opposite things; pass one of them`,
     });
   }
   if (flags.clear) return null;
   if (flags.set !== undefined) return parseSplit(flags.set, "--set");
 
-  throw new ScaloError("invalid-input", "Missing required argument", {
+  throw new ScafoError("invalid-input", "Missing required argument", {
     detail:
       `pass --set "build=weight,build2=weight2" to weight this environment's traffic over ` +
       `its builds, or --clear to serve the alias build alone again`,
@@ -318,12 +318,12 @@ export function describeSplitChange(
     const build = environment.alias?.build;
     const serving = build === undefined ? "nothing yet" : `build "${build}"`;
     return (
-      `scalo: ${name} splits its traffic no more; it serves ${serving} alone, and the nodes ` +
+      `scafo: ${name} splits its traffic no more; it serves ${serving} alone, and the nodes ` +
       `serving it stop every other leg on their next pass`
     );
   }
   return (
-    `scalo: ${name} splits its traffic ${describeSplit(split)}; the nodes serving it start ` +
+    `scafo: ${name} splits its traffic ${describeSplit(split)}; the nodes serving it start ` +
     `every leg on their next pass, and each takes its share once it has passed its readiness ` +
     `gate — until then its share goes to the legs that are ready`
   );
@@ -336,8 +336,8 @@ export function describeSplit(split: SplitEntry[]): string {
 
 /** `build=weight,build2=weight2`, in the order it was written. */
 function parseSplit(stated: string, flag: string): SplitEntry[] {
-  const malformed = (detail: string): ScaloError =>
-    new ScaloError("invalid-input", "Malformed traffic split", { detail });
+  const malformed = (detail: string): ScafoError =>
+    new ScafoError("invalid-input", "Malformed traffic split", { detail });
 
   const entries: SplitEntry[] = [];
   for (const part of stated.split(",")) {
@@ -371,7 +371,7 @@ async function takeLease(
   const lease = await acquireLease(registry, nodeId);
   if (lease !== null) return lease;
 
-  throw new ScaloError("lease-lost", "A node is coordinating this installation", {
+  throw new ScafoError("lease-lost", "A node is coordinating this installation", {
     detail:
       `"${target.project}/${target.env}" cannot be deleted straight through the bucket while a ` +
       `node holds the coordinator lease: ask that installation instead, with --agent <url> ` +

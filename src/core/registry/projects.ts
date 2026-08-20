@@ -1,4 +1,4 @@
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import type { PlacementStrategy, ProjectRecord } from "../types/registry.ts";
 import type { RetryOptions } from "../utils/backoff.ts";
 import { isCasConflict } from "./_shared.ts";
@@ -64,7 +64,7 @@ export async function listProjects(ctx: RegistryContext): Promise<string[]> {
 
 /**
  * Read-modify-write of a project. `v` and `slug` identify the record and may not
- * be changed; doing so throws `ScaloError("immutable")`.
+ * be changed; doing so throws `ScafoError("immutable")`.
  */
 export async function updateProject(
   ctx: RegistryContext,
@@ -78,7 +78,7 @@ export async function updateProject(
     async (current) => {
       const next = await mutate(current);
       if (next.v !== current.v || next.slug !== current.slug) {
-        throw new ScaloError("immutable", "Project identity cannot be changed", {
+        throw new ScafoError("immutable", "Project identity cannot be changed", {
           detail: `"${slug}" must keep v ${String(current.v)} and slug "${current.slug}"`,
         });
       }

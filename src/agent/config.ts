@@ -7,7 +7,7 @@
  */
 
 import { type JSONCParseError, parseJSONC } from "confbox";
-import { ScaloError } from "../core/error.ts";
+import { ScafoError } from "../core/error.ts";
 import { DEFAULT_PORT_RANGE_START } from "../core/placement/ports.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
 import type { TransportConfig, TransportMode } from "../core/types/transport.ts";
@@ -115,7 +115,7 @@ export interface VarsetsConfig {
  * API, so it must be told where that is. `traefik` PULLS: the node renders its
  * routing and serves it at `/v1/ingress/traefik`, and it is the operator's
  * Traefik that is configured with the address — in Traefik's own static
- * configuration, which scalo neither writes nor reads.
+ * configuration, which scafo neither writes nor reads.
  */
 export interface IngressConfig {
   /** Which ingress this node drives; anything else fails the boot. */
@@ -130,7 +130,7 @@ export interface IngressConfig {
    * applies when absent, and naming any is only meaningful with that driver.
    *
    * The list is never empty: Traefik reads an absent `entryPoints` as "every
-   * entryPoint there is", which includes the ones scalo has no business on.
+   * entryPoint there is", which includes the ones scafo has no business on.
    */
   entryPoints?: string[];
 }
@@ -174,7 +174,7 @@ export interface LoadConfigOptions {
 }
 
 /** Config files looked for when no path is given, in order of preference. */
-export const DEFAULT_CONFIG_PATHS: string[] = ["./scalo.config.jsonc", "./scalo.config.json"];
+export const DEFAULT_CONFIG_PATHS: string[] = ["./scafo.config.jsonc", "./scafo.config.json"];
 
 /** Signing region used when none is configured; harmless for stores that ignore it. */
 export const DEFAULT_REGION: string = "us-east-1";
@@ -203,7 +203,7 @@ export interface HostPort {
 /**
  * Reads the configuration a node agent starts from.
  *
- * Throws `ScaloError("invalid-input")` when a required setting has no value in
+ * Throws `ScafoError("invalid-input")` when a required setting has no value in
  * any source, or when an address, a node id or a platform domain is malformed.
  */
 export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentConfig> {
@@ -318,7 +318,7 @@ export function advertisedAddress(node: AgentConfig["node"]): HostPort {
  * Splits `host:port`. IPv6 literals must be bracketed the way a URL authority
  * writes them (`[::1]:7400`); every other host is a DNS name or an IPv4 address.
  *
- * Throws `ScaloError("invalid-input")` naming `field` when the value is not one.
+ * Throws `ScafoError("invalid-input")` naming `field` when the value is not one.
  */
 export function parseHostPort(value: string, field: string): HostPort {
   const match = /^(?:\[([^\]]+)\]|([^:]+)):(\d{1,5})$/.exec(value);
@@ -327,14 +327,14 @@ export function parseHostPort(value: string, field: string): HostPort {
   const port = Number(match?.[3]);
 
   if (host === undefined || !Number.isInteger(port) || port < 1 || port > 65_535) {
-    throw new ScaloError("invalid-input", "Invalid address", {
+    throw new ScafoError("invalid-input", "Invalid address", {
       detail: `"${field}" must be "host:port" with a port in 1-65535, got "${value}"`,
     });
   }
   /* A bracketed literal is taken as given; anything else must be a DNS name or
      an IPv4 address, both of which are plain lowercase labels. */
   if (bracketed === undefined && !isHost(host)) {
-    throw new ScaloError("invalid-input", "Invalid address", {
+    throw new ScafoError("invalid-input", "Invalid address", {
       detail: `"${field}" has host "${host}", which is not a lowercase DNS name or IPv4 address`,
     });
   }
@@ -353,72 +353,72 @@ interface Origin {
 
 /**
  * Every configurable setting and the sources that can carry it. The `AWS_*` and
- * `S3_*` names are accepted below the `SCALO_*` ones so a shell already set up
- * for the bucket works, without letting it override an explicit scalo setting.
+ * `S3_*` names are accepted below the `SCAFO_*` ones so a shell already set up
+ * for the bucket works, without letting it override an explicit scafo setting.
  */
 const ORIGINS = {
   endpoint: {
     flag: "endpoint",
-    env: ["SCALO_S3_ENDPOINT", "S3_ENDPOINT"],
+    env: ["SCAFO_S3_ENDPOINT", "S3_ENDPOINT"],
     file: "bucket.endpoint",
   },
-  region: { flag: "region", env: ["SCALO_S3_REGION", "AWS_REGION"], file: "bucket.region" },
-  bucket: { flag: "bucket", env: ["SCALO_S3_BUCKET"], file: "bucket.bucket" },
-  prefix: { flag: "prefix", env: ["SCALO_S3_PREFIX"], file: "bucket.prefix" },
+  region: { flag: "region", env: ["SCAFO_S3_REGION", "AWS_REGION"], file: "bucket.region" },
+  bucket: { flag: "bucket", env: ["SCAFO_S3_BUCKET"], file: "bucket.bucket" },
+  prefix: { flag: "prefix", env: ["SCAFO_S3_PREFIX"], file: "bucket.prefix" },
   accessKey: {
     flag: "access-key",
-    env: ["SCALO_S3_ACCESS_KEY", "AWS_ACCESS_KEY_ID"],
+    env: ["SCAFO_S3_ACCESS_KEY", "AWS_ACCESS_KEY_ID"],
     file: "bucket.accessKey",
   },
   secretKey: {
     flag: "secret-key",
-    env: ["SCALO_S3_SECRET_KEY", "AWS_SECRET_ACCESS_KEY"],
+    env: ["SCAFO_S3_SECRET_KEY", "AWS_SECRET_ACCESS_KEY"],
     file: "bucket.secretKey",
   },
-  nodeId: { flag: "node-id", env: ["SCALO_NODE_ID"], file: "node.id" },
-  listen: { flag: "listen", env: ["SCALO_LISTEN"], file: "node.listen" },
+  nodeId: { flag: "node-id", env: ["SCAFO_NODE_ID"], file: "node.id" },
+  listen: { flag: "listen", env: ["SCAFO_LISTEN"], file: "node.listen" },
   internalListen: {
     flag: "internal-listen",
-    env: ["SCALO_INTERNAL_LISTEN"],
+    env: ["SCAFO_INTERNAL_LISTEN"],
     file: "node.internalListen",
   },
-  advertise: { flag: "advertise", env: ["SCALO_ADVERTISE"], file: "node.advertise" },
-  stateDir: { flag: "state-dir", env: ["SCALO_STATE_DIR"], file: "node.stateDir" },
-  nodeLabels: { flag: "node-labels", env: ["SCALO_NODE_LABELS"], file: "node.labels" },
+  advertise: { flag: "advertise", env: ["SCAFO_ADVERTISE"], file: "node.advertise" },
+  stateDir: { flag: "state-dir", env: ["SCAFO_STATE_DIR"], file: "node.stateDir" },
+  nodeLabels: { flag: "node-labels", env: ["SCAFO_NODE_LABELS"], file: "node.labels" },
   platformDomains: {
     flag: "platform-domains",
-    env: ["SCALO_PLATFORM_DOMAINS"],
+    env: ["SCAFO_PLATFORM_DOMAINS"],
     file: "platformDomains",
   },
-  celldBin: { flag: "celld-bin", env: ["SCALO_CELLD_BIN"], file: "runtime.binPath" },
+  celldBin: { flag: "celld-bin", env: ["SCAFO_CELLD_BIN"], file: "runtime.binPath" },
   portRangeStart: {
     flag: "port-range-start",
-    env: ["SCALO_PORT_RANGE_START"],
+    env: ["SCAFO_PORT_RANGE_START"],
     file: "runtime.portRangeStart",
   },
-  probePath: { flag: "probe-path", env: ["SCALO_PROBE_PATH"], file: "runtime.probePath" },
-  bindHost: { flag: "bind-host", env: ["SCALO_BIND_HOST"], file: "runtime.bindHost" },
+  probePath: { flag: "probe-path", env: ["SCAFO_PROBE_PATH"], file: "runtime.probePath" },
+  bindHost: { flag: "bind-host", env: ["SCAFO_BIND_HOST"], file: "runtime.bindHost" },
   ingressDriver: {
     flag: "ingress-driver",
-    env: ["SCALO_INGRESS_DRIVER"],
+    env: ["SCAFO_INGRESS_DRIVER"],
     file: "ingress.driver",
   },
-  caddyAdmin: { flag: "caddy-admin", env: ["SCALO_CADDY_ADMIN"], file: "ingress.adminUrl" },
-  caddyServer: { flag: "caddy-server", env: ["SCALO_CADDY_SERVER"], file: "ingress.serverName" },
+  caddyAdmin: { flag: "caddy-admin", env: ["SCAFO_CADDY_ADMIN"], file: "ingress.adminUrl" },
+  caddyServer: { flag: "caddy-server", env: ["SCAFO_CADDY_SERVER"], file: "ingress.serverName" },
   traefikEntryPoints: {
     flag: "traefik-entrypoints",
-    env: ["SCALO_TRAEFIK_ENTRYPOINTS"],
+    env: ["SCAFO_TRAEFIK_ENTRYPOINTS"],
     file: "ingress.entryPoints",
   },
   varsetKeyFile: {
     flag: "varset-key-file",
-    env: ["SCALO_VARSET_KEY_FILE"],
+    env: ["SCAFO_VARSET_KEY_FILE"],
     file: "varsets.keyFile",
   },
-  transport: { flag: "transport", env: ["SCALO_TRANSPORT"], file: "transport.driver" },
-  wgAddress: { flag: "wg-address", env: ["SCALO_WG_ADDRESS"], file: "wireguard.address" },
-  wgEndpoint: { flag: "wg-endpoint", env: ["SCALO_WG_ENDPOINT"], file: "wireguard.endpoint" },
-  wgPort: { flag: "wg-port", env: ["SCALO_WG_PORT"], file: "wireguard.port" },
+  transport: { flag: "transport", env: ["SCAFO_TRANSPORT"], file: "transport.driver" },
+  wgAddress: { flag: "wg-address", env: ["SCAFO_WG_ADDRESS"], file: "wireguard.address" },
+  wgEndpoint: { flag: "wg-endpoint", env: ["SCAFO_WG_ENDPOINT"], file: "wireguard.endpoint" },
+  wgPort: { flag: "wg-port", env: ["SCAFO_WG_PORT"], file: "wireguard.port" },
 } satisfies Record<string, Origin>;
 
 /**
@@ -464,7 +464,7 @@ function required(setting: Setting, sources: Sources): string {
   if (value !== undefined) return value;
 
   const origin: Origin = ORIGINS[setting];
-  throw new ScaloError("invalid-input", "Missing required configuration", {
+  throw new ScafoError("invalid-input", "Missing required configuration", {
     detail:
       `"${origin.file}" has no value: set it in the config file, ` +
       `set ${origin.env.join(" or ")} in the environment, or pass --${origin.flag}`,
@@ -482,7 +482,7 @@ function resolvePort(setting: Setting, sources: Sources, fallback: number): numb
 
   const value = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN;
   if (!Number.isInteger(value) || value < 1 || value > 65_535) {
-    throw new ScaloError("invalid-input", "Invalid configuration value", {
+    throw new ScafoError("invalid-input", "Invalid configuration value", {
       detail: `"${origin.file}" must be a port in 1-65535, got ${JSON.stringify(raw)}`,
     });
   }
@@ -504,7 +504,7 @@ function resolveBindHost(sources: Sources): string | undefined {
   /* `0.0.0.0` and `::` are not DNS names, but they are the whole point of this
      setting — the wildcards that make a process reachable from another node. */
   if (value !== "0.0.0.0" && value !== "::" && !isHost(value)) {
-    throw new ScaloError("invalid-input", "Invalid configuration value", {
+    throw new ScafoError("invalid-input", "Invalid configuration value", {
       detail:
         `"${ORIGINS.bindHost.file}" must be an address runtime processes can bind, ` +
         `such as "127.0.0.1" or "0.0.0.0", got ${JSON.stringify(value)}`,
@@ -578,7 +578,7 @@ function resolveIngress(sources: Sources): IngressConfig | undefined {
      than dropped on the floor. */
   if (driver === undefined && adminUrl === undefined && entryPoints === undefined) return undefined;
   if (driver !== undefined && !(INGRESS_DRIVERS as string[]).includes(driver)) {
-    throw new ScaloError("invalid-input", "Invalid configuration value", {
+    throw new ScafoError("invalid-input", "Invalid configuration value", {
       detail:
         `"${ORIGINS.ingressDriver.file}" must be one of ` +
         `${INGRESS_DRIVERS.map((name) => `"${name}"`).join(", ")}, got ${JSON.stringify(driver)}`,
@@ -626,7 +626,7 @@ function resolveIngress(sources: Sources): IngressConfig | undefined {
  *
  * A list that parses to nothing is REFUSED rather than left empty, because empty
  * does not mean empty here: Traefik reads routers with no entryPoints as
- * attached to EVERY entryPoint it has — a TLS listener scalo holds no
+ * attached to EVERY entryPoint it has — a TLS listener scafo holds no
  * certificate for, the port the dashboard is on — so the quiet reading of a
  * mistyped list claims far more surface than was offered.
  */
@@ -646,7 +646,7 @@ function resolveEntryPoints(sources: Sources): string[] | undefined {
     .filter((entry) => entry !== "");
 
   if (names.length === 0) {
-    throw new ScaloError("invalid-input", "Invalid configuration value", {
+    throw new ScafoError("invalid-input", "Invalid configuration value", {
       detail:
         `"${origin.file}" must name at least one Traefik entryPoint, such as "web" or ` +
         `"web,websecure": routers attached to none are attached to all of them`,
@@ -666,7 +666,7 @@ function refuseForeign(
   const named = written
     .map(([origin, value]) => `"${origin.file}" (--${origin.flag}) = ${JSON.stringify(value)}`)
     .join(" and ");
-  throw new ScaloError("invalid-input", "Conflicting ingress configuration", {
+  throw new ScafoError("invalid-input", "Conflicting ingress configuration", {
     detail: detail(named),
   });
 }
@@ -683,7 +683,7 @@ function resolveTransport(sources: Sources): TransportConfig | undefined {
 
   const modes: TransportMode[] = ["wireguard", "none"];
   if (!(modes as string[]).includes(driver)) {
-    throw new ScaloError("invalid-input", "Invalid configuration value", {
+    throw new ScafoError("invalid-input", "Invalid configuration value", {
       detail:
         `"${ORIGINS.transport.file}" must be one of ${modes.map((m) => `"${m}"`).join(", ")}, ` +
         `got ${JSON.stringify(driver)}`,
@@ -708,7 +708,7 @@ function resolveWireguard(sources: Sources): WireguardConfig | undefined {
   if (address === undefined && endpoint === undefined) return undefined;
 
   if (address !== undefined && parseInterfaceAddress(address) === null) {
-    throw new ScaloError("invalid-input", "Invalid configuration value", {
+    throw new ScafoError("invalid-input", "Invalid configuration value", {
       detail:
         `"${ORIGINS.wgAddress.file}" must be this node's tunnel address with its prefix ` +
         `length, such as "10.83.0.1/24", got ${JSON.stringify(address)}`,
@@ -738,12 +738,12 @@ async function readConfigFile(
     const parsed: unknown = parseJSONC(text, { errors, allowTrailingComma: true });
     const failure = errors[0];
     if (failure !== undefined) {
-      throw new ScaloError("invalid-input", "Config file is not valid JSONC", {
+      throw new ScafoError("invalid-input", "Config file is not valid JSONC", {
         detail: `"${path}" has a syntax error at character ${String(failure.offset)}`,
       });
     }
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      throw new ScaloError("invalid-input", "Config file is not a JSON object", {
+      throw new ScafoError("invalid-input", "Config file is not a JSON object", {
         detail: `"${path}" must hold an object of settings`,
       });
     }
@@ -753,7 +753,7 @@ async function readConfigFile(
   /* A named file that is not there is a typo worth reporting; the defaults are
      only defaults, so their absence means "everything comes from elsewhere". */
   if (explicit !== undefined) {
-    throw new ScaloError("invalid-input", "Config file not found", {
+    throw new ScafoError("invalid-input", "Config file not found", {
       detail: `"${explicit}" could not be read`,
     });
   }
@@ -774,7 +774,7 @@ function fileStringList(file: Record<string, unknown> | undefined, path: string)
   const value = fileValue(file, path);
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
-    throw new ScaloError("invalid-input", "Invalid configuration value", {
+    throw new ScafoError("invalid-input", "Invalid configuration value", {
       detail: `"${path}" must be an array of strings`,
     });
   }

@@ -18,7 +18,7 @@ export interface StoredObject {
 export interface CasStore {
   /* Returns null when the key does not exist. */
   get(key: string): Promise<StoredObject | null>;
-  /* MUST throw ScaloError("cas-conflict") when a condition fails (HTTP 412). */
+  /* MUST throw ScafoError("cas-conflict") when a condition fails (HTTP 412). */
   put(key: string, body: string, cas?: CasHeaders): Promise<{ etag: string }>;
   del(key: string): Promise<void>;
   /* All keys under prefix, lexicographically sorted, fully paginated. */

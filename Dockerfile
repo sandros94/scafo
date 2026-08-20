@@ -1,8 +1,8 @@
-# The scalo node image: the agent, the runtime it supervises, and the builder it
+# The scafo node image: the agent, the runtime it supervises, and the builder it
 # hands deploys to — everything one node needs and nothing it does not.
 #
-#   docker build -t scalo .
-#   docker run --rm scalo --help
+#   docker build -t scafo .
+#   docker run --rm scafo --help
 #
 # See examples/compose.yaml for a runnable single-host stack and
 # examples/kubernetes/ for the same node as a Deployment.
@@ -88,13 +88,13 @@ COPY package.json ./
 # created 0700. Owned here so a volume mounted over it inherits the ownership,
 # and it is also the user's home, so anything else that reaches for $HOME lands
 # in the same place.
-RUN groupadd --gid 10001 scalo \
-  && useradd --uid 10001 --gid scalo --home-dir /var/lib/scalo \
-  --shell /usr/sbin/nologin scalo \
-  && install -d -o scalo -g scalo -m 0700 /var/lib/scalo
-ENV SCALO_STATE_DIR=/var/lib/scalo
+RUN groupadd --gid 10001 scafo \
+  && useradd --uid 10001 --gid scafo --home-dir /var/lib/scafo \
+  --shell /usr/sbin/nologin scafo \
+  && install -d -o scafo -g scafo -m 0700 /var/lib/scafo
+ENV SCAFO_STATE_DIR=/var/lib/scafo
 
-USER scalo
+USER scafo
 
 # The agent API. NOT bound here: `node.listen` defaults to 127.0.0.1:7400, and
 # widening it to 0.0.0.0 is what makes the node refuse to boot until

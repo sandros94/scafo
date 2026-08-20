@@ -8,7 +8,7 @@
  * finds out who replaced it.
  */
 
-import { isScaloError } from "../core/error.ts";
+import { isScafoError } from "../core/error.ts";
 import { nowDate } from "../core/registry/context.ts";
 import {
   acquireLease,
@@ -126,7 +126,7 @@ export function createCoordinator(agent: AgentContext, opts?: CoordinatorOptions
   function drop(lease: LeaseHandle): void {
     held = null;
     console.log(
-      `scalo: coordinator lease lost at fence ${String(lease.lease.fence)}, this node is no longer the coordinator`,
+      `scafo: coordinator lease lost at fence ${String(lease.lease.fence)}, this node is no longer the coordinator`,
     );
   }
 
@@ -136,7 +136,7 @@ export function createCoordinator(agent: AgentContext, opts?: CoordinatorOptions
       const taken = await acquireLease(agent.registry, agent.nodeId, { ttlMs });
       if (taken === null) return;
       held = taken;
-      console.log(`scalo: coordinator lease taken at fence ${String(taken.lease.fence)}`);
+      console.log(`scafo: coordinator lease taken at fence ${String(taken.lease.fence)}`);
       return;
     }
 
@@ -169,7 +169,7 @@ export function createCoordinator(agent: AgentContext, opts?: CoordinatorOptions
       lastAssignment = await runAssignment(agent.registry, lease, assignOptions);
       lastAssignFailure = null;
     } catch (error) {
-      if (isScaloError(error) && error.code === "lease-lost") drop(lease);
+      if (isScafoError(error) && error.code === "lease-lost") drop(lease);
       lastAssignment = null;
       lastAssignFailure = describe(error);
     } finally {
@@ -186,7 +186,7 @@ export function createCoordinator(agent: AgentContext, opts?: CoordinatorOptions
       /* A reap that failed is recorded and nothing more: the lease is kept and
          the next tick plans again from fresh state. The exception is a lost
          lease, which says this node is no longer the one doing this work. */
-      if (isScaloError(error) && error.code === "lease-lost") drop(lease);
+      if (isScafoError(error) && error.code === "lease-lost") drop(lease);
       lastReapFailure = describe(error);
     } finally {
       lastReapMs = nowDate(agent.registry).getTime();
@@ -267,9 +267,9 @@ export function createCoordinator(agent: AgentContext, opts?: CoordinatorOptions
   };
 }
 
-/** The specifics a scalo failure carries are the useful half; keep both. */
+/** The specifics a scafo failure carries are the useful half; keep both. */
 function describe(error: unknown): string {
-  if (isScaloError(error)) {
+  if (isScafoError(error)) {
     return error.detail === undefined ? error.message : `${error.message}: ${error.detail}`;
   }
   return error instanceof Error ? error.message : String(error);

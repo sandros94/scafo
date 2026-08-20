@@ -1,7 +1,7 @@
 /*
  * The whole single-node product loop against real infrastructure: a SeaweedFS
  * bucket holding the registry, a Caddy the agent drives through its admin API,
- * celld running the builds, and the built `scalo` CLI driving all of it from the
+ * celld running the builds, and the built `scafo` CLI driving all of it from the
  * host the way an operator would.
  *
  * The topology mirrors one real VPS. Caddy and the agent SHARE a network
@@ -18,9 +18,9 @@
  * which mirrors this one with the other ingress in Caddy's place. What stays
  * here is what this suite is: its containers, and what it asserts about them.
  *
- * Skipped unless SCALO_E2E=1, because it is minutes rather than seconds:
+ * Skipped unless SCAFO_E2E=1, because it is minutes rather than seconds:
  *
- *   SCALO_E2E=1 pnpm vitest run test/integration/e2e.test.ts
+ *   SCAFO_E2E=1 pnpm vitest run test/integration/e2e.test.ts
  *
  * Every HTTP assertion polls until a deadline, because a change only reaches
  * Caddy after the reconcile pass that observes it. Any timeout dumps the agent
@@ -83,7 +83,7 @@ import {
 } from "./_harness.ts";
 import { startStubIssuer, type StubIssuer } from "./_stub-issuer.ts";
 
-const E2E = process.env.SCALO_E2E === "1";
+const E2E = process.env.SCAFO_E2E === "1";
 
 const CADDY_IMAGE = "caddy:2";
 
@@ -92,10 +92,10 @@ const CADDY_ADMIN_PORT = 2019;
 /** Published on the Caddy container, because the agent shares its namespace. */
 const AGENT_PORT = 7400;
 
-const BUCKET = "scalo-e2e";
+const BUCKET = "scafo-e2e";
 const KEY_PREFIX = "e2e";
-const ACCESS_KEY = "scalo";
-const SECRET_KEY = "scalo-secret";
+const ACCESS_KEY = "scafo";
+const SECRET_KEY = "scafo-secret";
 const REGION = "us-east-1";
 
 /** The same four settings the harness starts the store and the CLI with. */
@@ -107,7 +107,7 @@ const BUCKET_SETTINGS: BucketSettings = {
   region: REGION,
 };
 
-const PLATFORM_DOMAIN = "scalo.test";
+const PLATFORM_DOMAIN = "scafo.test";
 const OPERATOR_HOST = "operator.test";
 const PROJECT = "app";
 const ENVIRONMENT = "production";
@@ -142,7 +142,7 @@ let operatorKey: OperatorKeyFile;
 let buildV1: string;
 let buildV2: string;
 let buildCi: string;
-/** The build eased in with `scalo deploy --canary`, beside the alias. */
+/** The build eased in with `scafo deploy --canary`, beside the alias. */
 let buildCanary: string;
 
 const tmpDirs: string[] = [];
@@ -171,7 +171,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       /* Waiting on the admin API rather than on every published port: nothing
          listens on the agent's until the agent itself starts. */
       .withWaitStrategy(
-        Wait.forHttp(`/config/apps/http/servers/scalo/routes`, CADDY_ADMIN_PORT).forStatusCode(200),
+        Wait.forHttp(`/config/apps/http/servers/scafo/routes`, CADDY_ADMIN_PORT).forStatusCode(200),
       )
       .start();
 
@@ -186,26 +186,26 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "rw" }])
       .withWorkingDir("/work")
       .withEnvironment({
-        SCALO_S3_ENDPOINT: storeFromContainers,
-        SCALO_S3_BUCKET: BUCKET,
-        SCALO_S3_PREFIX: KEY_PREFIX,
-        SCALO_S3_ACCESS_KEY: ACCESS_KEY,
-        SCALO_S3_SECRET_KEY: SECRET_KEY,
-        SCALO_S3_REGION: REGION,
-        SCALO_NODE_ID: NODE_ID,
+        SCAFO_S3_ENDPOINT: storeFromContainers,
+        SCAFO_S3_BUCKET: BUCKET,
+        SCAFO_S3_PREFIX: KEY_PREFIX,
+        SCAFO_S3_ACCESS_KEY: ACCESS_KEY,
+        SCAFO_S3_SECRET_KEY: SECRET_KEY,
+        SCAFO_S3_REGION: REGION,
+        SCAFO_NODE_ID: NODE_ID,
         /* The listener below binds every interface, which the agent refuses
            without being told what network that is. Inside a container of its
            own, on a private docker network, it is the trusted-network case. */
-        SCALO_TRANSPORT: "none",
+        SCAFO_TRANSPORT: "none",
         /* Container-local, and explicitly so: the working directory is this
            repository bind-mounted at /work, and the node's identity must not be
            written into a checkout. */
-        SCALO_STATE_DIR: "/var/lib/scalo",
-        SCALO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
-        SCALO_CADDY_ADMIN: `http://127.0.0.1:${String(CADDY_ADMIN_PORT)}`,
+        SCAFO_STATE_DIR: "/var/lib/scafo",
+        SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
+        SCAFO_CADDY_ADMIN: `http://127.0.0.1:${String(CADDY_ADMIN_PORT)}`,
         /* Peers reach a single node on loopback; without this the advertised
            host would be the wildcard the listener binds. */
-        SCALO_ADVERTISE: `127.0.0.1:${String(AGENT_PORT)}`,
+        SCAFO_ADVERTISE: `127.0.0.1:${String(AGENT_PORT)}`,
         /* Belt and braces: the image's own esbuild, rather than whichever one
            the bind-mounted node_modules resolves to. */
         ESBUILD_BINARY_PATH: "/usr/local/bin/esbuild",
@@ -272,7 +272,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   it(
     "registers an operator key whose public half lands in the registry",
     async () => {
-      const dir = await mkdtemp(join(tmpdir(), "scalo-e2e-key-"));
+      const dir = await mkdtemp(join(tmpdir(), "scafo-e2e-key-"));
       tmpDirs.push(dir);
       keyPath = join(dir, "operator.json");
 
@@ -386,7 +386,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       observed.v1BuildHostAfterReconcile = withdrawn;
 
       const routes = await caddyRoutes();
-      expect(routes.map((route) => route["@id"])).not.toContain(`scalo_${buildHost(buildV1)}`);
+      expect(routes.map((route) => route["@id"])).not.toContain(`scafo_${buildHost(buildV1)}`);
       expect(routes.map((route) => route["@id"])).toContain("operator_authored");
     },
     STEP_TIMEOUT_MS,
@@ -462,7 +462,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
           "--issuer",
           issuer.iss,
           "--audience",
-          "scalo",
+          "scafo",
           "--subject",
           WORKLOAD_GLOB,
         ],
@@ -472,7 +472,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
 
       const policy = await readJson<TrustPolicy>(registry, trustKey(PROJECT));
       expect(policy?.value.issuers).toEqual([
-        { iss: issuer.iss, aud: "scalo", subjects: [WORKLOAD_GLOB] },
+        { iss: issuer.iss, aud: "scafo", subjects: [WORKLOAD_GLOB] },
       ]);
 
       /* And an operator can read back what they set, glob intact — the pattern
@@ -502,7 +502,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
        */
       expect(args).not.toContain("--key");
       const ciEnv: Record<string, string> = {};
-      expect(Object.keys(ciEnv).filter((name) => name.startsWith("SCALO_"))).toEqual([]);
+      expect(Object.keys(ciEnv).filter((name) => name.startsWith("SCAFO_"))).toEqual([]);
 
       const started = Date.now();
       const result = await runCli(args, ciEnv);
@@ -552,7 +552,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
        * held up as authentication and the project simply does not admit it,
        * which is authorization and something the caller must be able to act on.
        */
-      expect(result.output).toContain("urn:scalo:trust-mismatch");
+      expect(result.output).toContain("urn:scafo:trust-mismatch");
       expect(result.output).toContain(HOSTILE_SUBJECT);
 
       /* Nothing was built and the alias did not move. */
@@ -689,7 +689,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       observed.afterPromotionProcesses = state.processes;
 
       const routes = await caddyRoutes();
-      expect(routes.map((route) => route["@id"])).not.toContain(`scalo_${buildHost(buildV1)}`);
+      expect(routes.map((route) => route["@id"])).not.toContain(`scafo_${buildHost(buildV1)}`);
       /* And the operator's own route is still there, after all of it. */
       expect(routes.map((route) => route["@id"])).toContain("operator_authored");
     },
@@ -797,7 +797,7 @@ async function untilServes(host: string, version: string): Promise<HttpAnswer> {
 
 /** The routes Caddy currently holds in the server the node writes into. */
 async function caddyRoutes(): Promise<Array<Record<string, unknown>>> {
-  const answer = await httpGet(caddyAdminPort, "/config/apps/http/servers/scalo/routes", {});
+  const answer = await httpGet(caddyAdminPort, "/config/apps/http/servers/scafo/routes", {});
   expect(answer.status, `the Caddy admin API answered ${answer.body}`).toBe(200);
 
   const body: unknown = JSON.parse(answer.body);

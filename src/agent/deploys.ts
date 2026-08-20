@@ -7,7 +7,7 @@
  * Progress is reported through a status object the caller polls.
  */
 
-import { isScaloError } from "../core/error.ts";
+import { isScafoError } from "../core/error.ts";
 import { createBuild } from "../core/registry/builds.ts";
 import { createEnvironment, flipAlias, getEnvironment } from "../core/registry/environments.ts";
 import { fleetPrefix } from "../core/registry/paths.ts";
@@ -18,7 +18,7 @@ import type {
   BuildSource,
   NodeSelector,
   ReplicaCount,
-  ScaloWarning,
+  ScafoWarning,
 } from "../core/types/registry.ts";
 import type { AgentContext } from "./app.ts";
 
@@ -59,7 +59,7 @@ export interface DeployStatus {
   state: DeployState;
   /** Why it failed, when it did. */
   detail?: string;
-  warnings: ScaloWarning[];
+  warnings: ScafoWarning[];
 }
 
 /** Everything a deploy request carries besides the artifact itself. */
@@ -137,7 +137,7 @@ export function createDeployService(
     return next;
   }
 
-  function warn(id: string, warning: ScaloWarning): void {
+  function warn(id: string, warning: ScafoWarning): void {
     const current = statuses.get(id);
     if (current !== undefined) update(id, { warnings: [...current.warnings, warning] });
   }
@@ -310,7 +310,7 @@ async function ensureEnvironment(
   try {
     await getEnvironment(agent.registry, project, environment);
   } catch (error) {
-    if (!isScaloError(error) || error.code !== "not-found") throw error;
+    if (!isScafoError(error) || error.code !== "not-found") throw error;
     exists = false;
   }
 
@@ -353,9 +353,9 @@ function randomDeployId(): string {
   return hex;
 }
 
-/** The specifics a scalo failure carries are the useful half; keep both. */
+/** The specifics a scafo failure carries are the useful half; keep both. */
 function describe(error: unknown): string {
-  if (isScaloError(error)) {
+  if (isScafoError(error)) {
     return error.detail === undefined ? error.message : `${error.message}: ${error.detail}`;
   }
   return error instanceof Error ? error.message : String(error);

@@ -32,12 +32,12 @@ export type NodeSelector = Record<string, string>;
  * Non-fatal advisory returned alongside a successful operation. Warnings never
  * abort a call; `code` is the stable contract, `detail` is human-facing.
  */
-export interface ScaloWarning {
+export interface ScafoWarning {
   code: string;
   detail: string;
 }
 
-/** Registry-wide settings written at bootstrap. Key: `_scalo/meta.json`. */
+/** Registry-wide settings written at bootstrap. Key: `_scafo/meta.json`. */
 export interface RegistryMeta {
   v: 1;
   /** Apex domains the platform serves wildcard subdomains under. */
@@ -47,7 +47,7 @@ export interface RegistryMeta {
 
 /**
  * Fenced lock held by the node currently acting as coordinator.
- * Key: `_scalo/coordinator/lease.json`.
+ * Key: `_scafo/coordinator/lease.json`.
  */
 export interface CoordinatorLease {
   v: 1;
@@ -65,7 +65,7 @@ export interface CoordinatorLease {
  *
  * Present only on a node whose transport is `wireguard`, and written by that
  * node itself: the keys are the operator's, generated with the operator's own
- * `wg`, and scalo never holds the private half in the registry.
+ * `wg`, and scafo never holds the private half in the registry.
  */
 export interface NodeWireguard {
   /** X25519 public key, base64 as `wg pubkey` prints it. */
@@ -76,7 +76,7 @@ export interface NodeWireguard {
   address: string;
 }
 
-/** A registered node running the agent. Key: `_scalo/nodes/<id>.json`. */
+/** A registered node running the agent. Key: `_scafo/nodes/<id>.json`. */
 export interface NodeRecord {
   v: 1;
   id: string;
@@ -117,7 +117,7 @@ export interface NodeRecord {
   labels?: Record<string, string>;
 }
 
-/** A project namespace. Key: `_scalo/projects/<slug>/project.json`. */
+/** A project namespace. Key: `_scafo/projects/<slug>/project.json`. */
 export interface ProjectRecord {
   v: 1;
   slug: string;
@@ -141,7 +141,7 @@ export interface BuildSource {
 }
 
 /**
- * An immutable build artifact. Key: `_scalo/projects/<project>/builds/<id>.json`.
+ * An immutable build artifact. Key: `_scafo/projects/<project>/builds/<id>.json`.
  */
 export interface BuildRecord {
   v: 1;
@@ -185,7 +185,7 @@ export interface SplitEntry {
 
 /**
  * A deployable environment of a project.
- * Key: `_scalo/projects/<project>/environments/<name>.json`.
+ * Key: `_scafo/projects/<project>/environments/<name>.json`.
  */
 export interface EnvironmentRecord {
   v: 1;
@@ -233,7 +233,7 @@ export interface EnvironmentRecord {
 
 /**
  * Which nodes serve one environment, as the coordinator last decided it.
- * Key: `_scalo/placement/<project>/<env>.json`.
+ * Key: `_scafo/placement/<project>/<env>.json`.
  *
  * The ABSENCE of this record is meaningful and is not an error: it says no
  * coordinator has decided yet, and every node then serves the environment. See
@@ -259,13 +259,13 @@ export interface TrustIssuer {
   subjects: string[];
 }
 
-/** Deploy-time trust configuration. Key: `_scalo/projects/<project>/trust.json`. */
+/** Deploy-time trust configuration. Key: `_scafo/projects/<project>/trust.json`. */
 export interface TrustPolicy {
   v: 1;
   issuers: TrustIssuer[];
 }
 
-/** Ownership of a custom domain. Key: `_scalo/domains/<domain>.json`. */
+/** Ownership of a custom domain. Key: `_scafo/domains/<domain>.json`. */
 export interface DomainClaim {
   v: 1;
   project: string;
@@ -285,7 +285,7 @@ export type PlainVarset = Record<string, VarsetEntry>;
 
 /**
  * Encrypted varset as stored. `iv` and `ct` are b64url.
- * Key: `_scalo/projects/<project>/varsets/<name>.json`.
+ * Key: `_scafo/projects/<project>/varsets/<name>.json`.
  */
 export interface VarsetEnvelope {
   v: 1;

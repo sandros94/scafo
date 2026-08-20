@@ -1,6 +1,6 @@
 /*
  * The seam between the agent and whatever actually runs processes on a node.
- * Core describes the contract; a driver (`scalo/drivers/supervisor/child`)
+ * Core describes the contract; a driver (`scafo/drivers/supervisor/child`)
  * implements it, and the caller wires the two together.
  */
 

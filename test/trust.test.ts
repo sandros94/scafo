@@ -13,7 +13,7 @@ import { ctxWith, rejectsWith } from "./_helpers.ts";
 
 const PROJECT = "app";
 const ISS = "https://token.actions.githubusercontent.com";
-const AUD = "scalo";
+const AUD = "scafo";
 
 const POLICY: TrustPolicy = {
   v: 1,
@@ -21,7 +21,7 @@ const POLICY: TrustPolicy = {
     {
       iss: ISS,
       aud: AUD,
-      subjects: ["repo:sandros94/scalo:ref:refs/heads/main", "repo:sandros94/scalo:pull_request"],
+      subjects: ["repo:sandros94/scafo:ref:refs/heads/main", "repo:sandros94/scafo:pull_request"],
     },
   ],
 };
@@ -33,7 +33,7 @@ function withSubjects(subjects: string[]): TrustPolicy {
 describe("matchTrust", () => {
   it("denies when there is no policy at all", () => {
     expect(
-      matchTrust(null, { iss: ISS, aud: AUD, sub: "repo:sandros94/scalo:pull_request" }),
+      matchTrust(null, { iss: ISS, aud: AUD, sub: "repo:sandros94/scafo:pull_request" }),
     ).toBeNull();
   });
 
@@ -41,13 +41,13 @@ describe("matchTrust", () => {
     const matched = matchTrust(POLICY, {
       iss: ISS,
       aud: AUD,
-      sub: "repo:sandros94/scalo:pull_request",
+      sub: "repo:sandros94/scafo:pull_request",
     });
     expect(matched).toEqual(POLICY.issuers[0]);
   });
 
   it("requires iss and aud to match exactly", () => {
-    const sub = "repo:sandros94/scalo:pull_request";
+    const sub = "repo:sandros94/scafo:pull_request";
 
     expect(matchTrust(POLICY, { iss: `${ISS}/`, aud: AUD, sub })).toBeNull();
     expect(matchTrust(POLICY, { iss: ISS, aud: "other", sub })).toBeNull();
@@ -59,21 +59,21 @@ describe("matchTrust", () => {
       matchTrust(POLICY, { iss: ISS, aud: AUD, sub: "repo:someone/else:pull_request" }),
     ).toBeNull();
     expect(
-      matchTrust(POLICY, { iss: ISS, aud: AUD, sub: "repo:sandros94/scalo:ref:refs/heads/dev" }),
+      matchTrust(POLICY, { iss: ISS, aud: AUD, sub: "repo:sandros94/scafo:ref:refs/heads/dev" }),
     ).toBeNull();
   });
 
   it("lets * stand for any run of characters, anchored at both ends", () => {
-    const policy = withSubjects(["repo:sandros94/scalo:*"]);
+    const policy = withSubjects(["repo:sandros94/scafo:*"]);
     const claims = (sub: string): { iss: string; aud: string; sub: string } => ({
       iss: ISS,
       aud: AUD,
       sub,
     });
 
-    expect(matchTrust(policy, claims("repo:sandros94/scalo:ref:refs/tags/v1"))).not.toBeNull();
-    expect(matchTrust(policy, claims("repo:sandros94/scalo:"))).not.toBeNull();
-    expect(matchTrust(policy, claims("prefix-repo:sandros94/scalo:x"))).toBeNull();
+    expect(matchTrust(policy, claims("repo:sandros94/scafo:ref:refs/tags/v1"))).not.toBeNull();
+    expect(matchTrust(policy, claims("repo:sandros94/scafo:"))).not.toBeNull();
+    expect(matchTrust(policy, claims("prefix-repo:sandros94/scafo:x"))).toBeNull();
     expect(matchTrust(policy, claims("repo:sandros94/other:x"))).toBeNull();
   });
 
@@ -113,7 +113,7 @@ describe("setTrustPolicy", () => {
     await expect(setTrustPolicy(ctx, PROJECT, POLICY)).resolves.toEqual(POLICY);
     await expect(getTrustPolicy(ctx, PROJECT)).resolves.toEqual(POLICY);
 
-    const replaced = withSubjects(["repo:sandros94/scalo:*"]);
+    const replaced = withSubjects(["repo:sandros94/scafo:*"]);
     await expect(setTrustPolicy(ctx, PROJECT, replaced)).resolves.toEqual(replaced);
     await expect(getTrustPolicy(ctx, PROJECT)).resolves.toEqual(replaced);
   });

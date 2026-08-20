@@ -218,7 +218,7 @@ describe("what it refuses, and what it tells the operator to do about it", () =>
        not in a state this call may act on. */
     expect(error.status).toBe(409);
     expect(error.detail).toContain(`"${PROJECT}/prod"`);
-    expect(error.detail).toContain("scalo env retire");
+    expect(error.detail).toContain("scafo env retire");
     expect(error.detail).toContain("force");
     /* The wait it is asking for, in the unit an operator plans around. */
     expect(error.detail).toContain("24h");
@@ -244,7 +244,7 @@ describe("what it refuses, and what it tells the operator to do about it", () =>
        operator holding this answer actually needs. */
     expect(error.detail).toContain(retired.retiredAt as string);
     expect(error.detail).toContain("18h");
-    expect(error.detail).toContain("scalo env unretire");
+    expect(error.detail).toContain("scafo env unretire");
     expect(error.detail).toContain("force");
     expect(store.dels).toBe(deletesBefore);
     await invariants(store);

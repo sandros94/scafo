@@ -11,7 +11,7 @@ import { S3Client } from "uns3";
 import type { AgentConfig } from "../agent/config.ts";
 import { advertisedAddress, parseHostPort } from "../agent/config.ts";
 import type { CapacityPlan } from "../core/capacity/compute.ts";
-import { isScaloError, ScaloError } from "../core/error.ts";
+import { isScafoError, ScafoError } from "../core/error.ts";
 import { readJson, updateJson } from "../core/registry/cas.ts";
 import { nowIso, type RegistryContext } from "../core/registry/context.ts";
 import { drainNode, registerNode } from "../core/registry/nodes.ts";
@@ -72,7 +72,7 @@ export function createRegistry(config: AgentConfig): RegistryContext {
  * is what a multi-node fleet has to widen for cross-node cell traffic, and that
  * is exactly when the operator must have said what the network is.
  *
- * Throws `ScaloError("invalid-input")` naming the addresses that made it
+ * Throws `ScafoError("invalid-input")` naming the addresses that made it
  * necessary.
  */
 export function assertTransportConfigured(config: AgentConfig): void {
@@ -93,11 +93,11 @@ export function assertTransportConfigured(config: AgentConfig): void {
   if (exposed.length === 0) return;
 
   const named = exposed.map(([field, value]) => `${field} "${String(value)}"`).join(", ");
-  throw new ScaloError("invalid-input", "No transport configured", {
+  throw new ScafoError("invalid-input", "No transport configured", {
     detail:
       `${named} reaches beyond loopback, so node-to-node and operator traffic would cross ` +
       `a network this node has not been told about: set --transport wireguard to tunnel it ` +
-      `(then run "scalo wg init" to set the tunnel up), or --transport none to state that ` +
+      `(then run "scafo wg init" to set the tunnel up), or --transport none to state that ` +
       `the network is already private and trusted, such as a cloud vRack`,
   });
 }
@@ -107,8 +107,8 @@ export function assertTransportConfigured(config: AgentConfig): void {
  * it runs no tunnel.
  *
  * Reads the keys, never makes them: a node whose transport is `wireguard` and
- * whose keys are not on disk has not had `scalo wg init` run on it, and is
- * refused with `ScaloError("invalid-input")` saying so. Booting anyway would put
+ * whose keys are not on disk has not had `scafo wg init` run on it, and is
+ * refused with `ScafoError("invalid-input")` saying so. Booting anyway would put
  * the node on a network the tunnel does not carry, which is the exact thing
  * `--transport wireguard` was asked to prevent.
  */
@@ -122,10 +122,10 @@ export async function loadWireguardRecord(
   const stateDir = wireguardStateDir(config, opts);
   const keys = await readWireguardKeys(stateDir);
   if (keys === null) {
-    throw new ScaloError("invalid-input", "WireGuard tunnel is not set up", {
+    throw new ScafoError("invalid-input", "WireGuard tunnel is not set up", {
       detail:
         `this node's transport is "wireguard" but "${stateDir}" holds no tunnel keypair: ` +
-        `run "scalo wg init" on this node to set one up, register it with its peers and ` +
+        `run "scafo wg init" on this node to set one up, register it with its peers and ` +
         `render "${stateDir}/${WG_CONF_FILE}", then bring the interface up before starting ` +
         `the agent`,
     });
@@ -261,11 +261,11 @@ export async function drainThisNode(
       isRetryable: () => true,
       ...(opts?.sleep === undefined ? {} : { sleep: opts.sleep }),
     });
-    log(`scalo: node "${nodeId}" is draining, placement will stop giving it work`);
+    log(`scafo: node "${nodeId}" is draining, placement will stop giving it work`);
     return at;
   } catch (error) {
     log(
-      `scalo: node "${nodeId}" could not be marked as draining (${describe(error)}); ` +
+      `scafo: node "${nodeId}" could not be marked as draining (${describe(error)}); ` +
         `the fleet will count it out after the liveness window instead`,
     );
     return null;
@@ -278,14 +278,14 @@ export async function drainThisNode(
  *
  * A narrow update rather than a re-registration, because this is what a command
  * about the tunnel alone is entitled to change. `registerNode` replaces a record
- * wholesale from the configuration it is handed, and `scalo wg init` is run from
+ * wholesale from the configuration it is handed, and `scafo wg init` is run from
  * an operator's shell rather than from the agent's own environment — one run
  * with a config the agent does not use would otherwise move the node's
  * advertised address and capacity along with its tunnel details, and nothing
  * would report it until a peer failed to reach it.
  *
- * A node with no record yet is registered outright: `scalo wg init` before the
- * first `scalo up` is the order the setup instructions ask for.
+ * A node with no record yet is registered outright: `scafo wg init` before the
+ * first `scafo up` is the order the setup instructions ask for.
  */
 export async function publishWireguard(
   registry: RegistryContext,
@@ -313,9 +313,9 @@ export async function loadVarsetKey(config: AgentConfig): Promise<CryptoKey | un
   return keyFile === undefined ? undefined : readVarsetKeyFile(keyFile);
 }
 
-/** The specifics a scalo failure carries are the useful half; keep both. */
+/** The specifics a scafo failure carries are the useful half; keep both. */
 function describe(error: unknown): string {
-  if (isScaloError(error)) {
+  if (isScafoError(error)) {
     return error.detail === undefined ? error.message : `${error.message}: ${error.detail}`;
   }
   return error instanceof Error ? error.message : String(error);

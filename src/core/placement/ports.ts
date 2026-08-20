@@ -1,6 +1,6 @@
 /* Loopback port pairs for the runtime processes a node runs. */
 
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import type { PortView } from "./reconcile.ts";
 
 /** First port of the default range. */
@@ -25,7 +25,7 @@ export interface PortAllocatorOptions {
  * to the same process.
  *
  * The allocator remembers what it handed out, so one instance can serve a whole
- * planning pass. Throws `ScaloError("placement-unavailable")` once the range is
+ * planning pass. Throws `ScafoError("placement-unavailable")` once the range is
  * exhausted.
  */
 export function createPortAllocator(opts?: PortAllocatorOptions): PortView {
@@ -44,7 +44,7 @@ export function createPortAllocator(opts?: PortAllocatorOptions): PortView {
         taken.add(base + 1);
         return { public: base, internal: base + 1 };
       }
-      throw new ScaloError("placement-unavailable", "No free port pair", {
+      throw new ScafoError("placement-unavailable", "No free port pair", {
         detail: `every port pair in ${String(start)}-${String(end)} is already in use on this node`,
       });
     },
@@ -52,8 +52,8 @@ export function createPortAllocator(opts?: PortAllocatorOptions): PortView {
 }
 
 function assertRange(start: number, end: number): void {
-  const invalid = (detail: string): ScaloError =>
-    new ScaloError("invalid-input", "Invalid port range", { detail });
+  const invalid = (detail: string): ScafoError =>
+    new ScafoError("invalid-input", "Invalid port range", { detail });
 
   if (!Number.isInteger(start) || start < 1 || start > 65_534) {
     throw invalid(`the range must start at a port in 1-65534, got ${String(start)}`);

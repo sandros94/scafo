@@ -1,14 +1,14 @@
 /* Helpers shared by the registry modules; not part of the public surface. */
 
-import { isScaloError } from "../error.ts";
+import { isScafoError } from "../error.ts";
 import { stableStringify } from "../utils/json.ts";
 
 export function isCasConflict(err: unknown): boolean {
-  return isScaloError(err) && err.code === "cas-conflict";
+  return isScafoError(err) && err.code === "cas-conflict";
 }
 
 export function isNotFound(err: unknown): boolean {
-  return isScaloError(err) && err.code === "not-found";
+  return isScafoError(err) && err.code === "not-found";
 }
 
 /** Structural equality by deterministic serialization; key order is irrelevant. */

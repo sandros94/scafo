@@ -3,15 +3,15 @@
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { isScaloError } from "../core/error.ts";
+import { isScafoError } from "../core/error.ts";
 
 /** Directory a node run by root keeps its state in. */
-export const SYSTEM_STATE_DIR: string = "/var/lib/scalo";
+export const SYSTEM_STATE_DIR: string = "/var/lib/scafo";
 
 /** Mode a file holding key material is written with: nothing but its owner may read one. */
 export const SECRET_FILE_MODE: number = 0o600;
 
-/** Mode a state directory scalo created itself is given. */
+/** Mode a state directory scafo created itself is given. */
 export const STATE_DIR_MODE: number = 0o700;
 
 /**
@@ -21,7 +21,7 @@ export const STATE_DIR_MODE: number = 0o700;
  * The mode is applied twice on purpose. `writeFile`'s own only applies to a file
  * this call created, and a private key that briefly existed readable by everyone
  * is a private key that has to be assumed read; the directory is narrowed only
- * when this call created it, because an operator who pointed scalo at a
+ * when this call created it, because an operator who pointed scafo at a
  * directory of their own chose its mode themselves.
  */
 export async function writeSecretFile(
@@ -48,8 +48,8 @@ export async function readTextFile(path: string): Promise<string | null> {
 
 /**
  * Where a node keeps its state when the configuration names no directory:
- * {@link SYSTEM_STATE_DIR} for root, `$XDG_STATE_HOME/scalo` for a user who has
- * one, and `~/.local/state/scalo` otherwise.
+ * {@link SYSTEM_STATE_DIR} for root, `$XDG_STATE_HOME/scafo` for a user who has
+ * one, and `~/.local/state/scafo` otherwise.
  *
  * Always an absolute path, and never derived from the working directory — a node
  * is launched from wherever the operator happened to be standing, and an
@@ -62,8 +62,8 @@ export function resolveDefaultStateDir(
   if (process.getuid?.() === 0) return SYSTEM_STATE_DIR;
 
   const xdg = env.XDG_STATE_HOME?.trim();
-  if (xdg !== undefined && xdg !== "" && isAbsolute(xdg)) return join(xdg, "scalo");
-  return join(homedir(), ".local", "state", "scalo");
+  if (xdg !== undefined && xdg !== "" && isAbsolute(xdg)) return join(xdg, "scafo");
+  return join(homedir(), ".local", "state", "scafo");
 }
 
 /**
@@ -90,10 +90,10 @@ export async function readPackageVersion(): Promise<string> {
  * whole, stack included, because nothing else knows what they mean.
  */
 export function reportFailure(error: unknown): void {
-  if (isScaloError(error)) {
+  if (isScafoError(error)) {
     const problem = error.toProblem();
     const detail = problem.detail === undefined ? "" : `: ${problem.detail}`;
-    console.error(`scalo: ${problem.title}${detail} [${problem.type}]`);
+    console.error(`scafo: ${problem.title}${detail} [${problem.type}]`);
   } else {
     console.error(error);
   }

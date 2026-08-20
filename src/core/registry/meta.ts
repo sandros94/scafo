@@ -1,6 +1,6 @@
 /* Bootstrap: prove the store really does conditional writes, then seal the meta record. */
 
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import type { RegistryMeta } from "../types/registry.ts";
 import type { CasStore } from "../types/store.ts";
 import { isCasConflict } from "./_shared.ts";
@@ -12,7 +12,7 @@ import { metaKey, probeKey } from "./paths.ts";
  * Five-step conformance probe against a throwaway key: create-if-absent, the
  * duplicate create it must reject, a matched update, the stale update it must
  * reject, and a read-back of the last write. Anything else throws
- * `ScaloError("store-nonconforming")` naming the step that failed — a store that
+ * `ScafoError("store-nonconforming")` naming the step that failed — a store that
  * silently drops preconditions would corrupt the registry.
  */
 export async function probeStore(store: CasStore): Promise<void> {
@@ -97,7 +97,7 @@ export async function initRegistry(
 
     const existing = await requireJson<RegistryMeta>(ctx, key);
     if (existing.value.v !== 1) {
-      throw new ScaloError("store-nonconforming", "Registry meta has an unknown version", {
+      throw new ScafoError("store-nonconforming", "Registry meta has an unknown version", {
         detail: `"${key}" is version ${String(existing.value.v)}, this build understands 1`,
         cause: error,
       });
@@ -112,8 +112,8 @@ export async function readMeta(ctx: RegistryContext): Promise<RegistryMeta | nul
   return found === null ? null : found.value;
 }
 
-function nonconforming(step: string, cause?: unknown): ScaloError {
-  return new ScaloError("store-nonconforming", "Store does not honour conditional writes", {
+function nonconforming(step: string, cause?: unknown): ScafoError {
+  return new ScafoError("store-nonconforming", "Store does not honour conditional writes", {
     detail: `Conformance probe failed at step ${step}`,
     cause,
   });

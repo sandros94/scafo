@@ -3,7 +3,7 @@
 import { H3, type H3Event } from "h3";
 import { createNodeVerifier, type NodeSigningKey } from "../core/auth/node-token.ts";
 import { createOidcVerifier } from "../core/auth/oidc.ts";
-import { ScaloError } from "../core/error.ts";
+import { ScafoError } from "../core/error.ts";
 import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { checkDomain } from "../core/registry/domains.ts";
@@ -18,7 +18,7 @@ import type {
   CoordinatorLease,
   EnvironmentRecord,
   NodeRecord,
-  ScaloWarning,
+  ScafoWarning,
 } from "../core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../core/types/supervisor.ts";
 import { isHost } from "../core/utils/host.ts";
@@ -149,7 +149,7 @@ export interface EnvironmentResult {
 /** Body of `POST /v1/aliases`: the environment as it now stands. */
 export interface AliasResult {
   environment: EnvironmentRecord;
-  warnings: ScaloWarning[];
+  warnings: ScafoWarning[];
 }
 
 /**
@@ -201,7 +201,7 @@ export function createAgentApp(agent: AgentContext): H3 {
     const domain = event.url.searchParams.get("domain") ?? "";
     if (await servesHost(agent, domain)) return new Response(null, { status: 200 });
 
-    throw new ScaloError("not-found", "Host is not served here", {
+    throw new ScafoError("not-found", "Host is not served here", {
       detail: `"${domain}" is neither a claimed domain nor a label under a platform domain`,
     });
   });
@@ -229,7 +229,7 @@ export function createAgentApp(agent: AgentContext): H3 {
   app.get("/v1/ingress/traefik", (): unknown => {
     const ingress = agent.ingress;
     if (ingress === undefined || !isPullingIngress(ingress)) {
-      throw new ScaloError("not-found", "This node publishes no ingress configuration", {
+      throw new ScafoError("not-found", "This node publishes no ingress configuration", {
         detail:
           `node "${agent.nodeId}" drives no ingress that reads its routing from the agent; ` +
           `set "ingress.driver" to "traefik" on the node this ingress polls`,
@@ -377,7 +377,7 @@ export function createAgentApp(agent: AgentContext): H3 {
      */
     await verifyCaller(verifiers, event, status?.project ?? null);
     if (status === null) {
-      throw new ScaloError("not-found", "No such deploy", {
+      throw new ScafoError("not-found", "No such deploy", {
         detail: `this node has no deploy "${id}"; a restarted agent forgets the ones it accepted`,
       });
     }
@@ -473,7 +473,7 @@ function target(event: H3Event): [project: string, env: string] {
 function deployService(agent: AgentContext): DeployService {
   const deploys = agent.deploys;
   if (deploys === undefined) {
-    throw new ScaloError("capability-missing", "This node does not accept deploys", {
+    throw new ScafoError("capability-missing", "This node does not accept deploys", {
       detail: "no deploy runner is configured, so there is nothing to publish an artifact with",
     });
   }

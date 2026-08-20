@@ -1,6 +1,6 @@
 /* Environments and the pointers that steer traffic: alias flips, rollbacks, splits. */
 
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import { assertReplicas } from "../placement/replicas.ts";
 import { assertSelector } from "../placement/selector.ts";
 import type {
@@ -9,7 +9,7 @@ import type {
   NodeSelector,
   PlacementStrategy,
   ReplicaCount,
-  ScaloWarning,
+  ScafoWarning,
   SplitEntry,
   VarsetEnvelope,
 } from "../types/registry.ts";
@@ -41,7 +41,7 @@ export interface CreateEnvironmentInput {
 /** An environment after a change, with any advisories the change raised. */
 export interface EnvironmentUpdate {
   environment: EnvironmentRecord;
-  warnings: ScaloWarning[];
+  warnings: ScafoWarning[];
 }
 
 /**
@@ -50,7 +50,7 @@ export interface EnvironmentUpdate {
  * beyond that identity apply on first creation only, so retried creates stay
  * idempotent no matter how the environment has been used since. `prefix` is
  * fixed at creation and never moves. An identity mismatch throws
- * `ScaloError("immutable")`.
+ * `ScafoError("immutable")`.
  */
 export async function createEnvironment(
   ctx: RegistryContext,
@@ -86,7 +86,7 @@ export async function createEnvironment(
 
     const existing = await requireJson<EnvironmentRecord>(ctx, key);
     if (deepEqual(identity(existing.value), identity(record))) return existing.value;
-    throw new ScaloError("immutable", "Environment already exists", {
+    throw new ScafoError("immutable", "Environment already exists", {
       detail: `"${input.name}" exists in project "${project}" with different settings`,
       cause: error,
     });
@@ -158,7 +158,7 @@ export async function flipAlias(
 }
 
 /**
- * Swaps the current and previous builds. Throws `ScaloError("not-found")` when
+ * Swaps the current and previous builds. Throws `ScafoError("not-found")` when
  * there is nothing to roll back to.
  */
 export async function rollbackAlias(
@@ -172,7 +172,7 @@ export async function rollbackAlias(
     (current) => {
       const previous = current.alias?.previous;
       if (current.alias === null || previous === undefined) {
-        throw new ScaloError("not-found", "No build to roll back to", {
+        throw new ScafoError("not-found", "No build to roll back to", {
           detail: `environment "${env}" of project "${project}" has no previous build`,
         });
       }
@@ -231,7 +231,7 @@ export interface CanaryInput {
  * The alias is read and the split written in ONE conditional update, so a canary
  * can never be weighed against an alias that has since been flipped.
  *
- * Throws `ScaloError("invalid-input")` when the environment has no alias yet —
+ * Throws `ScafoError("invalid-input")` when the environment has no alias yet —
  * there is nothing to hold the other side of the split, and the first build of
  * an environment is deployed with a flip rather than eased in — and when the
  * canary build is the one the alias already names.
@@ -243,7 +243,7 @@ export async function canarySplit(
   input: CanaryInput,
 ): Promise<EnvironmentRecord> {
   if (!Number.isInteger(input.weight) || input.weight < 1 || input.weight > 99) {
-    throw new ScaloError("invalid-input", "Invalid canary weight", {
+    throw new ScafoError("invalid-input", "Invalid canary weight", {
       detail:
         `a canary takes a whole number from 1 to 99 percent of the traffic, leaving the rest ` +
         `to the alias, got ${String(input.weight)}`,
@@ -257,14 +257,14 @@ export async function canarySplit(
     (current) => {
       const alias = current.alias;
       if (alias === null) {
-        throw new ScaloError("invalid-input", "Environment has no alias to split against", {
+        throw new ScafoError("invalid-input", "Environment has no alias to split against", {
           detail:
             `"${project}/${env}" has never been flipped, so there is no build to weigh a canary ` +
             `against; deploy this build with --flip to put it into service outright`,
         });
       }
       if (alias.build === input.build) {
-        throw new ScaloError("invalid-input", "Canary is already the alias", {
+        throw new ScafoError("invalid-input", "Canary is already the alias", {
           detail:
             `"${project}/${env}" already points at build "${input.build}", so splitting it ` +
             `against itself would change nothing`,
@@ -325,7 +325,7 @@ function identity(
  * they meant, and is worth stating either way because nothing else in the answer
  * mentions the split that was there a moment ago.
  */
-function splitClearedWarnings(split: SplitEntry[] | null, buildId: string): ScaloWarning[] {
+function splitClearedWarnings(split: SplitEntry[] | null, buildId: string): ScafoWarning[] {
   if (split === null || split.length === 0) return [];
 
   const legs = split.map((entry) => `"${entry.build}" at ${String(entry.weight)}%`).join(", ");
@@ -339,7 +339,7 @@ function splitClearedWarnings(split: SplitEntry[] | null, buildId: string): Scal
   ];
 }
 
-function varsetWarnings(environment: EnvironmentRecord, build: BuildRecord): ScaloWarning[] {
+function varsetWarnings(environment: EnvironmentRecord, build: BuildRecord): ScafoWarning[] {
   if (build.runtimeConfigurable) return [];
 
   const envVarset = environment.varset ?? null;
@@ -362,8 +362,8 @@ function describe(varset: string | null): string {
 }
 
 function assertSplit(entries: SplitEntry[]): void {
-  const invalid = (detail: string): ScaloError =>
-    new ScaloError("invalid-input", "Invalid traffic split", { detail });
+  const invalid = (detail: string): ScafoError =>
+    new ScafoError("invalid-input", "Invalid traffic split", { detail });
 
   if (entries.length < 2) throw invalid("a split needs at least two builds");
 

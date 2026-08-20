@@ -33,7 +33,7 @@ import { assertHost } from "../../core/utils/host.ts";
  * EntryPoint the rendered routers attach to when the operator names none.
  *
  * Named rather than omitted, even though Traefik reads an absent `entryPoints`
- * as "every entryPoint there is". Every entryPoint includes the ones scalo has
+ * as "every entryPoint there is". Every entryPoint includes the ones scafo has
  * no business on — a TLS listener it holds no certificate for, the port the
  * dashboard is served on — and a router that attaches itself to all of them
  * claims surface the operator did not offer it.
@@ -47,11 +47,11 @@ export const DEFAULT_ENTRY_POINT: string = "web";
  * The separator is an underscore for the same reason it is one there: it cannot
  * occur in a DNS name, so the boundary between the namespace and the host stays
  * unambiguous. Traefik places one further constraint on these names — `@`
- * separates a name from the provider that supplied it (`scalo_shop.test@http`),
+ * separates a name from the provider that supplied it (`scafo_shop.test@http`),
  * and a name containing one resolves to nothing — which a host cannot contain
  * either.
  */
-export const TRAEFIK_KEY_PREFIX: string = "scalo_";
+export const TRAEFIK_KEY_PREFIX: string = "scafo_";
 
 /** One router: which requests it matches, and what serves them. */
 export interface TraefikRouter {
@@ -236,7 +236,7 @@ export function traefikKey(host: string): string {
  * same reason: an underscore cannot occur in a DNS name or in a build id, so no
  * child key can collide with another host's key or with a router's. A separator
  * a host CAN contain — `--`, which every environment label carries — would make
- * `scalo_<host>--<build>` ambiguous against a claimed domain shaped like one.
+ * `scafo_<host>--<build>` ambiguous against a claimed domain shaped like one.
  */
 export function traefikLegKey(host: string, build: string): string {
   return `${TRAEFIK_KEY_PREFIX}${host}_${build}`;

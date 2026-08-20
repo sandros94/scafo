@@ -12,7 +12,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseJSONC } from "confbox";
-import { ScaloError } from "../../core/error.ts";
+import { ScafoError } from "../../core/error.ts";
 import type { DeployRunInput, DeployRunner, DeployRunResult } from "../../core/types/deploy.ts";
 import { unpackArchive } from "../archive/tar-zst.ts";
 import { esbuildBinaryPath } from "./_esbuild.ts";
@@ -60,7 +60,7 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
          publish, and finding that out after writing megabytes to disk helps
          nobody. */
       const esbuild = esbuildBinaryPath(globalThis.process?.env ?? {});
-      const dir = await mkdtemp(join(staging, "scalo-deploy-"));
+      const dir = await mkdtemp(join(staging, "scafo-deploy-"));
 
       try {
         await unpackArchive(input.artifact, dir);
@@ -91,7 +91,7 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
 
         const version = VERSION_RE.exec(output)?.[1];
         if (version === undefined) {
-          throw new ScaloError("store-nonconforming", "Publish reported no version", {
+          throw new ScafoError("store-nonconforming", "Publish reported no version", {
             detail: `"${binPath} deploy" exited successfully without naming a version id`,
           });
         }
@@ -105,7 +105,7 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
 }
 
 /**
- * Points the artifact's config at the name scalo recorded for it, and returns
+ * Points the artifact's config at the name scafo recorded for it, and returns
  * the path to it.
  *
  * The runtime files a version under the name its config carries, and the fleet's
@@ -125,7 +125,7 @@ async function prepareConfig(dir: string, script: string): Promise<string> {
 
     const parsed: unknown = parseJSONC(text, { allowTrailingComma: true });
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      throw new ScaloError("invalid-input", "Artifact config is not an object", {
+      throw new ScafoError("invalid-input", "Artifact config is not an object", {
         detail: `"${name}" must hold an object of runtime settings`,
       });
     }
@@ -134,7 +134,7 @@ async function prepareConfig(dir: string, script: string): Promise<string> {
     return path;
   }
 
-  throw new ScaloError("invalid-input", "Artifact carries no runtime config", {
+  throw new ScafoError("invalid-input", "Artifact carries no runtime config", {
     detail: `the archive has none of ${CONFIG_NAMES.join(", ")} at its root`,
   });
 }
@@ -163,7 +163,7 @@ function run(
 
     child.on("error", (error) => {
       reject(
-        new ScaloError("capability-missing", "Publish command could not be run", {
+        new ScafoError("capability-missing", "Publish command could not be run", {
           detail: `"${command}" could not be started on this node`,
           cause: error,
         }),
@@ -178,7 +178,7 @@ function run(
       const ended =
         signal === null ? `exited with code ${String(code)}` : `was killed by ${signal}`;
       reject(
-        new ScaloError("invalid-input", "Publish failed", {
+        new ScafoError("invalid-input", "Publish failed", {
           detail: `"${command} ${args[0] ?? ""}" ${ended}: ${lastLines(output)}`,
         }),
       );

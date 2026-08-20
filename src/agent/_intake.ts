@@ -3,7 +3,7 @@
 import type { H3Event } from "h3";
 import type { NodeIdentity, NodeVerifier } from "../core/auth/node-token.ts";
 import type { OidcIdentity, OidcVerifier } from "../core/auth/oidc.ts";
-import { isScaloError, ScaloError } from "../core/error.ts";
+import { isScafoError, ScafoError } from "../core/error.ts";
 import { assertReplicas } from "../core/placement/replicas.ts";
 import { assertSelector } from "../core/placement/selector.ts";
 import type { CanaryInput } from "../core/registry/environments.ts";
@@ -66,11 +66,11 @@ export interface AliasRequest {
  * project's trust policy — `project` is `null` when there is no project to check
  * it against, and the node token is then the only way in.
  *
- * A caller that fails both is answered with the one `ScaloError("auth-invalid")`
+ * A caller that fails both is answered with the one `ScafoError("auth-invalid")`
  * every rejection shares, so it cannot learn which of the two it failed, nor
  * whether the project exists. A trust denial is the single exception: the caller
  * proved who it is and the project simply does not admit it, which is
- * authorization and stays distinguishable as `ScaloError("trust-mismatch")`.
+ * authorization and stays distinguishable as `ScafoError("trust-mismatch")`.
  */
 export async function verifyCaller(
   verifiers: DeployVerifiers,
@@ -109,7 +109,7 @@ export async function tryNodeToken(
   try {
     return { kind: "node", identity: await verifiers.node.verify(token) };
   } catch (error) {
-    if (isScaloError(error) && error.code === "auth-invalid") return null;
+    if (isScafoError(error) && error.code === "auth-invalid") return null;
     throw error;
   }
 }
@@ -127,7 +127,7 @@ export async function verifyWorkload(
   try {
     return { kind: "workload", identity: await verifiers.oidc.verify(token, project) };
   } catch (error) {
-    if (isScaloError(error) && error.code === "trust-mismatch") throw error;
+    if (isScafoError(error) && error.code === "trust-mismatch") throw error;
     throw authInvalid(error);
   }
 }
@@ -285,7 +285,7 @@ function parseMeta(raw: string): DeployMeta {
   }
 
   /* Read the same way, and for the same reason: a pipeline that never mentions a
-     selector must not lift one an operator set. Clearing it is `scalo env
+     selector must not lift one an operator set. Clearing it is `scafo env
      selector --clear`, which says so out loud. */
   if (body.nodeSelector !== undefined && body.nodeSelector !== null) {
     assertSelector(body.nodeSelector);
@@ -368,11 +368,11 @@ function flag(body: Record<string, unknown>, name: string): boolean | undefined 
   return value;
 }
 
-function invalid(detail: string, cause?: unknown): ScaloError {
-  return new ScaloError("invalid-input", "Malformed request", { detail, cause });
+function invalid(detail: string, cause?: unknown): ScafoError {
+  return new ScafoError("invalid-input", "Malformed request", { detail, cause });
 }
 
 /** The one rejection every authentication failure shares, whatever caused it. */
-function authInvalid(cause?: unknown): ScaloError {
-  return new ScaloError("auth-invalid", "Authentication failed", { cause });
+function authInvalid(cause?: unknown): ScafoError {
+  return new ScafoError("auth-invalid", "Authentication failed", { cause });
 }

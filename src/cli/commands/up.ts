@@ -1,4 +1,4 @@
-/* `scalo up`: register this machine as a node and serve the agent API. */
+/* `scafo up`: register this machine as a node and serve the agent API. */
 
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import type { AgentContext } from "../../agent/app.ts";
@@ -29,7 +29,7 @@ import { readPackageVersion, readTextFile, reportFailure } from "../_utils.ts";
 
 /* Flag names are kebab-case, matching the keys `loadAgentConfig` reads them under. */
 const upArgs: ArgsDef = {
-  "config": { type: "string", description: "Path to scalo.config.jsonc" },
+  "config": { type: "string", description: "Path to scafo.config.jsonc" },
   "endpoint": { type: "string", description: "S3-compatible endpoint URL" },
   "region": { type: "string", description: "Signing region of the bucket" },
   "bucket": { type: "string", description: "Bucket holding the registry" },
@@ -118,7 +118,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   const supervisor = createChildSupervisor();
   supervisor.onExit((status) => {
     /* Reporting only: deciding what to do about it belongs to the reconcile loop. */
-    console.error(`scalo: process "${status.id}" exited with code ${String(status.exitCode)}`);
+    console.error(`scafo: process "${status.id}" exited with code ${String(status.exitCode)}`);
   });
 
   const version = await readPackageVersion();
@@ -139,7 +139,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
     /* Said once, at boot: a node with no ingress runs its processes and keeps
        them to itself, which is a legitimate way to run one and not a warning
        worth repeating on every reconcile pass. */
-    console.log("scalo: no ingress configured, nothing on this node will be routed to");
+    console.log("scafo: no ingress configured, nothing on this node will be routed to");
   } else if (ingress.driver === "traefik") {
     agent.ingress = createTraefikDriver(
       ingress.entryPoints === undefined ? {} : { entryPoints: ingress.entryPoints },
@@ -150,7 +150,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
        entryPoints are said too, because a router attached to one the operator's
        Traefik does not define is a route that exists and matches nothing. */
     console.log(
-      `scalo: ingress "traefik" reads this node's routing from ` +
+      `scafo: ingress "traefik" reads this node's routing from ` +
         `/v1/ingress/traefik on ${config.node.listen}; point its http provider there. ` +
         `Routers attach to entryPoint(s) ` +
         `${(ingress.entryPoints ?? [DEFAULT_ENTRY_POINT]).join(", ")}`,
@@ -186,7 +186,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   const heartbeat = createHeartbeat(agent);
 
   const server = await startAgent(agent);
-  console.log(`scalo ${version} listening on ${server.url} as node "${state.id}"`);
+  console.log(`scafo ${version} listening on ${server.url} as node "${state.id}"`);
   reconciler.start();
   coordinator.start();
   heartbeat.start();
@@ -230,7 +230,7 @@ function untilSignalled(shutdown: () => Promise<void>): Promise<void> {
     const stop = (signal: string): void => {
       if (stopping) return;
       stopping = true;
-      console.log(`scalo: ${signal} received, shutting down`);
+      console.log(`scafo: ${signal} received, shutting down`);
       shutdown().then(resolve, reject);
     };
 

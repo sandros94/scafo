@@ -1,4 +1,4 @@
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 
 /**
  * Lowercase alphanumeric segments joined by single hyphens: no leading or
@@ -14,10 +14,10 @@ export function isSlug(s: string): boolean {
   return s.length > 0 && s.length <= SLUG_MAX_LENGTH && SLUG_RE.test(s);
 }
 
-/** Throws `ScaloError("invalid-slug")` when `s` is not a valid slug. */
+/** Throws `ScafoError("invalid-slug")` when `s` is not a valid slug. */
 export function assertSlug(s: string): void {
   if (!isSlug(s)) {
-    throw new ScaloError("invalid-slug", "Invalid slug", {
+    throw new ScafoError("invalid-slug", "Invalid slug", {
       detail:
         `"${s}" must be 1-${SLUG_MAX_LENGTH} lowercase alphanumeric characters, ` +
         `optionally separated by single hyphens`,
@@ -37,7 +37,7 @@ export function formatHostLabel(project: string, ref?: string): string {
   assertSlug(ref);
   const label = `${project}--${ref}`;
   if (label.length > SLUG_MAX_LENGTH) {
-    throw new ScaloError("invalid-slug", "Host label too long", {
+    throw new ScafoError("invalid-slug", "Host label too long", {
       detail: `"${label}" is ${label.length} characters, the limit is ${SLUG_MAX_LENGTH}`,
     });
   }

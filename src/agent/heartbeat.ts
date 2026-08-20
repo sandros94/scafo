@@ -9,7 +9,7 @@
  */
 
 import { heartbeatNode, NODE_HEARTBEAT_INTERVAL_MS } from "../core/registry/nodes.ts";
-import { isScaloError } from "../core/error.ts";
+import { isScafoError } from "../core/error.ts";
 import type { AgentContext } from "./app.ts";
 
 /** What the heartbeat has managed lately. */
@@ -91,9 +91,9 @@ export function createHeartbeat(agent: AgentContext, opts?: HeartbeatOptions): H
   };
 }
 
-/** The specifics a scalo failure carries are the useful half; keep both. */
+/** The specifics a scafo failure carries are the useful half; keep both. */
 function describe(error: unknown): string {
-  if (isScaloError(error)) {
+  if (isScafoError(error)) {
     return error.detail === undefined ? error.message : `${error.message}: ${error.detail}`;
   }
   return error instanceof Error ? error.message : String(error);

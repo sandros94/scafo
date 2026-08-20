@@ -7,7 +7,7 @@
  * places nothing.
  */
 
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 
 /**
  * Lowercase alphanumerics, dots, dashes and underscores, beginning and ending on
@@ -30,7 +30,7 @@ export function isLabel(s: string): boolean {
 }
 
 /**
- * Throws `ScaloError("invalid-input")` naming `what` unless `s` is a label.
+ * Throws `ScafoError("invalid-input")` naming `what` unless `s` is a label.
  *
  * `what` is how the value is described back to whoever typed it — "label key",
  * "label value" — so a refusal says which half of a pair was the problem.
@@ -38,7 +38,7 @@ export function isLabel(s: string): boolean {
 export function assertLabel(s: unknown, what: string = "label"): void {
   if (typeof s === "string" && isLabel(s)) return;
 
-  throw new ScaloError("invalid-input", "Invalid label", {
+  throw new ScafoError("invalid-input", "Invalid label", {
     detail:
       `${describe(s)} is not a usable ${what}: 1-${LABEL_MAX_LENGTH} lowercase alphanumeric ` +
       `characters, dots, dashes and underscores, beginning and ending on a letter or a digit`,
@@ -46,7 +46,7 @@ export function assertLabel(s: unknown, what: string = "label"): void {
 }
 
 /**
- * Throws `ScaloError("invalid-input")` unless `value` is an object whose every
+ * Throws `ScafoError("invalid-input")` unless `value` is an object whose every
  * key and value is a label. `field` names the setting in the refusal.
  *
  * An empty object passes: whether "no labels at all" is meaningful is the
@@ -59,7 +59,7 @@ export function assertLabels(
   field: string,
 ): asserts value is Record<string, string> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new ScaloError("invalid-input", "Invalid labels", {
+    throw new ScafoError("invalid-input", "Invalid labels", {
       detail: `${field} must be an object of label keys and values, such as {"tier": "fast"}`,
     });
   }
@@ -77,7 +77,7 @@ export function assertLabels(
  * Blank entries are skipped, so a trailing comma is a typo that costs nothing.
  * A DUPLICATE KEY is refused rather than resolved: both "the first wins" and
  * "the last wins" are defensible, which is exactly why neither should be guessed
- * at on the operator's behalf. Anything unusable is `ScaloError("invalid-input")`
+ * at on the operator's behalf. Anything unusable is `ScafoError("invalid-input")`
  * naming `field`, so a typo never becomes a placement decision.
  */
 export function parseLabels(text: string, field: string): Record<string, string> {
@@ -89,7 +89,7 @@ export function parseLabels(text: string, field: string): Record<string, string>
 
     const at = pair.indexOf("=");
     if (at < 1) {
-      throw new ScaloError("invalid-input", "Invalid labels", {
+      throw new ScafoError("invalid-input", "Invalid labels", {
         detail: `${field} entry "${pair}" must be written as "key=value"`,
       });
     }
@@ -100,7 +100,7 @@ export function parseLabels(text: string, field: string): Record<string, string>
     assertLabel(value, `${field} value for "${key}"`);
 
     if (key in labels) {
-      throw new ScaloError("invalid-input", "Invalid labels", {
+      throw new ScafoError("invalid-input", "Invalid labels", {
         detail: `${field} names "${key}" twice, as "${labels[key]}" and as "${value}"`,
       });
     }
@@ -108,7 +108,7 @@ export function parseLabels(text: string, field: string): Record<string, string>
   }
 
   if (Object.keys(labels).length === 0) {
-    throw new ScaloError("invalid-input", "Invalid labels", {
+    throw new ScafoError("invalid-input", "Invalid labels", {
       detail: `${field} carries no label at all; write it as "key=value" or leave it unset`,
     });
   }

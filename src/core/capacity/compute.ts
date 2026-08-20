@@ -1,6 +1,6 @@
 /* Capacity planning formulas. Pure: every input is supplied by the caller. */
 
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import { parseCpuMax, parseMemoryMax } from "./cgroup.ts";
 
 /** Everything the plan is derived from: raw cgroup files plus host totals. */
@@ -43,7 +43,7 @@ const MIB = 1024 * 1024;
  * they are present and lower, so a containerized node never advertises the
  * hardware of its host.
  *
- * Throws `ScaloError("invalid-input")` on non-positive host values or overrides:
+ * Throws `ScafoError("invalid-input")` on non-positive host values or overrides:
  * a plan computed from a degenerate probe would be silently wrong.
  */
 export function computeCapacity(
@@ -84,7 +84,7 @@ export function computeCapacity(
 
 function positive(value: number, field: string): number {
   if (!Number.isFinite(value) || value <= 0) {
-    throw new ScaloError("invalid-input", "Invalid capacity input", {
+    throw new ScafoError("invalid-input", "Invalid capacity input", {
       detail: `"${field}" must be a finite number greater than 0, got ${String(value)}`,
     });
   }
@@ -93,7 +93,7 @@ function positive(value: number, field: string): number {
 
 function nonNegative(value: number, field: string): number {
   if (!Number.isFinite(value) || value < 0) {
-    throw new ScaloError("invalid-input", "Invalid capacity input", {
+    throw new ScafoError("invalid-input", "Invalid capacity input", {
       detail: `"${field}" must be a finite number of 0 or more, got ${String(value)}`,
     });
   }
@@ -102,7 +102,7 @@ function nonNegative(value: number, field: string): number {
 
 function fraction(value: number, field: string): number {
   if (!Number.isFinite(value) || value <= 0 || value > 1) {
-    throw new ScaloError("invalid-input", "Invalid capacity input", {
+    throw new ScafoError("invalid-input", "Invalid capacity input", {
       detail: `"${field}" must be greater than 0 and at most 1, got ${String(value)}`,
     });
   }

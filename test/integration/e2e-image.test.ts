@@ -20,10 +20,10 @@
  * network namespace, the celld processes bind loopback, and the store is a
  * separate container reached by address on the docker bridge.
  *
- * Skipped unless SCALO_E2E=1, and slower than the others by however long the
+ * Skipped unless SCAFO_E2E=1, and slower than the others by however long the
  * image takes to build:
  *
- *   SCALO_E2E=1 pnpm vitest run test/integration/e2e-image.test.ts
+ *   SCAFO_E2E=1 pnpm vitest run test/integration/e2e-image.test.ts
  */
 
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -62,7 +62,7 @@ import {
   until,
 } from "./_harness.ts";
 
-const E2E = process.env.SCALO_E2E === "1";
+const E2E = process.env.SCAFO_E2E === "1";
 
 const CADDY_IMAGE = "caddy:2";
 
@@ -72,25 +72,25 @@ const CADDY_IMAGE = "caddy:2";
  * that reuses the whole image, and an artifact left behind for whoever has to
  * look inside it after a failure.
  */
-const IMAGE_TAG = "scalo-e2e-image";
+const IMAGE_TAG = "scafo-e2e-image";
 
 const CADDY_HTTP_PORT = 80;
 const CADDY_ADMIN_PORT = 2019;
 /** Published on the Caddy container, because the node shares its namespace. */
 const AGENT_PORT = 7400;
 
-/** The uid the image's `scalo` user is created with; nothing may run as root. */
+/** The uid the image's `scafo` user is created with; nothing may run as root. */
 const IMAGE_UID = "10001";
 
 const BUCKET: BucketSettings = {
-  bucket: "scalo-e2e-image",
+  bucket: "scafo-e2e-image",
   prefix: "e2e",
-  accessKey: "scalo",
-  secretKey: "scalo-secret",
+  accessKey: "scafo",
+  secretKey: "scafo-secret",
   region: "us-east-1",
 };
 
-const PLATFORM_DOMAIN = "scalo.test";
+const PLATFORM_DOMAIN = "scafo.test";
 const PROJECT = "app";
 const ENVIRONMENT = "production";
 const NODE_ID = "node-e2e-image";
@@ -140,7 +140,7 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
       .withCommand(["caddy", "run", "--config", "/etc/caddy/config.json"])
       .withExposedPorts(CADDY_HTTP_PORT, CADDY_ADMIN_PORT, AGENT_PORT)
       .withWaitStrategy(
-        Wait.forHttp("/config/apps/http/servers/scalo/routes", CADDY_ADMIN_PORT).forStatusCode(200),
+        Wait.forHttp("/config/apps/http/servers/scafo/routes", CADDY_ADMIN_PORT).forStatusCode(200),
       )
       .start();
 
@@ -156,11 +156,11 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
        */
       .withEnvironment({
         ...storeEnv(store.fromContainers, BUCKET),
-        SCALO_NODE_ID: NODE_ID,
-        SCALO_TRANSPORT: "none",
-        SCALO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
-        SCALO_CADDY_ADMIN: `http://127.0.0.1:${String(CADDY_ADMIN_PORT)}`,
-        SCALO_ADVERTISE: `127.0.0.1:${String(AGENT_PORT)}`,
+        SCAFO_NODE_ID: NODE_ID,
+        SCAFO_TRANSPORT: "none",
+        SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
+        SCAFO_CADDY_ADMIN: `http://127.0.0.1:${String(CADDY_ADMIN_PORT)}`,
+        SCAFO_ADVERTISE: `127.0.0.1:${String(AGENT_PORT)}`,
         /* Deliberately NOT set here, unlike every other suite: the image pins
            ESBUILD_BINARY_PATH and names its own state directory, and a node that
            needed either of them from outside would be a packaging failure. */
@@ -235,7 +235,7 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
   it(
     "takes a deploy from the host CLI and serves it through Caddy",
     async () => {
-      const dir = await mkdtemp(join(tmpdir(), "scalo-e2e-image-key-"));
+      const dir = await mkdtemp(join(tmpdir(), "scafo-e2e-image-key-"));
       tmpDirs.push(dir);
       keyPath = join(dir, "operator.json");
 

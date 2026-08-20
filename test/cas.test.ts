@@ -1,7 +1,7 @@
 /* JSON over conditional writes: create-once, read, and the read-modify-retry loop. */
 
 import { describe, expect, it } from "vitest";
-import { ScaloError } from "../src/core/error.ts";
+import { ScafoError } from "../src/core/error.ts";
 import {
   createJson,
   putJson,
@@ -17,7 +17,7 @@ interface Counter {
   b: number;
 }
 
-const KEY = "_scalo/probe/aabbccdd.json";
+const KEY = "_scafo/probe/aabbccdd.json";
 
 describe("createJson", () => {
   it("creates once and conflicts on repeat", async () => {
@@ -161,7 +161,7 @@ describe("updateJson", () => {
       () =>
         updateJson<Counter>(ctx, KEY, () => {
           mutations++;
-          throw new ScaloError("immutable", "mutation refused");
+          throw new ScafoError("immutable", "mutation refused");
         }),
       "immutable",
     );

@@ -5,7 +5,7 @@ import { computeCapacity } from "./compute.ts";
 
 /**
  * Source of raw capacity inputs. Core never picks one: a caller passes the
- * reader for its runtime (`scalo/drivers/host/node`) so core stays free of
+ * reader for its runtime (`scafo/drivers/host/node`) so core stays free of
  * runtime imports.
  */
 export interface HostReader {

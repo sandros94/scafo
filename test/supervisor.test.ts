@@ -97,14 +97,14 @@ describe("starting a process", () => {
       () =>
         supervisor.start({
           id: "retried",
-          command: "scalo-test-no-such-binary",
+          command: "scafo-test-no-such-binary",
           args: [],
           env: {},
         }),
       "invalid-input",
     );
 
-    expect(error.detail).toContain("scalo-test-no-such-binary");
+    expect(error.detail).toContain("scafo-test-no-such-binary");
     /* Nothing ran, so nothing is remembered: no status, and no id to release. */
     expect(supervisor.status("retried")).toBeNull();
     expect(supervisor.list()).toEqual([]);

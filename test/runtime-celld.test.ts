@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { CapacityPlan } from "../src/core/capacity/compute.ts";
-import { ScaloError } from "../src/core/error.ts";
+import { ScafoError } from "../src/core/error.ts";
 import { putJson, readJson } from "../src/core/registry/cas.ts";
 import type { RegistryContext } from "../src/core/registry/context.ts";
 import { fleetPrefix } from "../src/core/registry/paths.ts";
@@ -676,7 +676,7 @@ async function pointerAt(ctx: RegistryContext, key: string): Promise<Record<stri
 
 /** The failure a writer sees when somebody else got to the object first. */
 function conflict(): Error {
-  return new ScaloError("cas-conflict", `Conditional write failed for "${FLEET_POINTER}"`, {
+  return new ScafoError("cas-conflict", `Conditional write failed for "${FLEET_POINTER}"`, {
     detail: "the object changed under the write",
   });
 }

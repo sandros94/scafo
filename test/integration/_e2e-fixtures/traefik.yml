@@ -1,9 +1,9 @@
-# Traefik as an operator would run it in front of a scalo node, for the e2e suite.
+# Traefik as an operator would run it in front of a scafo node, for the e2e suite.
 #
-# The whole of the scalo-facing configuration is the `http` provider below: it
+# The whole of the scafo-facing configuration is the `http` provider below: it
 # polls the agent, and whatever it reads there is the entirety of what this
-# provider routes. Nothing about scalo appears in this file except the address
-# it is asked at — which is the difference from the Caddy fixture, where scalo
+# provider routes. Nothing about scafo appears in this file except the address
+# it is asked at — which is the difference from the Caddy fixture, where scafo
 # writes into a server this file defines.
 #
 # The poll interval is 2s rather than the 5s default so the suite's assertions

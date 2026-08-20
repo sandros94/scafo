@@ -1,6 +1,6 @@
 /* The coordinator lease: a fenced, CAS-guarded lock held by exactly one node. */
 
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import type { CoordinatorLease } from "../types/registry.ts";
 import { isCasConflict } from "./_shared.ts";
 import { createJson, putJson, readJson } from "./cas.ts";
@@ -71,7 +71,7 @@ export async function acquireLease(
 
 /**
  * Extends the lease in place: same fence, fresh `acquiredAt`. Throws
- * `ScaloError("lease-lost")` when someone else has written the lease since.
+ * `ScafoError("lease-lost")` when someone else has written the lease since.
  */
 export async function renewLease(ctx: RegistryContext, handle: LeaseHandle): Promise<LeaseHandle> {
   const lease: CoordinatorLease = { ...handle.lease, acquiredAt: nowIso(ctx) };
@@ -105,8 +105,8 @@ export async function verifyLease(ctx: RegistryContext, handle: LeaseHandle): Pr
   return current !== null && current.etag === handle.etag;
 }
 
-function leaseLost(handle: LeaseHandle, cause: unknown): ScaloError {
-  return new ScaloError("lease-lost", "Coordinator lease is no longer held", {
+function leaseLost(handle: LeaseHandle, cause: unknown): ScafoError {
+  return new ScafoError("lease-lost", "Coordinator lease is no longer held", {
     detail: `fence ${handle.lease.fence} held by "${handle.lease.node}" was superseded`,
     cause,
   });

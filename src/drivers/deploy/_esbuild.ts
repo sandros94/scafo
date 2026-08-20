@@ -11,7 +11,7 @@
 
 import { createRequire } from "node:module";
 import { endianness } from "node:os";
-import { ScaloError } from "../../core/error.ts";
+import { ScafoError } from "../../core/error.ts";
 
 /** Overrides the search entirely; the same variable esbuild itself honours. */
 const BINARY_PATH_ENV = "ESBUILD_BINARY_PATH";
@@ -51,7 +51,7 @@ const PACKAGES: Record<string, { pkg: string; subpath: string }> = {
  *
  * `ESBUILD_BINARY_PATH` wins when it is set, which is how an operator points a
  * node at a build of esbuild it installed itself. Throws
- * `ScaloError("capability-missing")` when there is nothing to point at.
+ * `ScafoError("capability-missing")` when there is nothing to point at.
  */
 export function esbuildBinaryPath(env: Record<string, string | undefined> = {}): string {
   const configured = env[BINARY_PATH_ENV]?.trim();
@@ -75,6 +75,6 @@ export function esbuildBinaryPath(env: Record<string, string | undefined> = {}):
   }
 }
 
-function missing(detail: string, cause?: unknown): ScaloError {
-  return new ScaloError("capability-missing", "esbuild is not available", { detail, cause });
+function missing(detail: string, cause?: unknown): ScafoError {
+  return new ScafoError("capability-missing", "esbuild is not available", { detail, cause });
 }

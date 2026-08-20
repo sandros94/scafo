@@ -1,7 +1,7 @@
 /*
  * The seam between placement and whatever puts a node's ready processes on the
  * public network. Core describes the contract; a driver
- * (`scalo/drivers/ingress/caddy`) implements it, and the reconcile loop calls it
+ * (`scafo/drivers/ingress/caddy`) implements it, and the reconcile loop calls it
  * with the routing it renders after every pass.
  */
 
@@ -59,7 +59,7 @@ export interface IngressDriver {
  * An ingress that is READ rather than written to: `apply` renders its
  * configuration and caches it, and the ingress itself polls the agent for it.
  *
- * The distinction is the ingress's own, not scalo's. An ingress with an admin
+ * The distinction is the ingress's own, not scafo's. An ingress with an admin
  * API (Caddy) is converged by calling it, and `apply` is where the work happens.
  * An ingress configured by a provider it polls (Traefik's `http` provider) can
  * only be told anything by being asked, so the node has to publish what it would

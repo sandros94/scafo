@@ -1,6 +1,6 @@
 /* Internal: what the registry says THIS node should be serving. */
 
-import { isScaloError, ScaloError } from "../core/error.ts";
+import { isScafoError, ScafoError } from "../core/error.ts";
 import type { DesiredBuild, DesiredEnvironment } from "../core/placement/reconcile.ts";
 import { getBuild } from "../core/registry/builds.ts";
 import { readJson } from "../core/registry/cas.ts";
@@ -85,7 +85,7 @@ export interface DesiredState {
  * The FALLBACK is the safety line the whole feature hangs from. No coordinator
  * has decided anything yet during a bootstrap, on a single-node installation, or
  * throughout a rolling upgrade from a build that never wrote these records — and
- * in every one of those the right answer is the one scalo gave before placement
+ * in every one of those the right answer is the one scafo gave before placement
  * existed: serve it here. Reading a missing record as "not mine" instead would
  * take an entire installation off the air the first time it upgraded, and would
  * leave a fresh one serving nothing at all until its first coordinator tick.
@@ -136,11 +136,11 @@ export async function openEnvironmentVars(
   if (varsetId === undefined) return null;
 
   if (key === undefined) {
-    throw new ScaloError("invalid-varset", "No key for this environment's variables", {
+    throw new ScafoError("invalid-varset", "No key for this environment's variables", {
       detail:
         `"${wanted.project}/${wanted.env.name}" is configured with varset "${varsetId}", ` +
         `which this node holds no key for: point "varsets.keyFile" at the key file, ` +
-        `set SCALO_VARSET_KEY_FILE, or pass --varset-key-file`,
+        `set SCAFO_VARSET_KEY_FILE, or pass --varset-key-file`,
     });
   }
 
@@ -221,7 +221,7 @@ function servedHere(
  * the others were ready, and hand its share of the traffic to them, over a
  * build the operator never withdrew. The reaper refuses to delete a build any
  * split references, so this is a corrupted or raced registry rather than the
- * ordinary way a leg goes away; the ordinary way is `scalo env split --clear`.
+ * ordinary way a leg goes away; the ordinary way is `scafo env split --clear`.
  *
  * The ALIAS build is not treated that way and must not be: it is the whole of
  * what the environment serves when there is no split, so a missing one is not a
@@ -262,7 +262,7 @@ async function resolveEnvironment(
     try {
       builds.push({ build: await getBuild(registry, project, entry.build), role: "split" });
     } catch (error) {
-      if (!isScaloError(error) || error.code !== "not-found") throw error;
+      if (!isScafoError(error) || error.code !== "not-found") throw error;
       unresolved.push(entry.build);
       failures.push({
         subject: `${project}/${env.name}`,

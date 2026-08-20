@@ -1,6 +1,6 @@
 /* Builds are immutable: they are created, read and listed, never updated. */
 
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import type { BuildInput, BuildRecord } from "../types/registry.ts";
 import { deepEqual, isCasConflict, namesFromKeys } from "./_shared.ts";
 import { createJson, requireJson } from "./cas.ts";
@@ -10,7 +10,7 @@ import { artifactKey, buildKey, buildsPrefix } from "./paths.ts";
 /**
  * Records a build. `artifact` defaults to the conventional artifact key.
  * Re-creating the same build is idempotent as long as every identity field
- * matches; otherwise `ScaloError("immutable")`. Deletion is the reaper's job.
+ * matches; otherwise `ScafoError("immutable")`. Deletion is the reaper's job.
  */
 export async function createBuild(
   ctx: RegistryContext,
@@ -37,7 +37,7 @@ export async function createBuild(
 
     const existing = await requireJson<BuildRecord>(ctx, key);
     if (deepEqual(identity(existing.value), identity(record))) return existing.value;
-    throw new ScaloError("immutable", "Build already exists", {
+    throw new ScafoError("immutable", "Build already exists", {
       detail: `"${input.id}" exists in project "${project}" with different contents`,
       cause: error,
     });

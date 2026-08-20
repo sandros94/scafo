@@ -90,7 +90,7 @@ export async function startStubIssuer(opts: StartStubIssuerOptions): Promise<Stu
       const iat = Math.floor(Date.now() / 1000);
       const payload = {
         iss,
-        aud: "scalo",
+        aud: "scafo",
         iat,
         /* Long enough to outlive a whole deploy, which polls with the same
            token: an OIDC token is not single-use the way a node token is. */

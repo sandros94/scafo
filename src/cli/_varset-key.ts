@@ -8,7 +8,7 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { ScaloError } from "../core/error.ts";
+import { ScafoError } from "../core/error.ts";
 import { importVarsetKey } from "../core/registry/varsets.ts";
 import { fromBase64Url } from "../core/utils/base64.ts";
 
@@ -32,7 +32,7 @@ export async function readVarsetKeyFile(path: string): Promise<CryptoKey> {
   try {
     bytes = new Uint8Array(await readFile(path));
   } catch (error) {
-    throw new ScaloError("invalid-input", "Varset key file could not be read", {
+    throw new ScafoError("invalid-input", "Varset key file could not be read", {
       detail: `"${path}" could not be opened; it must hold ${VARSET_KEY_FORMS}`,
       cause: error,
     });
@@ -47,7 +47,7 @@ export async function readVarsetKeyFile(path: string): Promise<CryptoKey> {
  * never 32 bytes long, and a 32-byte raw key is never 43 or 64 characters of
  * either alphabet. `source` names the file in the failure.
  *
- * Throws `ScaloError("invalid-input")` for anything else, including a text
+ * Throws `ScafoError("invalid-input")` for anything else, including a text
  * encoding of the wrong length — a truncated key must not be padded into a
  * usable one.
  */
@@ -78,8 +78,8 @@ export function decodeVarsetKey(bytes: Uint8Array, source: string): Uint8Array {
   throw notAKey(source, `it holds ${String(bytes.byteLength)} bytes`);
 }
 
-function notAKey(source: string, why: string): ScaloError {
-  return new ScaloError("invalid-input", "Varset key file is not a key", {
+function notAKey(source: string, why: string): ScafoError {
+  return new ScafoError("invalid-input", "Varset key file is not a key", {
     detail: `"${source}" is none of the accepted forms: ${why}, and a key is ${VARSET_KEY_FORMS}`,
   });
 }

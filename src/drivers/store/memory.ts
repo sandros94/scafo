@@ -1,4 +1,4 @@
-import { ScaloError } from "../../core/error.ts";
+import { ScafoError } from "../../core/error.ts";
 import type { CasHeaders, CasStore, StoredObject } from "../../core/types/store.ts";
 
 /**
@@ -61,8 +61,8 @@ export function createMemoryStore(): MemoryCasStore {
   return new MemoryCasStore();
 }
 
-function conflict(key: string, detail: string): ScaloError {
-  return new ScaloError("cas-conflict", `Conditional write failed for "${key}"`, {
+function conflict(key: string, detail: string): ScafoError {
+  return new ScafoError("cas-conflict", `Conditional write failed for "${key}"`, {
     status: 412,
     detail,
   });

@@ -9,7 +9,7 @@
 
 import { readFile } from "node:fs/promises";
 import { signNodeToken } from "../core/auth/node-token.ts";
-import { fromProblem, type ProblemDetails, ScaloError } from "../core/error.ts";
+import { fromProblem, type ProblemDetails, ScafoError } from "../core/error.ts";
 import type { OperatorKeyFile } from "./commands/keygen.ts";
 
 /** Mints one bearer token per request; a spent one is refused as a replay. */
@@ -27,8 +27,8 @@ export async function operatorSigner(path: string): Promise<Authorize> {
   try {
     file = JSON.parse(await readFile(path, "utf8")) as OperatorKeyFile;
   } catch (error) {
-    throw new ScaloError("invalid-input", "Operator key could not be read", {
-      detail: `"${path}" is not a key file written by "scalo keygen"`,
+    throw new ScafoError("invalid-input", "Operator key could not be read", {
+      detail: `"${path}" is not a key file written by "scafo keygen"`,
       cause: error,
     });
   }
@@ -75,7 +75,7 @@ export async function agentRequest(
   const body: unknown = await response.json().catch(() => null);
   const problem = body as Partial<ProblemDetails> | null;
   if (typeof problem?.type !== "string" || typeof problem.title !== "string") {
-    throw new ScaloError("invalid-input", `Agent answered ${String(response.status)}`, {
+    throw new ScafoError("invalid-input", `Agent answered ${String(response.status)}`, {
       status: response.status,
       detail: `${init.method ?? "GET"} ${url}`,
     });

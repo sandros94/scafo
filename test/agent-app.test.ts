@@ -17,7 +17,7 @@ import type { AgentConfig } from "../src/agent/config.ts";
 import { renderProblem } from "../src/agent/middleware.ts";
 import { signNodeToken } from "../src/core/auth/index.ts";
 import type { ProblemDetails } from "../src/core/error.ts";
-import { ScaloError } from "../src/core/error.ts";
+import { ScafoError } from "../src/core/error.ts";
 import {
   acquireLease,
   claimDomain,
@@ -53,7 +53,7 @@ const PROCESSES: ProcessStatus[] = [
 
 /** Every problem body a rejected caller may see, whatever was wrong with the token. */
 const AUTH_INVALID_PROBLEM = {
-  type: "urn:scalo:auth-invalid",
+  type: "urn:scafo:auth-invalid",
   title: "Authentication failed",
   status: 401,
 };
@@ -242,7 +242,7 @@ describe("POST /v1/environments/:project/:env/retire", () => {
     });
 
     expect(response.status).toBe(404);
-    await expect(response.json()).resolves.toMatchObject({ type: "urn:scalo:not-found" });
+    await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:not-found" });
   });
 
   it("refuses both routes to a caller with no token", async () => {
@@ -569,7 +569,7 @@ describe("GET /v1/ingress/ask", () => {
      * a name that answers nothing — outliving the environment itself.
      */
     expect(response.status).toBe(404);
-    await expect(response.json()).resolves.toMatchObject({ type: "urn:scalo:not-found" });
+    await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:not-found" });
   });
 
   it("answers for it again once it is taken back", async () => {
@@ -627,8 +627,8 @@ describe("routes that do not exist", () => {
 });
 
 describe("renderProblem", () => {
-  it("answers a scalo failure with that error's own problem document", async () => {
-    const thrown = new ScaloError("cas-conflict", "Conditional write failed", {
+  it("answers a scafo failure with that error's own problem document", async () => {
+    const thrown = new ScafoError("cas-conflict", "Conditional write failed", {
       detail: "the object changed under the write",
     });
 
@@ -637,7 +637,7 @@ describe("renderProblem", () => {
     expect(response.status).toBe(409);
     expect(response.headers.get("content-type")).toBe("application/problem+json");
     await expect(response.json()).resolves.toEqual({
-      type: "urn:scalo:cas-conflict",
+      type: "urn:scafo:cas-conflict",
       title: "Conditional write failed",
       status: 409,
       detail: "the object changed under the write",
@@ -677,7 +677,7 @@ describe("renderProblem", () => {
     expect(response.status).toBe(500);
     /* Nothing else: not the message, not a detail, not the address it leaked. */
     await expect(response.json()).resolves.toEqual({
-      type: "urn:scalo:internal",
+      type: "urn:scafo:internal",
       title: "Internal Server Error",
       status: 500,
     });
@@ -689,7 +689,7 @@ describe("renderProblem", () => {
 /**
  * The error the HTTP layer hands its `onError` hook once a route handler has
  * thrown: the original wrapped, kept as `cause`, and flagged as unexpected —
- * which the layer does for every thrown error, a deliberate scalo failure included.
+ * which the layer does for every thrown error, a deliberate scafo failure included.
  */
 function asHandlerThrew(thrown: Error): HTTPError {
   const wrapped = new HTTPError(thrown);

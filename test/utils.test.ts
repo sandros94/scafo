@@ -1,7 +1,7 @@
 /* The naming grammar is a bijection, plus the utilities the registry hashes and retries with. */
 
 import { describe, expect, it } from "vitest";
-import { ScaloError } from "../src/core/error.ts";
+import { ScafoError } from "../src/core/error.ts";
 import { fromBase64Url, toBase64Url } from "../src/core/utils/base64.ts";
 import { withRetry } from "../src/core/utils/backoff.ts";
 import { sha256Hex } from "../src/core/utils/hash.ts";
@@ -50,7 +50,7 @@ describe("host labels", () => {
 
   it("rejects labels that are not one project, optionally one ref", () => {
     expect(isSlug("a--b")).toBe(false);
-    expect(() => assertSlug("a--b")).toThrow(ScaloError);
+    expect(() => assertSlug("a--b")).toThrow(ScafoError);
 
     for (const label of ["a---b", "--a", "a--", "a--b--c", "-a", "a-", "A", "a_b", ""]) {
       expect({ label, parsed: parseHostLabel(label) }).toEqual({ label, parsed: null });
@@ -59,7 +59,7 @@ describe("host labels", () => {
 
   it("refuses labels past the DNS label limit at both ends", () => {
     const long = "a".repeat(40);
-    expect(() => formatHostLabel(long, long)).toThrow(ScaloError);
+    expect(() => formatHostLabel(long, long)).toThrow(ScafoError);
     expect(parseHostLabel(`${long}--${long}`)).toBeNull();
     expect(parseHostLabel("a".repeat(64))).toBeNull();
   });
@@ -116,7 +116,7 @@ describe("withRetry", () => {
     const value = await withRetry(
       () => {
         calls++;
-        if (calls < 3) throw new ScaloError("cas-conflict", "conflict");
+        if (calls < 3) throw new ScafoError("cas-conflict", "conflict");
         return Promise.resolve("ok");
       },
       {
@@ -142,7 +142,7 @@ describe("withRetry", () => {
         withRetry(
           () => {
             calls++;
-            return Promise.reject(new ScaloError("cas-conflict", "conflict"));
+            return Promise.reject(new ScafoError("cas-conflict", "conflict"));
           },
           { attempts: 5, baseMs: 10_000, jitter: () => 1, sleep: nap },
         ),
@@ -160,7 +160,7 @@ describe("withRetry", () => {
         withRetry(
           () => {
             calls++;
-            return Promise.reject(new ScaloError("cas-conflict", `conflict ${String(calls)}`));
+            return Promise.reject(new ScafoError("cas-conflict", `conflict ${String(calls)}`));
           },
           { attempts: 2, jitter: () => 0, sleep: nap },
         ),
@@ -178,7 +178,7 @@ describe("withRetry", () => {
         withRetry(
           () => {
             calls++;
-            return Promise.reject(new ScaloError("not-found", "gone"));
+            return Promise.reject(new ScafoError("not-found", "gone"));
           },
           { attempts: 5, jitter: () => 0, sleep: nap },
         ),
@@ -193,14 +193,14 @@ describe("withRetry", () => {
     const value = await withRetry(
       () => {
         calls++;
-        if (calls < 2) throw new ScaloError("draining", "busy");
+        if (calls < 2) throw new ScafoError("draining", "busy");
         return Promise.resolve(calls);
       },
       {
         attempts: 3,
         jitter: () => 0,
         sleep: nap,
-        isRetryable: (err) => err instanceof ScaloError && err.code === "draining",
+        isRetryable: (err) => err instanceof ScafoError && err.code === "draining",
       },
     );
 
@@ -216,7 +216,7 @@ describe("withRetry", () => {
         withRetry(
           () => {
             calls++;
-            return Promise.reject(new ScaloError("cas-conflict", "conflict"));
+            return Promise.reject(new ScafoError("cas-conflict", "conflict"));
           },
           {
             attempts: 4,

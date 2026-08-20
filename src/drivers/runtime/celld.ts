@@ -4,7 +4,7 @@
  * says when it may take traffic.
  */
 
-import { ScaloError } from "../../core/error.ts";
+import { ScafoError } from "../../core/error.ts";
 import { formatProcessId } from "../../core/placement/ids.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
 import { fleetPrefix } from "../../core/registry/paths.ts";
@@ -124,7 +124,7 @@ export interface CelldDriverOptions {
 /**
  * Builds the driver that runs environments as celld processes.
  *
- * Throws `ScaloError("invalid-input")` when `graceMs` is too short to contain a
+ * Throws `ScafoError("invalid-input")` when `graceMs` is too short to contain a
  * drain.
  */
 export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
@@ -133,7 +133,7 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
   const ctx: RegistryContext = { store: opts.store };
 
   if (!Number.isInteger(graceMs) || graceMs < MIN_DRAIN_MS + DRAIN_HEADROOM_MS) {
-    throw new ScaloError("invalid-input", "Stop grace is too short", {
+    throw new ScafoError("invalid-input", "Stop grace is too short", {
       detail:
         `"graceMs" must be a whole number of at least ` +
         `${String(MIN_DRAIN_MS + DRAIN_HEADROOM_MS)} ms so a process can drain ` +
@@ -282,7 +282,7 @@ function checkedExtraEnv(extraEnv?: Record<string, string>): Record<string, stri
   if (extraEnv === undefined) return {};
 
   if (IDLE_EVICT_ENV in extraEnv) {
-    throw new ScaloError("invalid-input", "Idle eviction cannot be enabled", {
+    throw new ScafoError("invalid-input", "Idle eviction cannot be enabled", {
       detail:
         `"${IDLE_EVICT_ENV}" must not be set: in this runtime version, evicting an ` +
         `idle cell corrupts its replication chain in the bucket and rolls back writes ` +
@@ -292,7 +292,7 @@ function checkedExtraEnv(extraEnv?: Record<string, string>): Record<string, stri
 
   const reserved = RESERVED_ENV.filter((name) => name in extraEnv);
   if (reserved.length > 0) {
-    throw new ScaloError("invalid-input", "Reserved environment variable", {
+    throw new ScafoError("invalid-input", "Reserved environment variable", {
       detail:
         `${reserved.join(", ")} is derived from the node's configuration and the ` +
         `process's own listeners, and cannot be set by a caller`,
@@ -314,7 +314,7 @@ async function assertVersionUploaded(
 ): Promise<void> {
   const key = `${prefix}/${versionPrefix(script, version)}/manifest.json`;
   if ((await ctx.store.get(key)) === null) {
-    throw new ScaloError("not-found", "Version was never uploaded", {
+    throw new ScafoError("not-found", "Version was never uploaded", {
       detail: `"${key}" does not exist, so version "${version}" cannot be activated`,
     });
   }

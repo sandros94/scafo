@@ -6,7 +6,7 @@
  * prefix, so concurrent runs against the same bucket cannot collide:
  *
  *   S3_ENDPOINT=http://127.0.0.1:9000 S3_ACCESS_KEY=... S3_SECRET_KEY=... \
- *   S3_BUCKET=scalo-test pnpm test
+ *   S3_BUCKET=scafo-test pnpm test
  */
 
 import { S3Client } from "uns3";
@@ -43,7 +43,7 @@ const env =
   (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
 
 const ENDPOINT = env.S3_ENDPOINT ?? "";
-const BUCKET = env.S3_BUCKET ?? "scalo-test";
+const BUCKET = env.S3_BUCKET ?? "scafo-test";
 const ACCESS_KEY = env.S3_ACCESS_KEY ?? "";
 const SECRET_KEY = env.S3_SECRET_KEY ?? "";
 const REGION = env.S3_REGION ?? "us-east-1";

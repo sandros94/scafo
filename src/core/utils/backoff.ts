@@ -1,4 +1,4 @@
-import { isScaloError } from "../error.ts";
+import { isScafoError } from "../error.ts";
 
 export interface RetryOptions {
   /** Total tries, including the first one. Default 5. */
@@ -38,7 +38,7 @@ export async function withRetry<T>(fn: () => Promise<T>, opts?: RetryOptions): P
 }
 
 function isCasConflict(err: unknown): boolean {
-  return isScaloError(err) && err.code === "cas-conflict";
+  return isScafoError(err) && err.code === "cas-conflict";
 }
 
 function defaultSleep(ms: number): Promise<void> {

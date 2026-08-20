@@ -71,7 +71,7 @@ jobs:
         store: [seaweedfs, rustfs]
 
     env:
-      SCALO_TEST_STORE: ${{ matrix.store }}
+      SCAFO_TEST_STORE: ${{ matrix.store }}
 
     steps:
       - name: Checkout code

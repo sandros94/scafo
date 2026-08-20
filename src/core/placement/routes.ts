@@ -6,7 +6,7 @@
  * the same routes in the same order.
  */
 
-import { isScaloError } from "../error.ts";
+import { isScafoError } from "../error.ts";
 import type { IngressBackend, IngressDesired, WeightedBackend } from "../types/ingress.ts";
 import type { EnvironmentRecord } from "../types/registry.ts";
 import type { RuntimeProcess } from "../types/runtime.ts";
@@ -213,7 +213,7 @@ function hostUnder(domain: string, project: string, ref?: string): string | null
   try {
     return `${formatHostLabel(project, ref)}.${domain}`;
   } catch (error) {
-    if (isScaloError(error) && error.code === "invalid-slug") return null;
+    if (isScafoError(error) && error.code === "invalid-slug") return null;
     throw error;
   }
 }

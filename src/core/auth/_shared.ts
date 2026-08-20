@@ -1,6 +1,6 @@
 /* Internal: uniform rejection, plus unverified reads of a compact token. */
 
-import { ScaloError } from "../error.ts";
+import { ScafoError } from "../error.ts";
 import { fromBase64Url } from "../utils/base64.ts";
 
 /**
@@ -9,8 +9,8 @@ import { fromBase64Url } from "../utils/base64.ts";
  * be able to tell an expired token from an unknown key, a replayed `jti`, or a
  * forged signature.
  */
-export function authInvalid(reason: string, cause?: unknown): ScaloError {
-  return new ScaloError("auth-invalid", "Authentication failed", {
+export function authInvalid(reason: string, cause?: unknown): ScafoError {
+  return new ScafoError("auth-invalid", "Authentication failed", {
     cause: cause === undefined ? new Error(reason) : new Error(reason, { cause }),
   });
 }

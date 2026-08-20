@@ -2,13 +2,13 @@
  * Internal: the fleet deployment pointer celld maintains, and the reads and
  * writes that move it.
  *
- * CAVEAT: this is a format celld publishes, not one scalo defines, and it is
+ * CAVEAT: this is a format celld publishes, not one scafo defines, and it is
  * pinned to celld 0.2.x. Pointers are therefore rewritten by spreading the one
  * already in the bucket and replacing only the fields that select a version, so
- * anything a newer celld adds survives a scalo activation untouched.
+ * anything a newer celld adds survives a scafo activation untouched.
  */
 
-import { ScaloError } from "../../core/error.ts";
+import { ScafoError } from "../../core/error.ts";
 import { putJson, readJson, type Versioned } from "../../core/registry/cas.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
 
@@ -45,7 +45,7 @@ export function versionPrefix(script: string, version: string): string {
  * Reads the fleet-wide pointer, which every activation starts from: it carries
  * the script name a version directory is addressed under.
  *
- * Throws `ScaloError("not-found")` when the fleet has never been deployed to —
+ * Throws `ScafoError("not-found")` when the fleet has never been deployed to —
  * there is no name to activate a version under, and writing a guess would point
  * the fleet at a directory that does not exist.
  */
@@ -57,7 +57,7 @@ export async function readFleetPointer(
   const current = await readJson<DeployPointer>(ctx, key);
 
   if (current === null) {
-    throw new ScaloError("not-found", "Fleet has no deployment", {
+    throw new ScafoError("not-found", "Fleet has no deployment", {
       detail: `"${key}" does not exist: nothing has been deployed to this fleet yet`,
     });
   }
@@ -74,7 +74,7 @@ export function scriptNameOf(pointer: DeployPointer, key: string): string {
   const segments = pointer.prefix.split("/");
   const script = segments.length === 3 && segments[0] === "deploy" ? segments[1] : undefined;
   if (script === undefined || script === "") {
-    throw new ScaloError("store-nonconforming", "Deployment pointer names no script", {
+    throw new ScafoError("store-nonconforming", "Deployment pointer names no script", {
       detail: `"${key}" has neither a script name nor a "deploy/<script>/<version>" prefix`,
     });
   }

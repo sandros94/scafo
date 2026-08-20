@@ -28,12 +28,12 @@ const HERE = fileURLToPath(new URL(".", import.meta.url));
 export const REPO_ROOT: string = resolve(HERE, "../..");
 /** Fixtures every suite copies from: the application, and the ingress configs. */
 export const FIXTURES: string = join(HERE, "_e2e-fixtures");
-/** The built CLI, run as an operator's `scalo` would be. */
+/** The built CLI, run as an operator's `scafo` would be. */
 export const CLI: string = join(REPO_ROOT, "dist/cli/index.mjs");
 
 export const STORE_IMAGE: string = "chrislusf/seaweedfs:4.42";
 /** node24 + celld + esbuild; built locally, see the AGENTS.md note on the suites. */
-export const AGENT_IMAGE: string = "scalo-v13-probe";
+export const AGENT_IMAGE: string = "scafo-probe";
 /** S3 port inside the store container. */
 export const STORE_PORT: number = 8333;
 
@@ -118,12 +118,12 @@ export function registryAt(endpoint: string, settings: BucketSettings): Registry
 /** The bucket settings as the CLI and the agent read them from an environment. */
 export function storeEnv(endpoint: string, settings: BucketSettings): Record<string, string> {
   return {
-    SCALO_S3_ENDPOINT: endpoint,
-    SCALO_S3_BUCKET: settings.bucket,
-    SCALO_S3_PREFIX: settings.prefix,
-    SCALO_S3_ACCESS_KEY: settings.accessKey,
-    SCALO_S3_SECRET_KEY: settings.secretKey,
-    SCALO_S3_REGION: settings.region,
+    SCAFO_S3_ENDPOINT: endpoint,
+    SCAFO_S3_BUCKET: settings.bucket,
+    SCAFO_S3_PREFIX: settings.prefix,
+    SCAFO_S3_ACCESS_KEY: settings.accessKey,
+    SCAFO_S3_SECRET_KEY: settings.secretKey,
+    SCAFO_S3_REGION: settings.region,
   };
 }
 
@@ -152,7 +152,7 @@ export async function createBucket(endpoint: string, bucket: string): Promise<vo
 
 /** A copy of the fixture application with its version variable set to `version`. */
 export async function stageApp(version: string, keep: string[]): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), `scalo-e2e-app-${version}-`));
+  const dir = await mkdtemp(join(tmpdir(), `scafo-e2e-app-${version}-`));
   keep.push(dir);
   await cp(join(FIXTURES, "app"), dir, { recursive: true });
 
@@ -168,7 +168,7 @@ export async function stageApp(version: string, keep: string[]): Promise<string>
 
 /** The build id the CLI printed for a settled deploy. */
 export function buildIdOf(output: string): string {
-  const build = /scalo: build ([\da-f]{8,64})/.exec(output)?.[1];
+  const build = /scafo: build ([\da-f]{8,64})/.exec(output)?.[1];
   if (build === undefined) throw new Error(`the deploy named no build:\n${output}`);
   return build;
 }

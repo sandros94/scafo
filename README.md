@@ -1,4 +1,4 @@
-# scalo
+# scafo
 
 Self-hosted serverless deployment platform for JS apps.
 
@@ -19,28 +19,28 @@ docker compose -f examples/compose.yaml up --build -d
 ```
 
 Then mint an operator key and deploy something. The key lands in
-`./scalo-operator.json`, which is where `deploy` looks for it:
+`./scafo-operator.json`, which is where `deploy` looks for it:
 
 ```sh
-export SCALO_S3_ENDPOINT=http://127.0.0.1:8333 SCALO_S3_BUCKET=scalo \
-       SCALO_S3_ACCESS_KEY=scalo SCALO_S3_SECRET_KEY=scalo-secret
+export SCAFO_S3_ENDPOINT=http://127.0.0.1:8333 SCAFO_S3_BUCKET=scafo \
+       SCAFO_S3_ACCESS_KEY=scafo SCAFO_S3_SECRET_KEY=scafo-secret
 
 node dist/cli/index.mjs keygen --register
 node dist/cli/index.mjs deploy ./my-app --agent http://127.0.0.1:7400 \
   --project shop --env production --flip
 
-curl -H 'Host: shop.scalo.test' http://127.0.0.1
+curl -H 'Host: shop.scafo.test' http://127.0.0.1
 ```
 
-The application is reachable at `<project>--<env>.scalo.test`, at
-`shop.scalo.test` for the `production` environment, and at
-`<project>--<build>.scalo.test` for every build that is running. Nothing resolves
+The application is reachable at `<project>--<env>.scafo.test`, at
+`shop.scafo.test` for the `production` environment, and at
+`<project>--<build>.scafo.test` for every build that is running. Nothing resolves
 those names for you — send the `Host` header, or add them to `/etc/hosts`.
 
 ## Running it for real
 
-- **The node image:** `docker build -t scalo .` — the agent, celld and esbuild in
-  one image. `ENTRYPOINT` is the CLI, so `docker run scalo up --listen 0.0.0.0:7400`
+- **The node image:** `docker build -t scafo .` — the agent, celld and esbuild in
+  one image. `ENTRYPOINT` is the CLI, so `docker run scafo up --listen 0.0.0.0:7400`
   is the whole invocation. **Give it a stop grace of at least 35 seconds**
   (`stop_grace_period: 35s`, `terminationGracePeriodSeconds: 35`): a node drains
   its in-flight requests on the way out, and a shorter grace kills it mid-drain.

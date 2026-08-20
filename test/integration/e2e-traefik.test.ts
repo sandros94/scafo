@@ -18,15 +18,15 @@
  * container on the docker bridge.
  *
  * There is NO operator-coexistence step here, and its absence is a finding
- * rather than an omission. Caddy's suite proves scalo leaves a hand-written
- * route alone, because scalo writes into a server the operator also writes into.
+ * rather than an omission. Caddy's suite proves scafo leaves a hand-written
+ * route alone, because scafo writes into a server the operator also writes into.
  * Traefik's http provider has no such sharing to get wrong: what this document
  * says IS everything that provider routes, and an operator's own routers come
- * from their other providers, which scalo never sees and cannot touch.
+ * from their other providers, which scafo never sees and cannot touch.
  *
- * Skipped unless SCALO_E2E=1, because it is minutes rather than seconds:
+ * Skipped unless SCAFO_E2E=1, because it is minutes rather than seconds:
  *
- *   SCALO_E2E=1 pnpm vitest run test/integration/e2e-traefik.test.ts
+ *   SCAFO_E2E=1 pnpm vitest run test/integration/e2e-traefik.test.ts
  */
 
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -75,7 +75,7 @@ import {
   until,
 } from "./_harness.ts";
 
-const E2E = process.env.SCALO_E2E === "1";
+const E2E = process.env.SCAFO_E2E === "1";
 
 const TRAEFIK_IMAGE = "traefik:v3";
 
@@ -86,14 +86,14 @@ const TRAEFIK_API_PORT = 8080;
 const AGENT_PORT = 7400;
 
 const BUCKET: BucketSettings = {
-  bucket: "scalo-e2e-traefik",
+  bucket: "scafo-e2e-traefik",
   prefix: "e2e",
-  accessKey: "scalo",
-  secretKey: "scalo-secret",
+  accessKey: "scafo",
+  secretKey: "scafo-secret",
   region: "us-east-1",
 };
 
-const PLATFORM_DOMAIN = "scalo.test";
+const PLATFORM_DOMAIN = "scafo.test";
 const PROJECT = "app";
 const ENVIRONMENT = "production";
 const NODE_ID = "node-e2e-traefik";
@@ -143,7 +143,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       /*
        * Waiting on `/ping` rather than on the routing, and the distinction
        * matters here in a way it did not for Caddy: Traefik is ready long before
-       * it has any scalo routing at all, because the endpoint it polls belongs
+       * it has any scafo routing at all, because the endpoint it polls belongs
        * to an agent that has not started yet. Its provider will log a failed
        * poll a second from now, and that is the correct state to start from.
        */
@@ -163,25 +163,25 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       .withWorkingDir("/work")
       .withEnvironment({
         ...storeEnv(store.fromContainers, BUCKET),
-        SCALO_NODE_ID: NODE_ID,
+        SCAFO_NODE_ID: NODE_ID,
         /* The listener below binds every interface, which the agent refuses
            without being told what network that is. Inside a container of its
            own, on a private docker network, it is the trusted-network case. */
-        SCALO_TRANSPORT: "none",
+        SCAFO_TRANSPORT: "none",
         /* Container-local, and explicitly so: the working directory is this
            repository bind-mounted at /work, and the node's identity must not be
            written into a checkout. */
-        SCALO_STATE_DIR: "/var/lib/scalo",
-        SCALO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
+        SCAFO_STATE_DIR: "/var/lib/scafo",
+        SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
         /*
          * The one line that differs from the Caddy suite's node — and there is
          * nothing beside it, no address and no credential, because this node
          * never calls its ingress. It publishes, and Traefik asks.
          */
-        SCALO_INGRESS_DRIVER: "traefik",
+        SCAFO_INGRESS_DRIVER: "traefik",
         /* Peers reach a single node on loopback; without this the advertised
            host would be the wildcard the listener binds. */
-        SCALO_ADVERTISE: `127.0.0.1:${String(AGENT_PORT)}`,
+        SCAFO_ADVERTISE: `127.0.0.1:${String(AGENT_PORT)}`,
         /* Belt and braces: the image's own esbuild, rather than whichever one
            the bind-mounted node_modules resolves to. */
         ESBUILD_BINARY_PATH: "/usr/local/bin/esbuild",
@@ -251,8 +251,8 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       expect(JSON.parse(answer.body)).toEqual({});
       observed.emptySnapshot = answer.body;
 
-      /* And Traefik, having read it, holds no scalo router at all. */
-      expect(await scaloRouters()).toEqual([]);
+      /* And Traefik, having read it, holds no scafo router at all. */
+      expect(await scafoRouters()).toEqual([]);
     },
     STEP_TIMEOUT_MS,
   );
@@ -260,7 +260,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   it(
     "answers 404 for a host nothing routes, which is NOT what Caddy answers",
     async () => {
-      const answer = await httpGet(httpPort, "/", { host: "unrouted.scalo.test" });
+      const answer = await httpGet(httpPort, "/", { host: "unrouted.scafo.test" });
 
       expect(answer.status).toBe(404);
       expect(answer.body.trim()).toBe(TRAEFIK_NO_ROUTE_BODY);
@@ -274,7 +274,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   it(
     "registers an operator key whose public half lands in the registry",
     async () => {
-      const dir = await mkdtemp(join(tmpdir(), "scalo-e2e-traefik-key-"));
+      const dir = await mkdtemp(join(tmpdir(), "scafo-e2e-traefik-key-"));
       tmpDirs.push(dir);
       keyPath = join(dir, "operator.json");
 
@@ -328,15 +328,15 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
          the same three hosts, arrived at from opposite ends of the poll. */
       const snapshot = await snapshotNow();
       expect(Object.keys(snapshot.http?.routers ?? {}).sort()).toEqual(
-        [envHost(), apexHost(), buildHost(buildV1)].map((host) => `scalo_${host}`).sort(),
+        [envHost(), apexHost(), buildHost(buildV1)].map((host) => `scafo_${host}`).sort(),
       );
-      expect((await scaloRouters()).sort()).toEqual(
+      expect((await scafoRouters()).sort()).toEqual(
         Object.keys(snapshot.http?.routers ?? {})
           .map((name) => `${name}@http`)
           .sort(),
       );
       observed.v1Snapshot = snapshot;
-      observed.v1TraefikRouters = await scaloRouters();
+      observed.v1TraefikRouters = await scafoRouters();
     },
     STEP_TIMEOUT_MS,
   );
@@ -354,13 +354,13 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
 
       /*
        * Both v2 hosts, from both ends. The interesting number is NOT here: by
-       * the time `scalo deploy` printed "routed" the node had published the new
+       * the time `scafo deploy` printed "routed" the node had published the new
        * routing and Traefik had already polled it, so the poll interval hides
        * entirely inside the deploy's own seconds. Recorded as the observation it
        * is — under a deploy, the pull model costs nothing visible.
        */
       const publishedAt = Date.now();
-      expect(`scalo_${buildHost(buildV2)}` in ((await snapshotNow()).http?.routers ?? {})).toBe(
+      expect(`scafo_${buildHost(buildV2)}` in ((await snapshotNow()).http?.routers ?? {})).toBe(
         true,
       );
       await untilServes(envHost(), "v2");
@@ -387,7 +387,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
         DEADLINE_MS,
         async () => {
           const routers = (await snapshotNow()).http?.routers ?? {};
-          if (`scalo_${buildHost(buildV1)}` in routers) return null;
+          if (`scafo_${buildHost(buildV1)}` in routers) return null;
           /* Read in the same breath, so the answer belongs to the window. */
           return {
             at: Date.now(),
@@ -405,7 +405,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       );
 
       expect(withdrawn.body.trim()).toBe(TRAEFIK_NO_ROUTE_BODY);
-      expect(await scaloRouters()).not.toContain(`scalo_${buildHost(buildV1)}@http`);
+      expect(await scafoRouters()).not.toContain(`scafo_${buildHost(buildV1)}@http`);
       observed.withdrawPullLatencyMs = Date.now() - unpublishedAt.at;
       observed.v1BuildHostDuringWithdrawal = unpublishedAt.stale;
       observed.v1BuildHostAfterWithdrawal = withdrawn;
@@ -448,8 +448,8 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
 
   /*
    * Weighted traffic, the pull-model half. The Caddy suite eases a canary in
-   * with `scalo deploy --canary`; this one states the split outright with
-   * `scalo env split --set`, so between the two suites both surfaces are driven
+   * with `scafo deploy --canary`; this one states the split outright with
+   * `scafo env split --set`, so between the two suites both surfaces are driven
    * end to end — and here the leg being brought back (v1) is one whose process
    * was STOPPED when v2 superseded it, which is the restart path.
    */
@@ -497,7 +497,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
         "the node to publish a weighted service for the environment host",
         DEADLINE_MS,
         async () => {
-          const service = (await snapshotNow()).http?.services[`scalo_${envHost()}`];
+          const service = (await snapshotNow()).http?.services[`scafo_${envHost()}`];
           return service !== undefined && "weighted" in service ? service : null;
         },
       );
@@ -577,7 +577,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
         "the node to publish a single-backend service again",
         DEADLINE_MS,
         async () => {
-          const service = (await snapshotNow()).http?.services[`scalo_${envHost()}`];
+          const service = (await snapshotNow()).http?.services[`scafo_${envHost()}`];
           return service !== undefined && "loadBalancer" in service ? service : null;
         },
       );
@@ -605,7 +605,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
         },
       );
       expect(withdrawn.body.trim()).toBe(TRAEFIK_NO_ROUTE_BODY);
-      expect(await scaloRouters()).not.toContain(`scalo_${buildHost(buildV2)}@http`);
+      expect(await scafoRouters()).not.toContain(`scafo_${buildHost(buildV2)}@http`);
     },
     STEP_TIMEOUT_MS,
   );
@@ -665,9 +665,9 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       }
 
       /* Read from both ends: the node publishes the empty document, and Traefik
-         holds no scalo router at all. */
+         holds no scafo router at all. */
       expect(await snapshotNow()).toEqual({});
-      expect(await scaloRouters()).toEqual([]);
+      expect(await scafoRouters()).toEqual([]);
 
       const record = await getEnvironment(registry, PROJECT, ENVIRONMENT);
       expect(record.retiredAt).toBeDefined();
@@ -731,16 +731,16 @@ async function snapshotNow(): Promise<TraefikDynamicConfig> {
  * poll, read from its own API rather than inferred from what it serves.
  *
  * Names come back qualified with the provider that supplied them
- * (`scalo_shop.test@http`), which is Traefik's own convention and not something
+ * (`scafo_shop.test@http`), which is Traefik's own convention and not something
  * the node writes.
  */
-async function scaloRouters(): Promise<string[]> {
+async function scafoRouters(): Promise<string[]> {
   const answer = await httpGet(apiPort, "/api/http/routers", {});
   if (answer.status === 404) return [];
   expect(answer.status, `Traefik's API answered ${answer.body}`).toBe(200);
 
   const routers = JSON.parse(answer.body) as Array<{ name: string }>;
-  return routers.map((router) => router.name).filter((name) => name.startsWith("scalo_"));
+  return routers.map((router) => router.name).filter((name) => name.startsWith("scafo_"));
 }
 
 /** Polls one host through Traefik until it answers with the expected app version. */

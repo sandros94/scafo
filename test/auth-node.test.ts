@@ -20,7 +20,7 @@ import {
   registerNode,
   removeNode,
 } from "../src/core/registry/index.ts";
-import type { ScaloError } from "../src/core/error.ts";
+import type { ScafoError } from "../src/core/error.ts";
 import type { NodeRecord } from "../src/core/types/registry.ts";
 import { fromBase64Url, toBase64Url } from "../src/core/utils/base64.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
@@ -90,11 +90,11 @@ describe("signNodeToken", () => {
 
 describe("every bad node token is answered with the same rejection", () => {
   it("hides the reason in cause, and nowhere a caller can read it", async () => {
-    const error = await refusal(await forge({ ...baseClaims(), aud: "scalo" }));
+    const error = await refusal(await forge({ ...baseClaims(), aud: "scafo" }));
 
     expect(error).toMatchObject(AUTH_INVALID);
     expect(error.toProblem()).toEqual({
-      type: "urn:scalo:auth-invalid",
+      type: "urn:scafo:auth-invalid",
       title: "Authentication failed",
       status: 401,
     });
@@ -125,7 +125,7 @@ describe("every bad node token is answered with the same rejection", () => {
   });
 
   it("refuses a token minted for another audience", async () => {
-    for (const aud of ["scalo", NODE_TOKEN_AUDIENCE.toUpperCase(), "", 1]) {
+    for (const aud of ["scafo", NODE_TOKEN_AUDIENCE.toUpperCase(), "", 1]) {
       expect(await refusal(await forge({ ...baseClaims(), aud }))).toMatchObject(AUTH_INVALID);
     }
   });
@@ -297,7 +297,7 @@ function forge(claims: Record<string, unknown>, kid: string = NODE_ID): Promise<
   return signJws(claims, keys.privateKey, { alg: "EdDSA", protectedHeader: { kid } });
 }
 
-function refusal(token: string): Promise<ScaloError> {
+function refusal(token: string): Promise<ScafoError> {
   return rejectionOf(() => verifier.verify(token));
 }
 

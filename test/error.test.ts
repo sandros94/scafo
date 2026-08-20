@@ -13,12 +13,12 @@ import {
   fromProblem,
   PROBLEM_TYPE_PREFIX,
   type ProblemDetails,
-  ScaloError,
-  type ScaloErrorCode,
+  ScafoError,
+  type ScafoErrorCode,
 } from "../src/core/error.ts";
 
 /** One code of each kind that matters to a caller, plus the catch-all. */
-const CODES: ScaloErrorCode[] = [
+const CODES: ScafoErrorCode[] = [
   "auth-invalid",
   "trust-mismatch",
   "cas-conflict",
@@ -29,7 +29,7 @@ const CODES: ScaloErrorCode[] = [
 describe("a failure that crossed a process boundary", () => {
   it("comes back as the same code, status, title and detail", () => {
     for (const code of CODES) {
-      const original = new ScaloError(code, "Something specific happened", {
+      const original = new ScafoError(code, "Something specific happened", {
         detail: "with specifics attached",
       });
 
@@ -50,7 +50,7 @@ describe("a failure that crossed a process boundary", () => {
      * caller ends up debugging the wrong half.
      */
     const denied = fromProblem(
-      new ScaloError("trust-mismatch", "Trust policy does not admit this token", {
+      new ScafoError("trust-mismatch", "Trust policy does not admit this token", {
         detail: `"repo:evil/other" is not a trusted subject`,
       }).toProblem(),
     );
@@ -86,7 +86,7 @@ describe("a failure that crossed a process boundary", () => {
 
   it("lets the caller say what an unknown code should be taken as", () => {
     const returned = fromProblem(
-      { type: "urn:scalo:invented-later", title: "Something", status: 503 },
+      { type: "urn:scafo:invented-later", title: "Something", status: 503 },
       "draining",
     );
 
@@ -130,7 +130,7 @@ describe("a failure that crossed a process boundary", () => {
     for (const body of cases) {
       const returned = fromProblem(body as ProblemDetails);
 
-      expect(returned, JSON.stringify(body)).toBeInstanceOf(ScaloError);
+      expect(returned, JSON.stringify(body)).toBeInstanceOf(ScafoError);
       expect(typeof returned.message, JSON.stringify(body)).toBe("string");
       expect(Number.isInteger(returned.status), JSON.stringify(body)).toBe(true);
       expect(

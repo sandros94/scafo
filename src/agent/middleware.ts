@@ -2,17 +2,17 @@
 
 import type { H3Event, HTTPError, Middleware } from "h3";
 import type { NodeIdentity, NodeVerifier } from "../core/auth/node-token.ts";
-import { isScaloError, type ProblemDetails, ScaloError } from "../core/error.ts";
+import { isScafoError, type ProblemDetails, ScafoError } from "../core/error.ts";
 
 /** Context key the verified caller is filed under for the rest of the request. */
-const IDENTITY_KEY = "scaloIdentity";
+const IDENTITY_KEY = "scafoIdentity";
 
 /**
  * Guards a route with a node or operator token: `Authorization: Bearer <jws>`,
  * verified against the public keys the registry holds. The identity it resolves
  * is attached to the event, where {@link nodeIdentity} reads it back.
  *
- * Every rejection is the verifier's uniform `ScaloError("auth-invalid")`, so a
+ * Every rejection is the verifier's uniform `ScafoError("auth-invalid")`, so a
  * caller cannot tell a forged token from an expired or a replayed one.
  */
 export function requireNodeToken(verifier: NodeVerifier): Middleware {
@@ -29,7 +29,7 @@ export function nodeIdentity(event: H3Event): NodeIdentity | undefined {
 
 /**
  * Turns any failure into an RFC 9457 `application/problem+json` response: a
- * {@link ScaloError} keeps its code, status and detail, an error raised by the
+ * {@link ScafoError} keeps its code, status and detail, an error raised by the
  * HTTP layer itself (no route matched, malformed URL) keeps its status, and
  * anything unexpected becomes a bare 500 that reveals nothing about the node.
  *
@@ -45,7 +45,7 @@ export function renderProblem(error: HTTPError): Response {
 
 function toProblem(error: HTTPError): ProblemDetails {
   /* The HTTP layer wraps whatever a handler threw and keeps the original as `cause`. */
-  if (isScaloError(error.cause)) return error.cause.toProblem();
+  if (isScafoError(error.cause)) return error.cause.toProblem();
 
   if (error.unhandled !== true) {
     return {
@@ -56,13 +56,13 @@ function toProblem(error: HTTPError): ProblemDetails {
   }
 
   /* Unexpected: the operator gets the whole error, the client gets a status. */
-  console.error("[scalo] unhandled error while serving a request", error);
-  return { type: "urn:scalo:internal", title: "Internal Server Error", status: 500 };
+  console.error("[scafo] unhandled error while serving a request", error);
+  return { type: "urn:scafo:internal", title: "Internal Server Error", status: 500 };
 }
 
 /**
  * The bearer token a request presents. Throws the same
- * `ScaloError("auth-invalid")` every other rejection uses when there is none, so
+ * `ScafoError("auth-invalid")` every other rejection uses when there is none, so
  * a missing header is indistinguishable from a bad one.
  */
 export function bearerToken(event: H3Event): string {
@@ -72,7 +72,7 @@ export function bearerToken(event: H3Event): string {
   if (token === undefined) {
     /* Shaped like every other authentication failure: no message, no detail,
        the reason only in `cause` where it reaches the logs and not the client. */
-    throw new ScaloError("auth-invalid", "Authentication failed", {
+    throw new ScafoError("auth-invalid", "Authentication failed", {
       cause: new Error("Authorization header is missing or is not a bearer token"),
     });
   }

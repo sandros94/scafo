@@ -317,7 +317,7 @@ describe("an environment serving several builds at once", () => {
   });
 
   it("stops the legs a cleared split dropped, once the alias is ready", () => {
-    /* `scalo env split --clear`, seen one pass later: the environment is wanted
+    /* `scafo env split --clear`, seen one pass later: the environment is wanted
        at its alias alone again, and the leg that was taking 10% is retired — but
        only because the alias is up, which it has been all along. */
     const alias = mkProcess("shop", "prod", BUILD_ONE, { ready: true });
