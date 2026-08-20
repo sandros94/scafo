@@ -195,6 +195,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
     store: registry.store,
     durability: config.runtime.durability,
     cellIdleEvictS: config.runtime.cellIdleEvictS,
+    probeHost: upstreamHost,
   });
   const reconciler = createReconciler(agent, driver, { baseEnv });
   agent.reconciler = reconciler;

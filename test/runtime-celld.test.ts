@@ -147,6 +147,24 @@ describe("the spec one environment runs under", () => {
     });
   });
 
+  it("probes at the address the node says its processes bind", async () => {
+    /* A fleet's processes bind the tunnel address; a gate that dialled loopback
+       would never call one ready, however healthy it is. */
+    const urls: string[] = [];
+    const probing = createCelldDriver({ store: new MemoryCasStore(), probeHost: "10.83.0.1" });
+
+    await probing.probeReady(runtimeProcess(), {
+      attempts: 1,
+      fetchFn: async (input) => {
+        urls.push(String(input));
+        return new Response(null, { status: 200 });
+      },
+    });
+
+    expect(urls.every((url) => url.startsWith("http://10.83.0.1:"))).toBe(true);
+    expect(urls.length).toBeGreaterThan(0);
+  });
+
   it("evicts idle cells on the configured clock, whatever the environment inherited", () => {
     const evicting = createCelldDriver({ store: new MemoryCasStore(), cellIdleEvictS: 900 });
 

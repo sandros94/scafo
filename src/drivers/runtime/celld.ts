@@ -131,6 +131,13 @@ export interface CelldDriverOptions {
    * application — state is in the bucket, the next request restores it.
    */
   cellIdleEvictS?: number;
+  /**
+   * Address the readiness gate dials, which is the address the processes bind.
+   * Loopback by default; a node whose processes bind a tunnel address must
+   * hand it in, or the gate probes an address nothing answers on and no
+   * process is ever called ready.
+   */
+  probeHost?: string;
 }
 
 /**
@@ -143,6 +150,7 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
   const binPath = opts.binPath ?? DEFAULT_CELLD_BIN;
   const graceMs = opts.graceMs ?? DEFAULT_STOP_GRACE_MS;
   const durability = opts.durability ?? "bucket";
+  const probeHost = opts.probeHost ?? "127.0.0.1";
   const cellIdleEvictS = opts.cellIdleEvictS ?? 0;
   const ctx: RegistryContext = { store: opts.store };
 
@@ -220,7 +228,7 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
       const delayMs = probe?.delayMs ?? DEFAULT_PROBE_DELAY_MS;
       const expectBelow = probe?.expectBelow ?? DEFAULT_EXPECT_BELOW;
       const path = probe?.path ?? "/";
-      const origin = `http://127.0.0.1:${String(process.port)}`;
+      const origin = `http://${probeHost}:${String(process.port)}`;
 
       for (let attempt = 0; attempt < attempts; attempt++) {
         if (attempt > 0) await delay(delayMs);
