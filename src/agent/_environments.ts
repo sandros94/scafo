@@ -11,13 +11,7 @@ import { coordinatorKey } from "../core/registry/paths.ts";
 import { deleteEnvironment } from "../core/registry/reaper.ts";
 import type { CoordinatorLease } from "../core/types/registry.ts";
 import type { AgentContext, EnvironmentDeleted } from "./app.ts";
-
-/**
- * Marks a request one node has already forwarded to another. A request carrying
- * it is never forwarded again: the mesh is one hop between peers, and a ring of
- * nodes each convinced the next one coordinates would forward forever.
- */
-export const PROXIED_HEADER: string = "x-scafo-proxied";
+import { isProxiedHop, peerUrl, PROXIED_HEADER, PROXIED_VALUE } from "./_peer.ts";
 
 /**
  * Whether the request asked for a forced deletion, which bypasses both the
@@ -81,7 +75,7 @@ export async function deleteEnvironmentRequest(
     });
   }
 
-  if (event.req.headers.get(PROXIED_HEADER) === "1") {
+  if (isProxiedHop(event.req.headers)) {
     /* Loop guard. The lease moved between the hop being decided and this node
        reading it, so the forward landed on a node that does not coordinate
        either. Refused rather than forwarded on: the caller retries against a
@@ -124,15 +118,11 @@ async function forwardToCoordinator(
   }
 
   const record = await getNode(agent.registry, nodeId);
-  const host = record.addresses.internal;
-  /* An IPv6 literal is only a URL authority once it is bracketed. */
-  const authority = host.includes(":") ? `[${host}]` : host;
   /* Path AND query: the query is where `force` is, and a hop that dropped it
      would turn a deletion the operator forced into a refusal from a node they
      never addressed — or, worse if the default ever inverted, the reverse. What
      the coordinator carries out has to be the request that was made. */
-  const target = `${event.url.pathname}${event.url.search}`;
-  const url = `http://${authority}:${String(record.addresses.agentPort)}${target}`;
+  const url = peerUrl(record, `${event.url.pathname}${event.url.search}`);
 
   /*
    * A FRESH token, signed by this node for itself. The caller's token is never
@@ -145,7 +135,7 @@ async function forwardToCoordinator(
   const fetchFn = agent.fetchFn ?? globalThis.fetch;
   const answer = await fetchFn(url, {
     method: "DELETE",
-    headers: { authorization: `Bearer ${token}`, [PROXIED_HEADER]: "1" },
+    headers: { authorization: `Bearer ${token}`, [PROXIED_HEADER]: PROXIED_VALUE },
   });
 
   const contentType = answer.headers.get("content-type");

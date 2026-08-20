@@ -29,6 +29,17 @@ export const DEFAULT_SERVER_NAME: string = "scafo";
  */
 export const ROUTE_ID_PREFIX: string = "scafo_";
 
+/**
+ * Namespace of the catch-all routes, which is {@link ROUTE_ID_PREFIX} plus a
+ * segment no host route's id can carry.
+ *
+ * Every other id is `scafo_` followed by the host the route matches; an
+ * underscore cannot occur in a DNS name, so `scafo_catchall_<domain>` can never
+ * be the id of a route for a host. That is what lets the converge tell its own
+ * catch-alls apart from its own host routes without parsing either.
+ */
+export const CATCHALL_ID_PREFIX: string = `${ROUTE_ID_PREFIX}catchall_`;
+
 export interface CaddyDriverOptions {
   /** Base URL of Caddy's admin API. Defaults to {@link DEFAULT_ADMIN_URL}. */
   adminUrl?: string;
@@ -144,18 +155,42 @@ export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
 
   return {
     async apply(desired: IngressDesired): Promise<void> {
+      /*
+       * THE INVARIANT THIS CONVERGE KEEPS: every catch-all route this driver
+       * owns sits AFTER every other route it owns, on every pass. Caddy matches
+       * routes in ARRAY ORDER and each of these is terminal, so a catch-all
+       * reached first answers for a host an explicit route was written for —
+       * which is not one misrouted name but a whole platform domain's live
+       * traffic going to the agent instead of to the processes serving it.
+       *
+       * `POST` appends, so any route added on this pass would land behind
+       * catch-alls that are already there. Rather than compute an insertion
+       * point, the catch-alls are DELETED AND RE-APPENDED whenever they are not
+       * already exactly right — same ids, same contents, nothing this driver
+       * owns after them, and nothing appended after them on this pass. There is
+       * one per platform domain, and a settled node re-appends none of them.
+       */
       const owned = new Map<string, Record<string, unknown>>();
+      const order: string[] = [];
       for (const route of await readRoutes()) {
         const id = route["@id"];
-        if (typeof id === "string" && id.startsWith(ROUTE_ID_PREFIX)) owned.set(id, route);
+        if (typeof id === "string" && id.startsWith(ROUTE_ID_PREFIX)) {
+          owned.set(id, route);
+          order.push(id);
+        }
       }
 
+      const rendered = renderCaddyRoutes(desired);
       const wanted = new Map<string, CaddyRoute>();
-      for (const route of renderCaddyRoutes(desired)) wanted.set(route["@id"], route);
+      for (const route of rendered) wanted.set(route["@id"], route);
+      const catchAlls = rendered.filter((route) => isCatchAll(route["@id"]));
 
       /* Routes are put in place before stale ones are taken away, so a host that
          moves between backends is never briefly served by neither. */
+      let appended = false;
       for (const [id, route] of wanted) {
+        if (isCatchAll(id)) continue;
+
         const current = owned.get(id);
         if (current === undefined) {
           /* POST to an array appends to it; the routes the operator wrote keep
@@ -164,6 +199,7 @@ export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
           if (!response.ok) {
             throw adminFailed("POST", routesUrl, `answered ${String(response.status)}`);
           }
+          appended = true;
           continue;
         }
         if (sameRoute(current, route)) continue;
@@ -174,11 +210,33 @@ export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
       }
 
       for (const id of [...owned.keys()].sort()) {
-        if (wanted.has(id)) continue;
+        /* Stale catch-alls are left to the re-append below, which is the only
+           thing that ever writes them, so they are never removed and then not
+           put back. */
+        if (wanted.has(id) || isCatchAll(id)) continue;
 
         const url = idUrl(id);
         const response = await call("DELETE", url);
         if (!response.ok) throw adminFailed("DELETE", url, `answered ${String(response.status)}`);
+      }
+
+      if (!appended && catchAllsSettled(order, owned, catchAlls)) return;
+
+      /* The one place this driver removes before it adds, and it is the safe
+         direction: what a catch-all answers is a request nothing else routes,
+         so the window costs Caddy's own answer for an unrouted host rather than
+         an outage of anything being served. Adding first is not available —
+         appending a second copy would put the stale one first. */
+      for (const id of order.filter(isCatchAll)) {
+        const url = idUrl(id);
+        const response = await call("DELETE", url);
+        if (!response.ok) throw adminFailed("DELETE", url, `answered ${String(response.status)}`);
+      }
+      for (const route of catchAlls) {
+        const response = await call("POST", routesUrl, route);
+        if (!response.ok) {
+          throw adminFailed("POST", routesUrl, `answered ${String(response.status)}`);
+        }
       }
     },
   };
@@ -207,16 +265,40 @@ export function routeId(host: string): string {
   return `${ROUTE_ID_PREFIX}${host}`;
 }
 
+/** The `@id` the catch-all for one platform domain is addressed by. */
+export function catchAllId(domain: string): string {
+  return `${CATCHALL_ID_PREFIX}${domain}`;
+}
+
 /**
- * The routes this driver wants Caddy to hold for `desired`, in the order the
- * routing states them.
+ * The routes this driver wants Caddy to hold for `desired`, IN THE ORDER CADDY
+ * MUST HOLD THEM: everything explicit first — the process-backed hosts in the
+ * order the routing states them, then the hosts waiting to be woken — and the
+ * per-domain catch-alls last.
+ *
+ * The order is part of what is rendered rather than something `apply` sorts out,
+ * because Caddy matches top-down and every route here is terminal. See `apply`
+ * for how that order is kept across incremental converges.
  *
  * Pure, and separated from the conversation with the admin API so that what this
  * driver MEANS by a routing can be compared against what another ingress driver
  * means by the same one — which is what `test/ingress-parity.test.ts` does.
  */
 export function renderCaddyRoutes(desired: IngressDesired): CaddyRoute[] {
-  return desired.routes.map(({ host, backends }) => routeFor(host, backends));
+  const routes = desired.routes.map(({ host, backends }) => routeFor(host, backends));
+
+  const wake = desired.wake;
+  if (wake === undefined) return routes;
+
+  const dial = `127.0.0.1:${String(wake.port)}`;
+  for (const host of wake.hosts) routes.push(agentRoute(routeId(host), host, dial));
+  /* A Caddy host matcher wildcard covers exactly ONE label, so `*.<domain>` is
+     every subdomain of a platform domain and never the domain itself — and
+     never a subdomain of a subdomain either. */
+  for (const domain of wake.domains) {
+    routes.push(agentRoute(catchAllId(domain), `*.${domain}`, dial));
+  }
+  return routes;
 }
 
 /**
@@ -252,6 +334,51 @@ function routeFor(host: string, backends: WeightedBackend[]): CaddyRoute {
     ],
     "terminal": true,
   };
+}
+
+/**
+ * One route sending everything it matches to the node's own agent — a parked
+ * environment's host, or a whole platform domain's unmatched subdomains.
+ *
+ * A single upstream and no load-balancing policy: there is one agent, and it is
+ * on the same loopback the runtime processes are.
+ */
+function agentRoute(id: string, match: string, dial: string): CaddyRoute {
+  return {
+    "@id": id,
+    "match": [{ host: [match] }],
+    "handle": [{ handler: "reverse_proxy", upstreams: [{ dial }] }],
+    "terminal": true,
+  };
+}
+
+/** Whether an `@id` this driver owns is one of its catch-alls. */
+function isCatchAll(id: string): boolean {
+  return id.startsWith(CATCHALL_ID_PREFIX);
+}
+
+/**
+ * Whether Caddy already holds exactly these catch-alls, in this order, with
+ * nothing this driver owns after them — the invariant `apply` states.
+ *
+ * `order` is the ids this driver owns as Caddy listed them, so position is read
+ * off the array rather than assumed from the map.
+ */
+function catchAllsSettled(
+  order: string[],
+  owned: Map<string, Record<string, unknown>>,
+  wanted: CaddyRoute[],
+): boolean {
+  const held = order.filter(isCatchAll);
+  if (held.length !== wanted.length) return false;
+
+  const first = order.findIndex(isCatchAll);
+  if (first !== -1 && order.slice(first).some((id) => !isCatchAll(id))) return false;
+
+  return wanted.every((route, at) => {
+    const current = owned.get(held[at]);
+    return current !== undefined && held[at] === route["@id"] && sameRoute(current, route);
+  });
 }
 
 /**

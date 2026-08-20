@@ -53,6 +53,28 @@ export const DEFAULT_ENTRY_POINT: string = "web";
  */
 export const TRAEFIK_KEY_PREFIX: string = "scafo_";
 
+/**
+ * Namespace of the catch-all routers, which is {@link TRAEFIK_KEY_PREFIX} plus a
+ * segment no host's key can carry.
+ *
+ * Every other key is `scafo_` followed by a host, or a host and a build id; an
+ * underscore cannot occur in either, so `scafo_catchall_<domain>` can never be
+ * the key of a router or a service for a host.
+ */
+export const TRAEFIK_CATCHALL_PREFIX: string = `${TRAEFIK_KEY_PREFIX}catchall_`;
+
+/**
+ * Rank of every catch-all router, and it is stated rather than left out.
+ *
+ * TRAEFIK RANKS BY RULE LENGTH WHEN A ROUTER NAMES NO PRIORITY, and the longest
+ * rule wins. A `HostRegexp` for a whole platform domain is easily longer than a
+ * `Host` for one name under it — `^[^.]+\.apps\.test$` against `shop.apps.test`
+ * — so the default ranking would have the catch-all answer for a host an
+ * explicit router was written for. `1` is the lowest a priority may be, which
+ * puts every explicit router ahead of it whatever its rule turns out to be.
+ */
+export const CATCHALL_PRIORITY: number = 1;
+
 /** One router: which requests it matches, and what serves them. */
 export interface TraefikRouter {
   /** Traefik's rule language; a host match is written with backticks. */
@@ -60,6 +82,12 @@ export interface TraefikRouter {
   /** Name of the service in the same document, unqualified by a provider. */
   service: string;
   entryPoints: string[];
+  /**
+   * Rank among routers whose rules both match. Omitted by every router matching
+   * one host, where Traefik's default — the rule's length — cannot pick wrong,
+   * and set to {@link CATCHALL_PRIORITY} by the ones that must lose.
+   */
+  priority?: number;
 }
 
 /** A service that sends every request it is given to one place. */
@@ -156,6 +184,13 @@ export function createTraefikDriver(opts?: TraefikDriverOptions): TraefikDriver 
  * one child service per leg, which is the only place Traefik puts weights; a
  * host with one keeps the plain load balancer it has always had.
  *
+ * WHAT REACHES THE AGENT is rendered the same way and ranked differently. A
+ * host waiting to be woken is an ordinary router over an ordinary service — it
+ * names one host and dials the agent instead of a runtime process — while a
+ * platform domain's catch-all is a `HostRegexp` carrying an explicit
+ * {@link CATCHALL_PRIORITY}, because Traefik's default ranking is rule length
+ * and a regexp for a domain outruns a `Host` for a name under it.
+ *
  * EMPTY ROUTING IS THE INTERESTING CASE, and it is not what it looks like. The
  * obvious rendering — `{"http":{"routers":{},"services":{}}}` — does NOT clear
  * Traefik's routing. Its http provider decodes the body through the same parser
@@ -175,8 +210,6 @@ export function renderTraefikConfig(
   desired: IngressDesired,
   entryPoints: string[] = [DEFAULT_ENTRY_POINT],
 ): TraefikDynamicConfig {
-  if (desired.routes.length === 0) return {};
-
   const routers: Record<string, TraefikRouter> = {};
   const services: Record<string, TraefikService> = {};
 
@@ -221,6 +254,40 @@ export function renderTraefikConfig(
     }
   }
 
+  const wake = desired.wake;
+  if (wake !== undefined) {
+    const agent = `http://127.0.0.1:${String(wake.port)}`;
+
+    for (const host of [...wake.hosts].sort(compare)) {
+      /* Asserted for the same reason every routed host is: a rule is a language
+         carried in a string, and a host holding a backtick would be a different
+         rule rather than a malformed name. */
+      assertHost(host);
+
+      const key = traefikKey(host);
+      routers[key] = { rule: `Host(\`${host}\`)`, service: key, entryPoints: [...entryPoints] };
+      services[key] = { loadBalancer: { servers: [{ url: agent }] } };
+    }
+
+    for (const domain of [...wake.domains].sort(compare)) {
+      assertHost(domain);
+
+      const key = traefikCatchAllKey(domain);
+      routers[key] = {
+        rule: `HostRegexp(\`${subdomainPattern(domain)}\`)`,
+        service: key,
+        entryPoints: [...entryPoints],
+        priority: CATCHALL_PRIORITY,
+      };
+      services[key] = { loadBalancer: { servers: [{ url: agent }] } };
+    }
+  }
+
+  /* NEVER AN EMPTY MAP — see above. A node serving nothing and waking nothing
+     publishes an empty document, which is the only thing Traefik reads as "this
+     provider routes nothing". */
+  if (Object.keys(routers).length === 0) return {};
+
   return { http: { routers, services } };
 }
 
@@ -240,6 +307,24 @@ export function traefikKey(host: string): string {
  */
 export function traefikLegKey(host: string, build: string): string {
   return `${TRAEFIK_KEY_PREFIX}${host}_${build}`;
+}
+
+/** The router and service name one platform domain's catch-all is written under. */
+export function traefikCatchAllKey(domain: string): string {
+  return `${TRAEFIK_CATCHALL_PREFIX}${domain}`;
+}
+
+/**
+ * A Go regular expression matching any SINGLE-LABEL subdomain of `domain`, and
+ * never the domain itself.
+ *
+ * One label, so that it means exactly what Caddy's `*.<domain>` host matcher
+ * means and the two ingresses fall through on the same set of names. The dots of
+ * the domain are escaped because a bare `.` in a regexp matches anything, which
+ * would have this router claim names under domains nobody configured.
+ */
+function subdomainPattern(domain: string): string {
+  return `^[^.]+\\.${domain.replaceAll(".", "\\.")}$`;
 }
 
 /** Runtime processes only ever listen on loopback; the ingress faces the network. */

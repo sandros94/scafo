@@ -10,6 +10,7 @@ export type ScafoErrorCode =
   | "capability-missing"
   | "build-not-runtime-configurable"
   | "placement-unavailable"
+  | "wake-unavailable"
   | "draining"
   | "store-nonconforming"
   | "not-found"
@@ -44,6 +45,10 @@ const DEFAULT_STATUS: Record<ScafoErrorCode, number> = {
   "capability-missing": 409,
   "build-not-runtime-configurable": 409,
   "placement-unavailable": 409,
+  /* A host that IS wakeable, refused for now: over the node's wake cap, or past
+     the deadline the request was held for. Always answered with a `Retry-After`,
+     because the very next try may well succeed. */
+  "wake-unavailable": 503,
   "draining": 503,
   "store-nonconforming": 500,
   "not-found": 404,

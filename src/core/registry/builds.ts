@@ -27,6 +27,7 @@ export async function createBuild(
   };
   if (input.celldVersionId !== undefined) record.celldVersionId = input.celldVersionId;
   if (input.builtWithVarset !== undefined) record.builtWithVarset = input.builtWithVarset;
+  if (input.environment !== undefined) record.environment = input.environment;
   if (input.source !== undefined) record.source = input.source;
 
   try {
@@ -59,8 +60,15 @@ export async function listBuilds(ctx: RegistryContext, project: string): Promise
   return namesFromKeys(await ctx.store.list(prefix), prefix);
 }
 
-/* Everything but `createdAt`: two records of the same build differ only in when it was recorded. */
-function identity(record: BuildRecord): Omit<BuildRecord, "createdAt"> {
-  const { createdAt: _createdAt, ...rest } = record;
+/*
+ * Everything but `createdAt` and `environment`: two records of the same build
+ * differ only in when and where they were recorded. Build ids are content
+ * stable, so deploying the same commit into a SECOND environment re-creates the
+ * same id against a different fleet — an ordinary flow, not a conflict. The
+ * first record's environment stands, and recall wakes the build against that
+ * fleet, which is one of the fleets really holding its code.
+ */
+function identity(record: BuildRecord): Omit<BuildRecord, "createdAt" | "environment"> {
+  const { createdAt: _createdAt, environment: _environment, ...rest } = record;
   return rest;
 }

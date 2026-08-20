@@ -33,10 +33,33 @@ export interface CapacityPlan {
   rssBudgetMb: number;
   maxRssMbPerProcess: number;
   maxResidentCells: number;
+  /**
+   * Wakes this node will cold-start at the same time; further ones are refused
+   * with a retry hint, never queued — a queue of held requests is a memory of
+   * promises the node may not keep, and a refused wake writes no stamp, so
+   * nothing is booted on behalf of a request that was already turned away.
+   *
+   * A wake IS a process boot — unpacking nothing, but starting a runtime,
+   * loading a build and waiting on a readiness gate — and boots are CPU-bound
+   * bursts rather than steady load, so the ceiling is taken from threads and not
+   * from memory. Half of them, so a node waking a batch keeps enough of itself
+   * to answer for what it is already serving.
+   *
+   * ONE IS ALWAYS ALLOWED, whatever the hardware says: a node that could wake
+   * nothing would park an environment permanently the first time it was asked
+   * for. EIGHT IS A COURTESY CEILING rather than a hardware one — a crawler
+   * walking a platform domain touches every parked environment there is, and
+   * without a cap a big node would answer by turning itself into a boot farm.
+   */
+  maxConcurrentWakes: number;
   probedAt: string;
 }
 
 const MIB = 1024 * 1024;
+
+/* Bounds of {@link CapacityPlan.maxConcurrentWakes}, whatever the thread count is. */
+const MIN_CONCURRENT_WAKES = 1;
+const MAX_CONCURRENT_WAKES = 8;
 
 /**
  * Derives a node's capacity plan. cgroup v2 limits win over host values wherever
@@ -68,16 +91,21 @@ export function computeCapacity(
   const cores = cpuLimited ? Math.max(1, Math.ceil(cgroupCpus)) : hostCores;
 
   const rssBudgetMb = Math.max(0, rssFraction * memMb - agentOverheadMb);
+  const threads = cores;
 
   return {
     cores,
     memMb,
     cgroup: memLimited || cpuLimited,
-    threads: cores,
+    threads,
     isolates: cores,
     rssBudgetMb,
     maxRssMbPerProcess: Math.floor(rssBudgetMb / plannedProcesses),
     maxResidentCells: Math.max(1, Math.round((residentCellsPer8Gb * memMb) / 8192)),
+    maxConcurrentWakes: Math.min(
+      MAX_CONCURRENT_WAKES,
+      Math.max(MIN_CONCURRENT_WAKES, Math.ceil(threads / 2)),
+    ),
     probedAt: (opts?.now?.() ?? new Date()).toISOString(),
   };
 }

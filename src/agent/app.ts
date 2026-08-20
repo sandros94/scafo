@@ -42,7 +42,8 @@ import type { AgentConfig } from "./config.ts";
 import type { Coordinator } from "./coordinator.ts";
 import type { DeployService, DeployStatus } from "./deploys.ts";
 import { renderProblem, requireNodeToken } from "./middleware.ts";
-import type { PlacementView, Reconciler, ReconcileStatus } from "./reconcile.ts";
+import type { ParkedView, PlacementView, Reconciler, ReconcileStatus } from "./reconcile.ts";
+import { createWakeService, requestHost, type WakeCounters } from "./wake.ts";
 
 /** Everything the HTTP layer serves from; assembled once while the node boots. */
 export interface AgentContext {
@@ -134,6 +135,18 @@ export interface AgentState {
    * everything.
    */
   placements: PlacementView[];
+  /**
+   * Environments the last pass read as PARKED: nothing runs for them here, and a
+   * request for one of their hosts is what starts it again. Empty on a node that
+   * runs no reconcile loop.
+   */
+  parked: ParkedView[];
+  /**
+   * What this node has done about wakes since it booted. Node-local soft state,
+   * like the deploy map: it is in no registry, a restart counts from zero again,
+   * and each node of an installation reports only its own.
+   */
+  wakes: WakeCounters;
   /** Last pass of the reconcile loop; absent on a node that runs no loop. */
   reconcile?: ReconcileStatus;
 }
@@ -177,6 +190,25 @@ export function createAgentApp(agent: AgentContext): H3 {
        console output would only duplicate it. */
     silent: true,
     onError: renderProblem,
+  });
+
+  /*
+   * HOST DISPATCH, AND IT COMES BEFORE EVERYTHING. A node's routing sends two
+   * kinds of traffic to this listener: the operator and peer calls the routes
+   * below answer, and every host the ingress had nothing else to do with — a
+   * parked environment's, a superseded build's, or a name under a platform
+   * domain that nothing serves. The second kind is decided by the `Host` header
+   * alone and never reaches a route: no API path, no token, and no fall into an
+   * API 404 either, because a host on that surface is answered by the wake
+   * service whatever path it asks for.
+   *
+   * Global middleware, so it applies to routed and unrouted paths alike, and it
+   * short-circuits by returning a response — `next()` is never called for a
+   * host it takes.
+   */
+  const wake = createWakeService(agent);
+  app.use((event): Promise<Response> => wake.handle(event), {
+    match: (event) => wake.handles(requestHost(event)),
   });
 
   /*
@@ -256,6 +288,8 @@ export function createAgentApp(agent: AgentContext): H3 {
         /* From the reads the reconcile pass already made, rather than a second
            trip to the bucket for state this node has just been told. */
         placements: reconcile?.placements ?? [],
+        parked: reconcile?.parked ?? [],
+        wakes: wake.counters(),
         ...(reconcile === undefined ? {} : { reconcile }),
       };
     },

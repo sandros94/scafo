@@ -6,3 +6,4 @@ export * from "./reconcile.ts";
 export * from "./coordinator.ts";
 export * from "./heartbeat.ts";
 export * from "./deploys.ts";
+export * from "./wake.ts";

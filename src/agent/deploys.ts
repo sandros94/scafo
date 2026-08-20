@@ -234,6 +234,9 @@ export function createDeployService(
         id: meta.buildId ?? celldVersionId,
         celldVersionId,
         runtimeConfigurable: meta.runtimeConfigurable,
+        /* Where the code just published actually lives, which is what makes this
+           build's own host wakeable once a flip has superseded it. */
+        environment: meta.environment,
         ...(meta.builtWithVarset === undefined ? {} : { builtWithVarset: meta.builtWithVarset }),
         ...(meta.source === undefined ? {} : { source: meta.source }),
       });

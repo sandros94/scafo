@@ -36,6 +36,16 @@ export interface IngressRoute {
   backends: WeightedBackend[];
 }
 
+/** Traffic that must reach the node's own agent: hosts to wake, and whole domains to answer for. */
+export interface WakeRouting {
+  /** Loopback port the agent answers on. */
+  port: number;
+  /** Fully qualified hosts routed to the agent outright — parked environments' hosts and their custom domains. */
+  hosts: string[];
+  /** Platform domains whose UNMATCHED subdomain hosts fall through to the agent, after every explicit route. */
+  domains: string[];
+}
+
 /** The whole of the routing an ingress should present for this node. */
 export interface IngressDesired {
   /**
@@ -43,6 +53,30 @@ export interface IngressDesired {
    * under one of the platform domains, or a custom domain an environment claimed.
    */
   routes: IngressRoute[];
+  /**
+   * Where a request nothing above answers goes. Absent when the node has no
+   * agent address to send one to, which is the routing scafo rendered before
+   * scale-to-zero existed.
+   *
+   * PRECEDENCE IS THE WHOLE CONTRACT, AND IT IS ONE RULE: every explicit route
+   * beats the catch-all. A {@link IngressDesired.routes} entry is explicit
+   * because a ready process answers on it, a {@link WakeRouting.hosts} entry is
+   * explicit because a parked environment answers on it once woken, and a
+   * {@link WakeRouting.domains} entry is the catch-all that must never shadow
+   * either. A driver MUST therefore order or prioritize its catch-alls so they
+   * are consulted last, whatever its format calls that — an array position for
+   * an ingress that matches top-down, an explicit rank for one that scores
+   * rules. Getting it wrong does not misroute one host: it sends a whole
+   * platform domain's live traffic to the agent.
+   *
+   * The two kinds of entry are separate because they fail differently. A wake
+   * host is a name scafo KNOWS about and is holding open, so a request to one
+   * is answered by starting something; an unmatched host under a platform
+   * domain is a name scafo knows nothing about, and the agent answers it 404 —
+   * which is why the domains are routed at all rather than left to whatever the
+   * ingress does with a host it has no route for.
+   */
+  wake?: WakeRouting;
 }
 
 /** Routes public traffic to the processes a node runs. */

@@ -7,7 +7,9 @@ import type { DesiredEnvironment } from "../core/placement/reconcile.ts";
 import { renderRoutes, type RouteClaim } from "../core/placement/routes.ts";
 import type { IngressDriver, PullingIngressDriver } from "../core/types/ingress.ts";
 import type { RuntimeProcess } from "../core/types/runtime.ts";
+import type { ParkedEnvironment } from "./_desired.ts";
 import type { AgentContext } from "./app.ts";
+import { parseHostPort } from "./config.ts";
 
 /**
  * Whether this ingress is one the agent has to publish a configuration for.
@@ -21,6 +23,20 @@ export function isPullingIngress(driver: IngressDriver): driver is PullingIngres
   return typeof (driver as Partial<PullingIngressDriver>).snapshot === "function";
 }
 
+/** What one pass ended with, as the ingress is told about it. */
+export interface IngressInput {
+  /** Environments this node serves, with the builds it resolved for them. */
+  desired: DesiredEnvironment[];
+  /** Processes this node is running; only the ready ones are routable. */
+  processes: RuntimeProcess[];
+  /**
+   * Environments this node reads as parked. Their hosts are routed to the node's
+   * own agent instead of to a process, so that the request asking for one is
+   * what wakes it.
+   */
+  parked: ParkedEnvironment[];
+}
+
 /**
  * Renders the routing for what this node has ready and converges the ingress on
  * it. Does nothing when the node has no ingress configured — its processes still
@@ -29,14 +45,17 @@ export function isPullingIngress(driver: IngressDriver): driver is PullingIngres
  * Called after every reconcile pass rather than only when something changed:
  * `IngressDriver.apply` is idempotent, and a pass that re-states the routing is
  * also what repairs an ingress that was restarted or edited underneath the node.
+ *
+ * The routing always carries the agent's own port, because the agent is what
+ * answers for a parked host and for every host under a platform domain that
+ * nothing else claims. Only the PORT travels: an ingress that routes to this
+ * node's agent is on this node, so the host is always loopback.
  */
-export async function applyIngress(
-  agent: AgentContext,
-  desired: DesiredEnvironment[],
-  processes: RuntimeProcess[],
-): Promise<void> {
+export async function applyIngress(agent: AgentContext, input: IngressInput): Promise<void> {
   const ingress = agent.ingress;
   if (ingress === undefined) return;
+
+  const { desired, processes, parked } = input;
 
   /* An environment record mirrors every domain claimed for it, so the custom
      domains come along with the desired state and cost no extra registry reads.
@@ -55,6 +74,10 @@ export async function applyIngress(
       environments: desired.map((entry) => ({ project: entry.project, env: entry.env })),
       processes,
       claims,
+      wake: {
+        port: parseHostPort(agent.config.node.listen, "node.listen").port,
+        parked,
+      },
     }),
   );
 }

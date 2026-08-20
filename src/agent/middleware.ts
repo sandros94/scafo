@@ -36,10 +36,25 @@ export function nodeIdentity(event: H3Event): NodeIdentity | undefined {
  * Install as the app's `onError` hook; it is also what logs the unexpected ones.
  */
 export function renderProblem(error: HTTPError): Response {
-  const problem = toProblem(error);
+  return problemResponse(toProblem(error));
+}
+
+/**
+ * One problem document as an HTTP answer, and the single place their shape is
+ * decided: what {@link renderProblem} ends in, and what a handler answering a
+ * failure of its own — rather than throwing one — must go through, so that every
+ * refusal a caller sees is the same document with the same content type.
+ *
+ * `headers` is for what a status needs beyond the body: a `Retry-After` on the
+ * `503` a held request is given when it cannot be served in time.
+ */
+export function problemResponse(
+  problem: ProblemDetails,
+  headers?: Record<string, string>,
+): Response {
   return new Response(JSON.stringify(problem), {
     status: problem.status,
-    headers: { "content-type": "application/problem+json" },
+    headers: { "content-type": "application/problem+json", ...headers },
   });
 }
 

@@ -7,7 +7,12 @@
  */
 
 import { isScafoError } from "../error.ts";
-import type { IngressBackend, IngressDesired, WeightedBackend } from "../types/ingress.ts";
+import type {
+  IngressBackend,
+  IngressDesired,
+  WakeRouting,
+  WeightedBackend,
+} from "../types/ingress.ts";
 import type { EnvironmentRecord } from "../types/registry.ts";
 import type { RuntimeProcess } from "../types/runtime.ts";
 import { formatHostLabel } from "../utils/slug.ts";
@@ -39,6 +44,15 @@ export interface RenderRoutesInput {
   /** Processes running on this node right now; only ready ones are routable. */
   processes: RuntimeProcess[];
   claims: RouteClaim[];
+  /**
+   * The agent's own loopback port and the environments this node reads as
+   * parked, when there is an agent for a request to fall through to.
+   *
+   * Omitted, and the routing then carries no `wake` at all, by a caller that has
+   * no agent address to hand out — which is exactly the routing scafo rendered
+   * before scale-to-zero existed.
+   */
+  wake?: { port: number; parked: Array<{ project: string; env: EnvironmentRecord }> };
 }
 
 /**
@@ -55,6 +69,13 @@ export interface RenderRoutesInput {
  *    runs it, which is what makes a superseded build inspectable during a flip
  *    and either leg of a split addressable on its own.
  * 3. Each claimed custom domain whose environment has something ready.
+ * 4. The hosts of every PARKED environment — its label under each domain, its
+ *    apex when it is {@link APEX_ENVIRONMENT}, and every custom domain its
+ *    record claims — which no process answers on and which therefore go to the
+ *    node's own agent instead, to be woken by the request that asked for them.
+ *    These are reported in `wake` rather than in `routes`, because they name an
+ *    agent rather than a backend, and a host that already has a route in (1),
+ *    (2) or (3) is never among them: mid-transition, the ready process wins.
  *
  * A process that has not passed its readiness gate is never routed: sending it
  * traffic is exactly what the gate exists to prevent.
@@ -121,7 +142,45 @@ export function renderRoutes(input: RenderRoutesInput): IngressDesired {
     routes: [...routes.keys()]
       .sort(compare)
       .map((host) => ({ host, backends: routes.get(host) as WeightedBackend[] })),
+    ...(input.wake === undefined
+      ? {}
+      : { wake: wakeRouting(input.wake, input.platformDomains, routes) }),
   };
+}
+
+/**
+ * What the node's own agent is given: the hosts of every parked environment,
+ * and the platform domains it answers for whatever else is asked of them.
+ *
+ * A host `routes` already answers on is left out rather than listed in both. The
+ * two overlap for a whole pass whenever an environment is waking — the record
+ * still reads parked to a node that has not re-read it, while the process it
+ * started is already ready — and the ready process is the better answer of the
+ * two, since routing it to the agent would hold a request for something that is
+ * already up.
+ */
+function wakeRouting(
+  wake: { port: number; parked: Array<{ project: string; env: EnvironmentRecord }> },
+  platformDomains: string[],
+  routes: Map<string, WeightedBackend[]>,
+): WakeRouting {
+  const hosts = new Set<string>();
+  const claim = (host: string | null): void => {
+    if (host === null || routes.has(host)) return;
+    hosts.add(host);
+  };
+
+  for (const { project, env } of wake.parked) {
+    for (const domain of platformDomains) {
+      claim(hostUnder(domain, project, env.name));
+      if (env.name === APEX_ENVIRONMENT) claim(hostUnder(domain, project));
+    }
+    /* The record mirrors every domain claimed for the environment, and a parked
+       environment is reached by its custom names exactly as it is by its own. */
+    for (const host of env.domains) claim(host);
+  }
+
+  return { port: wake.port, hosts: [...hosts].sort(compare), domains: [...platformDomains] };
 }
 
 /**

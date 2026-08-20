@@ -153,6 +153,14 @@ export interface BuildRecord {
   runtimeConfigurable: boolean;
   /** Varset the artifact was built against; drives the runtime-configurable warning. */
   builtWithVarset?: string;
+  /**
+   * Environment whose fleet holds this build's deployed code, and therefore what
+   * makes its build-hash host WAKEABLE: recalling a superseded build means
+   * starting a process against that fleet, and nothing else records which one it
+   * is. A record without this field predates recall and is not wakeable — its
+   * host answers 404 rather than starting a process against a guess.
+   */
+  environment?: string;
   source?: BuildSource;
   createdAt: string;
 }
@@ -167,6 +175,8 @@ export interface BuildInput {
   celldVersionId?: string;
   runtimeConfigurable: boolean;
   builtWithVarset?: string;
+  /** Environment the build was published into; see {@link BuildRecord.environment}. */
+  environment?: string;
   source?: BuildSource;
 }
 
@@ -211,7 +221,7 @@ export interface ParkPolicy {
 export interface EnvironmentRecord {
   v: 1;
   name: string;
-  /** Host-label prefix this environment answers on. */
+  /** Bucket prefix the environment's fleet state lives under (`fleets/<project>/<name>`). */
   prefix: string;
   /** Current build pointer (last flip); `null` until the first flip. */
   alias: AliasState | null;

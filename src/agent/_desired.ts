@@ -38,6 +38,17 @@ export interface PlacementView {
   selector?: NodeSelector;
 }
 
+/**
+ * One environment a node reads as PARKED, with the whole record rather than its
+ * name: the routing claims the environment's hosts for the node's own agent, and
+ * the wake surface resolves a request's Host back to it and reads the park
+ * policy it is woken under. Neither can be done from a name.
+ */
+export interface ParkedEnvironment {
+  project: string;
+  env: EnvironmentRecord;
+}
+
 /** Something one read could not resolve, recorded against the environment it concerns. */
 export interface DesiredFailure {
   /** `project/environment`. */
@@ -67,8 +78,10 @@ export interface DesiredState {
    * operator otherwise: an environment nothing runs for because it was never
    * deployed looks exactly like one nothing runs for because it is waiting to be
    * woken, and only one of them is answered by sending it a request.
+   *
+   * Carries the whole record rather than the name — see {@link ParkedEnvironment}.
    */
-  parked: Array<{ project: string; env: string }>;
+  parked: ParkedEnvironment[];
   /**
    * Environments that were read but could not be fully resolved, each naming
    * what was missing. The environment is still desired — see
@@ -292,7 +305,7 @@ async function resolveEnvironment(
   /* Reported only when there is something the clock is keeping stopped: an
      environment whose alias was never flipped serves nothing either way, and
      calling it parked would promise that a request wakes something. */
-  if (parked && env.alias !== null) state.parked.push({ project, env: env.name });
+  if (parked && env.alias !== null) state.parked.push({ project, env });
 
   const builds: DesiredBuild[] = [];
   const unresolved: string[] = [];
