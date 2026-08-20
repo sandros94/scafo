@@ -24,13 +24,16 @@ import type { ProblemDetails } from "../src/core/error.ts";
 import {
   createEnvironment,
   createProject,
+  envWakeKey,
   getBuild,
   getEnvironment,
+  readEnvironmentWake,
   registerNode,
   setTrustPolicy,
 } from "../src/core/registry/index.ts";
 import type { DeployRunInput, DeployRunResult, DeployRunner } from "../src/core/types/deploy.ts";
 import type { NodeRecord } from "../src/core/types/registry.ts";
+import type { CasStore } from "../src/core/types/store.ts";
 import type { RuntimeProcess } from "../src/core/types/runtime.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { packDirectory } from "../src/drivers/archive/tar-zst.ts";
@@ -454,6 +457,71 @@ describe("what happens to an accepted deploy", () => {
   });
 });
 
+describe("the wake a deploy is", () => {
+  it("stamps the environment awake once the new build is serving traffic", async () => {
+    running = [readyProcess(VERSION_ID)];
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toBeNull();
+
+    const id = (await responseId(
+      await upload(await operatorToken(), { ...meta(), flip: true }),
+    )) as string;
+
+    /* A deploy IS a wake: what has just been brought into service must not park
+       for having had no request of its own yet. */
+    await expect(settled(id)).resolves.toMatchObject({ state: "routed" });
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toEqual(
+      new Date(clock.nowMs()),
+    );
+  });
+
+  it("stamps it awake when the deploy was not asked to flip either", async () => {
+    /* The build exists and is startable, which is the whole of what this deploy
+       asked for; the environment is no less freshly deployed for it. */
+    const id = (await responseId(await upload(await operatorToken()))) as string;
+
+    await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toEqual(
+      new Date(clock.nowMs()),
+    );
+  });
+
+  it("stamps it awake even when it gives up waiting for the routing", async () => {
+    /* Missing the deadline is a warning and never a failure — the alias points
+       at the build and the loop keeps trying — so the environment it is trying
+       for must not park out from under it in the meantime. */
+    const id = (await responseId(
+      await upload(await operatorToken(), { ...meta(), flip: true }),
+    )) as string;
+
+    const status = await settled(id);
+    expect(status.warnings.map((warning) => warning.code)).toEqual(["deploy-not-routed"]);
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toEqual(
+      new Date(clock.nowMs()),
+    );
+  });
+
+  it("carries the deploy through a stamp the bucket refused", async () => {
+    /*
+     * The deploy succeeded: the build exists and the alias points at it. A stamp
+     * only delays parking, and the next wake or the next deploy writes it again
+     * — so failing the deploy over one would report a failure that did not
+     * happen and send a pipeline into a retry that changes nothing.
+     */
+    running = [readyProcess(VERSION_ID)];
+    agent.registry = { ...clock.ctx, store: refusingWakeStamps(clock.ctx.store) };
+
+    const id = (await responseId(
+      await upload(await operatorToken(), { ...meta(), flip: true }),
+    )) as string;
+
+    await expect(settled(id)).resolves.toMatchObject({ state: "routed", build: VERSION_ID });
+    await expect(getBuild(clock.ctx, PROJECT, VERSION_ID)).resolves.toMatchObject({
+      id: VERSION_ID,
+    });
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toBeNull();
+  });
+});
+
 describe("polling a deploy", () => {
   it("hands an operator the status of a deploy it started", async () => {
     const id = (await responseId(await upload(await operatorToken()))) as string;
@@ -603,6 +671,20 @@ function fakeRunner(): DeployRunner {
       runs.push(input);
       return publish();
     },
+  };
+}
+
+/** A store that refuses the wake stamp alone, and answers every other write. */
+function refusingWakeStamps(inner: CasStore): CasStore {
+  const stamp = envWakeKey(PROJECT, ENVIRONMENT);
+  return {
+    get: (key) => inner.get(key),
+    put: (key, body, cas) =>
+      key === stamp
+        ? Promise.reject(new Error("the bucket refused the stamp"))
+        : inner.put(key, body, cas),
+    del: (key) => inner.del(key),
+    list: (prefix) => inner.list(prefix),
   };
 }
 

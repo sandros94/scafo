@@ -357,6 +357,130 @@ describe("an environment serving several builds at once", () => {
   });
 });
 
+describe("a build a wake has recalled", () => {
+  it("rolls a recalled leg out exactly as it rolls out any other", () => {
+    const alias = mkProcess("shop", "preview", BUILD_ONE, { ready: true });
+    const ports = countingPorts();
+
+    const plan = planReconcile({
+      desired: [
+        mkDesired("shop", "preview", BUILD_ONE, { ephemeral: true, recalled: [BUILD_TWO] }),
+      ],
+      actual: [alias],
+      ports,
+    });
+
+    /*
+     * A recalled build is a leg like any other as far as the planner is
+     * concerned — one rollout, one port pair, activate then start then gate —
+     * and it has to be, because it is the fleet pointer that forces the pairing
+     * and the pointer does not care why a process is being started. Its rollout
+     * can leave the pointer naming a build the alias moved off long ago, which
+     * is safe for the same reason a restart is: nothing reads it again until the
+     * next process starts, and that rollout re-activates first.
+     */
+    expect(plan).toEqual([
+      {
+        type: "rollout",
+        project: "shop",
+        env: "preview",
+        build: BUILD_TWO,
+        ports: { public: PORT_START, internal: PORT_START + 1 },
+      },
+    ]);
+    expect(stops(plan)).toEqual([]);
+    expect(ports.calls).toBe(1);
+  });
+
+  it("stops a recalled process once the wake that brought it back has gone", () => {
+    const alias = mkProcess("shop", "preview", BUILD_ONE, { ready: true });
+    const recalled = mkProcess("shop", "preview", BUILD_TWO, { ready: true });
+
+    const plan = planReconcile({
+      desired: [mkDesired("shop", "preview", BUILD_ONE, { ephemeral: true })],
+      actual: [alias, recalled],
+      ports: countingPorts(),
+    });
+
+    /* A build whose stamp has aged out simply stops being a leg, and what is not
+       a leg is retired on the same terms everything else is: once every build
+       the environment IS wanted at has a ready process. */
+    expect(plan).toEqual([
+      {
+        type: "stop",
+        processId: recalled.processId,
+        reason: `superseded by build "${BUILD_ONE}"`,
+      },
+    ]);
+  });
+
+  it("keeps it running while the legs that would replace it are still unproven", () => {
+    const alias = mkProcess("shop", "preview", BUILD_ONE, { ready: false });
+    const recalled = mkProcess("shop", "preview", BUILD_TWO, { ready: true });
+
+    const plan = planReconcile({
+      desired: [mkDesired("shop", "preview", BUILD_ONE, { ephemeral: true })],
+      actual: [alias, recalled],
+      ports: countingPorts(),
+    });
+
+    expect(plan).toEqual([{ type: "await-ready", processId: alias.processId }]);
+    expect(stoppedIds(plan)).not.toContain(recalled.processId);
+  });
+
+  it("rolls a parked environment's recalled legs out and stops nothing else", () => {
+    /*
+     * The shape a PARKED environment arrives in: its own hosts are deliberately
+     * not served, so it is desired with recalled legs ALONE and no alias leg at
+     * all. The process that was serving its alias when it parked is left running
+     * until the recalled leg has proven itself, exactly as any other unproven
+     * leg would leave it — the planner has no notion of parking and needs none.
+     */
+    const wasServing = mkProcess("shop", "preview", BUILD_ONE, { ready: true });
+    const ports = countingPorts();
+
+    const plan = planReconcile({
+      desired: [mkParked("shop", "preview", BUILD_ONE, [BUILD_TWO])],
+      actual: [wasServing],
+      ports,
+    });
+
+    expect(plan).toEqual([
+      {
+        type: "rollout",
+        project: "shop",
+        env: "preview",
+        build: BUILD_TWO,
+        ports: { public: PORT_START, internal: PORT_START + 1 },
+      },
+    ]);
+    expect(stops(plan)).toEqual([]);
+    expect(ports.calls).toBe(1);
+  });
+
+  it("retires what a parked environment stopped wanting, once its recalled leg is ready", () => {
+    const wasServing = mkProcess("shop", "preview", BUILD_ONE, { ready: true });
+    const recalled = mkProcess("shop", "preview", BUILD_TWO, { ready: true });
+
+    const plan = planReconcile({
+      desired: [mkParked("shop", "preview", BUILD_ONE, [BUILD_TWO])],
+      actual: [wasServing, recalled],
+      ports: countingPorts(),
+    });
+
+    /* The pass that completes the parking: the environment's own hosts stop
+       resolving because the process behind them is gone, and the one host
+       somebody asked for goes on answering. */
+    expect(plan).toEqual([
+      {
+        type: "stop",
+        processId: wasServing.processId,
+        reason: `superseded by build "${BUILD_TWO}"`,
+      },
+    ]);
+  });
+});
+
 describe("an environment the registry no longer lists", () => {
   it("stops every process still running for it, saying why", () => {
     const first = mkProcess("shop", "prod", BUILD_ONE, { ready: true });
@@ -746,6 +870,12 @@ interface DesiredOptions {
   legs?: string[];
   /** Split legs whose build record could not be read. */
   unresolved?: string[];
+  /**
+   * Superseded builds a wake has brought back. They are NOT split legs — they
+   * take no share of the environment's own hosts and the record says nothing
+   * about them — so they come last and only the desired builds carry them.
+   */
+  recalled?: string[];
 }
 
 /** One environment as the registry wants it served, with its builds resolved. */
@@ -780,14 +910,34 @@ function mkDesired(
       ephemeral: opts?.ephemeral ?? false,
       createdAt: CREATED_AT,
     },
-    builds: ids.map((id, at) => ({
-      build: mkBuild(project, id),
-      role: at === 0 ? "alias" : "split",
-    })),
+    builds: [
+      ...ids.map((id, at) => ({
+        build: mkBuild(project, id),
+        role: at === 0 ? ("alias" as const) : ("split" as const),
+      })),
+      ...(opts?.recalled ?? [])
+        .filter((id) => !ids.includes(id))
+        .map((id) => ({ build: mkBuild(project, id), role: "recalled" as const })),
+    ],
   };
   if (unresolved.length > 0) wanted.unresolved = [...unresolved];
   if (opts?.varsetId !== undefined) wanted.varsetId = opts.varsetId;
   return wanted;
+}
+
+/**
+ * A PARKED environment, as the reader hands one over: its record still names the
+ * alias it was serving, and NONE of its own builds is desired — only the ones a
+ * wake recalled, which are reachable at their build-hash hosts alone.
+ */
+function mkParked(
+  project: string,
+  env: string,
+  alias: string,
+  recalled: string[],
+): DesiredEnvironment {
+  const wanted = mkDesired(project, env, alias, { ephemeral: true, recalled });
+  return { ...wanted, builds: wanted.builds.filter((leg) => leg.role === "recalled") };
 }
 
 function mkBuild(project: string, build: string): BuildRecord {

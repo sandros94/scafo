@@ -14,17 +14,24 @@ import {
   flipAlias,
   getEnvironment,
   type LeaseHandle,
+  listBuildWakes,
   planReap,
+  readEnvironmentWake,
   type ReapOptions,
   retireEnvironment,
   setSplit,
+  stampBuildWake,
+  stampEnvironmentWake,
   unretireEnvironment,
+  wakeActivity,
 } from "../src/core/registry/index.ts";
 import {
   artifactKey,
   buildKey,
+  buildWakeKey,
   domainKey,
   environmentKey,
+  envWakeKey,
   fleetPrefix,
 } from "../src/core/registry/paths.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
@@ -265,6 +272,82 @@ describe("executeReap", () => {
       name: "preview",
     });
     await invariants(store);
+  });
+});
+
+describe("the wake stamps an environment leaves behind", () => {
+  it("deletes its own stamp and every build it ever woke", async () => {
+    await stampEnvironmentWake(clock.ctx, PROJECT, "preview");
+    for (const id of [B1, B3]) await stampBuildWake(clock.ctx, PROJECT, "preview", id);
+    /* Another environment's stamp, which must survive the run. */
+    await stampBuildWake(clock.ctx, PROJECT, "prod", B2);
+
+    const plan = await planReap(clock.ctx, opts);
+    const result = await executeReap(clock.ctx, plan, lease, opts);
+
+    /*
+     * On the same reading as the fleet keys: they are named after an environment
+     * nothing will ever iterate again, so one left behind is one nothing ever
+     * deletes — and a stale stamp would recall a build for an environment that
+     * is gone.
+     */
+    expect(result.deleted).toEqual([
+      ...FLEET_KEYS,
+      envWakeKey(PROJECT, "preview"),
+      buildWakeKey(PROJECT, "preview", B1),
+      buildWakeKey(PROJECT, "preview", B3),
+      environmentKey(PROJECT, "preview"),
+      buildKey(PROJECT, B4),
+      artifactKey(PROJECT, B4),
+    ]);
+    /* Before the record, like everything else that names it: a run cut short
+       leaves the environment for the next plan to find again. */
+    expect(result.deleted.indexOf(envWakeKey(PROJECT, "preview"))).toBeLessThan(
+      result.deleted.indexOf(environmentKey(PROJECT, "preview")),
+    );
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, "preview")).resolves.toBeNull();
+    await expect(listBuildWakes(clock.ctx, PROJECT, "preview")).resolves.toEqual(new Map());
+    await expect(store.get(buildWakeKey(PROJECT, "prod", B2))).resolves.not.toBeNull();
+    await invariants(store);
+  });
+
+  it("deletes nothing extra for an environment nothing ever woke", async () => {
+    const plan = await planReap(clock.ctx, opts);
+    const result = await executeReap(clock.ctx, plan, lease, opts);
+
+    /* Absent keys are not deleted keys: the result names what was actually
+       removed, and an environment nobody ever asked for leaves no stamp. */
+    expect(result.deleted).not.toContain(envWakeKey(PROJECT, "preview"));
+    expect(result.deleted).toContain(environmentKey(PROJECT, "preview"));
+  });
+});
+
+describe("idleness read from the wake stamps", () => {
+  it("spares an environment a stamp says was asked for, and reaps the one nothing stamped", async () => {
+    await createEnvironment(clock.ctx, PROJECT, {
+      name: "sandbox",
+      ephemeral: true,
+      idleTtlS: 900,
+    });
+    clock.tick(900_000);
+    await stampEnvironmentWake(clock.ctx, PROJECT, "preview");
+
+    const plan = await planReap(clock.ctx, { activity: wakeActivity(clock.ctx) });
+
+    /* The stamps ARE the activity source once a node supplies one; the
+       environment that has none falls back to its own record's timestamps,
+       which is exactly what an installation with no stamps at all does. */
+    expect(plan.environments.map((target) => target.env)).toEqual(["sandbox"]);
+  });
+
+  it("reaps the stamped one too, once its stamp has aged past the window", async () => {
+    await stampEnvironmentWake(clock.ctx, PROJECT, "preview");
+    clock.tick(900_000);
+
+    const plan = await planReap(clock.ctx, { activity: wakeActivity(clock.ctx) });
+
+    expect(plan.environments.map((target) => target.env)).toEqual(["preview"]);
+    expect(plan.environments[0].reason).toContain("idle");
   });
 });
 

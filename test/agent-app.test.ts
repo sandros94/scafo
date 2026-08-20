@@ -41,6 +41,8 @@ const NODE_ID = "node-a";
 const VERSION = "0.0.0-test";
 const PROJECT = "app";
 const ENVIRONMENT = "prod";
+/** The ephemeral environment beside it: the only kind that parks on a clock. */
+const PREVIEW = "preview";
 const CUSTOM_DOMAIN = "shop.example.com";
 const BUILD = "aaaa1111";
 const OTHER_BUILD = "bbbb2222";
@@ -324,6 +326,83 @@ describe("POST /v1/environments/:project/:env/selector", () => {
       headers: { ...(await bearer()), "content-type": "application/json" },
       body: JSON.stringify({ selector: { tier: "fast" } }),
     });
+
+    expect(response.status).toBe(404);
+  });
+});
+
+describe("POST /v1/environments/:project/:env/park", () => {
+  it("states how the environment scales to zero, without any lease at all", async () => {
+    await parkable();
+
+    const body = await parkBody(PREVIEW, { policy: { afterS: 60, recallBuilds: false } });
+
+    /* A plain conditional update on one record, like the selector: what it
+       states is an intent, and parked-ness is never stored — every node derives
+       it from this policy and the wake stamps on its next pass. */
+    expect(body.environment.park).toEqual({ afterS: 60, recallBuilds: false });
+    expect(await getEnvironment(clock.ctx, PROJECT, PREVIEW)).toEqual(body.environment);
+  });
+
+  it("falls back to what the environment's kind implies when the body says null", async () => {
+    await parkable();
+    await parkBody(PREVIEW, { policy: { afterS: 60 } });
+
+    const body = await parkBody(PREVIEW, { policy: null });
+
+    expect("park" in body.environment).toBe(false);
+  });
+
+  it("refuses a body that says nothing about the policy", async () => {
+    await parkable();
+
+    /* Clearing a policy would put a whole preview fleet back to running around
+       the clock, so a missing field is neither "set" nor "clear". */
+    const response = await parkRequest(PREVIEW, {});
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).detail).toContain("null to clear it");
+  });
+
+  it.each([{ policy: "900" }, { policy: 900 }, { policy: [] }])("refuses %p", async (sent) => {
+    await parkable();
+
+    const response = await parkRequest(PREVIEW, sent as Record<string, unknown>);
+
+    expect(response.status).toBe(400);
+    expect((await getEnvironment(clock.ctx, PROJECT, PREVIEW)).park).toBeUndefined();
+  });
+
+  it("relays the registry's refusal of a window on a long-lived environment", async () => {
+    /* Only the SHAPE is checked at the route; what a field may hold belongs to
+       the registry, so an operator reads the same refusal whichever way they
+       reached the installation. */
+    await deployable();
+
+    const response = await parkRequest(ENVIRONMENT, { policy: { afterS: 60 } });
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).detail).toContain("live traffic");
+  });
+
+  it("refuses a caller with no token, exactly as the selector route does", async () => {
+    await parkable();
+
+    const response = await app.request(`/v1/environments/${PROJECT}/${PREVIEW}/park`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ policy: { afterS: 60 } }),
+    });
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual(AUTH_INVALID_PROBLEM);
+    expect((await getEnvironment(clock.ctx, PROJECT, PREVIEW)).park).toBeUndefined();
+  });
+
+  it("answers a missing environment as a miss rather than as a policy", async () => {
+    await parkable();
+
+    const response = await parkRequest("ghost", { policy: { afterS: 60 } });
 
     expect(response.status).toBe(404);
   });
@@ -767,6 +846,28 @@ async function splittable(): Promise<void> {
     await createBuild(clock.ctx, PROJECT, { id, runtimeConfigurable: true });
   }
   await flipAlias(clock.ctx, PROJECT, ENVIRONMENT, BUILD);
+}
+
+/** One call to the park route with `sent` as the whole body. */
+async function parkRequest(env: string, sent: Record<string, unknown>): Promise<Response> {
+  return app.request(`/v1/environments/${PROJECT}/${env}/park`, {
+    method: "POST",
+    headers: { ...(await bearer()), "content-type": "application/json" },
+    body: JSON.stringify(sent),
+  });
+}
+
+/** The same call, asserted to have succeeded, with its body read back. */
+async function parkBody(env: string, sent: Record<string, unknown>): Promise<EnvironmentResult> {
+  const response = await parkRequest(env, sent);
+  expect(response.status, await response.clone().text()).toBe(200);
+  return (await response.json()) as EnvironmentResult;
+}
+
+/** An ephemeral environment: the only kind a window may be stated for. */
+async function parkable(): Promise<void> {
+  await deployable();
+  await createEnvironment(clock.ctx, PROJECT, { name: PREVIEW, ephemeral: true });
 }
 
 /** One call to the selector route with `sent` as the whole body. */

@@ -17,11 +17,14 @@ import type { AgentConfig } from "../src/agent/config.ts";
 import {
   agentOps,
   CLI_NODE_ID,
+  describeParkChange,
   describeRetirement,
   describeSelectorChange,
   describeSplitChange,
   directOps,
   type EnvironmentOps,
+  type ParkFlags,
+  readParkFlags,
   readSelectorFlags,
   readSplitFlags,
 } from "../src/cli/_environments.ts";
@@ -39,7 +42,7 @@ import {
   retireEnvironment,
 } from "../src/core/registry/index.ts";
 import { coordinatorKey, environmentKey } from "../src/core/registry/paths.ts";
-import type { CoordinatorLease } from "../src/core/types/registry.ts";
+import type { CoordinatorLease, ParkPolicy } from "../src/core/types/registry.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
@@ -385,6 +388,141 @@ describe("what --set and --clear are read as, for a split", () => {
   });
 });
 
+/* Saying how an environment scales to zero is a plain record update too, so it
+   goes the same two ways and must answer identically on both. */
+describe.each([
+  ["through a node agent", (): EnvironmentOps => throughAgent()],
+  ["straight through the bucket", (): EnvironmentOps => throughBucket()],
+])("stating a park policy %s", (_name, build) => {
+  it("stores the fields it was given, and answers with the record", async () => {
+    const environment = await build().setPark(PREVIEW, { afterS: 60, recallBuilds: false });
+
+    /* Only what the operator decided: every blank falls back to what the
+       environment's kind implies, and writing a resolved default into the
+       record would freeze today's default into an environment that never asked. */
+    expect(environment.park).toEqual({ afterS: 60, recallBuilds: false });
+    expect(await getEnvironment(clock.ctx, PROJECT, "preview")).toEqual(environment);
+  });
+
+  it("falls back to what its kind implies when it is cleared", async () => {
+    await build().setPark(PREVIEW, { afterS: 60 });
+
+    const environment = await build().setPark(PREVIEW, null);
+
+    /* The field is gone rather than emptied: readers ask what an environment
+       with no policy of its own implies, and a `{}` would be a policy saying
+       nothing. */
+    expect("park" in environment).toBe(false);
+    expect((await getEnvironment(clock.ctx, PROJECT, "preview")).park).toBeUndefined();
+  });
+
+  it("relays the registry's refusal of a window on a long-lived environment", async () => {
+    const error = await rejectsWith(() => build().setPark(PROD, { afterS: 60 }), "invalid-input");
+
+    /* Verbatim, whichever way the operator reached the installation: the rule is
+       the registry's and the wording must not depend on the transport. */
+    expect(error.detail).toContain("live traffic");
+    expect(error.detail).toContain("recallBuilds");
+    expect((await getEnvironment(clock.ctx, PROJECT, "prod")).park).toBeUndefined();
+  });
+
+  it("sets the recall fields on a long-lived environment, which do work on one", async () => {
+    const environment = await build().setPark(PROD, { buildIdleS: 45 });
+
+    expect(environment.park).toEqual({ buildIdleS: 45 });
+  });
+
+  it("reports an environment that is not there rather than inventing one", async () => {
+    await rejectsWith(
+      () => build().setPark({ project: PROJECT, env: "ghost" }, { afterS: 60 }),
+      "not-found",
+    );
+  });
+
+  it("takes no coordinator lease to do it", async () => {
+    await build().setPark(PREVIEW, { afterS: 60 });
+
+    const lease = await readJson<CoordinatorLease>(clock.ctx, coordinatorKey());
+    expect(lease?.value.node).not.toBe(CLI_NODE_ID);
+  });
+});
+
+describe("what the park flags are read as", () => {
+  it("reads only the fields that were given", () => {
+    expect(
+      readParkFlags({
+        after: "60",
+        buildIdle: "30",
+        wakeDeadline: "5",
+        recallBuilds: "false",
+        clear: false,
+      }),
+    ).toEqual({ afterS: 60, buildIdleS: 30, wakeDeadlineS: 5, recallBuilds: false });
+
+    expect(parkFlags({ after: "0" })).toEqual({ afterS: 0 });
+  });
+
+  it("reads --clear as the null that falls back to what the kind implies", () => {
+    expect(parkFlags({ clear: true })).toBeNull();
+  });
+
+  it.each(["after", "buildIdle", "wakeDeadline", "recallBuilds"] as const)(
+    "refuses --clear beside %s, which say opposite things",
+    async (field) => {
+      const error = await rejectsWith(
+        () =>
+          Promise.resolve(
+            parkFlags({ [field]: field === "recallBuilds" ? "true" : "60", clear: true }),
+          ),
+        "invalid-input",
+      );
+
+      expect(error.detail).toContain("opposite");
+      expect(error.detail).toContain("--clear");
+    },
+  );
+
+  it("refuses NEITHER rather than reading it as a clear", async () => {
+    /* An accidental `scafo env park` that lifted a policy would put a whole
+       preview fleet back to running around the clock. */
+    const error = await rejectsWith(() => Promise.resolve(parkFlags({})), "invalid-input");
+
+    expect(error.detail).toContain("--after");
+    expect(error.detail).toContain("--clear");
+  });
+
+  it("refuses seconds that are not a whole number, before any node is troubled", async () => {
+    for (const [flag, stated] of [
+      ["after", "1.5"],
+      ["after", "-60"],
+      ["after", "a while"],
+      ["buildIdle", "30s"],
+      ["wakeDeadline", "-1"],
+    ] as const) {
+      const error = await rejectsWith(
+        () => Promise.resolve(parkFlags({ [flag]: stated })),
+        "invalid-input",
+      );
+      expect(error.detail, `${flag} "${stated}"`).toContain("whole number of seconds");
+    }
+  });
+
+  it("reads --recall-builds as true or false and nothing else", async () => {
+    expect(parkFlags({ recallBuilds: "true" })).toEqual({ recallBuilds: true });
+    expect(parkFlags({ recallBuilds: "false" })).toEqual({ recallBuilds: false });
+
+    for (const stated of ["yes", "1", "TRUE", "off"]) {
+      /* A flag that guesses what "1" meant is a flag that reads a typo as an
+         instruction. */
+      const error = await rejectsWith(
+        () => Promise.resolve(parkFlags({ recallBuilds: stated })),
+        "invalid-input",
+      );
+      expect(error.detail, stated).toContain("--recall-builds");
+    }
+  });
+});
+
 describe("deleting through a node agent", () => {
   it("refuses a long-lived environment, relaying the grace the node named", async () => {
     const error = await rejectsWith(() => throughAgent().delete(PROD), "invalid-input");
@@ -542,6 +680,41 @@ describe("what the command puts on the terminal", () => {
     expect(printed).toContain("readiness gate");
   });
 
+  it("names the WHOLE resolved policy, not only the field that just changed", async () => {
+    const environment = await throughBucket().setPark(PREVIEW, { buildIdleS: 45 });
+
+    const printed = describeParkChange(PREVIEW, environment);
+
+    /* An operator who set one field still has to see what the others resolved
+       to, because that is what the environment will actually do. */
+    expect(printed).toContain("parks 900s after its last wake");
+    expect(printed).toContain("45s");
+    expect(printed).toContain("30s");
+  });
+
+  it("says a long-lived environment never parks on a clock, whatever was just set", async () => {
+    const environment = await throughBucket().setPark(PROD, { buildIdleS: 45 });
+
+    /* The case that surprises people most, and the reason the printed line is
+       the resolved policy rather than the fields that were written. */
+    expect(describeParkChange(PROD, environment)).toContain("never parks on a clock");
+  });
+
+  it("says when an environment carries no policy of its own", async () => {
+    const environment = await getEnvironment(clock.ctx, PROJECT, "preview");
+
+    const printed = describeParkChange(PREVIEW, environment);
+
+    expect(printed).toContain("no park policy of its own");
+    expect(printed).toContain("parks 900s after its last wake");
+  });
+
+  it("says plainly when superseded builds are to stay stopped", async () => {
+    const environment = await throughBucket().setPark(PREVIEW, { recallBuilds: false });
+
+    expect(describeParkChange(PREVIEW, environment)).toContain("superseded builds stay stopped");
+  });
+
   it("says which build a cleared split leaves serving on its own", async () => {
     await throughBucket().setSplit(PROD, [
       { build: BUILD, weight: 90 },
@@ -557,6 +730,18 @@ describe("what the command puts on the terminal", () => {
 });
 
 /* ------------------------------------------------------------------ helpers */
+
+/** One `scafo env park` invocation: the flags it stated, and no others. */
+function parkFlags(given: Partial<ParkFlags>): ParkPolicy | null {
+  return readParkFlags({
+    after: undefined,
+    buildIdle: undefined,
+    wakeDeadline: undefined,
+    recallBuilds: undefined,
+    clear: false,
+    ...given,
+  });
+}
 
 /** The one node this test talks to, as the CLI's agent transport sees it. */
 function throughAgent(): EnvironmentOps {
