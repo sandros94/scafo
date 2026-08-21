@@ -7,12 +7,14 @@ import { describe, expect, it } from "vitest";
 import {
   APEX_ENVIRONMENT,
   FULL_WEIGHT,
+  pickLeg,
   renderRoutes,
   type RenderRoutesInput,
   type RouteClaim,
+  servingLegs,
 } from "../src/core/placement/routes.ts";
 import type { EnvironmentRecord, SplitEntry } from "../src/core/types/registry.ts";
-import type { IngressBackend, IngressDesired } from "../src/core/types/ingress.ts";
+import type { IngressBackend, IngressDesired, WeightedBackend } from "../src/core/types/ingress.ts";
 import type { RuntimeProcess } from "../src/core/types/runtime.ts";
 import { SLUG_MAX_LENGTH } from "../src/core/utils/slug.ts";
 
@@ -567,6 +569,73 @@ describe("determinism", () => {
   });
 });
 
+/*
+ * The seam the agent's wake surface answers from, so that what serves an
+ * environment is decided ONCE. A wake holds a single request and hands it to one
+ * leg, where an ingress load-balances a stream of them across all of them, but
+ * both read the same legs and the same weights — that is the whole point of the
+ * export.
+ */
+describe("the legs one held request is answered from", () => {
+  const SPLIT: SplitEntry[] = [
+    { build: BUILD, weight: 90 },
+    { build: OLDER, weight: 10 },
+  ];
+  const both = [
+    process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000, true),
+    process(PROJECT, APEX_ENVIRONMENT, OLDER, 42_002, true),
+  ];
+
+  it("gives the very legs the environment's own hosts are rendered with", () => {
+    const { project, env } = environment(PROJECT, APEX_ENVIRONMENT, BUILD, [], SPLIT);
+    const processes = [
+      /* Unsorted, and carrying a build the split does not name: the same
+         filtering the render does, because it IS the render's. */
+      process(PROJECT, APEX_ENVIRONMENT, OLDER, 42_002, true),
+      process(PROJECT, APEX_ENVIRONMENT, THIRD, 42_004, true),
+      process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000, true),
+    ];
+    const desired = renderRoutes(input({ environments: [{ project, env }], processes }));
+
+    const legs = servingLegs(project, env, processes);
+
+    expect(legs).toEqual(backendsOf(desired, `${PROJECT}.${DOMAIN}`));
+    expect(legs.map((leg) => `${leg.backend.build}:${String(leg.weight)}`)).toEqual([
+      `${BUILD}:90`,
+      `${OLDER}:10`,
+    ]);
+  });
+
+  it("gives nothing when no leg is ready, which is what a wake falls through on", () => {
+    const { project, env } = environment(PROJECT, APEX_ENVIRONMENT, BUILD);
+
+    expect(servingLegs(project, env, [])).toEqual([]);
+    expect(
+      servingLegs(project, env, [process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000, false)]),
+    ).toEqual([]);
+  });
+
+  it("walks the shares in the order the legs are stated", () => {
+    const { project, env } = environment(PROJECT, APEX_ENVIRONMENT, BUILD, [], SPLIT);
+    const legs = servingLegs(project, env, both);
+
+    /* 90/10: every draw below 0.9 takes the first leg and every draw from it the
+       second, which over many of them is the distribution the weights state. */
+    expect(taken(legs, [0, 0.5, 0.899])).toEqual([BUILD, BUILD, BUILD]);
+    expect(taken(legs, [0.9, 0.95, 0.999])).toEqual([OLDER, OLDER, OLDER]);
+  });
+
+  it("names a leg for a draw off either end, rather than nothing", () => {
+    const { project, env } = environment(PROJECT, APEX_ENVIRONMENT, BUILD, [], SPLIT);
+
+    expect(taken(servingLegs(project, env, both), [-1, 1, 2])).toEqual([BUILD, OLDER, OLDER]);
+  });
+
+  it("has nothing to pick from when there are no legs", () => {
+    expect(pickLeg([], 0.5)).toBeUndefined();
+  });
+});
+
 function input(overrides: Partial<RenderRoutesInput>): RenderRoutesInput {
   return {
     platformDomains: [DOMAIN],
@@ -641,4 +710,9 @@ function backendsOf(
   host: string,
 ): IngressDesired["routes"][number]["backends"] | undefined {
   return desired.routes.find((route) => route.host === host)?.backends;
+}
+
+/** The build each draw takes, in order. */
+function taken(legs: WeightedBackend[], draws: number[]): Array<string | undefined> {
+  return draws.map((draw) => pickLeg(legs, draw)?.backend.build);
 }

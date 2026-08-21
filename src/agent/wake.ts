@@ -23,8 +23,8 @@ import { isNodeLive } from "../core/registry/nodes.ts";
 import { nodeKey } from "../core/registry/paths.ts";
 import { readPlacement } from "../core/registry/placement.ts";
 import { stampBuildWake, stampEnvironmentWake } from "../core/registry/wake.ts";
+import { pickLeg, servingLegs } from "../core/placement/routes.ts";
 import type { NodeRecord, PlacementRecord } from "../core/types/registry.ts";
-import type { RuntimeProcess } from "../core/types/runtime.ts";
 import { isProxiedHop } from "./_peer.ts";
 import { forwardWake, proxyToProcess } from "./_wake-proxy.ts";
 import type { ParkedEnvironment } from "./_desired.ts";
@@ -134,6 +134,9 @@ export function createWakeService(agent: AgentContext): WakeService {
   let refused = 0;
   let forwarded = 0;
 
+  /** Where the weighted pick between an environment's legs comes from. */
+  const draw = agent.random ?? Math.random;
+
   /** What the last reconcile pass read as parked; empty on a node with no loop. */
   function parked(): ParkedEnvironment[] {
     return agent.reconciler?.parkedRecords() ?? [];
@@ -148,17 +151,39 @@ export function createWakeService(agent: AgentContext): WakeService {
     return parked().some((entry) => entry.env.domains.includes(host));
   }
 
-  /** The ready process serving the target, or undefined while there is none. */
-  function servingProcess(target: WakeTarget): RuntimeProcess | undefined {
-    return agent.reconciler?.status().processes.find(
-      (process) =>
-        process.ready &&
-        process.project === target.project &&
-        process.env === target.env.name &&
-        /* An environment is answered by any leg it has ready; a recalled build is
-           answered by the process serving THAT build and by no other. */
-        (target.kind === "environment" || process.build === target.build.id),
-    );
+  /**
+   * The loopback port serving the target right now, or undefined while nothing
+   * is.
+   *
+   * AN ENVIRONMENT IS ANSWERED WITH WHAT THE INGRESS WOULD ANSWER IT WITH, from
+   * {@link servingLegs} — the same computation `renderRoutes` weights its hosts
+   * over — and never with "any ready process of this environment". THE FLIP
+   * WINDOW IS WHY, and it is minutes wide: the process serving the build a flip
+   * superseded keeps running until every desired leg is ready and a later pass
+   * stops it, so answering from any ready process serves the SUPERSEDED build
+   * for that whole window while the ingress has already moved. Nor is it a
+   * corner — every host without an explicit route falls through to this agent,
+   * so during router propagation, and for every parked or starting environment,
+   * this answer IS the user-visible one.
+   *
+   * The pick among the legs is weighted as the ingress weights them, one draw
+   * per look. A RECALLED BUILD IS ITS OWN CASE: it takes no share of the
+   * environment's hosts and is therefore no leg of it, so its own hash host is
+   * matched exactly against the process serving THAT build and nothing else.
+   */
+  function servingPort(target: WakeTarget): number | undefined {
+    const processes = agent.reconciler?.status().processes ?? [];
+
+    if (target.kind === "build") {
+      return processes.find(
+        (process) =>
+          process.ready &&
+          process.project === target.project &&
+          process.env === target.env.name &&
+          process.build === target.build.id,
+      )?.port;
+    }
+    return pickLeg(servingLegs(target.project, target.env, processes), draw())?.backend.port;
   }
 
   /**
@@ -167,11 +192,11 @@ export function createWakeService(agent: AgentContext): WakeService {
    * subscribed to because readiness is a fact about a process the loop already
    * re-establishes on every pass, and there is nothing here to keep in sync.
    */
-  async function awaitServing(target: WakeTarget): Promise<RuntimeProcess | undefined> {
+  async function awaitServing(target: WakeTarget): Promise<number | undefined> {
     const deadline = Date.now() + target.policy.wakeDeadlineS * 1000;
     for (;;) {
-      const process = servingProcess(target);
-      if (process !== undefined) return process;
+      const port = servingPort(target);
+      if (port !== undefined) return port;
       if (Date.now() >= deadline) return undefined;
 
       await delay(WAKE_POLL_INTERVAL_MS);
@@ -300,11 +325,11 @@ export function createWakeService(agent: AgentContext): WakeService {
          pass that reads it. */
       reconciler.kick();
 
-      const process = await awaitServing(target);
-      if (process === undefined) return notInTime(host, target);
+      const port = await awaitServing(target);
+      if (port === undefined) return notInTime(host, target);
 
       return await proxyToProcess(event, {
-        port: process.port,
+        port,
         host,
         ...(agent.fetchFn === undefined ? {} : { fetchFn: agent.fetchFn }),
       });

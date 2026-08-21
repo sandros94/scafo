@@ -51,6 +51,7 @@ import {
   retireEnvironment,
   setNodeSelector,
   setParkPolicy,
+  setSplit,
   writePlacement,
 } from "../src/core/registry/index.ts";
 import type { RuntimeProcess } from "../src/core/types/runtime.ts";
@@ -74,6 +75,8 @@ const RETIRED = "gone";
 const ORPHAN_BUILD = "cccc3333";
 const BUILD = "aaaa1111";
 const SUPERSEDED = "bbbb2222";
+/** A third build of the same environment, for the cases that weigh two legs. */
+const THIRD = "dddd4444";
 const CUSTOM = "shop.example.com";
 
 const PARKED_HOST = `${PROJECT}--${PREVIEW}.${DOMAIN}`;
@@ -404,6 +407,103 @@ describe("waking what this node has parked", () => {
   });
 });
 
+describe("what a woken host is answered with", () => {
+  it("answers an environment with its ALIAS build while the superseded one still runs", async () => {
+    /*
+     * THE FLIP WINDOW, and it is minutes wide rather than milliseconds: a
+     * process is stopped only once every desired leg is ready, so the build a
+     * flip superseded keeps running for passes after the ingress has moved off
+     * it. It is listed FIRST here because that is the order the loop reports it
+     * in — it started first — so anything answering with the first ready process
+     * of the environment would serve it.
+     */
+    loop.processes = [ready(PREVIEW, SUPERSEDED, 42_006), ready(PREVIEW, BUILD, 42_004)];
+
+    for (const path of ["/", "/cart", "/checkout"]) {
+      expect((await ask(PARKED_HOST, path)).status, path).toBe(200);
+    }
+
+    expect(dialled()).toEqual([42_004, 42_004, 42_004]);
+  });
+
+  it("answers a custom domain with the same leg its environment's own hosts get", async () => {
+    loop.processes = [ready(PREVIEW, SUPERSEDED, 42_006), ready(PREVIEW, BUILD, 42_004)];
+
+    expect((await ask(CUSTOM, "/")).status).toBe(200);
+
+    expect(dialled()).toEqual([42_004]);
+  });
+
+  it("divides a split environment over its legs, and over none of the others", async () => {
+    await setSplit(clock.ctx, PROJECT, PREVIEW, [
+      { build: BUILD, weight: 50 },
+      { build: THIRD, weight: 50 },
+    ]);
+    /* The build the split does not name keeps running and stays reachable under
+       its own hash; it simply takes none of the environment's traffic. */
+    loop.processes = [
+      ready(PREVIEW, SUPERSEDED, 42_006),
+      ready(PREVIEW, BUILD, 42_004),
+      ready(PREVIEW, THIRD, 42_008),
+    ];
+    app = appWith({ draws: [0, 0.25, 0.499, 0.5, 0.75, 0.999] });
+
+    for (const draw of [0, 0.25, 0.499, 0.5, 0.75, 0.999]) {
+      expect((await ask(PARKED_HOST, "/")).status, String(draw)).toBe(200);
+    }
+
+    /* Both legs are reachable and the shares are the registry's, walked in the
+       order it states them — the same weights the ingress is handed, so the
+       agent's answer and the router's agree on the distribution. */
+    expect(dialled()).toEqual([42_004, 42_004, 42_004, 42_008, 42_008, 42_008]);
+  });
+
+  it("holds rather than answering with a build the routing has moved off", async () => {
+    /* The alias has moved and its build is still coming up. What is left running
+       is the build it superseded, which the ingress sends nothing — so this
+       sends it nothing either: the request waits for the leg that IS routed. */
+    loop.processes = [ready(PREVIEW, SUPERSEDED, 42_006)];
+
+    const held = ask(PARKED_HOST, "/");
+    await sleep(WAKE_POLL_INTERVAL_MS / 2);
+    expect(upstream).toEqual([]);
+
+    loop.processes = [...loop.processes, ready(PREVIEW, BUILD, 42_004)];
+
+    expect((await held).status).toBe(200);
+    /* And the wake path it fell through to is the ordinary one: stamped, kicked,
+       held until the routed leg passed its gate. */
+    expect(dialled()).toEqual([42_004]);
+    expect(loop.kicks).toBe(1);
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.not.toBeNull();
+  });
+
+  it("answers a build's own host with that build alone, mid-start of another", async () => {
+    /*
+     * THE MIRROR CASE, pinned here rather than argued: a build-hash host is
+     * matched exactly, so the build starting beside it — ready first, and the
+     * environment's only ready process — never answers for it. What can still
+     * make one build's host serve another's CODE is upstream of this surface and
+     * not visible to it: the fleet has ONE deployment pointer, a process reads it
+     * once while it starts, and a publish landing between an activation and its
+     * start hands the starting process the wrong version under the right id.
+     */
+    loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+
+    const held = ask(`${PROJECT}--${SUPERSEDED}.${DOMAIN}`, "/");
+    await sleep(WAKE_POLL_INTERVAL_MS / 2);
+    expect(upstream).toEqual([]);
+
+    loop.processes = [...loop.processes, ready(PREVIEW, SUPERSEDED, 42_006)];
+
+    expect((await held).status).toBe(200);
+    expect(dialled()).toEqual([42_006]);
+    /* A recall keeps ONE build awake at its own host, and the split it is not a
+       leg of decides nothing about it. */
+    expect([...(await listBuildWakes(clock.ctx, PROJECT, PREVIEW)).keys()]).toEqual([SUPERSEDED]);
+  });
+});
+
 describe("which node a wake runs on", () => {
   it("wakes it here when the placement names this node", async () => {
     await placedOn(PREVIEW, [NODE_ID, PEER]);
@@ -652,6 +752,13 @@ interface AppOptions {
   capacity?: boolean;
   /** Whether this node runs a reconcile loop. */
   reconciler?: boolean;
+  /**
+   * The weighted-pick draws the wake surface takes, one per held request and in
+   * this order, cycling once they run out. Defaults to none, which is
+   * `Math.random` — a split is a distribution, and a case that means one leg
+   * says which draw it took rather than sampling for it.
+   */
+  draws?: number[];
 }
 
 /** This node's agent app, over the shared registry, loop and upstream stand-in. */
@@ -666,6 +773,11 @@ function appWith(opts: AppOptions): H3 {
   };
   if (opts.capacity !== false) agent.capacity = capacityPlan(opts.maxConcurrentWakes ?? 2);
   if (opts.reconciler !== false) agent.reconciler = loop;
+  if (opts.draws !== undefined) {
+    const draws = opts.draws;
+    let taken = 0;
+    agent.random = (): number => draws[taken++ % draws.length];
+  }
 
   return createAgentApp(agent);
 }
@@ -758,7 +870,7 @@ async function seed(): Promise<void> {
   for (const name of [PREVIEW, OTHER_PREVIEW, RETIRED]) {
     await createEnvironment(clock.ctx, PROJECT, { name, ephemeral: true });
   }
-  for (const id of [BUILD, SUPERSEDED]) {
+  for (const id of [BUILD, SUPERSEDED, THIRD]) {
     await createBuild(clock.ctx, PROJECT, {
       id,
       runtimeConfigurable: true,
@@ -831,6 +943,11 @@ function idleSupervisor(): Supervisor {
 
 async function bearer(): Promise<Record<string, string>> {
   return { authorization: `Bearer ${await signNodeToken(keys.privateKey, NODE_ID)}` };
+}
+
+/** The loopback ports the hops dialled, in the order they were dialled. */
+function dialled(): number[] {
+  return upstream.map((call) => Number(new URL(call.url).port));
 }
 
 function sleep(ms: number): Promise<void> {

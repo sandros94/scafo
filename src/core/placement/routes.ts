@@ -89,11 +89,7 @@ export interface RenderRoutesInput {
  * weighted: they name one build and reach it.
  */
 export function renderRoutes(input: RenderRoutesInput): IngressDesired {
-  /* Sorted so that two ready processes serving the same build — which a retried
-     start can leave behind — always resolve to the same one. */
-  const ready = input.processes
-    .filter((process) => process.ready)
-    .sort((a, b) => compare(a.processId, b.processId));
+  const ready = readyProcesses(input.processes);
 
   const routes = new Map<string, WeightedBackend[]>();
   /* Precedence is "first writer wins", so the kinds are emitted in order and a
@@ -112,7 +108,7 @@ export function renderRoutes(input: RenderRoutesInput): IngressDesired {
      host when it has one, and every custom domain claimed for it. */
   const served = new Map<string, WeightedBackend[]>();
   for (const { project, env } of environments) {
-    const backends = servingLegs(project, env, ready);
+    const backends = legsOf(project, env, ready);
     if (backends.length > 0) served.set(placement(project, env.name), backends);
   }
 
@@ -146,6 +142,59 @@ export function renderRoutes(input: RenderRoutesInput): IngressDesired {
       ? {}
       : { wake: wakeRouting(input.wake, input.platformDomains, routes) }),
   };
+}
+
+/**
+ * What an environment's own hosts answer with, weighted — the very computation
+ * {@link renderRoutes} gives its label, its apex and its custom domains, and an
+ * empty list when nothing ready serves it.
+ *
+ * The legs are the split's, in the order the registry states them, or the alias
+ * build alone at {@link FULL_WEIGHT} when there is no split. A leg with no ready
+ * process is left out and its share redistributed — see {@link shares}. Only
+ * ready processes are considered, whatever order they arrive in.
+ *
+ * EXPORTED SO THAT WHAT ANSWERS AN ENVIRONMENT IS DECIDED IN ONE PLACE. The
+ * agent's wake surface answers every host the ingress has no explicit route for,
+ * which is more of the traffic than it looks: a parked or starting environment,
+ * and every host of every environment while a router propagates. A second
+ * reading of "what serves this environment" would be a second routing, and two
+ * routings drift — the one that drifted served a build a flip had already
+ * superseded. There is one, and it is this.
+ */
+export function servingLegs(
+  project: string,
+  env: EnvironmentRecord,
+  processes: RuntimeProcess[],
+): WeightedBackend[] {
+  return legsOf(project, env, readyProcesses(processes));
+}
+
+/**
+ * The one leg a single request takes, given a draw in `[0, 1)`, or undefined
+ * when there is no leg to take.
+ *
+ * The weights are shares of {@link FULL_WEIGHT} and this walks them in the order
+ * the legs are stated, so a draw below the first leg's share takes the first
+ * leg. It is the choice an ingress's load balancer makes per request, made here
+ * for a request that is being HELD rather than routed; the two agree on the
+ * distribution and on nothing about the sequence, which is all a weight promises.
+ *
+ * The draw is the caller's, so this stays pure and a test states which leg a
+ * request takes. A draw outside `[0, 1)` still names a leg — the first below
+ * zero, the last at or above one — rather than nothing.
+ */
+export function pickLeg(legs: WeightedBackend[], draw: number): WeightedBackend | undefined {
+  if (legs.length === 0) return undefined;
+
+  const point = draw * legs.reduce((sum, leg) => sum + leg.weight, 0);
+
+  let passed = 0;
+  for (const leg of legs) {
+    passed += leg.weight;
+    if (point < passed) return leg;
+  }
+  return legs[legs.length - 1];
 }
 
 /**
@@ -184,14 +233,10 @@ function wakeRouting(
 }
 
 /**
- * The legs an environment's own hosts answer with, weighted, or an empty list
- * when nothing ready serves it.
- *
- * The legs are the split's, in the order the registry states them, or the alias
- * build alone at {@link FULL_WEIGHT} when there is no split. A leg with no ready
- * process is left out and its share redistributed — see {@link shares}.
+ * {@link servingLegs} over processes that are already ready and already sorted,
+ * which is what a whole render shares between its environments.
  */
-function servingLegs(
+function legsOf(
   project: string,
   env: EnvironmentRecord,
   ready: RuntimeProcess[],
@@ -275,6 +320,17 @@ function hostUnder(domain: string, project: string, ref?: string): string | null
     if (isScafoError(error) && error.code === "invalid-slug") return null;
     throw error;
   }
+}
+
+/**
+ * The processes anything here may name, in one order: sorted so that two ready
+ * processes serving the same build — which a retried start can leave behind —
+ * always resolve to the same one.
+ */
+function readyProcesses(processes: RuntimeProcess[]): RuntimeProcess[] {
+  return processes
+    .filter((process) => process.ready)
+    .sort((a, b) => compare(a.processId, b.processId));
 }
 
 function backendOf(process: RuntimeProcess): IngressBackend {

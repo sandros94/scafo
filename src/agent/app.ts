@@ -81,6 +81,14 @@ export interface AgentContext {
   /** How this node calls its peers; defaults to the global `fetch`. */
   fetchFn?: typeof fetch;
   /**
+   * Where the wake surface's weighted pick between an environment's serving legs
+   * comes from — a value in `[0, 1)`, drawn once per look at a held request.
+   *
+   * Defaults to `Math.random`, which is what a split asks for. Injectable so a
+   * test can state which leg a request takes rather than sample for it.
+   */
+  random?: () => number;
+  /**
    * Where the node publishes what it serves. Without one the processes still
    * run and are simply not reachable from outside the node.
    */
