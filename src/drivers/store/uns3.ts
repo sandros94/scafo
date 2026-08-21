@@ -76,10 +76,9 @@ export function createUns3Store(client: S3Client, opts: Uns3StoreOptions): CasSt
           continuationToken,
         });
         for (const object of page.contents) {
-          /* File-backed stores (Bunny) materialize the folders between keys
-             and list them as zero-byte entries ending in `/`. They are not
-             objects this store ever wrote, and a caller iterating keys must
-             never meet one. */
+          /* File-backed stores materialize the folders between keys and list
+             them as zero-byte entries ending in `/` — phantoms this store
+             never wrote, which a caller iterating keys must never meet. */
           if (object.key.endsWith("/")) continue;
           keys.push(toStoreKey(object.key));
         }
@@ -109,14 +108,13 @@ function etagOf(response: Response, objectKey: string): string {
     });
   }
   /*
-   * The one normalization applied: a `W/` weakness marker is stripped. Stores
-   * with a transforming edge in front (Bunny) answer a compressed GET with the
-   * SAME value the PUT returned, marked weak because the transfer encoding
-   * differed — but `If-Match` mandates strong comparison, so a weak tag sent
-   * back verbatim is refused by the very store that issued it, and every
-   * read-modify-write chain deadlocks against its own reads. On a store whose
-   * ETag is the object's content identity, the marker carries no information
-   * the value does not; the strong form is what conditional writes accept.
+   * The one normalization applied: a `W/` weakness marker is stripped. A store
+   * with a transforming edge in front answers a compressed GET with the SAME
+   * value the PUT returned, marked weak — but `If-Match` mandates strong
+   * comparison, so the weak tag sent back verbatim is refused by the very
+   * store that issued it, deadlocking every read-modify-write chain. Took a
+   * live fleet to surprise us; the strong form is what conditional writes
+   * accept everywhere.
    */
   return etag.startsWith("W/") ? etag.slice(2) : etag;
 }
