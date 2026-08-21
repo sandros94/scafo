@@ -74,6 +74,12 @@ const upArgs: ArgsDef = {
     type: "string",
     description: "Seconds a cell may sit idle before eviction frees its memory (0 = never)",
   },
+  "pointer-hold-ms": {
+    type: "string",
+    description:
+      "Milliseconds a rollout holds the deployment pointer past the spawn; " +
+      "size it to the store's worst request stall (0 = release at the spawn)",
+  },
   "probe-path": { type: "string", description: "Path the application readiness probe requests" },
   "ingress-driver": { type: "string", description: "Ingress this node drives (caddy, traefik)" },
   "caddy-admin": { type: "string", description: "Base URL of the Caddy admin API" },
@@ -215,7 +221,13 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
     cellIdleEvictS: config.runtime.cellIdleEvictS,
     probeHost: upstreamHost,
   });
-  const reconciler = createReconciler(agent, driver, { baseEnv });
+  /* The hold is the operator's, because it is sized to THEIR store: it is how
+     long a rollout keeps the environment's deployment pointer after the spawn,
+     for the one read the new process makes of it. */
+  const reconciler = createReconciler(agent, driver, {
+    baseEnv,
+    pointerLock: { holdMs: config.runtime.pointerHoldMs },
+  });
   agent.reconciler = reconciler;
 
   /* Every node runs one and competes for the same lease; all but one of them
