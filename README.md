@@ -52,6 +52,26 @@ those names for you — send the `Host` header, or add them to `/etc/hosts`.
 - **A fleet:** run the same node on every host against the SAME bucket and prefix.
   That, and nothing else, is what makes them one installation.
 
+## Credits
+
+scafo stands on other people's work, and it is only fair to say so.
+
+[celld](https://github.com/denoland/celld) is what moved this project from a year
+of notes to something running — the Deno team built the runtime every
+application here runs on. [Caddy](https://caddyserver.com) and
+[Traefik](https://traefik.io) terminate TLS and route for the fleet, and
+[WireGuard](https://www.wireguard.com) is the tunnel its nodes trust each other
+through. The agent and CLI lean on [h3](https://h3.dev), citty and confbox from
+the [UnJS](https://unjs.io) ecosystem, beside unjwt, uns3, esbuild and tar; the
+tests stand on vitest and testcontainers, with SeaweedFS and MinIO playing the
+bucket. A particular mention goes to
+[certmagic-s3](https://github.com/ss098/certmagic-s3), whose small, readable
+module is what convinced me that
+[scafo-certmagic](https://github.com/sandros94/scafo-certmagic) was worth
+building.
+
+To everyone who maintains and contributes to these projects: thank you.
+
 ## License
 
 [Apache-2.0](./LICENSE)
