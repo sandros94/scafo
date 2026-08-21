@@ -21,6 +21,7 @@ import { withRetry } from "../core/utils/backoff.ts";
 import { isLoopbackHost } from "../core/utils/host.ts";
 import { createUns3Store } from "../drivers/store/uns3.ts";
 import { loadOrCreateNodeState, type NodeState } from "./_node-state.ts";
+import { loadOrCreateStorageToken } from "./_storage-token.ts";
 import { resolveDefaultStateDir } from "./_utils.ts";
 import { readVarsetKeyFile } from "./_varset-key.ts";
 import {
@@ -145,11 +146,28 @@ export async function loadNodeIdentity(
   config: AgentConfig,
   opts?: NodeIdentityOptions,
 ): Promise<NodeState> {
-  const stateDir = config.node.stateDir ?? opts?.defaultStateDir ?? resolveDefaultStateDir();
-  return loadOrCreateNodeState(stateDir, {
+  return loadOrCreateNodeState(nodeStateDir(config, opts), {
     ...(config.node.id === undefined ? {} : { id: config.node.id }),
     ...(opts?.log === undefined ? {} : { log: opts.log }),
   });
+}
+
+/**
+ * Reads the token guarding this node's storage surface, writing one on the first
+ * boot that has none. It sits beside the node's identity, and is what a
+ * colocated process presents to keep its TLS material in the installation's
+ * bucket without holding a credential for it.
+ */
+export async function loadStorageToken(
+  config: AgentConfig,
+  opts?: NodeIdentityOptions,
+): Promise<string> {
+  return loadOrCreateStorageToken(nodeStateDir(config, opts));
+}
+
+/** Where this node keeps everything it must remember between boots. */
+export function nodeStateDir(config: AgentConfig, opts?: NodeIdentityOptions): string {
+  return config.node.stateDir ?? opts?.defaultStateDir ?? resolveDefaultStateDir();
 }
 
 export interface RegisterNodeOptions {

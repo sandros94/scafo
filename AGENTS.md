@@ -78,7 +78,8 @@ src/
       host.ts             # DNS host validation
       hash.ts             # sha256Hex
       json.ts             # stableStringify (deterministic JSON)
-      base64.ts           # unpadded base64url
+      base64.ts           # base64 and unpadded base64url
+      secret.ts           # constant-time comparison of two secrets
       backoff.ts          # withRetry (full jitter, retries CAS conflicts by default)
       index.ts
     registry/
@@ -99,6 +100,8 @@ src/
       reaper.ts           # plan/execute lease-gated GC, and operator-ordered deletion
       park.ts             # what scale-to-zero means for one environment: policy + defaults
       wake.ts             # wake stamps (plain-put, last-writer-wins) + the reaper's activity source
+      tls.ts              # the TLS material an ingress persists: binary-safe envelopes, list, stat
+      tls-lock.ts         # named locks over the same bucket: take, restamp, give up
       _shared.ts          # internal: error guards, deep equality, key-name parsing
       index.ts            # barrel
     auth/
@@ -133,6 +136,7 @@ src/
     coordinator.ts        # createCoordinator: the lease loop, its fence, assignment and the reap
     heartbeat.ts          # createHeartbeat: this node saying it is still there, every 30s
     deploys.ts            # createDeployService: accept an artifact, publish it, watch it land
+    storage.ts            # createStorageService: the storage token, and the locks this process holds
     wake.ts               # createWakeService: answers every host no process is serving yet
     _wake-target.ts       # internal: a request's Host, resolved to the environment or build it names
     _wake-proxy.ts        # internal: the held request's two hops — to a ready process, or to a peer
@@ -143,6 +147,7 @@ src/
     _ingress.ts           # internal: renders the routing after a pass and applies it
     _environments.ts      # internal: environment deletion, and the hop to the coordinator
     _intake.ts            # internal: dual-token auth, multipart and JSON request reading
+    _storage-routes.ts    # internal: the /v1/storage routes over objects and named locks
     index.ts              # barrel
   cli/
     index.ts              # the `scafo` binary (citty)
@@ -161,6 +166,7 @@ src/
     _trust.ts             # internal: editing a project's trust policy, and printing it
     _varset.ts            # internal: dotenv parsing, sealing, describing without leaking
     _varset-key.ts        # internal: the varset key file and the three forms it comes in
+    _storage-token.ts     # internal: the token guarding this node's storage surface
     _wireguard.ts         # internal: the tunnel settings, and sourcing the WG keypair
     _wg-conf.ts           # internal: rendering wg0.conf from the registry's peer list
     _utils.ts             # internal: file reads, secret writes, state dir, failure output
@@ -219,6 +225,7 @@ src/
   - **Never reduce serving capacity while any desired leg is unproven.** The old rule — no stop until the replacement has passed its readiness gate — generalizes: a process is stopped only once EVERY build its environment is wanted at has a ready process. A leg whose build record cannot be read (a corrupted or raced registry; the reaper refuses to delete a build any split references) counts as unproven rather than being dropped, so the environment keeps everything it is running and the gap is reported — dropping it would retire the process still serving that leg and hand its share to the others, over a build nobody withdrew.
   - **A split is a routing preference; an outage is not one of the options.** `renderRoutes` weights an environment's own hosts — its label, its apex, its custom domains — over the READY legs only, and redistributes a leg's share proportionally to the ones that are ready (largest remainder, so the shares still sum to 100 and no leg rounds to nothing). A 90/10 whose 10 has not come up yet serves 100 from the 90, and the 10 takes its share back the pass after it passes its gate. Build-hash hosts stay single-backend, so either leg is addressable on its own.
   - **THE DURABLE-OBJECT CAVEAT, and it is the one thing to decide BEFORE splitting anything.** A split divides REQUESTS, not state. Both legs read and write the same bucket, the same varset and the same cells: one durable object has exactly one owner at a time, and which leg owns it is decided by whichever process happened to instantiate it first — not by the weights, not by the request that arrives. So the SAME OBJECT MAY RUN EITHER VERSION during a split, and may hand off between them when a leg restarts. Two consequences. Split stateless and render paths with confidence: they read state they do not own and either version answers correctly. Split DO-heavy logic KNOWINGLY: a change to an object's stored shape, its alarm handling or its internal invariants will be executed by both versions against the same data, so it must be forward- and backward-compatible for the whole life of the split, or the canary corrupts the objects it touches for the 90% that never asked for it. When it cannot be made compatible, the safe shape is a flip (with a rollback) rather than a split, because a flip has one version running at a time.
+- **The node holds the bucket credential, so what runs beside it stores THROUGH the node.** An ingress terminating TLS has to keep its certificates, its account key and its issuance locks somewhere durable, and giving it a bucket credential of its own would put the whole registry behind a process whose job is to face the internet. So it stores through `/v1/storage` instead — `PUT`/`GET`/`DELETE` one object, `list` a prefix (recursively, or its immediate children with deeper keys folded into the child they sit under), `stat` a key, `POST`/`DELETE` a named lock. Objects live at `_scafo/tls/objects/<key>`, locks at `_scafo/tls/locks/<name>`, and every value is wrapped in a JSON envelope carrying it base64 beside its `modified` time, because the store's bodies are strings and a certificate's key is DER. **THE SURFACE CARRIES PRIVATE KEYS AND MUST NEVER BE REACHABLE FROM A PUBLIC OR INGRESS-EXPOSED ADDRESS.** It is guarded by one shared token — 32 random bytes, base64url, written `0600` to `<stateDir>/storage-token` on the first boot that finds none and compared in constant time — it is for local or tunnelled callers only, and a node holding no token serves no route here at all rather than refusing each in turn. Four rules carry the rest. Writes are LAST WRITER WINS, because one object is one write and serializing what PRODUCES a value is the locks' job rather than the store's. A DELETE takes the key AND everything beneath it, because a name in this space is a value and a directory at once. A LIST that matches nothing is a `404` rather than `200 []`, because the consumer's contract needs "no such name" told apart from "a name holding nothing" and this key space cannot store the second. And a LOCK is one record taken with `If-None-Match`, restamped every 5s by the process holding it and takeable by anyone once it has gone 10s unrestamped — the norms of the file-backed storage the same automation ships with, so an installation keeping its certificates in a bucket waits exactly as long as one keeping them on a disk. Acquisition never blocks (the caller polls, every 1s), a restamp that does not land drops the lock rather than assuming it survived, and a release only ever removes the record it was handed — so a holder that lost its lock removes nothing, and is answered `204` all the same, because unlocking is idempotent.
 - **Two ways in, one way out.** The deploy-facing routes accept either an operator's node token or a project's workload OIDC token. The node token is tried first because it needs nothing but the header; only when it fails as authentication is the bearer offered to the trust policy of the project the request names. A caller that fails both gets the single `auth-invalid` problem document every other rejection uses — it cannot learn which half it failed, nor whether the project exists. The one distinguishable outcome is `trust-mismatch`, which is authorization: a token trusted for one project can never deploy or flip another.
 
 ## Packaging

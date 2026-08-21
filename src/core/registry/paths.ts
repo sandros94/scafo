@@ -162,3 +162,57 @@ export function fleetPrefix(project: string, env: string): string {
   assertSlug(env);
   return `fleets/${project}/${env}`;
 }
+
+/**
+ * Prefix the TLS material an ingress persists through this node lives under:
+ * its certificates, its account keys, and anything else it must keep across
+ * restarts. The keys beneath it are the CALLER's, not the registry's — nothing
+ * here parses them.
+ */
+export function tlsObjectsPrefix(): string {
+  return `${ROOT}/tls/objects/`;
+}
+
+export function tlsObjectKey(key: string): string {
+  assertTlsKey(key);
+  return `${tlsObjectsPrefix()}${key}`;
+}
+
+/** Prefix the named locks that serialize TLS issuance live under. */
+export function tlsLocksPrefix(): string {
+  return `${ROOT}/tls/locks/`;
+}
+
+export function tlsLockKey(name: string): string {
+  assertTlsKey(name);
+  return `${tlsLocksPrefix()}${name}`;
+}
+
+/**
+ * Throws `ScafoError("invalid-input")` when `key` could not name one TLS object
+ * or one lock: it is empty, absolute, carries an empty, `.` or `..` segment, or
+ * holds a character outside printable ASCII.
+ *
+ * The relative-path rules are what keep a caller's key inside the prefix it was
+ * given — `..` would otherwise address a registry record — and the charset is
+ * what keeps a key addressable in a bucket that is not this one.
+ */
+export function assertTlsKey(key: string): void {
+  const wrong = tlsKeyProblem(key);
+  if (wrong === null) return;
+
+  throw new ScafoError("invalid-input", "Invalid storage key", { detail: `"${key}" ${wrong}` });
+}
+
+/** Why `key` is unusable, or null when it is fine. */
+function tlsKeyProblem(key: string): string | null {
+  if (key === "") return "is empty";
+  if (key.startsWith("/")) return "is absolute, and keys are relative to the storage root";
+  if (!/^[ -~]+$/.test(key)) return "holds a character outside printable ASCII";
+
+  for (const segment of key.split("/")) {
+    if (segment === "") return "has an empty segment";
+    if (segment === "." || segment === "..") return `has a "${segment}" segment`;
+  }
+  return null;
+}

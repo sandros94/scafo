@@ -45,6 +45,8 @@ import type { Coordinator } from "./coordinator.ts";
 import type { DeployService, DeployStatus } from "./deploys.ts";
 import { renderProblem, requireNodeToken } from "./middleware.ts";
 import type { ParkedView, PlacementView, Reconciler, ReconcileStatus } from "./reconcile.ts";
+import { registerStorageRoutes } from "./_storage-routes.ts";
+import type { StorageService } from "./storage.ts";
 import { createWakeService, requestHost, type WakeCounters } from "./wake.ts";
 
 /** Everything the HTTP layer serves from; assembled once while the node boots. */
@@ -85,6 +87,12 @@ export interface AgentContext {
   ingress?: IngressDriver;
   /** Accepts uploaded artifacts; without it this node refuses deploys. */
   deploys?: DeployService;
+  /**
+   * Guards and keeps the `/v1/storage` surface, where a colocated process
+   * persists its TLS material through this node. Without it that surface is not
+   * served at all.
+   */
+  storage?: StorageService;
 }
 
 /** Body of `GET /v1/health`. */
@@ -453,6 +461,21 @@ export function createAgentApp(agent: AgentContext): H3 {
     }
     return flipAlias(agent.registry, request.project, request.environment, request.build as string);
   });
+
+  /*
+   * TLS STORAGE, AND IT MUST NEVER BE REACHABLE THROUGH A PUBLIC OR
+   * INGRESS-EXPOSED SURFACE. These routes carry PRIVATE KEYS in both directions
+   * — an ingress's certificates, the account key it issues them with, and the
+   * locks that serialize issuance — guarded by one shared token rather than by
+   * the keys the rest of the API is verified against. They are for a caller on
+   * this machine or inside the installation's own tunnel and for nobody else: no
+   * ingress may proxy a public host to them, and no listener serving them may
+   * reach past loopback or that tunnel.
+   *
+   * A node holding no storage token serves nothing here at all, rather than
+   * refusing each request in turn.
+   */
+  if (agent.storage !== undefined) registerStorageRoutes(app, agent, agent.storage);
 
   return app;
 }

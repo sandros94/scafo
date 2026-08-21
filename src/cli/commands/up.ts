@@ -1,5 +1,6 @@
 /* `scafo up`: register this machine as a node and serve the agent API. */
 
+import { join } from "node:path";
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import type { AgentContext } from "../../agent/app.ts";
 import { loadAgentConfig } from "../../agent/config.ts";
@@ -7,6 +8,7 @@ import { createCoordinator } from "../../agent/coordinator.ts";
 import { createHeartbeat } from "../../agent/heartbeat.ts";
 import { createReconciler, runtimeBaseEnv } from "../../agent/reconcile.ts";
 import { startAgent } from "../../agent/serve.ts";
+import { createStorageService } from "../../agent/storage.ts";
 import { probeCapacity } from "../../core/capacity/reader.ts";
 import { initRegistry, readMeta } from "../../core/registry/meta.ts";
 import { wakeActivity } from "../../core/registry/wake.ts";
@@ -22,10 +24,13 @@ import {
   createRegistry,
   drainThisNode,
   loadNodeIdentity,
+  loadStorageToken,
   loadVarsetKey,
   loadWireguardRecord,
+  nodeStateDir,
   registerThisNode,
 } from "../_bootstrap.ts";
+import { STORAGE_TOKEN_FILE } from "../_storage-token.ts";
 import { readPackageVersion, readTextFile, reportFailure } from "../_utils.ts";
 
 /* Flag names are kebab-case, matching the keys `loadAgentConfig` reads them under. */
@@ -107,6 +112,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   const wireguard = await loadWireguardRecord(config);
 
   const state = await loadNodeIdentity(config);
+  const storageToken = await loadStorageToken(config);
   const varsetKey = await loadVarsetKey(config);
   const registry = createRegistry(config);
 
@@ -181,6 +187,18 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
     });
   }
 
+  /* What a colocated ingress keeps its certificates, its account key and its
+     issuance locks in: this node's bucket, reached through this node, which is
+     the only process on the machine holding a credential for it. */
+  const storage = createStorageService(agent, { token: storageToken });
+  agent.storage = storage;
+  /* Said once, because the operator has to go get it: the file is what a
+     colocated ingress presents to store its TLS material through this node. */
+  console.log(
+    `scafo: storage token at ${join(nodeStateDir(config), STORAGE_TOKEN_FILE)}; ` +
+      `mount it read-only into the process that terminates TLS`,
+  );
+
   const baseEnv = runtimeBaseEnv(process.env);
   agent.deploys = createDeployService(
     agent,
@@ -217,6 +235,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   reconciler.start();
   coordinator.start();
   heartbeat.start();
+  storage.start();
 
   await untilSignalled(async () => {
     /*
@@ -233,6 +252,9 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
     /* Stopped next: a node on its way out must stop saying it is available, so
        nothing keeps refreshing the record placement is about to stop reading. */
     heartbeat.stop();
+    /* Same reason, for the locks: anything still held stops being restamped and
+       is taken over by the next caller once it goes stale. */
+    storage.stop();
     /* Given up next, and awaited: releasing the lease lets the next node take
        it at once instead of waiting out the TTL, and a coordinator still running
        would keep deleting on behalf of a node that is leaving. */
