@@ -317,6 +317,60 @@ describe("what a caller may not put in a process's environment", () => {
   });
 });
 
+describe("the variables an operator hands every process on this node", () => {
+  it("carries them in, over whatever the agent itself was started with", () => {
+    const operating = createCelldDriver({
+      store: new MemoryCasStore(),
+      operatorEnv: { CELLD_OTEL: "1", RUST_LOG: "info" },
+    });
+
+    const spec = operating.processSpec(
+      specInput({ baseEnv: { PATH: "/usr/bin", RUST_LOG: "warn" } }),
+    );
+
+    /* What the hatch exists for: the runtime's telemetry switches reach a
+       process through nothing else, the environment the agent was started from
+       being passed on as a narrow allowlist. */
+    expect(spec.env.CELLD_OTEL).toBe("1");
+    expect(spec.env.RUST_LOG).toBe("info");
+    expect(spec.env.PATH).toBe("/usr/bin");
+  });
+
+  it("never lets one override what the driver derives, from either direction", () => {
+    const operating = createCelldDriver({
+      store: new MemoryCasStore(),
+      durability: "fleet",
+      cellIdleEvictS: 900,
+      operatorEnv: {
+        AWS_REGION: "eu-west-1",
+        CELLD_DURABILITY: "bucket",
+        CELLD_SHUTDOWN_DRAIN_MS: "1",
+        CELLD_MAX_RSS_MB: "64",
+        [IDLE_EVICT_ENV]: "60",
+      },
+    });
+
+    const spec = operating.processSpec(
+      specInput({
+        capacity: capacityPlan(),
+        baseEnv: { PATH: "/usr/bin", AWS_REGION: "us-west-2", CELLD_DURABILITY: "bucket" },
+      }),
+    );
+
+    /* Each of these comes from the node's configuration or from the ports this
+       process actually bound, so a value set anywhere else could only describe a
+       process that does not exist. Refusing them belongs to the configuration,
+       which is where an operator is still reading what they wrote. */
+    expect(spec.env).toMatchObject({
+      AWS_REGION: "us-east-1",
+      CELLD_DURABILITY: "fleet",
+      CELLD_SHUTDOWN_DRAIN_MS: "25000",
+      CELLD_MAX_RSS_MB: "1400",
+      [IDLE_EVICT_ENV]: "900",
+    });
+  });
+});
+
 describe("the grace a caller must give one of these processes", () => {
   it("is half a minute unless it is configured", () => {
     expect(driver().stopGraceMs).toBe(DEFAULT_STOP_GRACE_MS);

@@ -65,7 +65,7 @@ const MIN_DRAIN_MS = 5_000;
  * from a caller and dropped from the inherited environment, so every process
  * on a node evicts on the one clock its operator configured.
  */
-const IDLE_EVICT_ENV = "CELLD_IDLE_EVICT_S";
+export const IDLE_EVICT_ENV: string = "CELLD_IDLE_EVICT_S";
 
 /**
  * Variables this driver derives from the spec it is given. They are the
@@ -73,8 +73,14 @@ const IDLE_EVICT_ENV = "CELLD_IDLE_EVICT_S";
  * that come from the node's own configuration; letting a caller pass them in
  * would let the two disagree about where a process reads its fleet from, what
  * it listens on, or how long it may drain.
+ *
+ * Exported because whatever CONFIGURES a node's extra variables must refuse
+ * these by name, at the point they are written rather than at the process that
+ * would have ignored them. {@link IDLE_EVICT_ENV} belongs to the driver on the
+ * same terms and is listed separately only because its refusal names the setting
+ * that does carry it.
  */
-const RESERVED_ENV: string[] = [
+export const RESERVED_ENV: string[] = [
   "AWS_ACCESS_KEY_ID",
   "AWS_SECRET_ACCESS_KEY",
   "AWS_SESSION_TOKEN",
@@ -138,6 +144,19 @@ export interface CelldDriverOptions {
    * process is ever called ready.
    */
   probeHost?: string;
+  /**
+   * Variables the operator hands EVERY process this driver spawns, on top of
+   * the environment it is given and under everything the driver writes itself.
+   * The runtime's own switches are what this is for — `CELLD_OTEL` and the
+   * `CELLD_OTEL_*` tuning above all — since no typed option carries them and
+   * the environment a node starts from is a narrow allowlist.
+   *
+   * A name in {@link RESERVED_ENV} put here is OVERWRITTEN rather than refused:
+   * the driver derives those from the node's configuration and from the ports
+   * its processes actually bound. Refusing them belongs where they are
+   * configured, which is the only place an operator can be told in time.
+   */
+  operatorEnv?: Record<string, string>;
 }
 
 /**
@@ -196,7 +215,12 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
           "--advertise",
           `${input.node.advertiseHost}:${String(input.ports.internal)}`,
         ],
-        env: processEnv(input, drainMs, durability, cellIdleEvictS),
+        env: processEnv(input, {
+          drainMs,
+          durability,
+          cellIdleEvictS,
+          ...(opts.operatorEnv === undefined ? {} : { operatorEnv: opts.operatorEnv }),
+        }),
       };
     },
 
@@ -250,14 +274,27 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
   };
 }
 
+/** What the driver's own options put into every process it spawns. */
+interface EnvSettings {
+  drainMs: number;
+  durability: "bucket" | "fleet";
+  cellIdleEvictS: number;
+  operatorEnv?: Record<string, string>;
+}
+
 /** Environment of one runtime process, in the order the parts override each other. */
-function processEnv(
-  input: RuntimeSpecInput,
-  drainMs: number,
-  durability: "bucket" | "fleet",
-  cellIdleEvictS: number,
-): Record<string, string> {
-  const env: Record<string, string> = { ...input.baseEnv };
+function processEnv(input: RuntimeSpecInput, settings: EnvSettings): Record<string, string> {
+  /*
+   * Precedence, weakest first: the environment the agent was started from, then
+   * the variables the operator handed this node, then everything this driver
+   * derives — credentials, drain, forwarded-header trust, durability, capacity
+   * caps — then the environment's own varset, and idle eviction last of all.
+   * The driver's half is written AFTER the operator's on purpose: those values
+   * come from the node's configuration and from the ports these processes
+   * actually bound, so a variable that disagreed with them could only describe a
+   * process that does not exist. `RESERVED_ENV` is that half, by name.
+   */
+  const env: Record<string, string> = { ...input.baseEnv, ...settings.operatorEnv };
 
   env.AWS_ACCESS_KEY_ID = input.node.accessKey;
   env.AWS_SECRET_ACCESS_KEY = input.node.secretKey;
@@ -265,7 +302,7 @@ function processEnv(
 
   /* Rule: the drain must fit inside the stop grace, or a draining process is
      killed mid-flight and its in-progress requests die with it. */
-  env.CELLD_SHUTDOWN_DRAIN_MS = String(drainMs);
+  env.CELLD_SHUTDOWN_DRAIN_MS = String(settings.drainMs);
 
   /* The node is reached through an ingress that terminates TLS and rewrites
      both forwarded headers, so the application sees its own public origin. */
@@ -276,7 +313,7 @@ function processEnv(
      runtime's own default is this release — celld 0.3.0 flipped its to
      `fleet` (ack at follower fsync, bucket upload behind). On one node the
      two are identical; on a fleet they are the RPO trade the operator made. */
-  env.CELLD_DURABILITY = durability;
+  env.CELLD_DURABILITY = settings.durability;
 
   const capacity = input.capacity;
   if (capacity !== undefined) {
@@ -301,7 +338,7 @@ function processEnv(
   /* Last word on idle eviction, whatever the inherited environment carried:
      the node's one clock, or nothing at all. */
   delete env[IDLE_EVICT_ENV];
-  if (cellIdleEvictS > 0) env[IDLE_EVICT_ENV] = String(cellIdleEvictS);
+  if (settings.cellIdleEvictS > 0) env[IDLE_EVICT_ENV] = String(settings.cellIdleEvictS);
   return env;
 }
 

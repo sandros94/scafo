@@ -12,8 +12,14 @@ import { DEFAULT_PORT_RANGE_START } from "../core/placement/ports.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
 import { POINTER_READ_HOLD_MS } from "../core/registry/pointer-lock.ts";
 import type { TransportConfig, TransportMode } from "../core/types/transport.ts";
+import { assertEnvVars, parseEnvVars } from "../core/utils/env.ts";
 import { assertHost, isHost, parseInterfaceAddress } from "../core/utils/host.ts";
 import { assertLabels, parseLabels } from "../core/utils/labels.ts";
+/* Names only, taken from the driver that writes them so the two can never
+   drift: what an operator may not hand a runtime process is decided by what the
+   driver derives for itself, and a copy here would go stale the first time that
+   list grew. */
+import { IDLE_EVICT_ENV, RESERVED_ENV } from "../drivers/runtime/celld.ts";
 
 export interface AgentConfig {
   bucket: {
@@ -196,7 +202,31 @@ export interface RuntimeConfig {
    * process id. `src/core/registry/pointer-lock.ts` is what this bounds.
    */
   pointerHoldMs: number;
+  /**
+   * Variables handed to every runtime process this node spawns, on top of the
+   * ones the settings above are turned into. The escape hatch for what has no
+   * typed setting of its own — the runtime's own telemetry switches above all
+   * (`CELLD_OTEL`, and the `CELLD_OTEL_*` tuning beside it), which nothing else
+   * can reach a process with: the environment the agent was started from is
+   * passed on as a narrow allowlist, and none of these are on it.
+   *
+   * Absent when the operator handed over none. A name the runtime driver writes
+   * ITSELF is refused here rather than dropped at the process: those are derived
+   * from this node's configuration and from the ports its processes bound, so a
+   * value set here would never take effect, and an operator who set one is owed
+   * the refusal while they are still reading their own configuration.
+   */
+  celldEnv?: Record<string, string>;
 }
+
+/**
+ * Names no `runtime.celldEnv` may carry, taken from the driver that writes them.
+ *
+ * Idle eviction is listed apart from the rest only because it is the driver's
+ * for a different reason — it is a node policy with a setting of its own — and
+ * the refusal below points at that setting by name.
+ */
+const DRIVER_ENV: string[] = [IDLE_EVICT_ENV, ...RESERVED_ENV];
 
 /** The two answers to "when is a write durable", in the order a refusal lists them. */
 export type DurabilityMode = "bucket" | "fleet";
@@ -279,6 +309,7 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
   if (id !== undefined) assertNodeId(id);
 
   const ingress = resolveIngress(sources);
+  const celldEnv = resolveCelldEnv(sources);
   const keyFile = resolve("varsetKeyFile", sources);
   const transport = resolveTransport(sources);
   const wireguard = resolveWireguard(sources);
@@ -337,6 +368,7 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
       durability: resolveDurability(sources) ?? DEFAULT_DURABILITY,
       cellIdleEvictS: resolveCellIdleEvict(sources),
       pointerHoldMs: resolvePointerHold(sources),
+      ...(celldEnv === undefined ? {} : { celldEnv }),
     },
     ...(ingress === undefined ? {} : { ingress }),
     ...(keyFile === undefined ? {} : { varsets: { keyFile } }),
@@ -440,6 +472,7 @@ const ORIGINS = {
     file: "platformDomains",
   },
   celldBin: { flag: "celld-bin", env: ["SCAFO_CELLD_BIN"], file: "runtime.binPath" },
+  celldEnv: { flag: "celld-env", env: ["SCAFO_CELLD_ENV"], file: "runtime.celldEnv" },
   portRangeStart: {
     flag: "port-range-start",
     env: ["SCAFO_PORT_RANGE_START"],
@@ -647,6 +680,52 @@ function resolveNodeLabels(sources: Sources): Record<string, string> | undefined
 
   assertLabels(value, `"${origin.file}"`);
   return { ...value };
+}
+
+/**
+ * The variables an operator hands every runtime process, or undefined when they
+ * handed over none.
+ *
+ * Two spellings, as the node labels have: a flag and an environment variable can
+ * only carry text, written `NAME=value,NAME2=value2`, while the config file
+ * carries the object that text parses into. A VALUE MAY NOT CONTAIN A COMMA in
+ * the inline form — the separator wins — so a value that needs one is written in
+ * the config file, which has no such limit. The inline form replaces the file's
+ * whole set rather than merging into it, for the reason labels do: a set
+ * half-stated in two places is one nobody can read off either.
+ *
+ * A name the runtime driver derives for itself is refused here, naming the
+ * variable, because this is the last moment an operator is still looking at
+ * what they wrote — the process would simply overwrite it and say nothing.
+ */
+function resolveCelldEnv(sources: Sources): Record<string, string> | undefined {
+  const origin: Origin = ORIGINS.celldEnv;
+  const inline = flagOrEnv(origin, sources);
+
+  let vars: Record<string, string>;
+  if (inline === undefined) {
+    const value = fileValue(sources.file, origin.file);
+    if (value === undefined || value === null) return undefined;
+
+    assertEnvVars(value, `"${origin.file}"`);
+    vars = { ...value };
+  } else {
+    vars = parseEnvVars(inline, `"${origin.file}"`);
+  }
+
+  for (const name of Object.keys(vars)) {
+    if (!DRIVER_ENV.includes(name)) continue;
+
+    throw new ScafoError("invalid-input", "Reserved environment variable", {
+      detail:
+        `"${origin.file}" sets "${name}", which the runtime driver writes itself from this ` +
+        `node's configuration and from the listeners its processes bind — a value set here ` +
+        `is overwritten and never reaches the application. Drop it, or state it through the ` +
+        `setting that owns it, such as "${ORIGINS.durability.file}" or ` +
+        `"${ORIGINS.cellIdleEvictS.file}"`,
+    });
+  }
+  return Object.keys(vars).length === 0 ? undefined : vars;
 }
 
 function resolvePlatformDomains(sources: Sources): string[] {

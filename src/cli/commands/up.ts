@@ -64,6 +64,12 @@ const upArgs: ArgsDef = {
   "platform-domains": { type: "string", description: "Comma-separated apex domains to serve" },
   "varset-key-file": { type: "string", description: "File holding the varset encryption key" },
   "celld-bin": { type: "string", description: "Executable that runs an environment" },
+  "celld-env": {
+    type: "string",
+    description:
+      "Extra variables for every runtime process, NAME=value,NAME2=value2 (CELLD_OTEL=1); " +
+      "a value cannot contain a comma here — write those as runtime.celldEnv in the config file",
+  },
   "port-range-start": { type: "string", description: "First port runtime processes use" },
   "bind-host": { type: "string", description: "Address runtime processes bind their listeners to" },
   "durability": {
@@ -220,6 +226,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
     durability: config.runtime.durability,
     cellIdleEvictS: config.runtime.cellIdleEvictS,
     probeHost: upstreamHost,
+    ...(config.runtime.celldEnv === undefined ? {} : { operatorEnv: config.runtime.celldEnv }),
   });
   /* The hold is the operator's, because it is sized to THEIR store: it is how
      long a rollout keeps the environment's deployment pointer after the spawn,

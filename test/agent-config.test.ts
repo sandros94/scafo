@@ -631,6 +631,127 @@ describe("how long a rollout holds the deployment pointer", () => {
   });
 });
 
+describe("the variables an operator hands every runtime process", () => {
+  it("reads the comma syntax a flag and an environment variable carry", async () => {
+    const config = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCAFO_CELLD_ENV: " CELLD_OTEL=1, CELLD_OTEL_SINK = bucket ,," },
+    });
+
+    expect(config.runtime.celldEnv).toEqual({ CELLD_OTEL: "1", CELLD_OTEL_SINK: "bucket" });
+  });
+
+  it("reads the object the config file writes them as", async () => {
+    const config = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(
+        CONFIG_PATH,
+        JSON.stringify({ runtime: { celldEnv: { CELLD_OTEL: "1", OTEL_HEADERS: "a=1,b=2" } } }),
+      ),
+      env: REQUIRED_ENV,
+    });
+
+    /* The file is where a value carrying a comma goes: the inline form has no
+       way to write one, because the separator wins. */
+    expect(config.runtime.celldEnv).toEqual({ CELLD_OTEL: "1", OTEL_HEADERS: "a=1,b=2" });
+  });
+
+  it("keeps everything after the first equals sign as the value", async () => {
+    const config = await loadAgentConfig({
+      flags: { "celld-env": "CELLD_OTEL_RESOURCE=service.name=shop" },
+      env: REQUIRED_ENV,
+    });
+
+    expect(config.runtime.celldEnv).toEqual({ CELLD_OTEL_RESOURCE: "service.name=shop" });
+  });
+
+  it("lets the inline form replace the file's whole set rather than merging into it", async () => {
+    const config = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(
+        CONFIG_PATH,
+        JSON.stringify({ runtime: { celldEnv: { CELLD_OTEL: "0", RUST_BACKTRACE: "1" } } }),
+      ),
+      env: { ...REQUIRED_ENV, SCAFO_CELLD_ENV: "CELLD_OTEL=1" },
+      flags: { "celld-env": "CELLD_OTEL=1,RUST_LOG=debug" },
+    });
+
+    /* One process's environment is read off one place, and a flag beats the
+       variable beats the file exactly as every other setting does. */
+    expect(config.runtime.celldEnv).toEqual({ CELLD_OTEL: "1", RUST_LOG: "debug" });
+  });
+
+  it("hands over none at all when nothing configures them", async () => {
+    const config = await loadAgentConfig({ env: REQUIRED_ENV });
+
+    expect(config.runtime.celldEnv).toBeUndefined();
+  });
+
+  it("REFUSES a name the runtime driver writes itself, naming the variable", async () => {
+    for (const name of ["CELLD_DURABILITY", "AWS_REGION", "CELLD_ADDR", "CELLD_IDLE_EVICT_S"]) {
+      const error = await rejectsWith(
+        () => loadAgentConfig({ env: { ...REQUIRED_ENV, SCAFO_CELLD_ENV: `${name}=1` } }),
+        "invalid-input",
+      );
+
+      /* Refused where it is written rather than at the process that would
+         overwrite it: this is the last moment the operator is still looking at
+         the configuration they got wrong. */
+      expect(error.detail, name).toContain(name);
+      expect(error.detail, name).toContain("runtime.celldEnv");
+      expect(error.detail, name).toContain("runtime.durability");
+      expect(error.detail, name).toContain("runtime.cellIdleEvictS");
+    }
+  });
+
+  it("refuses a reserved name written in the config file just the same", async () => {
+    const error = await rejectsWith(
+      () =>
+        loadAgentConfig({
+          configPath: CONFIG_PATH,
+          readFile: fileAt(
+            CONFIG_PATH,
+            JSON.stringify({ runtime: { celldEnv: { CELLD_MAX_RSS_MB: "256" } } }),
+          ),
+          env: REQUIRED_ENV,
+        }),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("CELLD_MAX_RSS_MB");
+    expect(error.detail).toContain("runtime.celldEnv");
+  });
+
+  it.each(["CELLD_OTEL", "=1", "9LIVES=1", "CELLD-OTEL=1", "CELLD OTEL=1", "A=1,A=2", " , "])(
+    "refuses %p, naming the setting",
+    async (value) => {
+      const error = await rejectsWith(
+        () => loadAgentConfig({ env: { ...REQUIRED_ENV, SCAFO_CELLD_ENV: value } }),
+        "invalid-input",
+      );
+
+      expect(error.detail).toContain("runtime.celldEnv");
+    },
+  );
+
+  it.each([
+    { runtime: { celldEnv: ["CELLD_OTEL=1"] } },
+    { runtime: { celldEnv: { CELLD_OTEL: 1 } } },
+    { runtime: { celldEnv: { "celld otel": "1" } } },
+  ])("refuses a file value that is not an object of variables", async (file) => {
+    const error = await rejectsWith(
+      () =>
+        loadAgentConfig({
+          configPath: CONFIG_PATH,
+          readFile: fileAt(CONFIG_PATH, JSON.stringify(file)),
+          env: REQUIRED_ENV,
+        }),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("runtime.celldEnv");
+  });
+});
+
 describe("node identity and defaults", () => {
   it("falls back to a loopback listener, the default signing region and no extra addresses", async () => {
     const config = await loadAgentConfig({ env: REQUIRED_ENV });
