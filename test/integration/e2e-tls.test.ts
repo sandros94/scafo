@@ -84,7 +84,7 @@ const E2E = process.env.SCAFO_E2E === "1";
  * module that is not released yet.
  */
 const CADDY_IMAGE: string =
-  process.env.SCAFO_E2E_CADDY_IMAGE ?? "ghcr.io/sandros94/certmagic-scafo:edge";
+  process.env.SCAFO_E2E_CADDY_IMAGE ?? "ghcr.io/sandros94/scafo-caddy:edge";
 
 /** The ACME test CA. It mints a fresh issuance chain on every start. */
 const PEBBLE_IMAGE = "ghcr.io/letsencrypt/pebble:latest";
