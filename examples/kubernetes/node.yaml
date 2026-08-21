@@ -35,6 +35,23 @@ data:
   # reach it, and because peers dial it at the pod IP below. The default is
   # loopback, which none of that could reach.
   SCAFO_LISTEN: "0.0.0.0:7400"
+  # WHAT THE RUNTIME PROCESSES BIND, AND A FLEET DOES NOT WORK WITHOUT IT.
+  #
+  # The default is loopback, which is everything a SINGLE node needs — its own
+  # ingress and its own readiness probe are on that loopback. A fleet is the
+  # case that needs more: one cell has one owner, and a request landing on a pod
+  # that does not own it is forwarded to the pod that does, at the address that
+  # pod advertises. With the listeners on loopback nothing answers there, and a
+  # request for a durable object owned elsewhere fails outright ("The Durable
+  # Object owner is currently unreachable") on whichever pod the load balancer
+  # happened to pick.
+  #
+  # The sidecar keeps dialling 127.0.0.1 — a wildcard answers there too — so
+  # nothing about the pod-local topology changes. What does change is that the
+  # runtime's peer listener, which authenticates nobody, is now on the pod
+  # network: it is exposed on exactly the terms SCAFO_TRANSPORT below classifies,
+  # and it is the same decision, not a second one.
+  SCAFO_BIND_HOST: "0.0.0.0"
   # THE OPERATOR'S CLASSIFICATION CALL, and there is no default for it.
   #
   # Every address a node exposes carries traffic that commands it, so scafo
@@ -199,9 +216,21 @@ spec:
             limits:
               memory: "2Gi"
         - name: traefik
+          # v3 specifically. The routing the node publishes is a v3 dynamic
+          # configuration: `HostRegexp` takes a plain Go regular expression
+          # there, where v2 takes a named-group pattern of its own. A v2 Traefik
+          # loads the same document without complaining and reports the routers
+          # as enabled — the ones matching a single host work, and the platform
+          # domain's catch-all matches nothing, so a host waiting to be woken is
+          # answered 404 by the ingress instead of reaching the node.
           image: traefik:v3
           args: ["--configFile=/etc/traefik/traefik.yml"]
           securityContext:
+            # Nothing here needs root: the entryPoint is above 1024, the only
+            # volume is a read-only ConfigMap, and the provider does not write.
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
             allowPrivilegeEscalation: false
           ports:
             - name: web
@@ -236,6 +265,25 @@ spec:
 # How application traffic gets in: one address in front of every pod's Traefik
 # sidecar. Point the wildcard DNS for the platform domain at it — see the README
 # for what that means for `--replicas`.
+#
+# THIS IS THE ONE THING IN THE FILE THAT DEPENDS ON THE CLUSTER, and a
+# LoadBalancer is only the simplest of the shapes it takes:
+#
+#   * A cloud provider's controller gives this an address of its own and it
+#     works as written.
+#   * An implementation that publishes a LoadBalancer by taking the port on
+#     every node — k3s' ServiceLB does, and it is what the bundled ingress
+#     controller is already published through — has no port 80 left to give.
+#     The Service never gets an address and the pods meant to carry it stay
+#     Pending on "didn't have free ports for the requested pod ports", with
+#     nothing else in the cluster looking wrong. Either take :80 back (drop the
+#     bundled controller) or use the next option.
+#   * A cluster that already terminates traffic somewhere — an ingress
+#     controller, a Gateway — keeps doing that: make this `type: ClusterIP` and
+#     send it every name under the platform domain, Host header intact. What
+#     routes a request is the Traefik inside the pod; whatever puts the request
+#     in front of it only has to not rewrite the name. The README carries the
+#     Ingress that shape is written as.
 apiVersion: v1
 kind: Service
 metadata:

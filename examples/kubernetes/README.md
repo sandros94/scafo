@@ -28,8 +28,14 @@ Watch it come up:
 ```sh
 kubectl rollout status deploy/scafo-node
 kubectl port-forward svc/scafo-nodes 7400:7400
-curl -s localhost:7400/v1/state | jq
+curl -s localhost:7400/v1/health
+# {"ok":true,"version":"...","node":"node-368f8285"}
 ```
+
+`/v1/health` and `/v1/ingress/traefik` are the two routes that answer without a
+key — the first is what the probes ask, the second is what the sidecar polls.
+Everything else on the agent, `/v1/state` included, wants an operator token and
+answers `401` without one.
 
 ## How traffic gets in
 
@@ -47,10 +53,67 @@ An application is then reachable at `<project>--<env>.apps.example.com`, at
 Nothing about that path is scafo-specific on the cluster's side, and it does not
 have to be a LoadBalancer: an Ingress or a Gateway pointed at the same pods works
 the same way, because what routes a request is the Traefik inside the pod, not
-whatever put the request in front of it. For TLS, terminate at the cluster's edge
-and keep the sidecar's `web` entryPoint plain, or add a `websecure` entryPoint to
-the sidecar's config and set `SCAFO_TRAEFIK_ENTRYPOINTS: "web,websecure"` so the
-published routers attach to both.
+whatever put the request in front of it. **The one thing it must do is leave the
+Host header alone** — every routing decision scafo makes is made from it.
+
+### When the cluster already has an ingress controller
+
+A cluster that ships one — k3s does, and it publishes it by taking :80 and :443
+on every node — has no port 80 left for a second LoadBalancer. `scafo-ingress`
+then never gets an address, the pods meant to carry it sit Pending on `didn't
+have free ports for the requested pod ports`, and nothing else looks wrong.
+
+Rather than fight it, put it in front. Make `scafo-ingress`
+`type: ClusterIP` and send the existing controller every name under the platform
+domain:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: scafo-platform
+spec:
+  rules:
+    - host: "*.apps.example.com"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: scafo-ingress
+                port:
+                  number: 80
+```
+
+That is two layers of routing and they are not doing the same job: the cluster's
+controller picks a pod, any pod, and the sidecar in the pod it picked resolves
+the name against the processes that pod actually has ready. Custom domains
+claimed through scafo are not under the platform domain, so each needs a rule of
+its own here — which is the cost of this shape, and the reason a LoadBalancer
+with wildcard DNS in front of it is simpler where the ports are free.
+
+### The sidecar is Traefik v3, and v2 fails quietly
+
+What the node publishes is a v3 dynamic configuration. A v2 Traefik accepts the
+document, reports every router as enabled, and serves the ones that match a
+single host correctly — but `HostRegexp` means something else in v2, so the
+platform domain's catch-all matches nothing and a host waiting to be woken gets
+the ingress's own `404` instead of reaching the node. Nothing logs a problem.
+Check the tag, especially against a cluster whose bundled controller is older
+than the sidecar you are copying this from.
+
+### TLS
+
+Terminate at the cluster's edge and keep the sidecar's `web` entryPoint plain —
+with the edge in front, whatever issues its certificate (cert-manager writing a
+Secret the controller reads, a cloud load balancer's own) is the cluster's
+business and none of scafo's. Terminating in the sidecar instead means adding a
+`websecure` entryPoint to its config and setting
+`SCAFO_TRAEFIK_ENTRYPOINTS: "web,websecure"` so the published routers attach to
+both — and then the certificate has to reach the sidecar: a wildcard for the
+platform domain, mounted in as a Secret, since a sidecar per pod issuing per name
+would have every pod asking a CA for the same names.
 
 **One address in front of every node has a consequence for `--replicas`.** A node
 routes to the processes IT runs and to nothing else — routing follows readiness,
@@ -68,7 +131,7 @@ cluster by design — it accepts deploys and commands that node. Reach it with
 the cluster against `scafo-nodes:7400`. Any node accepts the call; work that only
 the coordinator may do is forwarded to whichever node holds the lease.
 
-## Two rules that must not be violated
+## Three rules that must not be violated
 
 **The stop grace stays at 35 seconds or more.** On SIGTERM a node writes that it
 is draining, releases the coordinator lease, stops reconciling, closes its
@@ -84,6 +147,17 @@ share every record, compete for one coordinator lease, and are placed against
 each other. Two installations that share them will fight; two that differ in
 either share nothing at all. Never point a staging fleet at production's prefix
 to "have a look" — a node that boots there registers itself and is given work.
+
+**More than one pod means `SCAFO_BIND_HOST` past loopback.** Runtime processes
+bind loopback by default, which is all a single node needs. As soon as there are
+two, one cell still has exactly one owner, and a request landing on a pod that
+does not own it is forwarded to the pod that does — at the address that pod
+advertises, where a loopback listener answers nothing. The application does not
+degrade, it fails: a durable object owned by the other pod answers `The Durable
+Object owner is currently unreachable` on roughly half the requests, depending on
+which pod the load balancer picked, while stateless paths keep working and hide
+it. `SCAFO_BIND_HOST: "0.0.0.0"` in the ConfigMap is what the fleet needs; the
+sidecar goes on dialling loopback either way.
 
 ## What is disposable, and what is not
 
