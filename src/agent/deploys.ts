@@ -10,8 +10,14 @@
 import { isScafoError } from "../core/error.ts";
 import { createBuild } from "../core/registry/builds.ts";
 import { createEnvironment, flipAlias, getEnvironment } from "../core/registry/environments.ts";
+import { lockHolder, withLock } from "../core/registry/locks.ts";
 import { fleetPrefix } from "../core/registry/paths.ts";
 import { setNodeSelector, setReplicas } from "../core/registry/placement.ts";
+import {
+  DEPLOY_LOCK_TIMEOUT_MS,
+  POINTER_LOCK_SPACE,
+  pointerLockName,
+} from "../core/registry/pointer-lock.ts";
 import { createProject } from "../core/registry/projects.ts";
 import { stampEnvironmentWake } from "../core/registry/wake.ts";
 import type { DeployRunner } from "../core/types/deploy.ts";
@@ -96,6 +102,11 @@ export interface DeployServiceOptions {
   pollMs?: number;
   /** Defaults to {@link DEFAULT_HISTORY}. */
   history?: number;
+  /**
+   * Longest a publish waits for the environment's deployment pointer before it
+   * fails. Defaults to {@link DEPLOY_LOCK_TIMEOUT_MS}.
+   */
+  lockTimeoutMs?: number;
 }
 
 export interface DeployService {
@@ -126,6 +137,8 @@ export function createDeployService(
   const routedTimeoutMs = opts?.routedTimeoutMs ?? DEFAULT_ROUTED_TIMEOUT_MS;
   const pollMs = opts?.pollMs ?? DEFAULT_POLL_MS;
   const history = Math.max(1, opts?.history ?? DEFAULT_HISTORY);
+  const lockTimeoutMs = opts?.lockTimeoutMs ?? DEPLOY_LOCK_TIMEOUT_MS;
+  const holder = lockHolder(agent.nodeId);
 
   const statuses = new Map<string, DeployStatus>();
 
@@ -213,22 +226,46 @@ export function createDeployService(
       update(id, { state: "uploading" });
 
       const bucket = agent.config.bucket;
-      const { celldVersionId } = await runner.run({
-        project: meta.project,
-        environment: meta.environment,
-        script: meta.script,
-        artifact,
-        target: {
-          endpoint: bucket.endpoint,
-          region: bucket.region,
-          bucket: bucket.bucket,
-          /* The same prefix a runtime process reads its fleet from, so what is
-             published is what gets served. */
-          prefix: joinPrefix(bucket.prefix, fleetPrefix(meta.project, meta.environment)),
-          accessKey: bucket.accessKey,
-          secretKey: bucket.secretKey,
+      /*
+       * PUBLISHING MOVES THE FLEET'S DEPLOYMENT POINTER, so it holds the
+       * environment's pointer lock for the whole shell-out — the bundling and
+       * the upload included, because the pointer moves at the end of them and
+       * the lock has to have been held since before whoever else wants it could
+       * have started. It therefore waits behind an in-flight rollout of this
+       * environment, on this node or any other, and makes those rollouts wait
+       * behind it: that IS the serialization, and it is what it costs.
+       *
+       * The flip and the wait for the routing below are deliberately OUTSIDE
+       * it. They wait on the reconcile loop, whose rollout needs this very
+       * lock — holding it across them would deadlock a deploy against the loop
+       * that carries it out.
+       */
+      const { celldVersionId } = await withLock(
+        agent.registry,
+        {
+          space: POINTER_LOCK_SPACE,
+          name: pointerLockName(meta.project, meta.environment),
+          holder,
+          timeoutMs: lockTimeoutMs,
         },
-      });
+        () =>
+          runner.run({
+            project: meta.project,
+            environment: meta.environment,
+            script: meta.script,
+            artifact,
+            target: {
+              endpoint: bucket.endpoint,
+              region: bucket.region,
+              bucket: bucket.bucket,
+              /* The same prefix a runtime process reads its fleet from, so what
+                 is published is what gets served. */
+              prefix: joinPrefix(bucket.prefix, fleetPrefix(meta.project, meta.environment)),
+              accessKey: bucket.accessKey,
+              secretKey: bucket.secretKey,
+            },
+          }),
+      );
 
       const build = await createBuild(agent.registry, meta.project, {
         id: meta.buildId ?? celldVersionId,

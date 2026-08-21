@@ -10,12 +10,17 @@ import { createPortAllocator } from "../core/placement/ports.ts";
 import { planReconcile, type ReconcileAction } from "../core/placement/reconcile.ts";
 import type { ProbeOptions, RuntimeDriver, RuntimeProcess } from "../core/types/runtime.ts";
 import { type ParkedEnvironment, type PlacementView, readDesired } from "./_desired.ts";
-import { createExecutor, failureOf, type ReconcileFailure } from "./_execute.ts";
+import {
+  createExecutor,
+  failureOf,
+  type PointerLockOptions,
+  type ReconcileFailure,
+} from "./_execute.ts";
 import { applyIngress } from "./_ingress.ts";
 import type { AgentContext } from "./app.ts";
 
 export type { ParkedEnvironment, PlacementView } from "./_desired.ts";
-export type { ReconcileFailure } from "./_execute.ts";
+export type { PointerLockOptions, ReconcileFailure } from "./_execute.ts";
 
 /** One parked environment as a status reports it: the name is all that is read there. */
 export interface ParkedView {
@@ -100,6 +105,12 @@ export interface ReconcilerOptions {
    * agent's own environment.
    */
   baseEnv?: Record<string, string>;
+  /**
+   * How long a rollout holds the environment's deployment pointer past the
+   * spawn, and how long it waits to take that lock at all. The defaults are the
+   * ones a fleet wants; a test that spawns nothing shortens both.
+   */
+  pointerLock?: PointerLockOptions;
 }
 
 /**
@@ -123,6 +134,7 @@ export function createReconciler(
     driver,
     probe: { path: agent.config.runtime.probePath, ...opts?.probe },
     baseEnv: opts?.baseEnv ?? runtimeBaseEnv(globalThis.process?.env ?? {}),
+    ...(opts?.pointerLock === undefined ? {} : { pointerLock: opts.pointerLock }),
     known,
   });
 

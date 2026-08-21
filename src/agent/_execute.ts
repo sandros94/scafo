@@ -3,7 +3,14 @@
 import { isScafoError, ScafoError } from "../core/error.ts";
 import { formatProcessId, parseProcessId } from "../core/placement/ids.ts";
 import type { DesiredEnvironment, ReconcileAction } from "../core/placement/reconcile.ts";
+import { lockHolder, withLock } from "../core/registry/locks.ts";
 import { fleetPrefix } from "../core/registry/paths.ts";
+import {
+  POINTER_LOCK_SPACE,
+  POINTER_READ_HOLD_MS,
+  pointerLockName,
+  ROLLOUT_LOCK_TIMEOUT_MS,
+} from "../core/registry/pointer-lock.ts";
 import type {
   ProbeOptions,
   RuntimeDriver,
@@ -28,6 +35,21 @@ export interface ReconcileFailure {
   detail: string;
 }
 
+/** How long a rollout holds the fleet's deployment pointer, and waits for it. */
+export interface PointerLockOptions {
+  /**
+   * Time the lock is kept past the spawn, for the process to read the pointer.
+   * Defaults to {@link POINTER_READ_HOLD_MS}.
+   */
+  holdMs?: number;
+  /**
+   * Longest a rollout waits to take the lock before recording the failure and
+   * leaving the environment to the next pass. Defaults to
+   * {@link ROLLOUT_LOCK_TIMEOUT_MS}.
+   */
+  timeoutMs?: number;
+}
+
 /** Everything the executor acts through. */
 export interface ExecutorDeps {
   agent: AgentContext;
@@ -36,6 +58,8 @@ export interface ExecutorDeps {
   probe: ProbeOptions;
   /** Environment every process starts from; must carry a usable `PATH`. */
   baseEnv: Record<string, string>;
+  /** How this node holds one environment's deployment pointer while it rolls out. */
+  pointerLock?: PointerLockOptions;
   /**
    * Soft state shared with the loop: what this node started, and what it knows
    * about each process beyond the supervisor's own view of it.
@@ -56,6 +80,9 @@ export interface Executor {
 
 export function createExecutor(deps: ExecutorDeps): Executor {
   const { agent, driver, probe, baseEnv, known } = deps;
+  const holdMs = deps.pointerLock?.holdMs ?? POINTER_READ_HOLD_MS;
+  const lockTimeoutMs = deps.pointerLock?.timeoutMs ?? ROLLOUT_LOCK_TIMEOUT_MS;
+  const holder = lockHolder(agent.nodeId);
 
   /**
    * Brings one build into service, as one uninterrupted sequence.
@@ -74,6 +101,15 @@ export function createExecutor(deps: ExecutorDeps): Executor {
    * the first step that fails: a failed activation raises before anything is
    * started, because a process started under the old pointer would serve the
    * wrong build.
+   *
+   * PAIRING IS NOT ENOUGH ON ITS OWN, because this node is not the only writer:
+   * a deploy accepted anywhere in the fleet moves the same pointer whenever its
+   * bundle finishes, and another node rolling the same environment out moves it
+   * too. So the sequence runs under the environment's pointer lock, held past
+   * the spawn for as long as the process needs to read what was just written
+   * ({@link POINTER_READ_HOLD_MS}). The gate is deliberately OUTSIDE it —
+   * readiness takes tens of seconds, and every other writer of this environment
+   * in the fleet would be waiting on them.
    */
   async function runRollout(
     action: Extract<ReconcileAction, { type: "rollout" }>,
@@ -95,8 +131,6 @@ export function createExecutor(deps: ExecutorDeps): Executor {
           `so the fleet cannot be pointed at it`,
       });
     }
-    await driver.activateVersion(fleetPrefix(action.project, action.env), version);
-
     const input: RuntimeSpecInput = {
       project: entry.project,
       env: entry.env,
@@ -123,8 +157,28 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       baseEnv,
     };
 
+    /* Built before the lock is taken, and deliberately: opening a varset is a
+       bucket read that may refuse the whole rollout, and the section below is
+       only the three steps that must not be interleaved with another writer. */
     const spec = driver.processSpec(input);
-    await agent.supervisor.start(spec);
+
+    await withLock(
+      agent.registry,
+      {
+        space: POINTER_LOCK_SPACE,
+        name: pointerLockName(action.project, action.env),
+        holder,
+        timeoutMs: lockTimeoutMs,
+      },
+      async () => {
+        await driver.activateVersion(fleetPrefix(action.project, action.env), version);
+        await agent.supervisor.start(spec);
+        /* The process is running and has not read the pointer yet. Held for it,
+           because nothing here can observe the read itself. */
+        await delay(holdMs);
+      },
+    );
+
     const started: RuntimeProcess = {
       processId: spec.id,
       project: entry.project,
@@ -262,6 +316,10 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       return processes;
     },
   };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Records a readiness failure against the process it concerns. */

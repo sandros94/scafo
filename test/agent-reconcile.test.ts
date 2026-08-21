@@ -923,6 +923,10 @@ async function seededWorld(opts?: WorldOptions): Promise<World> {
     events,
     reconciler: createReconciler(agent, driver, {
       baseEnv: BASE_ENV,
+      /* A rollout holds the environment's deployment pointer past the spawn, for
+         the process to read it. Nothing here spawns one, so there is nothing to
+         wait for — what that hold is FOR is `test/pointer-lock.test.ts`. */
+      pointerLock: { holdMs: 0 },
       ...(opts?.intervalMs === undefined ? {} : { intervalMs: opts.intervalMs }),
     }),
   };

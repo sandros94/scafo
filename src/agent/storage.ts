@@ -11,6 +11,7 @@
 
 import type { H3Event } from "h3";
 import { isScafoError, ScafoError } from "../core/error.ts";
+import { lockHolder } from "../core/registry/locks.ts";
 import {
   acquireTlsLock,
   refreshTlsLock,
@@ -81,7 +82,7 @@ export function createStorageService(
   /* Process-unique, and it names the node so that a record outliving its holder
      still says where that holder was: two agents sharing one node id would
      otherwise be indistinguishable in it. */
-  const holder = `${agent.nodeId}-${randomSuffix()}`;
+  const holder = lockHolder(agent.nodeId);
 
   const holding = new Map<string, TlsLockHandle>();
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -175,15 +176,6 @@ export function createStorageService(
       timer = null;
     },
   };
-}
-
-/** Four random bytes as hex; what makes one agent process tell itself from another. */
-function randomSuffix(): string {
-  let hex = "";
-  for (const byte of crypto.getRandomValues(new Uint8Array(4))) {
-    hex += byte.toString(16).padStart(2, "0");
-  }
-  return hex;
 }
 
 /** The specifics a scafo failure carries are the useful half; keep both. */

@@ -16,4 +16,6 @@ export * from "./reaper.ts";
 export * from "./park.ts";
 export * from "./wake.ts";
 export * from "./tls.ts";
+export * from "./locks.ts";
 export * from "./tls-lock.ts";
+export * from "./pointer-lock.ts";
