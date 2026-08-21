@@ -20,7 +20,10 @@
 #
 # Scaling this to several hosts is a matter of running this same node service on
 # each of them against the SAME bucket and prefix, on a network they can all
-# reach: see examples/kubernetes/README.md for what that changes.
+# reach: see examples/kubernetes/README.md for what that changes. The rule that
+# bites first is the same one stated there — more than one node means
+# SCAFO_BIND_HOST past loopback — and a scheduler that replicates this service
+# counts, Swarm's `deploy.replicas` included: every replica is a node.
 
 services:
   # The registry: every project, build, environment and node record scafo has,

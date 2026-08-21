@@ -27,6 +27,10 @@ metadata:
 data:
   SCAFO_S3_ENDPOINT: "http://minio.storage.svc.cluster.local:9000"
   SCAFO_S3_BUCKET: "scafo"
+  # The region requests are signed for. Some stores validate it and refuse a
+  # request signed for another; the ones that ignore it are unharmed by naming
+  # one, so it is set here rather than left to be discovered.
+  SCAFO_S3_REGION: "us-east-1"
   # One bucket can hold several fleets, one per prefix. Changing this on a
   # running installation points the nodes at an empty registry.
   SCAFO_S3_PREFIX: "prod"
@@ -206,10 +210,29 @@ spec:
             periodSeconds: 20
             failureThreshold: 3
           resources:
+            # THE MEMORY LIMIT IS PLANNED FROM. THE CORES ARE NOT, UNLESS SAID.
+            #
             # The node plans its capacity — how many cells it will hold and what
-            # RSS budget it gives them — by reading its own cgroup. A limit here
-            # is therefore not just a cap: it is the number that planning is
-            # done from, and a pod with none plans against the whole machine.
+            # RSS budget it gives them — by reading its own cgroup. A memory
+            # limit is what writes `memory.max`, so the 2Gi below really is the
+            # number the memory side of that plan is done from, and a pod with
+            # none plans against the whole machine's memory.
+            #
+            # The CPU side is not capped here at all, and A REQUEST IS A SHARE
+            # RATHER THAN A CEILING: it writes no `cpu.max`, so every pod reads
+            # the host's core count and plans against all of it — on a 2-vCPU
+            # machine, two pods each plan for 2 cores. Add `limits.cpu` if the
+            # plan should match the slice the pod actually gets; the cost is
+            # being throttled at it, which is why this file does not assume it.
+            #
+            # SIZE THIS AGAINST THE BUCKET'S LATENCY, NOT ONLY THE WORKLOAD. A
+            # small node running several runtime processes against a store with
+            # a long latency tail can stall inside one of that store's slow
+            # spells for longer than the runtime's lease renewal allows: the
+            # process fences itself, exits, and is restarted. Serving mostly
+            # survives that — it comes back, and the other nodes never stopped
+            # answering — but the node churns. Fewer, larger nodes and a bucket
+            # close to them is the fix.
             requests:
               cpu: "500m"
               memory: "1Gi"
