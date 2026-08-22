@@ -128,6 +128,66 @@ describe("the ring", () => {
   });
 });
 
+describe("draining, which is the flusher's reader", () => {
+  it("takes what has been emitted since the last drain, and only that", () => {
+    const observe = createObservability({ enabled: true, ringSize: 8, now: manualClock().now });
+    observe.emit({ type: "wake.kicked", id: "one" });
+    observe.emit({ type: "wake.kicked", id: "two" });
+
+    expect(ids(observe.drain().events)).toEqual(["one", "two"]);
+    /* Consumed: a second drain of the same events would write them twice. */
+    expect(observe.drain().events).toEqual([]);
+
+    observe.emit({ type: "wake.kicked", id: "three" });
+    expect(ids(observe.drain().events)).toEqual(["three"]);
+  });
+
+  it("leaves the window alone: a snapshot still shows what was drained", () => {
+    const observe = createObservability({ enabled: true, ringSize: 8, now: manualClock().now });
+    observe.emit({ type: "wake.kicked", id: "one" });
+
+    observe.drain();
+
+    /* The ring is a window on the recent past and the drain is a high-water
+       mark over it; consuming one must not empty the other. */
+    expect(ids(observe.snapshot().events)).toEqual(["one"]);
+  });
+
+  it("counts what fell out of the ring before it could be read, since the last drain", () => {
+    const observe = createObservability({ enabled: true, ringSize: 4, now: manualClock().now });
+    for (let index = 0; index < 6; index++) {
+      observe.emit({ type: "wake.kicked", id: `id-${String(index)}` });
+    }
+
+    const first = observe.drain();
+
+    expect(ids(first.events)).toEqual(["id-2", "id-3", "id-4", "id-5"]);
+    expect(first.dropped).toBe(2);
+
+    /* Since the LAST DRAIN, never since the seam was made: the flusher records
+       each flush's own loss, and a total would be counted again every time. */
+    for (let index = 6; index < 11; index++) {
+      observe.emit({ type: "wake.kicked", id: `id-${String(index)}` });
+    }
+    const second = observe.drain();
+
+    expect(ids(second.events)).toEqual(["id-7", "id-8", "id-9", "id-10"]);
+    expect(second.dropped).toBe(1);
+  });
+
+  it("admits no loss while the drainer keeps up", () => {
+    const observe = createObservability({ enabled: true, ringSize: 4, now: manualClock().now });
+
+    for (let round = 0; round < 5; round++) {
+      observe.emit({ type: "wake.kicked", id: `round-${String(round)}` });
+      expect(observe.drain().dropped).toBe(0);
+    }
+    /* And the ring itself has forgotten a few by now, which is a different
+       number and a different question. */
+    expect(observe.snapshot().dropped).toBe(1);
+  });
+});
+
 describe("a seam that is off", () => {
   it("records nothing at all, whatever it is handed", () => {
     const observe = createObservability({ enabled: false, now: manualClock().now });
@@ -137,6 +197,9 @@ describe("a seam that is off", () => {
 
     expect(observe.enabled).toBe(false);
     expect(observe.snapshot()).toEqual({ events: [], dropped: 0 });
+    /* Including to the flusher: a disabled seam is legal to hand one, and it
+       simply never has anything to write. */
+    expect(observe.drain()).toEqual({ events: [], dropped: 0 });
   });
 
   it("still answers the clock, so a caller measuring a span needs no branch", () => {

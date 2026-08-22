@@ -1,0 +1,590 @@
+/*
+ * `scafo metrics` and `scafo traces`: what they read out of a bucket, what they
+ * make of it, and what they say when there is nothing there.
+ *
+ * Driven against a memory store seeded with the very files a flusher writes —
+ * same keys, same codec — so what these cases exercise is the whole read path an
+ * operator's command takes rather than a stand-in for it.
+ */
+
+import { beforeEach, describe, expect, it } from "vitest";
+import {
+  JSONL_CODEC,
+  type ObserveCountersRecord,
+  type ObserveEventRecord,
+  type ObserveRecord,
+  OBSERVE_RECORD_VERSION,
+} from "../src/agent/observe-records.ts";
+import { bandAt, formatMetrics, noCounters, summarizeMetrics } from "../src/cli/_metrics.ts";
+import {
+  nothingRecorded,
+  OBSERVE_READ_SLACK_MS,
+  parseSince,
+  readObservations,
+  windowFrom,
+} from "../src/cli/_observe-read.ts";
+import { formatTraces, formatWakeTimeline, selectTraces } from "../src/cli/_traces.ts";
+import type { RegistryContext } from "../src/core/registry/context.ts";
+import { observeKey } from "../src/core/registry/paths.ts";
+import { MemoryCasStore } from "../src/drivers/store/memory.ts";
+import { CLOCK_START_MS, rejectsWith } from "./_helpers.ts";
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 3_600_000;
+
+let store: MemoryCasStore;
+let registry: RegistryContext;
+let sequence: number;
+
+beforeEach(() => {
+  store = new MemoryCasStore();
+  registry = { store };
+  sequence = 0;
+});
+
+/** Writes one flush file exactly where and how the flusher would have. */
+async function seed(node: string, atMs: number, records: ObserveRecord[]): Promise<string> {
+  sequence++;
+  const encoded = JSONL_CODEC.encode(records);
+  const key = observeKey(node, new Date(atMs), sequence, encoded.extension);
+  await store.put(key, new TextDecoder().decode(encoded.bytes));
+  return key;
+}
+
+function counters(
+  node: string,
+  atMs: number,
+  opts: {
+    project: string;
+    env: string;
+    sinceMs?: number;
+    requests: number;
+    bytes: number;
+    status?: Partial<ObserveCountersRecord["status"]>;
+    durations?: number[];
+  },
+): ObserveCountersRecord {
+  return {
+    v: OBSERVE_RECORD_VERSION,
+    record: "counters",
+    node,
+    at: new Date(atMs).toISOString(),
+    since: new Date(opts.sinceMs ?? CLOCK_START_MS - 5 * HOUR_MS).toISOString(),
+    project: opts.project,
+    env: opts.env,
+    requests: opts.requests,
+    bytes: opts.bytes,
+    status: { "2xx": opts.requests, "3xx": 0, "4xx": 0, "5xx": 0, "other": 0, ...opts.status },
+    durations: opts.durations ?? [opts.requests, 0, 0, 0, 0, 0, 0],
+  };
+}
+
+function event(node: string, atMs: number, body: Record<string, unknown>): ObserveEventRecord {
+  return {
+    v: OBSERVE_RECORD_VERSION,
+    record: "event",
+    node,
+    at: new Date(atMs).toISOString(),
+    ...body,
+  } as ObserveEventRecord;
+}
+
+describe("what a window reads", () => {
+  it("takes the records inside it and leaves the rest, oldest first", async () => {
+    await seed("node-a", CLOCK_START_MS - 2 * HOUR_MS, [
+      event("node-a", CLOCK_START_MS - 2 * HOUR_MS, { type: "wake.kicked", id: "old" }),
+    ]);
+    await seed("node-a", CLOCK_START_MS - 10 * MINUTE_MS, [
+      event("node-a", CLOCK_START_MS - 10 * MINUTE_MS, { type: "wake.kicked", id: "inside" }),
+    ]);
+
+    const window = { sinceMs: CLOCK_START_MS - HOUR_MS, untilMs: CLOCK_START_MS };
+    const found = await readObservations(registry, { window });
+
+    expect(found.records.map((record) => ("id" in record ? record.id : ""))).toEqual(["inside"]);
+    /* The nodes are reported whatever the window said, so an empty answer can
+       tell "nobody ever wrote" from "nobody wrote lately". */
+    expect(found.nodes).toEqual(["node-a"]);
+  });
+
+  it("reads a file written after the window, because its records may predate it", async () => {
+    /* A flush that had to be retried carries events far older than its own key,
+       which is why the upper bound is on the RECORD and never on the file. */
+    await seed("node-a", CLOCK_START_MS + 30 * MINUTE_MS, [
+      event("node-a", CLOCK_START_MS - 10 * MINUTE_MS, { type: "wake.kicked", id: "late-flush" }),
+    ]);
+
+    const window = { sinceMs: CLOCK_START_MS - HOUR_MS, untilMs: CLOCK_START_MS };
+    const found = await readObservations(registry, { window });
+
+    expect(found.records).toHaveLength(1);
+  });
+
+  it("skips a file written long before the window without reading it", async () => {
+    const stale = await seed("node-a", CLOCK_START_MS - 2 * OBSERVE_READ_SLACK_MS - HOUR_MS, [
+      event("node-a", CLOCK_START_MS - 30 * MINUTE_MS, { type: "wake.kicked", id: "impossible" }),
+    ]);
+    expect(stale).toContain("_scafo/observe/node-a/");
+
+    const found = await readObservations(registry, {
+      window: { sinceMs: CLOCK_START_MS - HOUR_MS, untilMs: CLOCK_START_MS },
+    });
+
+    expect(found.files).toBe(0);
+    expect(found.records).toEqual([]);
+  });
+
+  it("interleaves two nodes by when things happened, not by how they were listed", async () => {
+    await seed("node-b", CLOCK_START_MS, [
+      event("node-b", CLOCK_START_MS - 5 * MINUTE_MS, { type: "wake.kicked", id: "b-second" }),
+    ]);
+    await seed("node-a", CLOCK_START_MS, [
+      event("node-a", CLOCK_START_MS - 9 * MINUTE_MS, { type: "wake.kicked", id: "a-first" }),
+    ]);
+
+    const found = await readObservations(registry, {
+      window: { sinceMs: CLOCK_START_MS - HOUR_MS, untilMs: CLOCK_START_MS },
+    });
+
+    expect(found.records.map((record) => record.node)).toEqual(["node-a", "node-b"]);
+  });
+
+  it("skips and counts the lines that are not records, keeping the file's good ones", async () => {
+    const good = event("node-a", CLOCK_START_MS - MINUTE_MS, { type: "wake.kicked", id: "kept" });
+    const key = observeKey("node-a", new Date(CLOCK_START_MS), 1, "jsonl");
+    await store.put(key, [JSON.stringify(good), "{ truncated", ""].join("\n"));
+
+    const found = await readObservations(registry, {
+      window: { sinceMs: CLOCK_START_MS - HOUR_MS, untilMs: CLOCK_START_MS },
+    });
+
+    expect(found.records).toHaveLength(1);
+    expect(found.malformed).toBe(1);
+  });
+
+  it("reports a file it cannot decode instead of failing over it", async () => {
+    await store.put(observeKey("node-a", new Date(CLOCK_START_MS), 1, "parquet"), "binary");
+
+    const found = await readObservations(registry, {
+      window: { sinceMs: CLOCK_START_MS - HOUR_MS, untilMs: CLOCK_START_MS },
+    });
+
+    expect(found.unreadable).toHaveLength(1);
+    expect(found.files).toBe(0);
+  });
+});
+
+describe("--since", () => {
+  it("reads a duration back from now", () => {
+    expect(parseSince("90s", CLOCK_START_MS)).toBe(CLOCK_START_MS - 90_000);
+    expect(parseSince("15m", CLOCK_START_MS)).toBe(CLOCK_START_MS - 15 * MINUTE_MS);
+    expect(parseSince("1h", CLOCK_START_MS)).toBe(CLOCK_START_MS - HOUR_MS);
+    expect(parseSince("7d", CLOCK_START_MS)).toBe(CLOCK_START_MS - 7 * 86_400_000);
+  });
+
+  it("reads an instant, for correlating with something that happened at one", () => {
+    expect(parseSince("2026-01-01T00:00:00.000Z", CLOCK_START_MS)).toBe(CLOCK_START_MS);
+  });
+
+  it("defaults to the last hour", () => {
+    expect(windowFrom(undefined, CLOCK_START_MS)).toEqual({
+      sinceMs: CLOCK_START_MS - HOUR_MS,
+      untilMs: CLOCK_START_MS,
+    });
+  });
+
+  it("refuses what it cannot read rather than falling back to the default", async () => {
+    /* A window that silently became the default would answer a question nobody
+       asked, and read exactly like an empty one. */
+    const error = await rejectsWith(
+      () => Promise.resolve(parseSince("last tuesday", CLOCK_START_MS)),
+      "invalid-input",
+    );
+    expect(error.detail).toContain("90s, 15m, 1h, 7d");
+  });
+});
+
+describe("what the metrics come to", () => {
+  const window = { sinceMs: CLOCK_START_MS - HOUR_MS, untilMs: CLOCK_START_MS };
+
+  it("differences the first and last snapshot of the window", () => {
+    const records: ObserveRecord[] = [
+      counters("node-a", CLOCK_START_MS - 50 * MINUTE_MS, {
+        project: "shop",
+        env: "production",
+        requests: 100,
+        bytes: 1000,
+      }),
+      counters("node-a", CLOCK_START_MS - 5 * MINUTE_MS, {
+        project: "shop",
+        env: "production",
+        requests: 460,
+        bytes: 9000,
+      }),
+    ];
+
+    const summary = summarizeMetrics(records, window);
+
+    /* The totals are monotonic since that node booted; what happened IN the
+       window is the difference and nothing else. */
+    expect(summary.rows).toHaveLength(1);
+    expect(summary.rows[0].requests).toBe(360);
+    expect(summary.rows[0].bytes).toBe(8000);
+  });
+
+  it("adds up the nodes rather than differencing across them", () => {
+    const records: ObserveRecord[] = [
+      counters("node-a", CLOCK_START_MS - 50 * MINUTE_MS, {
+        project: "shop",
+        env: "production",
+        requests: 100,
+        bytes: 10,
+      }),
+      counters("node-b", CLOCK_START_MS - 50 * MINUTE_MS, {
+        project: "shop",
+        env: "production",
+        requests: 7000,
+        bytes: 10,
+      }),
+      counters("node-a", CLOCK_START_MS - 5 * MINUTE_MS, {
+        project: "shop",
+        env: "production",
+        requests: 150,
+        bytes: 20,
+      }),
+      counters("node-b", CLOCK_START_MS - 5 * MINUTE_MS, {
+        project: "shop",
+        env: "production",
+        requests: 7020,
+        bytes: 20,
+      }),
+    ];
+
+    const summary = summarizeMetrics(records, window);
+
+    expect(summary.rows[0].requests).toBe(70);
+    expect(summary.rows[0].nodes).toEqual(["node-a", "node-b"]);
+  });
+
+  it("takes a node that restarted mid-window whole rather than going negative", () => {
+    const records: ObserveRecord[] = [
+      counters("node-a", CLOCK_START_MS - 50 * MINUTE_MS, {
+        project: "shop",
+        env: "production",
+        sinceMs: CLOCK_START_MS - 5 * HOUR_MS,
+        requests: 9000,
+        bytes: 90,
+      }),
+      /* Restarted: the totals went back to zero, and a subtraction against the
+         old run's 9000 would report a negative number of requests. */
+      counters("node-a", CLOCK_START_MS - 20 * MINUTE_MS, {
+        project: "shop",
+        env: "production",
+        sinceMs: CLOCK_START_MS - 30 * MINUTE_MS,
+        requests: 12,
+        bytes: 12,
+      }),
+      counters("node-a", CLOCK_START_MS - 5 * MINUTE_MS, {
+        project: "shop",
+        env: "production",
+        sinceMs: CLOCK_START_MS - 30 * MINUTE_MS,
+        requests: 40,
+        bytes: 40,
+      }),
+    ];
+
+    const summary = summarizeMetrics(records, window);
+
+    /* The old run contributes nothing (one sample, nothing to difference), and
+       the new one contributes everything it counted, because it started here. */
+    expect(summary.rows[0].requests).toBe(40);
+  });
+
+  it("keeps the environments apart and totals them together", () => {
+    const records: ObserveRecord[] = [
+      counters("node-a", CLOCK_START_MS - 50 * MINUTE_MS, {
+        project: "shop",
+        env: "production",
+        requests: 0,
+        bytes: 0,
+      }),
+      counters("node-a", CLOCK_START_MS - 50 * MINUTE_MS, {
+        project: "shop",
+        env: "preview",
+        requests: 0,
+        bytes: 0,
+      }),
+      counters("node-a", CLOCK_START_MS - 5 * MINUTE_MS, {
+        project: "shop",
+        env: "production",
+        requests: 300,
+        bytes: 3000,
+      }),
+      counters("node-a", CLOCK_START_MS - 5 * MINUTE_MS, {
+        project: "shop",
+        env: "preview",
+        requests: 12,
+        bytes: 120,
+      }),
+    ];
+
+    const summary = summarizeMetrics(records, window);
+
+    expect(summary.rows.map((row) => `${row.project}/${row.env}=${String(row.requests)}`)).toEqual([
+      "shop/preview=12",
+      "shop/production=300",
+    ]);
+    expect(summary.totals.requests).toBe(312);
+  });
+
+  it("narrows to one project and environment when asked", () => {
+    const records: ObserveRecord[] = [
+      counters("node-a", CLOCK_START_MS - 50 * MINUTE_MS, {
+        project: "shop",
+        env: "production",
+        requests: 0,
+        bytes: 0,
+      }),
+      counters("node-a", CLOCK_START_MS - 50 * MINUTE_MS, {
+        project: "blog",
+        env: "production",
+        requests: 0,
+        bytes: 0,
+      }),
+      counters("node-a", CLOCK_START_MS - 5 * MINUTE_MS, {
+        project: "shop",
+        env: "production",
+        requests: 5,
+        bytes: 5,
+      }),
+      counters("node-a", CLOCK_START_MS - 5 * MINUTE_MS, {
+        project: "blog",
+        env: "production",
+        requests: 900,
+        bytes: 900,
+      }),
+    ];
+
+    const summary = summarizeMetrics(records, window, { project: "shop", env: "production" });
+
+    expect(summary.rows).toHaveLength(1);
+    expect(summary.totals.requests).toBe(5);
+  });
+
+  it("summarizes the latency as the band a share of the requests finished inside", () => {
+    /* 80 of a hundred inside 10ms and a long thin tail: the median lands in the
+       first band, and the 95th only reaches the third. */
+    expect(bandAt([80, 10, 5, 3, 1, 0, 1], 0.5)).toBe("<=10ms");
+    expect(bandAt([80, 10, 5, 3, 1, 0, 1], 0.95)).toBe("<=100ms");
+    expect(bandAt([0, 0, 0, 0, 0, 0, 4], 0.5)).toBe(">3s");
+    expect(bandAt([0, 0, 0, 0, 0, 0, 0], 0.5)).toBe("-");
+  });
+
+  it("prints a table with a totals line under it", () => {
+    const records: ObserveRecord[] = [
+      counters("node-a", CLOCK_START_MS - 50 * MINUTE_MS, {
+        project: "shop",
+        env: "production",
+        requests: 0,
+        bytes: 0,
+        durations: [0, 0, 0, 0, 0, 0, 0],
+      }),
+      counters("node-a", CLOCK_START_MS - 5 * MINUTE_MS, {
+        project: "shop",
+        env: "production",
+        requests: 12_480,
+        bytes: 4_200_000,
+        status: { "2xx": 12_310, "4xx": 160, "5xx": 10 },
+        durations: [4000, 5000, 2000, 1200, 260, 19, 1],
+      }),
+    ];
+
+    const table = formatMetrics(summarizeMetrics(records, window));
+    const lines = table.split("\n");
+
+    expect(lines[0].split(/\s+/)).toEqual([
+      "PROJECT",
+      "ENV",
+      "REQUESTS",
+      "BYTES",
+      "2XX",
+      "3XX",
+      "4XX",
+      "5XX",
+      "P50",
+      "P95",
+    ]);
+    expect(lines[1]).toContain("shop");
+    expect(lines[1]).toContain("12480");
+    expect(lines[1]).toContain("4.20 MB");
+    expect(lines.at(-1)).toContain("TOTAL");
+    /* A rule between the rows and the total, so a fleet with one environment
+       cannot be misread as counting it twice. */
+    expect(lines.at(-2)).toMatch(/^-+$/);
+  });
+});
+
+describe("what the traces come to", () => {
+  const window = { sinceMs: CLOCK_START_MS - HOUR_MS, untilMs: CLOCK_START_MS };
+
+  /** One request's whole life on a node, as the wake surface emits it. */
+  function wakeTimeline(id: string, startMs: number): ObserveEventRecord[] {
+    return [
+      event("node-a", startMs, {
+        type: "wake.admitted",
+        id,
+        host: "shop.apps.test",
+        kind: "environment",
+        project: "shop",
+        env: "production",
+        inFlight: 1,
+      }),
+      event("node-a", startMs + 3, { type: "wake.resolved", id, storeOps: 4 }),
+      event("node-a", startMs + 91, { type: "wake.stamped", id }),
+      event("node-a", startMs + 92, { type: "wake.kicked", id }),
+      event("node-a", startMs + 812, { type: "wake.served", id, port: 41_001, status: 200 }),
+    ];
+  }
+
+  it("shows the newest when there are more than the limit, and says how many it left out", () => {
+    const events = Array.from({ length: 10 }, (_unused, index) =>
+      event("node-a", CLOCK_START_MS - (10 - index) * MINUTE_MS, {
+        type: "wake.kicked",
+        id: `id-${String(index)}`,
+      }),
+    );
+
+    const selection = selectTraces(events, { limit: 3 });
+
+    expect(selection.events.map((record) => ("id" in record ? record.id : ""))).toEqual([
+      "id-7",
+      "id-8",
+      "id-9",
+    ]);
+    expect({ matched: selection.matched, omitted: selection.omitted }).toEqual({
+      matched: 10,
+      omitted: 7,
+    });
+  });
+
+  it("finds a project's whole request, not only the event that names it", () => {
+    const records: ObserveRecord[] = [
+      ...wakeTimeline("8f3a", CLOCK_START_MS - 10 * MINUTE_MS),
+      event("node-a", CLOCK_START_MS - 9 * MINUTE_MS, {
+        type: "gate.passed",
+        processId: "shop--production--b1b1b1b1",
+        attempts: 2,
+        durationMs: 700,
+      }),
+      event("node-a", CLOCK_START_MS - 8 * MINUTE_MS, {
+        type: "gate.passed",
+        processId: "blog--production--c2c2c2c2",
+        attempts: 1,
+        durationMs: 100,
+      }),
+      event("node-a", CLOCK_START_MS - 7 * MINUTE_MS, {
+        type: "reconcile.pass.start",
+        kicked: true,
+      }),
+    ];
+
+    const selection = selectTraces(records, { project: "shop" });
+
+    /* The five wake events — only the first of which names the project — plus
+       the rollout gate, which names it through the process id. The reconcile
+       pass belongs to the node rather than to any project. */
+    expect(selection.events).toHaveLength(6);
+    expect(selection.events.every((record) => record.type !== "reconcile.pass.start")).toBe(true);
+  });
+
+  it("lays one request out against the moment it started", () => {
+    const timeline = wakeTimeline("8f3a", CLOCK_START_MS - 10 * MINUTE_MS);
+
+    const rendered = formatWakeTimeline("8f3a", selectTraces(timeline, { wake: "8f3a" }).events);
+    const lines = rendered.split("\n");
+
+    expect(lines[0]).toContain('wake "8f3a" on node-a, 5 event(s) over 812ms');
+    expect(lines[1]).toContain("+0ms");
+    expect(lines[1]).toContain("wake.admitted");
+    expect(lines[1]).toContain("host=shop.apps.test");
+    expect(lines.at(-1)).toContain("+812ms");
+    expect(lines.at(-1)).toContain("status=200");
+  });
+
+  it("says so when the id it was given is in nothing it read", () => {
+    const rendered = formatWakeTimeline("nope", []);
+
+    expect(rendered).toContain('nothing recorded for wake "nope"');
+    expect(rendered).toContain("observability.enabled");
+  });
+
+  it("renders every field an event carried, whatever the event is", () => {
+    const rendered = formatTraces(
+      selectTraces([
+        event("node-a", CLOCK_START_MS, {
+          type: "reconcile.pass.end",
+          actions: 2,
+          failures: 0,
+          storeOps: 17,
+          listOps: 3,
+          durationMs: 412,
+        }),
+      ]),
+    );
+
+    /* Derived rather than per-type, so an event variant added later prints its
+       own fields rather than another variant's. */
+    expect(rendered).toContain("reconcile.pass.end");
+    expect(rendered).toContain("actions=2 failures=0 storeOps=17 listOps=3 durationMs=412");
+    expect(rendered).toContain(new Date(CLOCK_START_MS).toISOString());
+  });
+
+  it("reads a seeded bucket end to end", async () => {
+    await seed("node-a", CLOCK_START_MS, wakeTimeline("8f3a", CLOCK_START_MS - 3 * MINUTE_MS));
+
+    const found = await readObservations(registry, { window });
+    const selection = selectTraces(found.records, { wake: "8f3a" });
+
+    expect(selection.events).toHaveLength(5);
+    expect(formatWakeTimeline("8f3a", selection.events)).toContain("+812ms");
+  });
+});
+
+describe("nothing to show", () => {
+  const window = { sinceMs: CLOCK_START_MS - HOUR_MS, untilMs: CLOCK_START_MS };
+
+  it("names the switch when no node has ever written anything", async () => {
+    const found = await readObservations(registry, { window });
+
+    const said = nothingRecorded(found, window);
+    expect(said).toContain("nothing recorded");
+    expect(said).toContain("observability.enabled");
+  });
+
+  it("says the window is the problem when something was written outside it", async () => {
+    await seed("node-a", CLOCK_START_MS - 10 * HOUR_MS, [
+      event("node-a", CLOCK_START_MS - 10 * HOUR_MS, { type: "wake.kicked", id: "old" }),
+    ]);
+    const found = await readObservations(registry, { window });
+
+    const said = nothingRecorded(found, window);
+    expect(said).toContain("nothing recorded since");
+    expect(said).toContain("node-a");
+    expect(said).toContain("--since");
+  });
+
+  it("names the access log when the nodes report on themselves but count nothing", () => {
+    const records = [event("node-a", CLOCK_START_MS, { type: "wake.kicked", id: "one" })];
+
+    const said = noCounters(records);
+    expect(said).toContain("nothing recorded");
+    expect(said).toContain("observability.ingressAccessLog");
+  });
+
+  it("summarizes an empty window as no rows rather than as a failure", () => {
+    const summary = summarizeMetrics([], window);
+
+    expect({ rows: summary.rows, samples: summary.samples }).toEqual({ rows: [], samples: 0 });
+    expect(summary.totals.requests).toBe(0);
+  });
+});

@@ -8,6 +8,13 @@ import { loadAgentConfig, runtimeDialHost } from "../../agent/config.ts";
 import { createCoordinator } from "../../agent/coordinator.ts";
 import { createHeartbeat } from "../../agent/heartbeat.ts";
 import { createObservability, OBSERVED_RING_SIZE } from "../../agent/observe.ts";
+import {
+  createObserveFlusher,
+  OBSERVE_FLUSH_INTERVAL_MS,
+  OBSERVE_RETENTION_DAYS,
+  type ObserveFlusher,
+} from "../../agent/observe-flush.ts";
+import { observeNodePrefix } from "../../core/registry/paths.ts";
 import { createReconciler, runtimeBaseEnv } from "../../agent/reconcile.ts";
 import { startAgent } from "../../agent/serve.ts";
 import { createStorageService } from "../../agent/storage.ts";
@@ -185,16 +192,32 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
    */
   const observability = createObservability({ enabled: config.observability.enabled });
   let accessLog: AccessLogTailer | undefined;
+  let flusher: ObserveFlusher | undefined;
   if (observability.enabled) {
     agent.observability = observability;
-    /* Said once: what is recorded stays in this process, in a ring of a fixed
-       size, and nothing reads it off the node yet. */
+    /* Said once: the ring is a buffer rather than the record, and where the
+       record actually ends up is the next line. */
     console.log(
-      `scafo: observability on; this node records its own events in memory ` +
-        `(${String(OBSERVED_RING_SIZE)} kept, oldest dropped) and runs its processes with ` +
-        `${TELEMETRY_ENV}=1 unless "runtime.celldEnv" says otherwise`,
+      `scafo: observability on; this node records its own events in a ring of ` +
+        `${String(OBSERVED_RING_SIZE)} and runs its processes with ${TELEMETRY_ENV}=1 unless ` +
+        `"runtime.celldEnv" says otherwise`,
     );
     accessLog = attachIngressCounters(agent, config.observability.ingressAccessLog);
+    /* Built AFTER the counters, because it flushes them alongside the events and
+       an adapter attached later would never be read. */
+    flusher = createObserveFlusher(registry, {
+      nodeId: state.id,
+      observability,
+      ...(agent.ingressCounters === undefined ? {} : { counters: agent.ingressCounters }),
+    });
+    /* Said once, because it is the only thing here that costs the operator
+       money: this is what the node writes, where, and for how long it keeps it. */
+    console.log(
+      `scafo: flushing them to "${observeNodePrefix(state.id)}" every ` +
+        `${String(OBSERVE_FLUSH_INTERVAL_MS / 1000)}s, keeping ` +
+        `${String(OBSERVE_RETENTION_DAYS)} days; read them back with "scafo metrics" and ` +
+        `"scafo traces"`,
+    );
   }
 
   /* What every dialer of a process this node starts uses — the ingress here, the
@@ -292,6 +315,9 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   coordinator.start();
   heartbeat.start();
   storage.start();
+  /* Last of the loops to start and first to stop: everything above it is a
+     source of what it writes, so it has nothing to do until they are running. */
+  flusher?.start();
 
   await untilSignalled(async () => {
     /*
@@ -305,6 +331,9 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
      * reached delays the shutdown briefly and changes nothing else.
      */
     await drainThisNode(registry, state.id);
+    /* Stopped first among the loops: everything below still emits, and one
+       final flush at the end writes what they emitted on the way out. */
+    flusher?.stop();
     /* Stopped next: a node on its way out must stop saying it is available, so
        nothing keeps refreshing the record placement is about to stop reading. */
     heartbeat.stop();
@@ -321,6 +350,10 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
     /* Read to the end and closed before the listener goes, so the requests the
        ingress served while this node was shutting down are still counted. */
     await accessLog?.stop();
+    /* AFTER the log has been read to its end and after every loop above has
+       stopped emitting, so the last thing written is the whole of what this node
+       saw — including the shutdown itself. Never throws. */
+    await flusher?.flush();
     await server.close();
     await Promise.all(
       supervisor

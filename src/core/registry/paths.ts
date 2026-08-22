@@ -92,6 +92,99 @@ export function buildWakeKey(project: string, env: string, build: string): strin
   return `${buildWakesPrefix(project, env)}${build}.json`;
 }
 
+/**
+ * Prefix everything the nodes have flushed about themselves lives under.
+ *
+ * NODE-SCOPED ONE LEVEL DOWN, and that is the whole of the write rule: a node
+ * writes only under its own segment and sweeps only its own segment, so no node
+ * can delete another's history and a listing of one node costs only that node's
+ * keys. Below it the path is the UTC calendar — `<YYYY>/<MM>/<DD>/<HH>/` — so a
+ * reader asking for a window lists a node once and skips whole hours by name,
+ * and the keys sort lexicographically in the order they were written.
+ */
+export function observePrefix(): string {
+  return `${ROOT}/observe/`;
+}
+
+export function observeNodePrefix(nodeId: string): string {
+  assertNodeId(nodeId);
+  return `${observePrefix()}${nodeId}/`;
+}
+
+/** Prefix one node's flushes of one UTC day live under. */
+export function observeDayPrefix(nodeId: string, at: Date): string {
+  const day = [
+    String(at.getUTCFullYear()).padStart(4, "0"),
+    String(at.getUTCMonth() + 1).padStart(2, "0"),
+    String(at.getUTCDate()).padStart(2, "0"),
+  ].join("/");
+  return `${observeNodePrefix(nodeId)}${day}/`;
+}
+
+/** Prefix one node's flushes of one UTC hour live under. */
+export function observeHourPrefix(nodeId: string, at: Date): string {
+  return `${observeDayPrefix(nodeId, at)}${String(at.getUTCHours()).padStart(2, "0")}/`;
+}
+
+/** Digits a flush's sequence number is padded to, so a listing sorts by write order. */
+const OBSERVE_SEQ_DIGITS = 6;
+
+/**
+ * Where one flush lands. `at` is the moment the flush was written and `seq` its
+ * number since this node booted, which is what keeps two flushes of the same
+ * millisecond apart; `extension` is the one the encoder that produced the bytes
+ * declared, and is what tells a reader which decoder the file needs.
+ */
+export function observeKey(nodeId: string, at: Date, seq: number, extension: string): string {
+  if (!/^[a-z\d]{1,16}$/.test(extension)) {
+    throw new ScafoError("invalid-input", "Invalid observation extension", {
+      detail: `"${extension}" must be 1-16 lowercase alphanumerics`,
+    });
+  }
+  const name = `${String(at.getTime())}-${String(seq).padStart(OBSERVE_SEQ_DIGITS, "0")}`;
+  return `${observeHourPrefix(nodeId, at)}${name}.${extension}`;
+}
+
+/** What an observation key says about itself. */
+export interface ObserveKeyParts {
+  /** Node that wrote it, which is the only node allowed to delete it. */
+  node: string;
+  /** Moment it was written, in epoch milliseconds. */
+  atMs: number;
+  /** Its writer's flush number since that node booted. */
+  seq: number;
+  /** Filename extension, without the dot: which decoder the file needs. */
+  extension: string;
+}
+
+/**
+ * Inverse of {@link observeKey}; returns null for anything that is not one.
+ *
+ * The calendar segments are checked against the timestamp rather than read out
+ * of it, so a key whose path and stamp disagree is not one of ours and is left
+ * alone — which is what keeps a sweep from deleting a key it cannot account for.
+ */
+export function parseObserveKey(key: string): ObserveKeyParts | null {
+  const root = observePrefix();
+  if (!key.startsWith(root)) return null;
+
+  const parts = key.slice(root.length).split("/");
+  if (parts.length !== 6) return null;
+
+  const [node, , , , , name] = parts;
+  if (!NODE_ID_RE.test(node)) return null;
+
+  const match = /^(\d{1,15})-(\d{1,15})\.([a-z\d]{1,16})$/.exec(name);
+  if (match === null) return null;
+
+  const atMs = Number(match[1]);
+  const at = new Date(atMs);
+  if (!Number.isFinite(atMs) || Number.isNaN(at.getTime())) return null;
+  if (observeHourPrefix(node, at) !== `${root}${parts.slice(0, 5).join("/")}/`) return null;
+
+  return { node, atMs, seq: Number(match[2]), extension: match[3] };
+}
+
 export function domainsPrefix(): string {
   return `${ROOT}/domains/`;
 }

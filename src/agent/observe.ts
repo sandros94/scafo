@@ -2,9 +2,18 @@
  * What a node saw itself do: the seam every observable moment of the agent is
  * reported through, and the bounded ring those reports land in.
  *
- * EMISSION ONLY. Nothing here is persisted, exported or served — a later phase
- * flushes {@link Observability.snapshot} somewhere. What this settles is the
- * SHAPE of an event and the cost of a node that is not observing.
+ * EMISSION AND A RING, AND NOTHING HERE REACHES THE BUCKET. What this settles is
+ * the SHAPE of an event and the cost of a node that is not observing; the
+ * flusher beside it (`src/agent/observe-flush.ts`) is what takes the events off
+ * the ring and writes them.
+ *
+ * TWO READERS, AND ONLY ONE OF THEM CONSUMES. {@link Observability.snapshot} is a
+ * WINDOW on the recent past: it reads without consuming, so any number of
+ * callers see the same events. {@link Observability.drain} is the FLUSHER'S, and
+ * there may only be one — it takes everything since the last drain and moves a
+ * high-water mark past it, so a second drainer would silently halve what each of
+ * them wrote. What it reports as dropped is what fell out of the ring BEFORE it
+ * could be read, which is the flusher's own loss rather than the ring's total.
  *
  * THE SEAM IS THREADED, NEVER IMPORTED AS A GLOBAL. It reaches the code that
  * emits through {@link AgentContext} and the executor's deps, exactly as the
@@ -112,7 +121,20 @@ export interface ObservedSnapshot {
   dropped: number;
 }
 
-/** Where the agent reports what it did, and what a later phase reads it back from. */
+/** What one drain took off the ring, and what it could not. */
+export interface ObservedDrain {
+  /** Events emitted since the last drain, oldest first. */
+  events: ObservedEvent[];
+  /**
+   * Events that fell out of the ring since the last drain, before this one could
+   * read them. Nonzero means the drainer is slower than the node emits, or the
+   * ring is too small for the interval between drains — never that the events
+   * were uninteresting.
+   */
+  dropped: number;
+}
+
+/** Where the agent reports what it did, and what the flusher reads it back from. */
 export interface Observability {
   /**
    * Whether anything is recorded at all. False makes every call below a no-op —
@@ -133,6 +155,16 @@ export interface Observability {
    * a window on the recent past, and two readers see the same events.
    */
   snapshot(): ObservedSnapshot;
+  /**
+   * Everything emitted since the last drain, CONSUMED — a second call answers
+   * only what arrived in between.
+   *
+   * FOR THE FLUSHER AND FOR NOTHING ELSE. It moves a high-water mark rather than
+   * clearing the ring, so {@link Observability.snapshot} still shows the window
+   * it always did; but two drainers would each take half the events and neither
+   * would know it, which is why the agent only ever builds one.
+   */
+  drain(): ObservedDrain;
 }
 
 export interface ObservabilityOptions {
@@ -162,6 +194,7 @@ export function createObservability(opts: ObservabilityOptions): Observability {
       emit: (): void => {},
       nowMs,
       snapshot: (): ObservedSnapshot => ({ events: [], dropped: 0 }),
+      drain: (): ObservedDrain => ({ events: [], dropped: 0 }),
     };
   }
 
@@ -169,6 +202,19 @@ export function createObservability(opts: ObservabilityOptions): Observability {
   const ring: (ObservedEvent | undefined)[] = Array.from({ length: size });
   /* Every event ever emitted, which is what says how many fell out of the ring. */
   let written = 0;
+  /* How far the drainer has read. Counted in the same units as `written`, so the
+     arithmetic below never has to look at the ring to know what it missed. */
+  let drained = 0;
+
+  /** Events from `position` up to what has been written, oldest first. */
+  const read = (position: number): ObservedEvent[] => {
+    const events: ObservedEvent[] = [];
+    for (let index = position; index < written; index++) {
+      const event = ring[index % size];
+      if (event !== undefined) events.push(event);
+    }
+    return events;
+  };
 
   return {
     enabled: true,
@@ -181,13 +227,17 @@ export function createObservability(opts: ObservabilityOptions): Observability {
     nowMs,
 
     snapshot(): ObservedSnapshot {
-      const events: ObservedEvent[] = [];
+      return { events: read(Math.max(0, written - size)), dropped: Math.max(0, written - size) };
+    },
+
+    drain(): ObservedDrain {
+      /* The oldest position the ring can still answer for. Anything the drainer
+         had not reached by the time it was overwritten is gone, and counted. */
       const oldest = Math.max(0, written - size);
-      for (let index = oldest; index < written; index++) {
-        const event = ring[index % size];
-        if (event !== undefined) events.push(event);
-      }
-      return { events, dropped: oldest };
+      const dropped = Math.max(0, oldest - drained);
+      const events = read(Math.max(drained, oldest));
+      drained = written;
+      return { events, dropped };
     },
   };
 }
