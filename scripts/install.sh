@@ -649,6 +649,24 @@ EOF
 # manifest either, having made no directory of its own to keep one in.
 write_manifest() {
   manifest="${STATE_DIR}/install.manifest"
+  # A reinstall over kept state finds the accounts already existing and creates
+  # none — but the FACT that an earlier run created them must outlive that run,
+  # or the rewrite below erases it and a later --purge leaves both accounts
+  # behind while reporting it kept nothing. Prior created_user lines are folded
+  # back in before the file is replaced.
+  if [ -f "$manifest" ]; then
+    while IFS= read -r prior_line; do
+      case "$prior_line" in
+        created_user=*)
+          prior_user="${prior_line#created_user=}"
+          case " ${CREATED_USERS} " in
+            *" ${prior_user} "*) ;;
+            *) CREATED_USERS="${CREATED_USERS} ${prior_user}" ;;
+          esac
+          ;;
+      esac
+    done <"$manifest"
+  fi
   {
     printf '# What scripts/install.sh made on this host, for scripts/uninstall.sh.\n'
     printf '# Losing this file does not break the uninstall; it only makes it derive.\n'
@@ -746,15 +764,15 @@ next_steps() {
   fi
 
   printf 'WHERE THINGS ARE\n\n'
-  printf '  %-28s node identity, 0600 in a %s directory\n' "${STATE_DIR}/node.json" "$STATE_DIR_MODE"
-  printf '  %-28s the token the ingress presents to /v1/storage,\n' "${STATE_DIR}/storage-token"
-  printf '  %-28s minted on the first boot. LOCAL OR TUNNELLED CALLERS ONLY:\n' ''
-  printf '  %-28s that surface carries private keys in both directions.\n' ''
+  printf '  %-32s node identity, 0600 in a %s directory\n' "${STATE_DIR}/node.json" "$STATE_DIR_MODE"
+  printf '  %-32s the token the ingress presents to /v1/storage,\n' "${STATE_DIR}/storage-token"
+  printf '  %-32s minted on the first boot. LOCAL OR TUNNELLED CALLERS ONLY:\n' ''
+  printf '  %-32s that surface carries private keys in both directions.\n' ''
   if [ "$UNITS_WRITTEN" = 'yes' ]; then
-    printf '  %-28s bucket credentials and every other setting\n' "${CONFIG_DIR}/node.env"
-    printf '  %-28s the ingress config the node writes its routes into\n' "${CONFIG_DIR}/caddy.json"
-    printf '  %-28s where Caddy logs what it served, when asked to\n' "${INGRESS_LOG_DIR}/"
-    printf '  %-28s what this run installed, for scripts/uninstall.sh\n' "${STATE_DIR}/install.manifest"
+    printf '  %-32s bucket credentials and every other setting\n' "${CONFIG_DIR}/node.env"
+    printf '  %-32s the ingress config the node writes its routes into\n' "${CONFIG_DIR}/caddy.json"
+    printf '  %-32s where Caddy logs what it served, when asked to\n' "${INGRESS_LOG_DIR}/"
+    printf '  %-32s what this run installed, for scripts/uninstall.sh\n' "${STATE_DIR}/install.manifest"
   fi
 
   printf '\nWHAT THIS INSTALL IS NOT\n\n'

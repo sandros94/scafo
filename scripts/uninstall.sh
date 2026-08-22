@@ -610,7 +610,7 @@ report() {
   else
     printf '  %s\n' '(nothing of scafo'\''s)'
   fi
-  printf '  %-30s %s\n' "${BIN_DIR}/" 'the directory itself, and everything else in it'
+  printf '  %-40s %s\n' "${BIN_DIR}/" 'the directory itself, and everything else in it'
 
   if [ "$PURGE" != 'yes' ] && [ -n "$KEPT_LINES" ]; then
     printf '\n  --purge removes every line above except the directory. The state one\n'
@@ -720,12 +720,12 @@ safe_path() {
 }
 
 record_removed() {
-  REMOVED_LINES="${REMOVED_LINES}$(printf '  %-30s %s' "$1" "$2")
+  REMOVED_LINES="${REMOVED_LINES}$(printf '  %-40s %s' "$1" "$2")
 "
 }
 
 record_kept() {
-  KEPT_LINES="${KEPT_LINES}$(printf '  %-30s %s' "$1" "$2")
+  KEPT_LINES="${KEPT_LINES}$(printf '  %-40s %s' "$1" "$2")
 "
 }
 
