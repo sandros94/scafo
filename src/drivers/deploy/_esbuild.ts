@@ -50,8 +50,10 @@ const PACKAGES: Record<string, { pkg: string; subpath: string }> = {
  * Absolute path of the esbuild executable for the platform this node runs on.
  *
  * `ESBUILD_BINARY_PATH` wins when it is set, which is how an operator points a
- * node at a build of esbuild it installed itself. Throws
- * `ScafoError("capability-missing")` when there is nothing to point at.
+ * node at a build of esbuild it installed itself — and it is the ONLY answer on
+ * a node running the single-file binary, which carries no packages to resolve
+ * one from. Throws `ScafoError("capability-missing")` when there is nothing to
+ * point at.
  */
 export function esbuildBinaryPath(env: Record<string, string | undefined> = {}): string {
   const configured = env[BINARY_PATH_ENV]?.trim();
@@ -68,8 +70,10 @@ export function esbuildBinaryPath(env: Record<string, string | undefined> = {}):
     return fromEsbuild.resolve(`${target.pkg}/${target.subpath}`);
   } catch (error) {
     throw missing(
-      `"${target.pkg}" is not installed beside esbuild, so there is no executable to run; ` +
-        `reinstall dependencies or set ${BINARY_PATH_ENV}`,
+      `no "${target.pkg}" could be resolved beside esbuild, so there is no executable to run: ` +
+        `either this node has no esbuild installed — the single-file binary carries none — or ` +
+        `esbuild's per-platform package is missing beside it; install esbuild and point ` +
+        `${BINARY_PATH_ENV} at its executable, or reinstall this node's dependencies`,
       error,
     );
   }

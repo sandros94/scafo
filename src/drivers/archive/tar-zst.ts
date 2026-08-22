@@ -5,17 +5,9 @@
  * `.tar.zst` is.
  */
 
-import { createRequire } from "node:module";
 import { promisify } from "node:util";
 import { gunzip, zstdCompress, zstdDecompress } from "node:zlib";
 import { ScafoError } from "../../core/error.ts";
-
-/*
- * `tar` reaches into `node:fs` and is loaded through a CommonJS require, which
- * keeps it out of the module graph of a bundle that only wants the pure halves
- * of this package.
- */
-const require = createRequire(import.meta.url);
 
 /** First bytes of a zstd frame (RFC 8878 §3.1.1). */
 const ZSTD_MAGIC: number[] = [0x28, 0xb5, 0x2f, 0xfd];
@@ -36,6 +28,9 @@ interface TarModule {
   extract(opts: { cwd: string }): NodeJS.WritableStream;
 }
 
+/** The `tar` module once something has asked for it; see {@link loadTar}. */
+let loaded: Promise<TarModule> | undefined;
+
 /**
  * Packs everything under `dir` into a `.tar.zst`.
  *
@@ -43,7 +38,7 @@ interface TarModule {
  * reproduces the directory's contents and not the directory itself.
  */
 export async function packDirectory(dir: string): Promise<Uint8Array> {
-  const tar = require("tar") as TarModule;
+  const tar = await loadTar();
   const chunks: Buffer[] = [];
 
   /* `portable` drops the uid, gid and device numbers of the machine that packed
@@ -67,7 +62,7 @@ export async function packDirectory(dir: string): Promise<Uint8Array> {
  * or when what they decompress to is not a tar.
  */
 export async function unpackArchive(archive: Uint8Array, dir: string): Promise<void> {
-  const tar = require("tar") as TarModule;
+  const tar = await loadTar();
   /*
    * A `Buffer`, and never a bare `Uint8Array`: the tar reader accepts one
    * without complaint and then reads nothing but zeroes out of it, which
@@ -113,4 +108,21 @@ async function decompress(archive: Uint8Array): Promise<Buffer> {
 
 function startsWith(bytes: Uint8Array, magic: number[]): boolean {
   return bytes.length >= magic.length && magic.every((byte, index) => bytes[index] === byte);
+}
+
+/**
+ * The `tar` package, loaded the first time something packs or unpacks and kept
+ * for every call after it.
+ *
+ * A DYNAMIC IMPORT OF A LITERAL SPECIFIER, and it has to be one: it keeps `tar`
+ * — which reaches into `node:fs` — out of the eager module graph of a bundle
+ * that only wants the pure halves of this package, exactly as the CommonJS
+ * `require` it replaced did, while staying something a bundler and
+ * `deno compile` can both FOLLOW. A `createRequire(...)("tar")` is invisible to
+ * both, and a single-file binary built around one carries no `tar` at all —
+ * every deploy then fails at the pack, on the one path no unit test covers.
+ */
+function loadTar(): Promise<TarModule> {
+  loaded ??= import("tar") as Promise<unknown> as Promise<TarModule>;
+  return loaded;
 }

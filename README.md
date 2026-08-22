@@ -39,6 +39,28 @@ those names for you — send the `Host` header, or add them to `/etc/hosts`.
 
 ## Running it for real
 
+- **One host, no containers:** [`scripts/install.sh`](./scripts/install.sh) — a
+  single-binary bootstrap for a Linux host. It downloads and sha256-verifies the
+  four executables a node is made of (`scafo`, celld, Caddy and the esbuild
+  `celld deploy` builds with), then writes the systemd units and `/etc/scafo`
+  when it is run by root. It starts nothing: fill in the bucket credentials it
+  points you at first.
+
+  ```sh
+  curl -fsSL https://raw.githubusercontent.com/sandros94/scafo/main/scripts/install.sh | sh
+  ```
+
+  Read it before you run it — that is what it is written for. There are no
+  releases yet, so point `SCAFO_INSTALL_BASE` at your own `pnpm compile` output
+  (`build/`) until there are. Two things it deliberately leaves to you:
+  wireguard-tools comes from your package manager, and the Caddy it installs is
+  the plain one, which keeps its certificates on that host — a fleet sharing one
+  certificate needs the `caddy.storage.scafo` build instead.
+
+- **The binary:** `pnpm compile` — `deno compile` over the same `dist/` the image
+  runs, producing `build/scafo-linux-amd64` and `build/scafo-linux-arm64` with a
+  `.sha256` beside each. celld, an ingress and wireguard-tools stay separate
+  prerequisites; the binary carries none of them.
 - **The node image:** `docker build -t scafo .` — the agent, celld and esbuild in
   one image. `ENTRYPOINT` is the CLI, so `docker run scafo up --listen 0.0.0.0:7400`
   is the whole invocation. **Give it a stop grace of at least 35 seconds**
