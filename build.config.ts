@@ -21,6 +21,7 @@ export default defineBuildConfig({
         "./src/drivers/ingress/traefik",
         "./src/drivers/deploy/celld",
         "./src/drivers/archive/tar-zst",
+        "./src/drivers/observe/access-log",
       ],
       rolldown: {
         platform: "neutral",

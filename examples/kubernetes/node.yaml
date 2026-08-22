@@ -74,6 +74,27 @@ data:
   # rather than left out: routers with no entryPoints attach to EVERY entryPoint
   # Traefik has, including ones scafo has no business on.
   SCAFO_TRAEFIK_ENTRYPOINTS: "web"
+  # OPTIONAL, AND BOTH LINES GO TOGETHER. The first turns the node's own
+  # reporting on; the second says where its ingress writes the access log it
+  # should count requests off — the ONLY complete account of what this
+  # installation served, since once a process is up its traffic goes
+  # ingress → process and never touches the node. Requests, bytes, statuses and
+  # latencies are then kept per project and environment, in memory, for as long
+  # as the pod lives; nothing is persisted or served yet.
+  #
+  # BRING YOUR OWN INGRESS AND SKIP BOTH. There is no default path and naming
+  # none is not a warning: an installation whose ingress is configured elsewhere
+  # simply never sets SCAFO_INGRESS_ACCESS_LOG, and the adapter is not built at
+  # all. Naming one with SCAFO_OBSERVABILITY off is REFUSED at boot rather than
+  # ignored, because nothing would read it.
+  #
+  # What turns the log on at the other end is the `accessLog` block in the
+  # sidecar's static configuration below — `--accesslog.filepath` and
+  # `--accesslog.format=json` written as configuration rather than as flags —
+  # plus the `ingress-log` volume both containers mount. Both containers run as
+  # uid 10001, so an emptyDir needs nothing said about permissions.
+  SCAFO_OBSERVABILITY: "1"
+  SCAFO_INGRESS_ACCESS_LOG: "/var/log/scafo-ingress/access.log"
 ---
 # The sidecar's static configuration. The `http` provider is the entire
 # scafo-facing part of it: what it reads at that URL is the whole of what this
@@ -108,6 +129,14 @@ data:
 
     log:
       level: INFO
+
+    # OPTIONAL, and the other half of SCAFO_INGRESS_ACCESS_LOG above: what the
+    # node reads to count what this pod's ingress actually served. `json` is
+    # required — the node reads Traefik's structured fields (RequestHost,
+    # DownstreamStatus, DownstreamContentSize, Duration), not the common format.
+    accessLog:
+      filePath: /var/log/scafo-ingress/access.log
+      format: json
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -158,6 +187,14 @@ spec:
         - name: traefik-config
           configMap:
             name: scafo-traefik
+        # OPTIONAL, and only for the access-log settings above: how the log gets
+        # from the sidecar that writes it to the node that counts it. It is
+        # pod-scoped and disposable by design — the counters are in memory and
+        # start from zero with the pod, so a volume that outlives one buys
+        # nothing. Drop it, the `accessLog` block and the two SCAFO_ settings
+        # together, or keep them together.
+        - name: ingress-log
+          emptyDir: {}
       containers:
         - name: node
           # Built from the repository's Dockerfile and pushed somewhere the
@@ -197,6 +234,9 @@ spec:
           volumeMounts:
             - name: state
               mountPath: /var/lib/scafo
+            - name: ingress-log
+              mountPath: /var/log/scafo-ingress
+              readOnly: true
           # Answered before the node is doing anything else useful, and cheap.
           readinessProbe:
             httpGet:
@@ -249,8 +289,10 @@ spec:
           image: traefik:v3
           args: ["--configFile=/etc/traefik/traefik.yml"]
           securityContext:
-            # Nothing here needs root: the entryPoint is above 1024, the only
-            # volume is a read-only ConfigMap, and the provider does not write.
+            # Nothing here needs root: the entryPoint is above 1024, the
+            # configuration is a read-only ConfigMap, and the only thing this
+            # writes is its own access log into an emptyDir it shares with the
+            # node — which both containers run as the same uid for.
             runAsNonRoot: true
             runAsUser: 10001
             runAsGroup: 10001
@@ -262,6 +304,8 @@ spec:
             - name: traefik-config
               mountPath: /etc/traefik
               readOnly: true
+            - name: ingress-log
+              mountPath: /var/log/scafo-ingress
           readinessProbe:
             httpGet:
               path: /ping

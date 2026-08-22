@@ -82,6 +82,10 @@
     "./drivers/archive/tar-zst": {
       "types": "./dist/drivers/archive/tar-zst.d.mts",
       "default": "./dist/drivers/archive/tar-zst.mjs"
+    },
+    "./drivers/observe/access-log": {
+      "types": "./dist/drivers/observe/access-log.d.mts",
+      "default": "./dist/drivers/observe/access-log.mjs"
     }
   },
   "scripts": {

@@ -2,6 +2,7 @@
 
 import { join } from "node:path";
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
+import { createIngressCounters } from "../../agent/access-counters.ts";
 import type { AgentContext } from "../../agent/app.ts";
 import { loadAgentConfig, runtimeDialHost } from "../../agent/config.ts";
 import { createCoordinator } from "../../agent/coordinator.ts";
@@ -16,6 +17,7 @@ import { wakeActivity } from "../../core/registry/wake.ts";
 import { createDeployService } from "../../agent/deploys.ts";
 import { createCelldDeployRunner } from "../../drivers/deploy/celld.ts";
 import { createNodeHostReader } from "../../drivers/host/node.ts";
+import { type AccessLogTailer, createAccessLogTailer } from "../../drivers/observe/access-log.ts";
 import { createCaddyDriver } from "../../drivers/ingress/caddy.ts";
 import { createTraefikDriver, DEFAULT_ENTRY_POINT } from "../../drivers/ingress/traefik.ts";
 import { createCelldDriver, TELEMETRY_ENV } from "../../drivers/runtime/celld.ts";
@@ -93,6 +95,12 @@ const upArgs: ArgsDef = {
     description:
       "Report what this node does: emit its own events, and give every runtime " +
       "process CELLD_OTEL=1 unless runtime.celldEnv already states it",
+  },
+  "ingress-access-log": {
+    type: "string",
+    description:
+      "File the ingress writes its JSON access log to; the node follows it and counts " +
+      "requests, bytes, statuses and latencies per environment. Needs --observability",
   },
   "ingress-driver": { type: "string", description: "Ingress this node drives (caddy, traefik)" },
   "caddy-admin": { type: "string", description: "Base URL of the Caddy admin API" },
@@ -176,6 +184,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
    * settled by the loader and travels with the rest of that set.
    */
   const observability = createObservability({ enabled: config.observability.enabled });
+  let accessLog: AccessLogTailer | undefined;
   if (observability.enabled) {
     agent.observability = observability;
     /* Said once: what is recorded stays in this process, in a ring of a fixed
@@ -185,6 +194,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
         `(${String(OBSERVED_RING_SIZE)} kept, oldest dropped) and runs its processes with ` +
         `${TELEMETRY_ENV}=1 unless "runtime.celldEnv" says otherwise`,
     );
+    accessLog = attachIngressCounters(agent, config.observability.ingressAccessLog);
   }
 
   /* What every dialer of a process this node starts uses — the ingress here, the
@@ -274,6 +284,10 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
 
   const server = await startAgent(agent);
   console.log(`scafo ${version} listening on ${server.url} as node "${state.id}"`);
+  /* Started AFTER the agent, and at the log's current end: whatever the ingress
+     served before this node came up was already served, and re-counting it on
+     every restart would invent traffic. */
+  await accessLog?.start();
   reconciler.start();
   coordinator.start();
   heartbeat.start();
@@ -304,6 +318,9 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
     /* Stopped next: a pass that started while the node was shutting down would
        start processes this shutdown is about to leave behind. */
     reconciler.stop();
+    /* Read to the end and closed before the listener goes, so the requests the
+       ingress served while this node was shutting down are still counted. */
+    await accessLog?.stop();
     await server.close();
     await Promise.all(
       supervisor
@@ -311,6 +328,51 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
         .filter((status) => status.state === "running")
         .map((status) => supervisor.stop(status.id, { graceMs: driver.stopGraceMs })),
     );
+  });
+}
+
+/**
+ * Attaches the per-request counters when an operator named the access log their
+ * ingress writes, and returns the tailer that feeds them.
+ *
+ * ABSENT IS NOT A WARNING, IT IS THE ORDINARY CASE — an operator running their
+ * own Caddy or Traefik simply never names one, and there is no default path
+ * worth guessing. It is said ONCE, at boot, beside the switch that would have
+ * used it, so a node that is observing itself and counting nothing is not a
+ * mystery; nothing is said again on any pass.
+ */
+function attachIngressCounters(
+  agent: AgentContext,
+  path: string | undefined,
+): AccessLogTailer | undefined {
+  if (path === undefined) {
+    console.log(
+      `scafo: no ingress access log configured ("observability.ingressAccessLog", ` +
+        `--ingress-access-log, or SCAFO_INGRESS_ACCESS_LOG), so this node counts no requests`,
+    );
+    return undefined;
+  }
+
+  const counters = createIngressCounters({ platformDomains: agent.config.platformDomains });
+  agent.ingressCounters = counters;
+  console.log(
+    `scafo: counting what the ingress serves from "${path}"; requests, bytes, statuses ` +
+      `and latencies are kept per environment, in memory, since this boot`,
+  );
+
+  return createAccessLogTailer({
+    path,
+    onLine: (line) => {
+      counters.ingest(line);
+    },
+    /* Said once per distinct failure rather than once per poll: a log this node
+       may not read would otherwise print every second for as long as it runs. */
+    onError: (error) => {
+      console.error(
+        `scafo: ingress access log "${path}" could not be read: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    },
   });
 }
 

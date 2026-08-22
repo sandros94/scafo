@@ -90,6 +90,9 @@ services:
       # key in the registry and every token this node signs rejected for
       # reasons nothing on it explains. Deleting it is a deliberate act.
       - state:/var/lib/scafo
+      # OPTIONAL, and only for the two settings below: the file Caddy writes its
+      # access log to, shared with the ingress container so the node can read it.
+      - ingress-log:/var/log/scafo-ingress
     environment:
       SCAFO_S3_ENDPOINT: ${SCAFO_S3_ENDPOINT:-http://seaweedfs:8333}
       SCAFO_S3_BUCKET: ${SCAFO_S3_BUCKET:-scafo}
@@ -113,6 +116,27 @@ services:
       SCAFO_ADVERTISE: 127.0.0.1:7400
       # Caddy's admin API, on the loopback the two containers share.
       SCAFO_CADDY_ADMIN: http://127.0.0.1:2019
+      # OPTIONAL, AND BOTH LINES GO TOGETHER. The first turns the node's own
+      # reporting on; the second says where its ingress writes the access log it
+      # should count requests off — the ONLY complete account of what this
+      # installation served, since once a process is up its traffic goes
+      # ingress → process and never touches the node. Requests, bytes, statuses
+      # and latencies are then kept per project and environment, in memory, for
+      # as long as this node runs; nothing is persisted or served yet.
+      #
+      # BRING YOUR OWN INGRESS AND SKIP BOTH. There is no default path and
+      # naming none is not a warning: an installation whose Caddy or Traefik is
+      # configured elsewhere simply never sets SCAFO_INGRESS_ACCESS_LOG, and the
+      # adapter is not built at all. Naming one with SCAFO_OBSERVABILITY off is
+      # REFUSED at boot rather than ignored, because nothing would read it.
+      #
+      # What turns the log on at the other end is in caddy.json: a `scafo` log
+      # under `logging.logs` writing this file with the json encoder, and
+      # `logs.default_logger_name` on the server pointing the access entries at
+      # it. `"mode": "0644"` is what lets the node (uid 10001) read a file Caddy
+      # writes as root.
+      SCAFO_OBSERVABILITY: "1"
+      SCAFO_INGRESS_ACCESS_LOG: /var/log/scafo-ingress/access.log
 
   # The ingress. It SHARES THE NODE'S NETWORK NAMESPACE, which is the whole
   # topology in one line: the celld processes bind 127.0.0.1 and nothing else,
@@ -143,7 +167,13 @@ services:
     command: ["caddy", "run", "--config", "/etc/caddy/config.json"]
     volumes:
       - ./caddy.json:/etc/caddy/config.json:ro
+      # The same volume the node mounts, which is the whole of how the access
+      # log gets from the ingress to the node. Drop it, the `logging` block in
+      # caddy.json and the two SCAFO_ settings above together, or keep them
+      # together — half of this is a node counting nothing.
+      - ingress-log:/var/log/scafo-ingress
 
 volumes:
   store:
   state:
+  ingress-log:

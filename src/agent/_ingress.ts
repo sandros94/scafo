@@ -68,16 +68,24 @@ export async function applyIngress(agent: AgentContext, input: IngressInput): Pr
     }
   }
 
-  await ingress.apply(
-    renderRoutes({
-      platformDomains: agent.config.platformDomains,
-      environments: desired.map((entry) => ({ project: entry.project, env: entry.env })),
-      processes,
-      claims,
-      wake: {
-        port: parseHostPort(agent.config.node.listen, "node.listen").port,
-        parked,
-      },
-    }),
-  );
+  const routing = renderRoutes({
+    platformDomains: agent.config.platformDomains,
+    environments: desired.map((entry) => ({ project: entry.project, env: entry.env })),
+    processes,
+    claims,
+    wake: {
+      port: parseHostPort(agent.config.node.listen, "node.listen").port,
+      parked,
+    },
+  });
+
+  /* WHAT THE INGRESS IS ABOUT TO BE TOLD IS ALSO WHAT SAYS WHOSE HOST IS WHOSE.
+     The counters read the ingress's access log, and only this knows that a
+     custom domain belongs to an environment and which environment a build's own
+     hash host is a leg of — a second reading of that would be a second routing.
+     Handed over BEFORE the ingress call, so a pass whose ingress cannot be
+     reached still attributes the traffic that ingress is still serving. */
+  agent.ingressCounters?.observeRouting({ routes: routing.routes, claims });
+
+  await ingress.apply(routing);
 }

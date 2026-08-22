@@ -2,12 +2,33 @@
   "admin": {
     "listen": "127.0.0.1:2019"
   },
+  "logging": {
+    "logs": {
+      "default": {
+        "exclude": ["http.log.access.scafo"]
+      },
+      "scafo": {
+        "writer": {
+          "output": "file",
+          "filename": "/var/log/scafo-ingress/access.log",
+          "mode": "0644"
+        },
+        "encoder": {
+          "format": "json"
+        },
+        "include": ["http.log.access.scafo"]
+      }
+    }
+  },
   "apps": {
     "http": {
       "servers": {
         "scafo": {
           "listen": [":80"],
-          "routes": []
+          "routes": [],
+          "logs": {
+            "default_logger_name": "scafo"
+          }
         }
       }
     }

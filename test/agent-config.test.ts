@@ -880,6 +880,110 @@ describe("whether the node reports on itself", () => {
   });
 });
 
+describe("the ingress access log the node counts requests off", () => {
+  it("is ABSENT unless an operator names one, and that is not a warning", async () => {
+    /* The agent sees only the requests it wakes, so per-request numbers can only
+       come off the ingress's own log — and where that is, or whether there is
+       one at all, is the operator's to say. There is no default to guess. */
+    const config = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCAFO_OBSERVABILITY: "1" },
+    });
+
+    expect(config.observability).toEqual({ enabled: true });
+    expect(config.observability.ingressAccessLog).toBeUndefined();
+  });
+
+  it("is named from a flag, the environment or the file alike", async () => {
+    const path = "/var/log/scafo-ingress/access.log";
+
+    const fromFlag = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCAFO_OBSERVABILITY: "1" },
+      flags: { "ingress-access-log": path },
+    });
+    const fromEnv = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCAFO_OBSERVABILITY: "1", SCAFO_INGRESS_ACCESS_LOG: path },
+    });
+    const fromFile = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(
+        CONFIG_PATH,
+        JSON.stringify({ observability: { enabled: true, ingressAccessLog: path } }),
+      ),
+      env: REQUIRED_ENV,
+    });
+
+    expect(
+      [fromFlag, fromEnv, fromFile].map((config) => config.observability.ingressAccessLog),
+    ).toEqual([path, path, path]);
+  });
+
+  it("lets a flag override the environment and the environment the file", async () => {
+    const file = JSON.stringify({
+      observability: { enabled: true, ingressAccessLog: "/from/file.log" },
+    });
+
+    const overriddenByEnv = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, file),
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_ACCESS_LOG: "/from/env.log" },
+    });
+    const overriddenByFlag = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, file),
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_ACCESS_LOG: "/from/env.log" },
+      flags: { "ingress-access-log": "/from/flag.log" },
+    });
+
+    expect(overriddenByEnv.observability.ingressAccessLog).toBe("/from/env.log");
+    expect(overriddenByFlag.observability.ingressAccessLog).toBe("/from/flag.log");
+  });
+
+  it("REFUSES one named while observability is off, in every source", async () => {
+    /* A file nothing would ever open is an operator who believes they are
+       counting requests and is not — the same silent-off failure the switch
+       above refuses, one layer out. */
+    for (const opts of [
+      { env: { ...REQUIRED_ENV, SCAFO_INGRESS_ACCESS_LOG: "/var/log/access.log" } },
+      {
+        env: { ...REQUIRED_ENV, SCAFO_OBSERVABILITY: "0" },
+        flags: { "ingress-access-log": "/var/log/access.log" },
+      },
+      {
+        configPath: CONFIG_PATH,
+        readFile: fileAt(
+          CONFIG_PATH,
+          JSON.stringify({ observability: { ingressAccessLog: "/var/log/access.log" } }),
+        ),
+        env: REQUIRED_ENV,
+      },
+    ]) {
+      const error = await rejectsWith(() => loadAgentConfig(opts), "invalid-input");
+
+      /* Names both settings and the way forward, because a refusal that only
+         restates its rule sends an operator looking for documentation. */
+      expect(error.detail).toContain("observability.ingressAccessLog");
+      expect(error.detail).toContain("observability.enabled");
+      expect(error.detail).toContain("--ingress-access-log");
+      expect(error.detail).toContain("/var/log/access.log");
+    }
+  });
+
+  it("is accepted the moment observability is turned on in ANY source", async () => {
+    /* The two need not come from the same place: a file that turns observability
+       on and an environment that names the log is a working node. */
+    const config = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ observability: { enabled: true } })),
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_ACCESS_LOG: "/var/log/access.log" },
+    });
+
+    expect(config.observability).toEqual({
+      enabled: true,
+      ingressAccessLog: "/var/log/access.log",
+    });
+  });
+});
+
 describe("the runtime telemetry switch the node's own composes", () => {
   it("defaults CELLD_OTEL=1 under the operator's own set when it is on", async () => {
     const config = await loadAgentConfig({

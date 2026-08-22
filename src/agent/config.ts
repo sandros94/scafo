@@ -128,6 +128,23 @@ export interface WireguardConfig {
  */
 export interface ObservabilityConfig {
   enabled: boolean;
+  /**
+   * File the operator's ingress writes its JSON access log to, when the node
+   * should count the requests it records.
+   *
+   * A SEPARATE SWITCH, AND IT IS OPT-IN BY PRESENCE. The agent sees only the
+   * requests it wakes — once a process is up, traffic goes ingress → process and
+   * never touches the node — so per-request numbers can only come off the
+   * ingress's own log, and only an operator knows where their ingress writes it
+   * or whether it writes one at all. Absent means no adapter, no error and no
+   * warning: bringing your own ingress is simply never naming this.
+   *
+   * ONLY MEANINGFUL WHILE {@link ObservabilityConfig.enabled} IS ON, and naming
+   * one with observability off is REFUSED rather than ignored — a file nothing
+   * would ever read is a misreading of the surface worth telling the operator
+   * about while they are still looking at what they wrote.
+   */
+  ingressAccessLog?: string;
 }
 
 /** How this node gets at the variables its environments are configured with. */
@@ -335,6 +352,7 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
 
   const ingress = resolveIngress(sources);
   const observing = resolveBoolean("observability", sources, false);
+  const ingressAccessLog = resolveIngressAccessLog(sources, observing);
   /* Composed HERE rather than in the driver: the runtime's telemetry switch is
      one more variable an operator may state, so the node's own switch has to
      meet it where the variables are resolved and lose to it if it is there. */
@@ -399,7 +417,10 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
       pointerHoldMs: resolvePointerHold(sources),
       ...(celldEnv === undefined ? {} : { celldEnv }),
     },
-    observability: { enabled: observing },
+    observability: {
+      enabled: observing,
+      ...(ingressAccessLog === undefined ? {} : { ingressAccessLog }),
+    },
     ...(ingress === undefined ? {} : { ingress }),
     ...(keyFile === undefined ? {} : { varsets: { keyFile } }),
     ...(transport === undefined ? {} : { transport }),
@@ -544,6 +565,11 @@ const ORIGINS = {
     env: ["SCAFO_OBSERVABILITY"],
     file: "observability.enabled",
   },
+  ingressAccessLog: {
+    flag: "ingress-access-log",
+    env: ["SCAFO_INGRESS_ACCESS_LOG"],
+    file: "observability.ingressAccessLog",
+  },
   ingressDriver: {
     flag: "ingress-driver",
     env: ["SCAFO_INGRESS_DRIVER"],
@@ -678,6 +704,32 @@ function withTelemetry(
   if (!observing) return configured;
   if (configured?.[TELEMETRY_ENV] !== undefined) return configured;
   return { ...configured, [TELEMETRY_ENV]: "1" };
+}
+
+/**
+ * The ingress access log this node counts requests off, or undefined when the
+ * operator named none — which is the ordinary case and not a warning.
+ *
+ * NAMING ONE WITH OBSERVABILITY OFF IS REFUSED. The two are separate switches on
+ * purpose: observability is what this node reports about ITSELF, and the access
+ * log is the only complete account of what its ingress served. But the second
+ * only ever feeds the first, so a file named while the first is off is a file
+ * nothing opens — an operator who wrote it believes they are counting requests
+ * and is not, which is exactly the silent-off failure this surface refuses
+ * everywhere else.
+ */
+function resolveIngressAccessLog(sources: Sources, observing: boolean): string | undefined {
+  const origin: Origin = ORIGINS.ingressAccessLog;
+  const path = resolve("ingressAccessLog", sources);
+  if (path === undefined || observing) return path;
+
+  throw new ScafoError("invalid-input", "Access log configured with observability off", {
+    detail:
+      `"${origin.file}" (--${origin.flag}) names ${JSON.stringify(path)}, but ` +
+      `"${ORIGINS.observability.file}" is off, so nothing would ever read that file. ` +
+      `Turn observability on (--${ORIGINS.observability.flag}, or ` +
+      `${ORIGINS.observability.env.join(" or ")}=1), or drop the access log setting`,
+  });
 }
 
 /**

@@ -1,6 +1,7 @@
 export * from "./config.ts";
 export * from "./middleware.ts";
 export * from "./observe.ts";
+export * from "./access-counters.ts";
 export * from "./app.ts";
 export * from "./serve.ts";
 export * from "./reconcile.ts";

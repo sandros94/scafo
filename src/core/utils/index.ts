@@ -1,3 +1,4 @@
+export * from "./access-log.ts";
 export * from "./slug.ts";
 export * from "./host.ts";
 export * from "./hash.ts";

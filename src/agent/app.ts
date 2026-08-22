@@ -40,6 +40,7 @@ import {
   verifyCaller,
   verifyWorkload,
 } from "./_intake.ts";
+import type { IngressCounters } from "./access-counters.ts";
 import type { AgentConfig } from "./config.ts";
 import type { Coordinator } from "./coordinator.ts";
 import type { DeployService, DeployStatus } from "./deploys.ts";
@@ -91,6 +92,16 @@ export interface AgentContext {
    * `observability.enabled` says so.
    */
   observability?: Observability;
+  /**
+   * Where the requests this node's INGRESS served are counted, when an operator
+   * named the access log it writes them to.
+   *
+   * ABSENT IS THE OFF STATE, exactly as above, and it is the ordinary one: the
+   * adapter is built only when `observability.ingressAccessLog` names a file.
+   * The routing is fed to it after every reconcile pass, because the routing is
+   * what says which environment a host in that log belongs to.
+   */
+  ingressCounters?: IngressCounters;
   /**
    * Where the wake surface's weighted pick between an environment's serving legs
    * comes from — a value in `[0, 1)`, drawn once per look at a held request.

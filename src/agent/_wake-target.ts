@@ -1,6 +1,7 @@
 /* Internal: what a request's Host names, and whether it is something this node can wake. */
 
 import { isScafoError } from "../core/error.ts";
+import { platformLabel } from "../core/placement/hosts.ts";
 import { APEX_ENVIRONMENT } from "../core/placement/routes.ts";
 import { getBuild } from "../core/registry/builds.ts";
 import { readJson } from "../core/registry/cas.ts";
@@ -72,21 +73,6 @@ export async function resolveWakeTarget(
   /* No environment answers to it, so the label's second half is read as the one
      other thing it can be. An apex host has no second half and stops here. */
   return ref === undefined ? null : recallableBuild(registry, project, ref);
-}
-
-/**
- * The label a host carries under one of this installation's platform domains, or
- * null when it is under none of them.
- *
- * The apex domain itself is not one: nothing is ever rendered at it, and a
- * request for it is not asking for a project.
- */
-function platformLabel(host: string, platformDomains: string[]): string | null {
-  for (const domain of platformDomains) {
-    const suffix = `.${domain}`;
-    if (host.endsWith(suffix)) return host.slice(0, -suffix.length);
-  }
-  return null;
 }
 
 /**
