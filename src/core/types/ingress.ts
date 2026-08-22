@@ -46,6 +46,31 @@ export interface WakeRouting {
   domains: string[];
 }
 
+/**
+ * The fleet's own API, served at each platform domain's BARE APEX so that a CI
+ * job, a CLI or a dashboard reaches any node of the installation at one
+ * well-known name — the registry is in the bucket, so any node answers any call.
+ *
+ * AN EXPLICIT ROUTE PER APEX, never a widening of the catch-all: a `*.<domain>`
+ * matcher covers exactly one label and therefore never the domain itself, which
+ * is also why the apex has no wildcard certificate and mints its own.
+ *
+ * {@link ApiRouting.denied} IS THE SECURITY RULE OF THIS SURFACE AND A DRIVER
+ * MUST ENFORCE IT AT THE INGRESS, not by trusting the agent behind it: a request
+ * for one of these prefixes on one of these hosts must be answered by the
+ * ingress itself and must never be proxied. Both prefixes are matched at a path
+ * SEGMENT boundary — the prefix exactly, or the prefix followed by `/` and
+ * anything — which is what the two implemented drivers were pinned to.
+ */
+export interface ApiRouting {
+  /** Loopback port the agent answers on. */
+  port: number;
+  /** Bare platform-domain apexes routed to the agent, sorted. */
+  hosts: string[];
+  /** Path prefixes that must NEVER be proxied through {@link ApiRouting.hosts}. */
+  denied: string[];
+}
+
 /** The whole of the routing an ingress should present for this node. */
 export interface IngressDesired {
   /**
@@ -77,6 +102,20 @@ export interface IngressDesired {
    * ingress does with a host it has no route for.
    */
   wake?: WakeRouting;
+  /**
+   * The platform apexes serving the fleet's API, when this node publishes it.
+   * Absent when `api.public` is off, which is the routing scafo renders when the
+   * apex answers nothing at all.
+   *
+   * PRECEDENCE, IN BOTH DIRECTIONS. These entries sit BELOW every
+   * {@link IngressDesired.routes} host and every {@link WakeRouting.hosts} entry
+   * — a renderer leaves an apex out of them entirely when either already answers
+   * on it — and ABOVE the {@link WakeRouting.domains} catch-alls, which matters
+   * whenever one platform domain is a subdomain of another (`dev.example.com`
+   * under `example.com`): the catch-all for the outer domain matches the inner
+   * one's apex, and the API must win.
+   */
+  api?: ApiRouting;
 }
 
 /** Routes public traffic to the processes a node runs. */

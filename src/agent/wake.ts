@@ -110,6 +110,13 @@ export interface WakeService {
    * domains is reached as the wake surface, API path or not. That is the routing
    * being honoured rather than an accident — every host under those domains is
    * routed here — and it is why `node.listen` is loopback by default.
+   *
+   * THE ONE EXCEPTION IS THE BARE APEX OF A PLATFORM DOMAIN, while `api.public`
+   * is on: that name is the fleet's API and belongs to the routes rather than to
+   * this surface, so a path nothing serves there is the API's own 404 problem
+   * document instead of a wake refusal. It is a name no label parses to, so
+   * nothing else would have claimed it — but a custom domain claimed for a
+   * parked environment could, and the API wins.
    */
   handles(host: string): boolean;
   /**
@@ -172,6 +179,11 @@ export function createWakeService(agent: AgentContext): WakeService {
 
   function handles(host: string): boolean {
     if (host === "") return false;
+
+    /* The fleet's API, not an application: the routing sends this name here for
+       the routes below to answer, so it is dispatched to them and a path they do
+       not have is their own 404 rather than a wake for a host that has none. */
+    if (agent.config.api.public && agent.config.platformDomains.includes(host)) return false;
 
     for (const domain of agent.config.platformDomains) {
       if (host.endsWith(`.${domain}`)) return true;

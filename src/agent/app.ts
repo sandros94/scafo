@@ -562,6 +562,19 @@ async function servesHost(agent: AgentContext, host: string): Promise<boolean> {
   if (!isHost(host)) return false;
 
   /*
+   * THE BARE APEX OF A PLATFORM DOMAIN IS THE FLEET'S API, and the wildcard
+   * certificate does not cover it — `*.<domain>` is one label and never the
+   * domain itself — so this ask is the only way it is ever issued one. Approved
+   * without a bucket read: the name is this node's own configuration, and what
+   * answers there is the agent rather than anything that could be missing.
+   *
+   * REFUSED WHILE `api.public` IS OFF, which is what it was before the apex
+   * served anything: no route points there, so a certificate for it would name
+   * something that answers nothing.
+   */
+  if (agent.config.api.public && agent.config.platformDomains.includes(host)) return true;
+
+  /*
    * A platform-domain host is approved only when the name resolves to
    * something real: an environment, a wakeable build, or a process actually
    * running one. A parseable label alone is NOT enough — the ask gates

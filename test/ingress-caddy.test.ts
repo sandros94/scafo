@@ -9,6 +9,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { IngressDesired, IngressDriver } from "../src/core/types/ingress.ts";
 import {
+  type CaddyProxyHandler,
+  type CaddyRoute,
   CATCHALL_ID_PREFIX,
   catchAllId,
   createCaddyDriver,
@@ -222,7 +224,7 @@ describe("a host divided between several backends", () => {
        compare and rewrite on every pass for no gain. */
     const [route] = renderCaddyRoutes(desired([[HOST, 42_000]]));
 
-    expect(route.handle[0].load_balancing).toBeUndefined();
+    expect(proxyOf(route).load_balancing).toBeUndefined();
     expect(Object.keys(route.handle[0])).toEqual(["handler", "upstreams"]);
   });
 
@@ -231,7 +233,7 @@ describe("a host divided between several backends", () => {
        for them — the dial follows the node's word, not an assumption. */
     const [route] = renderCaddyRoutes(desired([[HOST, 42_000]]), "10.83.0.1");
 
-    expect(route.handle[0].upstreams).toEqual([{ dial: "10.83.0.1:42000" }]);
+    expect(proxyOf(route).upstreams).toEqual([{ dial: "10.83.0.1:42000" }]);
   });
 
   it("keeps the weights and the upstreams the same length, whatever the split", () => {
@@ -244,7 +246,7 @@ describe("a host divided between several backends", () => {
       ],
     ]) {
       const [route] = renderCaddyRoutes(split(HOST, legs));
-      const handle = route.handle[0];
+      const handle = proxyOf(route);
 
       /* Caddy accepts a mismatch without complaint, which is exactly why the
          renderer may never produce one. */
@@ -598,6 +600,19 @@ function agentRoute(id: string, match: string): Record<string, unknown> {
 
 function backend(port: number): { project: string; env: string; build: string; port: number } {
   return { project: "shop", env: "production", build: `build${String(port)}`, port };
+}
+
+/**
+ * The proxy handler of a route, narrowed. Only the API apex denials carry
+ * another kind, and a route that has one here is the assertion failing rather
+ * than a field read off the wrong shape.
+ */
+function proxyOf(route: CaddyRoute): CaddyProxyHandler {
+  const handle = route.handle[0];
+  if (handle.handler !== "reverse_proxy") {
+    throw new Error(`route "${route["@id"]}" does not proxy: ${handle.handler}`);
+  }
+  return handle;
 }
 
 function methods(): string[] {

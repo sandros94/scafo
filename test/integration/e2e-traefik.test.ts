@@ -98,6 +98,18 @@ const PROJECT = "app";
 const ENVIRONMENT = "production";
 const NODE_ID = "node-e2e-traefik";
 
+/**
+ * The routers this node publishes whatever it is serving: the catch-all that
+ * hands unmatched names under the platform domain to the agent, and the pair
+ * that answers the fleet's API at the domain's own apex — the second of which
+ * is what keeps `/v1/storage` off that public name.
+ */
+const STANDING_ROUTERS = [
+  `scafo_catchall_${PLATFORM_DOMAIN}`,
+  `scafo_api_${PLATFORM_DOMAIN}`,
+  `scafo_apideny_${PLATFORM_DOMAIN}`,
+];
+
 let store: StartedStore;
 let traefik: StartedTestContainer;
 let agent: StartedTestContainer;
@@ -334,7 +346,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
        */
       const expected = [
         ...[envHost(), apexHost(), buildHost(buildV1)].map((host) => `scafo_${host}`),
-        `scafo_catchall_${PLATFORM_DOMAIN}`,
+        ...STANDING_ROUTERS,
       ].sort();
       await wait("Traefik to hold the three v1 routers", DEADLINE_MS, async () => {
         const routers = (await scafoRouters()).sort();
@@ -359,6 +371,51 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   );
 
   it(
+    "answers the fleet's API at the domain's apex, and denies the colocated prefixes there",
+    async () => {
+      /*
+       * THE PULL MODEL'S HALF OF THE APEX CONTRACT, and the shape worth pinning
+       * against the real thing: the denial is sent to `noop@internal`, Traefik's
+       * own service for a router that must reach no backend. A router naming a
+       * service Traefik cannot resolve is DISABLED, and a disabled denial is
+       * `/v1/storage` falling through to the apex router — so what this asserts
+       * is that the denial is a router Traefik actually built and honours.
+       */
+      const health = await wait(
+        `${PLATFORM_DOMAIN} to answer the agent's health`,
+        DEADLINE_MS,
+        async () => {
+          const answer = await httpGet(httpPort, "/v1/health", { host: PLATFORM_DOMAIN });
+          return answer.status === 200 ? answer : null;
+        },
+      );
+      expect(JSON.parse(health.body)).toMatchObject({ ok: true, node: NODE_ID });
+      observed.apexHealth = JSON.parse(health.body);
+
+      for (const path of [
+        "/v1/storage",
+        "/v1/storage/list?prefix=",
+        "/v1/storage/objects/anything",
+        "/v1/ingress/traefik",
+      ]) {
+        const blocked = await httpGet(httpPort, path, { host: PLATFORM_DOMAIN });
+
+        /* Traefik's own answer for a router with nothing behind it, and the one
+           thing that matters about it: it is not the agent's. */
+        expect(blocked.status, `${path} through the apex`).toBe(418);
+        expect(blocked.body, `${path} through the apex`).not.toContain("urn:scafo:");
+      }
+      observed.apexDeniedStatus = 418;
+
+      /* The pull-provider route itself is untouched on the node's own listener,
+         which is where a colocated Traefik reaches it. */
+      const local = await httpGet(agentPort, "/v1/ingress/traefik", {});
+      expect(local.status).toBe(200);
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
     "flips to a second build, and Traefik follows within a poll of the node publishing it",
     async () => {
       const result = await runCli(deployArgs(await staged("v2")), {});
@@ -370,16 +427,17 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       observed.deployV2Output = result.output;
 
       /*
-       * Both v2 hosts, from both ends. The interesting number is NOT here: by
-       * the time `scafo deploy` printed "routed" the node had published the new
-       * routing and Traefik had already polled it, so the poll interval hides
-       * entirely inside the deploy's own seconds. Recorded as the observation it
-       * is — under a deploy, the pull model costs nothing visible.
+       * Both v2 hosts, from both ends. "routed" is a fact about the PROCESS —
+       * its readiness gate passed — and the pass publishes the routing after
+       * its rollouts, so the router may land a beat behind the word. Polled for
+       * that reason; the delta below records how far behind it ever is, which
+       * under a deploy is usually nothing visible.
        */
       const publishedAt = Date.now();
-      expect(`scafo_${buildHost(buildV2)}` in ((await snapshotNow()).http?.routers ?? {})).toBe(
-        true,
-      );
+      await wait(`the router for ${buildHost(buildV2)} to be published`, DEADLINE_MS, async () => {
+        const routers = (await snapshotNow()).http?.routers ?? {};
+        return `scafo_${buildHost(buildV2)}` in routers ? routers : null;
+      });
       await untilServes(envHost(), "v2");
       observed.flipPublishedToServedMs = Date.now() - publishedAt;
 
@@ -676,20 +734,22 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
        */
       /*
        * The snapshot never empties any more: the catch-alls that hand unmatched
-       * platform hosts to the agent stay whatever is retired, so "nothing served"
-       * now reads as "nothing but catch-alls". The empty-document spelling the
-       * driver keeps is for the node that has no platform domains at all.
+       * platform hosts to the agent, and the routers that answer the fleet's API
+       * at this domain's own apex, stay whatever is retired — so "nothing
+       * served" reads as "nothing but the standing routers". The empty-document
+       * spelling the driver keeps is for the node that has no platform domains
+       * at all.
        *
        * SAFE TO REQUEST, unlike a superseded build's host: a retired environment
        * is a 404 the wake surface answers without stamping anything, so the poll
        * cannot keep alive what it is watching leave.
        */
       const settledAt = await wait(
-        "the node to publish nothing but the catch-alls",
+        "the node to publish nothing but the standing routers",
         DEADLINE_MS,
         async () => {
           const routers = Object.keys((await snapshotNow()).http?.routers ?? { absent: true });
-          return routers.every((name) => name.startsWith("scafo_catchall_")) ? Date.now() : null;
+          return routers.every((name) => STANDING_ROUTERS.includes(name)) ? Date.now() : null;
         },
       );
       const gone = await wait(`${envHost()} to stop being served`, DEADLINE_MS, async () => {
@@ -709,11 +769,11 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
         expect(answer.body, host).toContain("urn:scafo:not-found");
       }
 
-      /* Read from both ends: Traefik holds nothing of this node but the
-         catch-alls that keep its platform domains answered. */
+      /* Read from both ends: Traefik holds nothing of this node but the standing
+         routers — the catch-alls keeping its platform domains answered, and the
+         fleet's API at the domain's own apex, which no environment owns. */
       const remaining = await scafoRouters();
-      expect(remaining.every((name) => name.startsWith("scafo_catchall_"))).toBe(true);
-      expect(remaining).not.toHaveLength(0);
+      expect(remaining.sort()).toEqual([...STANDING_ROUTERS].map((name) => `${name}@http`).sort());
 
       const record = await getEnvironment(registry, PROJECT, ENVIRONMENT);
       expect(record.retiredAt).toBeDefined();

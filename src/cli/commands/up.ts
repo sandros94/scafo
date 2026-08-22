@@ -109,6 +109,13 @@ const upArgs: ArgsDef = {
       "File the ingress writes its JSON access log to; the node follows it and counts " +
       "requests, bytes, statuses and latencies per environment. Needs --observability",
   },
+  "api-public": {
+    type: "boolean",
+    description:
+      "Serve the fleet's API at each platform domain's own apex, so any node is reachable " +
+      "at one well-known name (default on; --no-api-public leaves the apex unrouted and " +
+      "without a certificate). /v1/storage and /v1/ingress/traefik are never reachable there",
+  },
   "ingress-driver": { type: "string", description: "Ingress this node drives (caddy, traefik)" },
   "caddy-admin": { type: "string", description: "Base URL of the Caddy admin API" },
   "caddy-server": { type: "string", description: "Caddy server the node writes its routes into" },

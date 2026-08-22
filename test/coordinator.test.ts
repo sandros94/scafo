@@ -279,6 +279,7 @@ function agentConfig(nodeId: string): AgentConfig {
       pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
+    api: { public: true },
   };
 }
 

@@ -17,6 +17,7 @@ import {
 import { applyIngress } from "../src/agent/_ingress.ts";
 import type { AgentContext } from "../src/agent/app.ts";
 import type { DesiredEnvironment } from "../src/core/placement/reconcile.ts";
+import { API_DENIED_PREFIXES } from "../src/core/placement/routes.ts";
 import type { IngressDesired, IngressRoute } from "../src/core/types/ingress.ts";
 import type { EnvironmentRecord } from "../src/core/types/registry.ts";
 import type { RuntimeProcess } from "../src/core/types/runtime.ts";
@@ -287,6 +288,7 @@ describe("what the reconcile pass hands over", () => {
       config: {
         platformDomains: DOMAINS,
         node: { listen: "127.0.0.1:7400" },
+        api: { public: true },
       },
       ingress: {
         apply: (desired: IngressDesired): Promise<void> => {
@@ -319,6 +321,39 @@ describe("what the reconcile pass hands over", () => {
 
     expect(counters.snapshot().unattributed).toBe(0);
     expect(named(counters)).toEqual([{ project: "shop", env: "production", requests: 4 }]);
+  });
+
+  it("publishes the platform apexes as the fleet's API, or not at all", async () => {
+    /* The one thing `api.public` does to the routing, at the seam that reads it:
+       the apexes are named with the agent's own port, or the routing carries no
+       `api` at all and is what scafo rendered before the apex answered. */
+    for (const isPublic of [true, false]) {
+      const applied: IngressDesired[] = [];
+      const agent = {
+        config: {
+          platformDomains: DOMAINS,
+          node: { listen: "127.0.0.1:7400" },
+          api: { public: isPublic },
+        },
+        ingress: {
+          apply: (desired: IngressDesired): Promise<void> => {
+            applied.push(desired);
+            return Promise.resolve();
+          },
+        },
+      } as unknown as AgentContext;
+
+      await applyIngress(agent, { desired: [], processes: [], parked: [] });
+
+      expect(applied[0].api, String(isPublic)).toEqual(
+        isPublic
+          ? { port: 7400, hosts: [...DOMAINS].sort(), denied: API_DENIED_PREFIXES }
+          : undefined,
+      );
+      /* The same agent, the same port: the API and the wake surface are one
+         listener reached under two contracts. */
+      expect(applied[0].wake?.port, String(isPublic)).toBe(7400);
+    }
   });
 });
 

@@ -431,6 +431,7 @@ function agentConfig(): AgentConfig {
       pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
+    api: { public: true },
   };
 }
 

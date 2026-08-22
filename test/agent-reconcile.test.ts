@@ -1281,6 +1281,7 @@ function agentContext(
       pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
+    api: { public: true },
   };
 
   const agent: AgentContext = {

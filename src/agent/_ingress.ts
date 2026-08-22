@@ -68,15 +68,19 @@ export async function applyIngress(agent: AgentContext, input: IngressInput): Pr
     }
   }
 
+  const port = parseHostPort(agent.config.node.listen, "node.listen").port;
   const routing = renderRoutes({
     platformDomains: agent.config.platformDomains,
     environments: desired.map((entry) => ({ project: entry.project, env: entry.env })),
     processes,
     claims,
-    wake: {
-      port: parseHostPort(agent.config.node.listen, "node.listen").port,
-      parked,
-    },
+    wake: { port, parked },
+    /* The same agent, at the same port, reached under a different contract: the
+       platform apexes serve the fleet's API rather than an application, and the
+       ingress keeps the colocated prefixes off them. Omitted outright when the
+       operator turned that off, so the routing is the one scafo rendered before
+       the apex answered anything. */
+    ...(agent.config.api.public ? { api: { port } } : {}),
   });
 
   /* WHAT THE INGRESS IS ABOUT TO BE TOLD IS ALSO WHAT SAYS WHOSE HOST IS WHOSE.

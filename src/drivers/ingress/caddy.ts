@@ -40,6 +40,30 @@ export const ROUTE_ID_PREFIX: string = "scafo_";
  */
 export const CATCHALL_ID_PREFIX: string = `${ROUTE_ID_PREFIX}catchall_`;
 
+/**
+ * Namespace of the route serving the fleet's API at one platform apex, on the
+ * same reading as {@link CATCHALL_ID_PREFIX}: an underscore cannot occur in a
+ * DNS name, so `scafo_api_<domain>` can never be the id of a route for a host.
+ */
+export const API_ID_PREFIX: string = `${ROUTE_ID_PREFIX}api_`;
+
+/**
+ * Namespace of the route that DENIES the excluded prefixes at one platform
+ * apex. Distinct from {@link API_ID_PREFIX} rather than a suffix of it, so
+ * neither is a prefix of the other and a converge can tell them apart by name.
+ */
+export const API_DENY_ID_PREFIX: string = `${ROUTE_ID_PREFIX}apideny_`;
+
+/**
+ * What a denied request on the API apex is answered with, by Caddy itself and
+ * never by the agent behind it.
+ *
+ * A miss rather than a refusal: an unauthenticated caller learns that the name
+ * serves nothing there, which is all it is owed. A `403` would confirm the
+ * surface exists and is merely closed to them.
+ */
+export const API_DENY_STATUS: number = 404;
+
 export interface CaddyDriverOptions {
   /** Base URL of Caddy's admin API. Defaults to {@link DEFAULT_ADMIN_URL}. */
   adminUrl?: string;
@@ -71,16 +95,43 @@ export interface CaddyLoadBalancing {
   selection_policy: { policy: "weighted_round_robin"; weights: number[] };
 }
 
+/**
+ * One matcher set: every matcher in it must agree for the route to match.
+ *
+ * `not` holds matcher sets the request must match NONE of, which is Caddy's own
+ * spelling of a negation and the shape it stores a route in — verified against
+ * `caddy:2` (v2.11.4) by writing it through the admin API and reading it back
+ * verbatim. `path` is a list of patterns, case-insensitive, where a trailing
+ * `/*` matches the whole subtree beneath a prefix and the bare prefix does not.
+ */
+export interface CaddyMatch {
+  host: string[];
+  path?: string[];
+  not?: Array<{ path: string[] }>;
+}
+
+/** What a routed host is served by: the upstreams, and how they are chosen. */
+export interface CaddyProxyHandler {
+  handler: "reverse_proxy";
+  upstreams: Array<{ dial: string }>;
+  /** Absent for a single upstream: there is nothing to balance. */
+  load_balancing?: CaddyLoadBalancing;
+}
+
+/** What Caddy answers with itself, dialling nothing: the API apex denials. */
+export interface CaddyDenyHandler {
+  handler: "static_response";
+  status_code: number;
+}
+
+/** A route's handler: the proxy every routed host has, or a flat denial. */
+export type CaddyHandler = CaddyProxyHandler | CaddyDenyHandler;
+
 /** One route as this driver writes it; Caddy keeps every field verbatim. */
 export interface CaddyRoute {
   "@id": string;
-  "match": Array<{ host: string[] }>;
-  "handle": Array<{
-    handler: "reverse_proxy";
-    upstreams: Array<{ dial: string }>;
-    /** Absent for a single upstream: there is nothing to balance. */
-    load_balancing?: CaddyLoadBalancing;
-  }>;
+  "match": CaddyMatch[];
+  "handle": CaddyHandler[];
   "terminal": true;
 }
 
@@ -164,19 +215,20 @@ export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
   return {
     async apply(desired: IngressDesired): Promise<void> {
       /*
-       * THE INVARIANT THIS CONVERGE KEEPS: every catch-all route this driver
-       * owns sits AFTER every other route it owns, on every pass. Caddy matches
-       * routes in ARRAY ORDER and each of these is terminal, so a catch-all
-       * reached first answers for a host an explicit route was written for —
-       * which is not one misrouted name but a whole platform domain's live
-       * traffic going to the agent instead of to the processes serving it.
+       * THE INVARIANT THIS CONVERGE KEEPS: the TRAILING routes this driver owns
+       * — the API apexes and their denials, then the per-domain catch-alls —
+       * sit AFTER every host route it owns and in exactly the rendered order, on
+       * every pass. Caddy matches routes in ARRAY ORDER and each of these is
+       * terminal, so getting it wrong is not one misrouted name: a catch-all
+       * reached first sends a whole platform domain's live traffic to the agent,
+       * and an API route reached before its denial would proxy `/v1/storage`.
        *
-       * `POST` appends, so any route added on this pass would land behind
-       * catch-alls that are already there. Rather than compute an insertion
-       * point, the catch-alls are DELETED AND RE-APPENDED whenever they are not
-       * already exactly right — same ids, same contents, nothing this driver
-       * owns after them, and nothing appended after them on this pass. There is
-       * one per platform domain, and a settled node re-appends none of them.
+       * `POST` appends, so any route added on this pass would land behind the
+       * trailing ones that are already there. Rather than compute an insertion
+       * point, they are DELETED AND RE-APPENDED AS A BLOCK whenever they are not
+       * already exactly right — same ids, same order, same contents, nothing
+       * this driver owns after them, and nothing appended after them on this
+       * pass. A settled node re-appends none of them.
        */
       const owned = new Map<string, Record<string, unknown>>();
       const order: string[] = [];
@@ -191,13 +243,13 @@ export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
       const rendered = renderCaddyRoutes(desired, upstreamHost);
       const wanted = new Map<string, CaddyRoute>();
       for (const route of rendered) wanted.set(route["@id"], route);
-      const catchAlls = rendered.filter((route) => isCatchAll(route["@id"]));
+      const trailing = rendered.filter((route) => isTrailing(route["@id"]));
 
       /* Routes are put in place before stale ones are taken away, so a host that
          moves between backends is never briefly served by neither. */
       let appended = false;
       for (const [id, route] of wanted) {
-        if (isCatchAll(id)) continue;
+        if (isTrailing(id)) continue;
 
         const current = owned.get(id);
         if (current === undefined) {
@@ -218,29 +270,31 @@ export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
       }
 
       for (const id of [...owned.keys()].sort()) {
-        /* Stale catch-alls are left to the re-append below, which is the only
-           thing that ever writes them, so they are never removed and then not
-           put back. */
-        if (wanted.has(id) || isCatchAll(id)) continue;
+        /* Stale trailing routes are left to the re-append below, which is the
+           only thing that ever writes them, so they are never removed and then
+           not put back. */
+        if (wanted.has(id) || isTrailing(id)) continue;
 
         const url = idUrl(id);
         const response = await call("DELETE", url);
         if (!response.ok) throw adminFailed("DELETE", url, `answered ${String(response.status)}`);
       }
 
-      if (!appended && catchAllsSettled(order, owned, catchAlls)) return;
+      if (!appended && trailingSettled(order, owned, trailing)) return;
 
       /* The one place this driver removes before it adds, and it is the safe
-         direction: what a catch-all answers is a request nothing else routes,
+         direction: what these routes answer is a request nothing else routes,
          so the window costs Caddy's own answer for an unrouted host rather than
-         an outage of anything being served. Adding first is not available —
-         appending a second copy would put the stale one first. */
-      for (const id of order.filter(isCatchAll)) {
+         an outage of anything being served — and an API apex that is briefly
+         absent cannot leak, because its denial and its proxy go together.
+         Adding first is not available — appending a second copy would put the
+         stale one first. */
+      for (const id of order.filter(isTrailing)) {
         const url = idUrl(id);
         const response = await call("DELETE", url);
         if (!response.ok) throw adminFailed("DELETE", url, `answered ${String(response.status)}`);
       }
-      for (const route of catchAlls) {
+      for (const route of trailing) {
         const response = await call("POST", routesUrl, route);
         if (!response.ok) {
           throw adminFailed("POST", routesUrl, `answered ${String(response.status)}`);
@@ -278,11 +332,34 @@ export function catchAllId(domain: string): string {
   return `${CATCHALL_ID_PREFIX}${domain}`;
 }
 
+/** The `@id` the API route for one platform apex is addressed by. */
+export function apiRouteId(domain: string): string {
+  return `${API_ID_PREFIX}${domain}`;
+}
+
+/** The `@id` the denial guarding one platform apex is addressed by. */
+export function apiDenyId(domain: string): string {
+  return `${API_DENY_ID_PREFIX}${domain}`;
+}
+
 /**
  * The routes this driver wants Caddy to hold for `desired`, IN THE ORDER CADDY
  * MUST HOLD THEM: everything explicit first — the process-backed hosts in the
- * order the routing states them, then the hosts waiting to be woken — and the
- * per-domain catch-alls last.
+ * order the routing states them, then the hosts waiting to be woken — then the
+ * API apexes, and the per-domain catch-alls last.
+ *
+ * THE API APEXES SIT WHERE THEY DO FOR TWO REASONS. Below the hosts above, so an
+ * application deliberately put at a platform apex keeps it; above the
+ * catch-alls, because one platform domain may be a subdomain of another and
+ * `*.<outer>` matches `<inner>` exactly.
+ *
+ * Each apex is TWO routes and the DENIAL COMES FIRST. The second matches the
+ * apex and NOT the excluded prefixes and proxies everything else to the agent;
+ * the first matches those very prefixes and answers {@link API_DENY_STATUS} flat,
+ * from Caddy, without ever dialling anything. Either alone would close the
+ * surface — the negation makes the proxy unable to carry those paths at all —
+ * and the pair is what also gives the caller an answer instead of Caddy's
+ * fall-through.
  *
  * The order is part of what is rendered rather than something `apply` sorts out,
  * because Caddy matches top-down and every route here is terminal. See `apply`
@@ -299,15 +376,41 @@ export function renderCaddyRoutes(
   const routes = desired.routes.map(({ host, backends }) => routeFor(host, backends, upstreamHost));
 
   const wake = desired.wake;
-  if (wake === undefined) return routes;
+  const wakeDial = wake === undefined ? "" : `127.0.0.1:${String(wake.port)}`;
+  if (wake !== undefined) {
+    for (const host of wake.hosts) routes.push(agentRoute(routeId(host), host, wakeDial));
+  }
 
-  const dial = `127.0.0.1:${String(wake.port)}`;
-  for (const host of wake.hosts) routes.push(agentRoute(routeId(host), host, dial));
+  const api = desired.api;
+  if (api !== undefined) {
+    const dial = `127.0.0.1:${String(api.port)}`;
+    const denied = api.denied.flatMap(deniedPatterns);
+
+    for (const host of api.hosts) {
+      routes.push({
+        "@id": apiDenyId(host),
+        "match": [{ host: [host], path: denied }],
+        /* Answered BY CADDY. Nothing on this path reaches the agent, so no
+           misreading of a header, a token or a route behind it can open it. */
+        "handle": [{ handler: "static_response", status_code: API_DENY_STATUS }],
+        "terminal": true,
+      });
+      routes.push({
+        "@id": apiRouteId(host),
+        "match": [{ host: [host], not: [{ path: denied }] }],
+        "handle": [{ handler: "reverse_proxy", upstreams: [{ dial }] }],
+        "terminal": true,
+      });
+    }
+  }
+
   /* A Caddy host matcher wildcard covers exactly ONE label, so `*.<domain>` is
      every subdomain of a platform domain and never the domain itself — and
      never a subdomain of a subdomain either. */
-  for (const domain of wake.domains) {
-    routes.push(agentRoute(catchAllId(domain), `*.${domain}`, dial));
+  if (wake !== undefined) {
+    for (const domain of wake.domains) {
+      routes.push(agentRoute(catchAllId(domain), `*.${domain}`, wakeDial));
+    }
   }
   return routes;
 }
@@ -366,28 +469,35 @@ function agentRoute(id: string, match: string, dial: string): CaddyRoute {
   };
 }
 
-/** Whether an `@id` this driver owns is one of its catch-alls. */
-function isCatchAll(id: string): boolean {
-  return id.startsWith(CATCHALL_ID_PREFIX);
+/**
+ * Whether an `@id` this driver owns belongs to the block that must sit last: an
+ * API apex, its denial, or a platform domain's catch-all.
+ */
+function isTrailing(id: string): boolean {
+  return (
+    id.startsWith(CATCHALL_ID_PREFIX) ||
+    id.startsWith(API_ID_PREFIX) ||
+    id.startsWith(API_DENY_ID_PREFIX)
+  );
 }
 
 /**
- * Whether Caddy already holds exactly these catch-alls, in this order, with
- * nothing this driver owns after them — the invariant `apply` states.
+ * Whether Caddy already holds exactly this trailing block, in this order, with
+ * nothing this driver owns after it — the invariant `apply` states.
  *
  * `order` is the ids this driver owns as Caddy listed them, so position is read
  * off the array rather than assumed from the map.
  */
-function catchAllsSettled(
+function trailingSettled(
   order: string[],
   owned: Map<string, Record<string, unknown>>,
   wanted: CaddyRoute[],
 ): boolean {
-  const held = order.filter(isCatchAll);
+  const held = order.filter(isTrailing);
   if (held.length !== wanted.length) return false;
 
-  const first = order.findIndex(isCatchAll);
-  if (first !== -1 && order.slice(first).some((id) => !isCatchAll(id))) return false;
+  const first = order.findIndex(isTrailing);
+  if (first !== -1 && order.slice(first).some((id) => !isTrailing(id))) return false;
 
   return wanted.every((route, at) => {
     const current = owned.get(held[at]);
@@ -407,6 +517,20 @@ function sameRoute(current: Record<string, unknown>, wanted: CaddyRoute): boolea
     stableStringify({ match: route.match, handle: route.handle, terminal: route.terminal });
 
   return projection(current) === projection(wanted as unknown as Record<string, unknown>);
+}
+
+/**
+ * The Caddy path patterns one denied prefix is written as: the prefix exactly,
+ * and the whole subtree beneath it.
+ *
+ * A SEGMENT BOUNDARY rather than a string prefix, because that is what a route
+ * prefix means and because the Traefik driver's rules say the same thing —
+ * `/v1/storagex` is a different path and neither driver denies it. Caddy's path
+ * matcher does not treat a bare pattern as a prefix, so both forms are written
+ * out; pinned against v2.11.4, where `/v1/storage/*` matched `/v1/storage/a/b`.
+ */
+function deniedPatterns(prefix: string): string[] {
+  return [prefix, `${prefix}/*`];
 }
 
 function adminFailed(method: string, url: string, what: string, cause?: unknown): ScafoError {

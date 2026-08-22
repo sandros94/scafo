@@ -332,6 +332,82 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   );
 
   it(
+    "answers the fleet's API at the platform domain's own apex, through Caddy",
+    async () => {
+      /*
+       * THE APEX IS THE FLEET'S FRONT DOOR. `*.scafo.test` is one label and
+       * never `scafo.test` itself, so nothing served this name before: the node
+       * routes it to its own agent, and any node of the fleet answers any call
+       * there because the registry is in the bucket.
+       */
+      const health = await until(
+        `${PLATFORM_DOMAIN} to answer the agent's health through Caddy`,
+        DEADLINE_MS,
+        async () => {
+          const answer = await httpGet(caddyHttpPort, "/v1/health", { host: PLATFORM_DOMAIN });
+          return answer.status === 200 ? answer : null;
+        },
+      );
+      expect(JSON.parse(health.body)).toMatchObject({ ok: true, node: NODE_ID });
+      observed.apexHealth = JSON.parse(health.body);
+
+      /* And it is the API rather than the wake surface: a path the API does not
+         have is the API's own miss, not "nothing is served at this host". */
+      const missing = await httpGet(caddyHttpPort, "/v1/nope", { host: PLATFORM_DOMAIN });
+      expect(missing.status).toBe(404);
+      expect(missing.body).not.toContain("urn:scafo:not-found");
+
+      /* The apex takes nothing away from the applications under it. */
+      const app = await httpGet(caddyHttpPort, "/", { host: apexHost() });
+      expect(app.status).toBe(200);
+      expect(app.body).toContain(`"v1"`);
+
+      /* THE CERTIFICATE PATH: the wildcard does not cover this name, so the
+         on-demand ask is the only thing that can mint it one — and it says yes,
+         with no environment, no claim and no process behind it. */
+      const ask = await httpGet(agentPort, `/v1/ingress/ask?domain=${PLATFORM_DOMAIN}`, {});
+      expect(ask.status).toBe(200);
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "NEVER reaches /v1/storage or the pull-provider route through that apex",
+    async () => {
+      /*
+       * THE ONE NON-NEGOTIABLE RULE OF THIS SURFACE, asserted where it is
+       * enforced. `/v1/storage` carries the certificates, the ACME account key
+       * and the issuance locks a colocated ingress persists through this node,
+       * behind a shared token; `/v1/ingress/traefik` is the node's whole routing
+       * map. Both are for a caller on this machine, and the exclusion is CADDY'S
+       * — the agent behind it is never asked.
+       */
+      for (const path of [
+        "/v1/storage",
+        "/v1/storage/list?prefix=",
+        "/v1/storage/objects/anything",
+        "/v1/ingress/traefik",
+      ]) {
+        const blocked = await httpGet(caddyHttpPort, path, { host: PLATFORM_DOMAIN });
+
+        expect(blocked.status, `${path} through the apex`).toBe(404);
+        /* The ingress's own denial: no problem document, no header the agent
+           puts on its answers, and therefore nothing that reached it. */
+        expect(blocked.body, `${path} through the apex`).not.toContain("urn:scafo:");
+        expect(blocked.body, `${path} through the apex`).toBe("");
+      }
+      observed.apexDenied = ["/v1/storage", "/v1/ingress/traefik"];
+
+      /* The surface itself is untouched and still answers a local caller — on
+         the node's own listener, which is where it is meant to be reached. */
+      const local = await httpGet(agentPort, "/v1/storage/list?prefix=", {});
+      expect(local.status).toBe(401);
+      expect(local.body).toContain("urn:scafo:");
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
     "tells an ingress it serves a platform host and refuses one nothing claimed",
     async () => {
       const served = await httpGet(agentPort, `/v1/ingress/ask?domain=${envHost()}`, {});

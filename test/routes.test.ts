@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  API_DENIED_PREFIXES,
   APEX_ENVIRONMENT,
   FULL_WEIGHT,
   pickLeg,
@@ -535,6 +536,96 @@ describe("a routing rendered with no wake at all", () => {
       `${PROJECT}.${DOMAIN}`,
       "shop.example",
     ]);
+  });
+});
+
+describe("the fleet's API at a platform apex", () => {
+  const AGENT_PORT = 7400;
+
+  it("names the BARE apex of every platform domain, which no other entry covers", () => {
+    const desired = renderRoutes(
+      input({
+        platformDomains: [DOMAIN, OTHER_DOMAIN],
+        environments: [environment(PROJECT, APEX_ENVIRONMENT, BUILD)],
+        processes: [process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000, true)],
+        wake: { port: AGENT_PORT, parked: [] },
+        api: { port: AGENT_PORT },
+      }),
+    );
+
+    expect(desired.api).toEqual({
+      port: AGENT_PORT,
+      hosts: [OTHER_DOMAIN, DOMAIN].sort(),
+      denied: API_DENIED_PREFIXES,
+    });
+    /* A project's own apex is `<project>.<domain>` and is a route; the domain
+       itself is neither that nor a subdomain of it, which is why it needs an
+       entry rather than a widened catch-all. */
+    expect(hosts(desired)).not.toContain(DOMAIN);
+    expect(desired.wake?.hosts).not.toContain(DOMAIN);
+    expect(desired.wake?.domains).toEqual([DOMAIN, OTHER_DOMAIN]);
+  });
+
+  it("carries the two prefixes an ingress must never proxy there", () => {
+    const desired = renderRoutes(input({ api: { port: AGENT_PORT } }));
+
+    expect(desired.api?.denied).toEqual(["/v1/storage", "/v1/ingress/traefik"]);
+  });
+
+  it("carries no api member at all when the node publishes none", () => {
+    /* `api.public` off, and this is the whole of what it means to the routing:
+       byte-identical to what scafo rendered before the apex served anything. */
+    const off = renderRoutes(
+      input({
+        environments: [environment(PROJECT, APEX_ENVIRONMENT, BUILD)],
+        processes: [process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000, true)],
+        wake: { port: AGENT_PORT, parked: [] },
+      }),
+    );
+
+    expect(off.api).toBeUndefined();
+    expect(Object.keys(off)).toEqual(["routes", "wake"]);
+  });
+
+  it("leaves an apex to the application that already answers on it", () => {
+    /* A custom domain claimed for an environment IS the platform apex. The
+       first thing to claim a host keeps it, exactly as everywhere else here. */
+    const desired = renderRoutes(
+      input({
+        platformDomains: [DOMAIN, OTHER_DOMAIN],
+        environments: [environment(PROJECT, APEX_ENVIRONMENT, BUILD, [DOMAIN])],
+        processes: [process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000, true)],
+        claims: [{ host: DOMAIN, project: PROJECT, environment: APEX_ENVIRONMENT }],
+        wake: { port: AGENT_PORT, parked: [] },
+        api: { port: AGENT_PORT },
+      }),
+    );
+
+    expect(hosts(desired)).toContain(DOMAIN);
+    expect(desired.api?.hosts).toEqual([OTHER_DOMAIN]);
+  });
+
+  it("leaves an apex a parked environment is holding open, too", () => {
+    const desired = renderRoutes(
+      input({
+        platformDomains: [DOMAIN, OTHER_DOMAIN],
+        wake: {
+          port: AGENT_PORT,
+          parked: [environment(PROJECT, APEX_ENVIRONMENT, BUILD, [DOMAIN])],
+        },
+        api: { port: AGENT_PORT },
+      }),
+    );
+
+    expect(desired.wake?.hosts).toContain(DOMAIN);
+    expect(desired.api?.hosts).toEqual([OTHER_DOMAIN]);
+  });
+
+  it("is rendered without a wake surface just as well", () => {
+    const desired = renderRoutes(input({ api: { port: AGENT_PORT } }));
+
+    expect(Object.keys(desired)).toEqual(["routes", "api"]);
+    expect(desired.api?.hosts).toEqual([DOMAIN]);
   });
 });
 

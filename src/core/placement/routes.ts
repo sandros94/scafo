@@ -8,6 +8,7 @@
 
 import { isScafoError } from "../error.ts";
 import type {
+  ApiRouting,
   IngressBackend,
   IngressDesired,
   WakeRouting,
@@ -25,6 +26,30 @@ export const APEX_ENVIRONMENT: string = "production";
 
 /** What the weights of one host sum to, whatever the split says. */
 export const FULL_WEIGHT: number = 100;
+
+/**
+ * The parts of the agent's API that MUST NOT be reachable through a platform
+ * apex, whatever else that apex serves. Every ingress driver is handed these in
+ * {@link ApiRouting.denied} and enforces them itself.
+ *
+ * `/v1/storage` carries PRIVATE KEYS in both directions — a colocated ingress's
+ * certificates, the account key it issues them with, and the locks that
+ * serialize issuance — and is guarded by one shared token meant for a caller on
+ * this machine or inside the installation's own tunnel. Publishing it at a name
+ * the internet resolves would put that token between the world and every
+ * certificate the fleet holds.
+ *
+ * `/v1/ingress/traefik` is the WHOLE routing map of the node: every host it
+ * serves and the loopback port behind each. It is unauthenticated because it is
+ * a pull-provider endpoint for an ingress sharing this node's network namespace,
+ * and that reading stops being true the moment it is reachable from anywhere
+ * else — so it is a colocated surface rather than a public API, and it is
+ * excluded on exactly the same mechanism as the storage one.
+ *
+ * Matched at a path SEGMENT boundary by every driver: the prefix exactly, or the
+ * prefix followed by `/` and anything at all.
+ */
+export const API_DENIED_PREFIXES: string[] = ["/v1/storage", "/v1/ingress/traefik"];
 
 /** A custom domain and the environment that claimed it. */
 export interface RouteClaim {
@@ -53,6 +78,15 @@ export interface RenderRoutesInput {
    * before scale-to-zero existed.
    */
   wake?: { port: number; parked: Array<{ project: string; env: EnvironmentRecord }> };
+  /**
+   * The agent's own loopback port again, by a node publishing the fleet's API at
+   * its platform domains' bare apexes (`api.public`).
+   *
+   * Omitted, and the routing then carries no `api` at all, by a node whose
+   * operator turned that off — which is exactly the routing scafo rendered
+   * before the apex served anything.
+   */
+  api?: { port: number };
 }
 
 /**
@@ -76,6 +110,11 @@ export interface RenderRoutesInput {
  *    These are reported in `wake` rather than in `routes`, because they name an
  *    agent rather than a backend, and a host that already has a route in (1),
  *    (2) or (3) is never among them: mid-transition, the ready process wins.
+ * 5. The BARE APEX of every platform domain, when this node publishes the
+ *    fleet's API there — reported in `api`, on the same precedence rule: an apex
+ *    that (1), (2), (3) or (4) already answers on is left out. A `*.<domain>`
+ *    matcher covers exactly one label, so an apex is never a catch-all's
+ *    business and needs an explicit route of its own.
  *
  * A process that has not passed its readiness gate is never routed: sending it
  * traffic is exactly what the gate exists to prevent.
@@ -134,13 +173,19 @@ export function renderRoutes(input: RenderRoutesInput): IngressDesired {
     add(claim.host, served.get(placement(claim.project, claim.environment)));
   }
 
+  const wake =
+    input.wake === undefined ? undefined : wakeRouting(input.wake, input.platformDomains, routes);
+  const api =
+    input.api === undefined
+      ? undefined
+      : apiRouting(input.api, input.platformDomains, routes, wake);
+
   return {
     routes: [...routes.keys()]
       .sort(compare)
       .map((host) => ({ host, backends: routes.get(host) as WeightedBackend[] })),
-    ...(input.wake === undefined
-      ? {}
-      : { wake: wakeRouting(input.wake, input.platformDomains, routes) }),
+    ...(wake === undefined ? {} : { wake }),
+    ...(api === undefined ? {} : { api }),
   };
 }
 
@@ -230,6 +275,29 @@ function wakeRouting(
   }
 
   return { port: wake.port, hosts: [...hosts].sort(compare), domains: [...platformDomains] };
+}
+
+/**
+ * The apexes this node answers the fleet's API at: every platform domain, bare.
+ *
+ * A domain something else already answers on is left out rather than listed
+ * twice — an environment that claimed the platform apex as a custom domain, or a
+ * parked one holding it open. The rule is the same one the routes themselves are
+ * built on: the first thing to claim a host keeps it, and an application an
+ * operator deliberately put at the apex is not displaced by the API.
+ */
+function apiRouting(
+  api: { port: number },
+  platformDomains: string[],
+  routes: Map<string, WeightedBackend[]>,
+  wake: WakeRouting | undefined,
+): ApiRouting {
+  const held = new Set(wake?.hosts ?? []);
+  const hosts = new Set(
+    platformDomains.filter((domain) => !routes.has(domain) && !held.has(domain)),
+  );
+
+  return { port: api.port, hosts: [...hosts].sort(compare), denied: [...API_DENIED_PREFIXES] };
 }
 
 /**

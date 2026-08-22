@@ -68,6 +68,8 @@ export interface AgentConfig {
   runtime: RuntimeConfig;
   /** Whether this node reports on itself at all. Off unless it was turned on. */
   observability: ObservabilityConfig;
+  /** Whether the fleet's API answers at the platform domains' own apexes. */
+  api: ApiConfig;
   /**
    * Where the node publishes what it serves. Absent means no ingress at all:
    * the processes still run and are simply not reachable from outside the node.
@@ -145,6 +147,33 @@ export interface ObservabilityConfig {
    * about while they are still looking at what they wrote.
    */
   ingressAccessLog?: string;
+}
+
+/**
+ * Whether each platform domain's BARE APEX serves the fleet's API, which is ONE
+ * switch and it is ON.
+ *
+ * `dev.example.com` is the name every `<project>.dev.example.com` hangs off and
+ * nothing has ever served it — the wildcard does not cover it, so it is refused
+ * a certificate too. Turning this on makes it the installation's front door: the
+ * ingress routes it to the node's own agent, and because the registry lives in
+ * the bucket, ANY node answers ANY call — so a CI job, a CLI or a dashboard has
+ * one well-known name to reach the fleet at, whichever machine picks the request
+ * up. `/v1/ingress/ask` approves the apex while this is on, which is what lets
+ * on-demand issuance mint the certificate the wildcard never covered.
+ *
+ * NOTHING IS OPENED BY IT. Every route keeps the token gating it already had,
+ * and the two surfaces that are unauthenticated because they are COLOCATED —
+ * `/v1/storage`, which carries private keys, and `/v1/ingress/traefik`, which is
+ * the node's whole routing map — are excluded from the apex AT THE INGRESS, by
+ * both drivers, and never reach the agent through it. Health and the on-demand
+ * ask stay reachable: they answer yes or no about names that are already public.
+ *
+ * Off, the apex is refused a certificate and routed nowhere, exactly as before
+ * this existed.
+ */
+export interface ApiConfig {
+  public: boolean;
 }
 
 /** How this node gets at the variables its environments are configured with. */
@@ -312,6 +341,17 @@ export const DEFAULT_CELL_IDLE_EVICT_S: number = 900;
 /** UDP port a WireGuard interface listens on when none is configured. */
 export const DEFAULT_WIREGUARD_PORT: number = 51_820;
 
+/**
+ * Whether the platform apexes serve the fleet's API when nobody said: yes.
+ *
+ * ON is the default because the apex answered NOTHING before this — no route, no
+ * certificate — so there is no behaviour to preserve and every installation
+ * gains one name its tooling can reach it at. What the switch is FOR is the
+ * operator who wants that name for something else, or who keeps their API off
+ * the public internet entirely.
+ */
+export const DEFAULT_API_PUBLIC: boolean = true;
+
 /** A `host:port` pair, as written for a listener or an advertised address. */
 export interface HostPort {
   host: string;
@@ -421,6 +461,7 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
       enabled: observing,
       ...(ingressAccessLog === undefined ? {} : { ingressAccessLog }),
     },
+    api: { public: resolveBoolean("apiPublic", sources, DEFAULT_API_PUBLIC) },
     ...(ingress === undefined ? {} : { ingress }),
     ...(keyFile === undefined ? {} : { varsets: { keyFile } }),
     ...(transport === undefined ? {} : { transport }),
@@ -570,6 +611,7 @@ const ORIGINS = {
     env: ["SCAFO_INGRESS_ACCESS_LOG"],
     file: "observability.ingressAccessLog",
   },
+  apiPublic: { flag: "api-public", env: ["SCAFO_API_PUBLIC"], file: "api.public" },
   ingressDriver: {
     flag: "ingress-driver",
     env: ["SCAFO_INGRESS_DRIVER"],

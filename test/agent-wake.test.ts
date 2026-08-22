@@ -182,6 +182,56 @@ describe("which surface a request lands on", () => {
     await expect(response.json()).resolves.toMatchObject({ node: NODE_ID });
   });
 
+  it("answers a path the API does not have at the apex as the API's own 404", async () => {
+    /* The ingress routes the apex here for the ROUTES to answer, so a path they
+       do not carry is their miss — `about:blank`, the shape every unrouted API
+       path wears — rather than the wake surface's "nothing is served at this
+       host". Nothing is woken and nothing is proxied on the way. */
+    const response = await ask(DOMAIN, "/v1/nope");
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("content-type")).toBe("application/problem+json");
+    await expect(response.json()).resolves.toMatchObject({ type: "about:blank", status: 404 });
+    expect(upstream).toEqual([]);
+    expect(loop.kicks).toBe(0);
+  });
+
+  it("keeps it on the API surface even against a parked environment's claim on it", async () => {
+    /* The one case where the two surfaces both want the bare apex: an
+       environment claimed the platform domain itself as a custom domain. While
+       the API is published there, the API wins. */
+    await claimDomain(clock.ctx, DOMAIN, PROJECT, OTHER_PREVIEW);
+    loop.parked = [
+      { project: PROJECT, env: await getEnvironment(clock.ctx, PROJECT, PREVIEW) },
+      { project: PROJECT, env: await getEnvironment(clock.ctx, PROJECT, OTHER_PREVIEW) },
+    ];
+
+    const response = await ask(DOMAIN, "/v1/health");
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ node: NODE_ID });
+    expect(upstream).toEqual([]);
+  });
+
+  it("gives the apex back to the wake surface when the API is not published there", async () => {
+    /* `api.public` off: the apex is nothing the routing sends here for the API,
+       so the claim on it is the only thing left and it wakes exactly as any
+       other custom domain does. */
+    await claimDomain(clock.ctx, DOMAIN, PROJECT, OTHER_PREVIEW);
+    loop.parked = [
+      { project: PROJECT, env: await getEnvironment(clock.ctx, PROJECT, OTHER_PREVIEW) },
+    ];
+    loop.onKick = (): void => {
+      loop.processes = [ready(OTHER_PREVIEW, BUILD, 42_006)];
+    };
+
+    const closed = appWith({ apiPublic: false });
+    const response = await closed.request("/v1/health", { headers: { host: DOMAIN } });
+
+    expect(response.status).toBe(200);
+    await expect(response.text()).resolves.toBe(UPSTREAM_BODY);
+  });
+
   it("reads x-forwarded-host ONLY on a hop another node marked", async () => {
     const spoofed = await app.request("/v1/health", {
       headers: {
@@ -982,12 +1032,19 @@ interface AppOptions {
    * an ABSENT seam rather than a disabled one.
    */
   observability?: boolean;
+  /**
+   * Whether this node publishes the fleet's API at its platform apexes. On by
+   * default, which is the product default; `false` is the operator who kept the
+   * apex for something else, and the surface then behaves as it did before the
+   * apex answered anything.
+   */
+  apiPublic?: boolean;
 }
 
 /** This node's agent app, over the shared registry, loop and upstream stand-in. */
 function appWith(opts: AppOptions): H3 {
   const agent: AgentContext = {
-    config: agentConfig(opts.bindHost),
+    config: agentConfig(opts.bindHost, opts.apiPublic),
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: idleSupervisor(),
@@ -1117,7 +1174,7 @@ async function seed(): Promise<void> {
   ];
 }
 
-function agentConfig(bindHost = "127.0.0.1"): AgentConfig {
+function agentConfig(bindHost = "127.0.0.1", apiPublic = true): AgentConfig {
   return {
     bucket: {
       endpoint: "http://store.test:9000",
@@ -1138,6 +1195,7 @@ function agentConfig(bindHost = "127.0.0.1"): AgentConfig {
       pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
+    api: { public: apiPublic },
   };
 }
 

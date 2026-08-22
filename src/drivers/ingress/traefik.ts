@@ -75,6 +75,44 @@ export const TRAEFIK_CATCHALL_PREFIX: string = `${TRAEFIK_KEY_PREFIX}catchall_`;
  */
 export const CATCHALL_PRIORITY: number = 1;
 
+/**
+ * Namespace of the router serving the fleet's API at one platform apex, and of
+ * the one denying the excluded prefixes there. Both follow
+ * {@link TRAEFIK_CATCHALL_PREFIX}'s reading: an underscore occurs in neither a
+ * host nor a build id, so neither can ever be the key of a router for a host,
+ * and neither is a prefix of the other.
+ */
+export const TRAEFIK_API_PREFIX: string = `${TRAEFIK_KEY_PREFIX}api_`;
+export const TRAEFIK_API_DENY_PREFIX: string = `${TRAEFIK_KEY_PREFIX}apideny_`;
+
+/**
+ * Rank of the API apex routers, and both are stated rather than left to
+ * Traefik's default.
+ *
+ * THE DENIAL MUST OUTRANK THE APEX and rule length cannot be trusted to say so:
+ * the two rules name the same host and differ only in how they speak about the
+ * same paths, so which one is longer is an accident of punctuation. Both sit
+ * above {@link CATCHALL_PRIORITY} because one platform domain may be a subdomain
+ * of another, and the outer domain's catch-all regexp matches the inner one's
+ * apex; both sit below the length-ranked default of an ordinary host router,
+ * which is harmless because no ordinary router matches a bare apex — a renderer
+ * that finds one already answering there emits no API entry for it at all.
+ */
+export const API_PRIORITY: number = 2;
+export const API_DENY_PRIORITY: number = 3;
+
+/**
+ * Traefik's own service for a router that must reach no backend, supplied by its
+ * always-on `internal` provider and therefore qualified with `@internal`.
+ *
+ * A DENIAL WITH NOTHING BEHIND IT, which is what this surface needs: naming a
+ * service that does not resolve would put the router in error and DISABLE it,
+ * and a disabled denial is a request falling through to whatever ranks next.
+ * Pinned against `traefik:v3` (v3.7.11), where it answered `418` with an empty
+ * body and never dialled anything.
+ */
+export const NOOP_SERVICE: string = "noop@internal";
+
 /** One router: which requests it matches, and what serves them. */
 export interface TraefikRouter {
   /** Traefik's rule language; a host match is written with backticks. */
@@ -199,6 +237,13 @@ export function createTraefikDriver(opts?: TraefikDriverOptions): TraefikDriver 
  * {@link CATCHALL_PRIORITY}, because Traefik's default ranking is rule length
  * and a regexp for a domain outruns a `Host` for a name under it.
  *
+ * THE FLEET'S API AT A PLATFORM APEX IS TWO ROUTERS, and the pair is the whole
+ * of how `/v1/storage` is kept off a public name. The apex router dials the
+ * agent for every path EXCEPT the denied prefixes, which its rule negates
+ * outright; the denial above it matches exactly those prefixes and is sent to
+ * {@link NOOP_SERVICE}, so nothing is dialled and no answer comes from behind
+ * the ingress. Both ranks are stated — see {@link API_PRIORITY}.
+ *
  * EMPTY ROUTING IS THE INTERESTING CASE, and it is not what it looks like. The
  * obvious rendering — `{"http":{"routers":{},"services":{}}}` — does NOT clear
  * Traefik's routing. Its http provider decodes the body through the same parser
@@ -294,6 +339,40 @@ export function renderTraefikConfig(
     }
   }
 
+  const api = desired.api;
+  if (api !== undefined) {
+    const agent = `http://127.0.0.1:${String(api.port)}`;
+
+    for (const host of [...api.hosts].sort(compare)) {
+      assertHost(host);
+
+      /*
+       * TWO ROUTERS, AND EACH CLOSES THE SURFACE ON ITS OWN. The apex router's
+       * rule NEGATES every denied prefix, so it cannot carry one whatever else
+       * is configured — and a rule Traefik refuses disables that router, which
+       * fails closed. The denial above it is what turns the resulting
+       * fall-through into an answer, and it reaches no backend at all.
+       */
+      const denied = api.denied.flatMap(deniedRules);
+
+      routers[traefikApiDenyKey(host)] = {
+        rule: `Host(\`${host}\`) && (${denied.join(" || ")})`,
+        service: NOOP_SERVICE,
+        entryPoints: [...entryPoints],
+        priority: API_DENY_PRIORITY,
+      };
+
+      const key = traefikApiKey(host);
+      routers[key] = {
+        rule: [`Host(\`${host}\`)`, ...denied.map((rule) => `!${rule}`)].join(" && "),
+        service: key,
+        entryPoints: [...entryPoints],
+        priority: API_PRIORITY,
+      };
+      services[key] = { loadBalancer: { servers: [{ url: agent }] } };
+    }
+  }
+
   /* NEVER AN EMPTY MAP — see above. A node serving nothing and waking nothing
      publishes an empty document, which is the only thing Traefik reads as "this
      provider routes nothing". */
@@ -325,6 +404,16 @@ export function traefikCatchAllKey(domain: string): string {
   return `${TRAEFIK_CATCHALL_PREFIX}${domain}`;
 }
 
+/** The router and service name the API at one platform apex is written under. */
+export function traefikApiKey(domain: string): string {
+  return `${TRAEFIK_API_PREFIX}${domain}`;
+}
+
+/** The router name the denial guarding one platform apex is written under. */
+export function traefikApiDenyKey(domain: string): string {
+  return `${TRAEFIK_API_DENY_PREFIX}${domain}`;
+}
+
 /**
  * A Go regular expression matching any SINGLE-LABEL subdomain of `domain`, and
  * never the domain itself.
@@ -336,6 +425,19 @@ export function traefikCatchAllKey(domain: string): string {
  */
 function subdomainPattern(domain: string): string {
   return `^[^.]+\\.${domain.replaceAll(".", "\\.")}$`;
+}
+
+/**
+ * The Traefik matchers one denied prefix is written as: the path exactly, and
+ * the whole subtree beneath it.
+ *
+ * A SEGMENT BOUNDARY rather than a string prefix, so that this means precisely
+ * what the Caddy driver's `["<prefix>", "<prefix>/*"]` means — `PathPrefix` on
+ * its own is a raw string prefix in Traefik v3 and would also deny
+ * `/v1/storagex`, which the other driver does not. Pinned against v3.7.11.
+ */
+function deniedRules(prefix: string): string[] {
+  return [`Path(\`${prefix}\`)`, `PathPrefix(\`${prefix}/\`)`];
 }
 
 /* Dialled at the address the processes actually bound: loopback on a single

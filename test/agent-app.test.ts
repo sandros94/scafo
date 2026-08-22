@@ -44,6 +44,8 @@ const ENVIRONMENT = "prod";
 /** The ephemeral environment beside it: the only kind that parks on a clock. */
 const PREVIEW = "preview";
 const CUSTOM_DOMAIN = "shop.example.com";
+/** The one platform domain this node serves; its bare apex is the fleet's API. */
+const PLATFORM_DOMAIN = "apps.test";
 const BUILD = "aaaa1111";
 const OTHER_BUILD = "bbbb2222";
 
@@ -700,6 +702,78 @@ describe("GET /v1/ingress/ask", () => {
       expect(response.status, domain).toBe(404);
     }
   });
+
+  it("APPROVES the bare platform apex, which the wildcard does not cover", async () => {
+    /*
+     * `*.apps.test` is one label and never `apps.test` itself, so the apex has
+     * no certificate unless this ask mints it one — and it is the fleet's API
+     * while `api.public` is on, so it needs one. No environment, no claim and
+     * no process is behind it: what answers there is this very agent.
+     */
+    const response = await app.request(`/v1/ingress/ask?domain=${PLATFORM_DOMAIN}`);
+
+    expect(response.status).toBe(200);
+  });
+
+  it("REFUSES it while the API is not published there", async () => {
+    /* Nothing routes the apex then, so a certificate for it would be a public
+       record of a name that answers nothing — exactly what this endpoint
+       refuses for a retired environment's claim. */
+    const closed = appWith({ api: { public: false } });
+
+    const response = await closed.request(`/v1/ingress/ask?domain=${PLATFORM_DOMAIN}`);
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:not-found" });
+  });
+
+  it("still refuses a label under the apex that names nothing, either way", async () => {
+    /* The approval is the apex and nothing else: a junk label under it is as
+       unmintable as it ever was, which is what keeps a crawler from spending a
+       CA's rate limit on names that do not exist. */
+    for (const app_ of [app, appWith({ api: { public: false } })]) {
+      const response = await app_.request(`/v1/ingress/ask?domain=nothing.${PLATFORM_DOMAIN}`);
+
+      expect(response.status).toBe(404);
+    }
+  });
+});
+
+describe("the fleet's API at the platform apex", () => {
+  it("dispatches the bare apex to the API routes rather than to the host surface", async () => {
+    const health = await app.request("/v1/health", { headers: { host: PLATFORM_DOMAIN } });
+
+    expect(health.status).toBe(200);
+    await expect(health.json()).resolves.toEqual({ ok: true, version: VERSION, node: NODE_ID });
+  });
+
+  it("answers a path it does not have there as the API's own miss", async () => {
+    const response = await app.request("/v1/nope", { headers: { host: PLATFORM_DOMAIN } });
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("content-type")).toBe("application/problem+json");
+    await expect(response.json()).resolves.toMatchObject({ type: "about:blank", status: 404 });
+  });
+
+  it("keeps every route's own token gating, opening nothing", async () => {
+    /* The apex is a way IN, never a way AROUND: an authenticated route asked at
+       the apex is the same refusal it is anywhere else. */
+    const state = await app.request("/v1/state", { headers: { host: PLATFORM_DOMAIN } });
+
+    expect(state.status).toBe(401);
+    await expect(state.json()).resolves.toMatchObject(AUTH_INVALID_PROBLEM);
+  });
+
+  it("leaves a project's own host under that domain to the host surface", async () => {
+    /* `<project>.<domain>` and `<project>--<env>.<domain>` are applications, not
+       the API: the same request there is never the agent's health. */
+    for (const host of [`${PROJECT}.${PLATFORM_DOMAIN}`, `${PROJECT}--x.${PLATFORM_DOMAIN}`]) {
+      const response = await app.request("/v1/health", { headers: { host } });
+
+      expect(response.status, host).not.toBe(200);
+      await expect(response.json(), host).resolves.not.toMatchObject({ node: NODE_ID });
+    }
+  });
 });
 
 describe("routes that do not exist", () => {
@@ -804,7 +878,7 @@ function agentConfig(): AgentConfig {
       secretKey: "secret",
     },
     node: { id: NODE_ID, listen: "127.0.0.1:7400" },
-    platformDomains: ["apps.test"],
+    platformDomains: [PLATFORM_DOMAIN],
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
@@ -815,7 +889,19 @@ function agentConfig(): AgentConfig {
       pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
+    api: { public: true },
   };
+}
+
+/** The same app again, with part of the configuration stated differently. */
+function appWith(overrides: Partial<AgentConfig>): H3 {
+  return createAgentApp({
+    config: { ...agentConfig(), ...overrides },
+    nodeId: NODE_ID,
+    registry: clock.ctx,
+    supervisor: fakeSupervisor(),
+    version: VERSION,
+  });
 }
 
 /** Reports a fixed inventory; nothing it is asked to run would run. */

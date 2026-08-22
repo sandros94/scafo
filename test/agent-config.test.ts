@@ -880,6 +880,105 @@ describe("whether the node reports on itself", () => {
   });
 });
 
+describe("whether the fleet's API answers at the platform apexes", () => {
+  it("is ON when nothing says otherwise", async () => {
+    /* The apex answered nothing before this existed — no route, no certificate
+       — so there is no behaviour to preserve and every installation gains one
+       name its tooling can reach any node at. */
+    const config = await loadAgentConfig({ env: REQUIRED_ENV });
+
+    expect(config.api).toEqual({ public: true });
+  });
+
+  it("is turned off from a flag, the environment or the file alike", async () => {
+    const fromFlag = await loadAgentConfig({
+      env: REQUIRED_ENV,
+      /* `--no-api-public`, as the parser hands it over. */
+      flags: { "api-public": "false" },
+    });
+    const fromEnv = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCAFO_API_PUBLIC: "0" },
+    });
+    const fromFile = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ api: { public: false } })),
+      env: REQUIRED_ENV,
+    });
+
+    expect([fromFlag, fromEnv, fromFile].map((config) => config.api.public)).toEqual([
+      false,
+      false,
+      false,
+    ]);
+  });
+
+  it("lets a flag override the environment and the environment the file", async () => {
+    const file = JSON.stringify({ api: { public: false } });
+
+    const overriddenByEnv = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, file),
+      env: { ...REQUIRED_ENV, SCAFO_API_PUBLIC: "1" },
+    });
+    const overriddenByFlag = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, file),
+      env: { ...REQUIRED_ENV, SCAFO_API_PUBLIC: "1" },
+      flags: { "api-public": "false" },
+    });
+
+    expect(overriddenByEnv.api.public).toBe(true);
+    expect(overriddenByFlag.api.public).toBe(false);
+  });
+
+  it.each([
+    ["1", true],
+    ["true", true],
+    ["TRUE", true],
+    [" True ", true],
+    ["0", false],
+    ["false", false],
+    ["FALSE", false],
+  ])("reads %p as %p", async (written, expected) => {
+    const config = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCAFO_API_PUBLIC: written },
+    });
+
+    expect(config.api.public).toBe(expected);
+  });
+
+  it.each(["yes", "no", "on", "off", "2", "public"])(
+    "REFUSES %p rather than reading it either way",
+    async (written) => {
+      const error = await rejectsWith(
+        () => loadAgentConfig({ env: { ...REQUIRED_ENV, SCAFO_API_PUBLIC: written } }),
+        "invalid-input",
+      );
+
+      /* The same refusal the observability switch makes, and for the same
+         reason: a value nobody parses read as a default is an operator who
+         believes their apex is closed — or open — and is wrong. */
+      expect(error.detail, written).toContain("api.public");
+      expect(error.detail, written).toContain(`"1"`);
+      expect(error.detail, written).toContain(`"0"`);
+    },
+  );
+
+  it("refuses a file value that is neither a boolean nor one of those words", async () => {
+    const error = await rejectsWith(
+      () =>
+        loadAgentConfig({
+          configPath: CONFIG_PATH,
+          readFile: fileAt(CONFIG_PATH, JSON.stringify({ api: { public: 1 } })),
+          env: REQUIRED_ENV,
+        }),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("api.public");
+  });
+});
+
 describe("the ingress access log the node counts requests off", () => {
   it("is ABSENT unless an operator names one, and that is not a warning", async () => {
     /* The agent sees only the requests it wakes, so per-request numbers can only
