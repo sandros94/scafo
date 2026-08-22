@@ -27,10 +27,19 @@ import {
   setReplicas,
   writePlacement,
 } from "../src/core/registry/index.ts";
+import type { RegistryContext } from "../src/core/registry/context.ts";
 import { environmentKey, placementKey } from "../src/core/registry/paths.ts";
 import type { NodeRecord, PlacementRecord } from "../src/core/types/registry.ts";
+import { DEFAULT_CONCURRENCY } from "../src/core/utils/concurrency.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { CLOCK_START_MS, ctxWith, FaultStore, type ManualClock, rejectsWith } from "./_helpers.ts";
+import {
+  CLOCK_START_MS,
+  ctxWith,
+  FaultStore,
+  type ManualClock,
+  ObservingStore,
+  rejectsWith,
+} from "./_helpers.ts";
 
 const PROJECT = "app";
 const ENV = "prod";
@@ -226,6 +235,41 @@ describe("listPlacements", () => {
     /* One listing, and a read only for the environments that HAVE a decision. */
     expect([...placements.keys()]).toEqual([ENV]);
     expect(placements.get(ENV)).toMatchObject({ nodes: [NODE_A] });
+  });
+
+  it("reads the decisions it found at once, and keys them in listing order all the same", async () => {
+    const { ctx, observing, names } = await decidedProject();
+    /* The first one answers LAST, so a map assembled as the reads came back
+       would not be in the order below. */
+    observing.delays.set(placementKey(PROJECT, names[0]), 20);
+    observing.reset();
+
+    const placements = await listPlacements(ctx, PROJECT);
+
+    expect([...placements.keys()]).toEqual(names);
+    expect(observing.peakReads).toBeGreaterThan(1);
+    expect(observing.peakReads).toBeLessThanOrEqual(DEFAULT_CONCURRENCY);
+  });
+
+  it("reads them one at a time when the caller bounds it to one", async () => {
+    const { ctx, observing, names } = await decidedProject();
+    observing.reset();
+
+    const placements = await listPlacements(ctx, PROJECT, { concurrency: 1 });
+
+    expect([...placements.keys()]).toEqual(names);
+    expect(observing.peakReads).toBe(1);
+  });
+
+  it("surfaces the failure of the FIRST decision that could not be read", async () => {
+    const { ctx, observing, names } = await decidedProject();
+    /* The later one fails at once and the earlier one takes its time, so the
+       failure that settles first is not the one a sequential read would hit. */
+    observing.delays.set(placementKey(PROJECT, names[1]), 20);
+    observing.faults.set(placementKey(PROJECT, names[1]), new Error("second"));
+    observing.faults.set(placementKey(PROJECT, names[3]), new Error("fourth"));
+
+    await expect(listPlacements(ctx, PROJECT)).rejects.toThrow("second");
   });
 });
 
@@ -437,6 +481,27 @@ function node(id: string, opts: { heartbeatAt?: string; probedAt?: string }): No
 
 function placement(nodes: string[], fence: number): PlacementRecord {
   return { v: 1, nodes, decidedAt: iso(0), fence };
+}
+
+/** A project of five decided environments, over a store that watches its reads. */
+async function decidedProject(): Promise<{
+  ctx: RegistryContext;
+  observing: ObservingStore;
+  names: string[];
+}> {
+  const observing = new ObservingStore(new MemoryCasStore());
+  const { ctx } = ctxWith(observing);
+  await createProject(ctx, { slug: PROJECT });
+
+  const taken = await acquireLease(ctx, NODE_A);
+  if (taken === null) throw new Error("the fixture could not take the lease");
+
+  const names = ["alpha", "bravo", "charlie", "delta", "echo"];
+  for (const name of names) {
+    await createEnvironment(ctx, PROJECT, { name });
+    await writePlacement(ctx, PROJECT, name, [NODE_A], taken);
+  }
+  return { ctx, observing, names };
 }
 
 /** An ISO stamp `offsetMs` after the shared clock's start. */

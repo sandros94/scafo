@@ -452,6 +452,75 @@ describe("pointing a fleet at a version", () => {
     expect(store.puts).toBe(0);
   });
 
+  it("reads the two pointers and stops, when both already name the version", async () => {
+    const { store } = await seededFleet({ pointerVersion: NEXT_VERSION });
+
+    await createCelldDriver({ store }).activateVersion(FLEET, NEXT_VERSION);
+    /* A repeated wake of one build is the common case, and it is what this
+       costs: the fleet-wide pointer, then the named one it is not evidence
+       about. Establishing the same thing one object at a time took four. */
+    expect({ gets: store.gets, puts: store.puts }).toEqual({ gets: 2, puts: 0 });
+
+    await createCelldDriver({ store }).activateVersion(FLEET, NEXT_VERSION);
+    expect({ gets: store.gets, puts: store.puts }).toEqual({ gets: 4, puts: 0 });
+  });
+
+  it("writes when the NAMED pointer names another version, whatever the fleet-wide one says", async () => {
+    /* The disagreement a writer interrupted between the two objects leaves —
+       they are moved named-first — and the one that matters, because the named
+       pointer is what celld resolves the application through. */
+    const { store, ctx } = await seededFleet({ pointerVersion: NEXT_VERSION });
+    await putJson(ctx, NAMED_POINTER, {
+      script_name: SCRIPT,
+      version: CURRENT_VERSION,
+      prefix: `deploy/${SCRIPT}/${CURRENT_VERSION}`,
+      rollout: { percent: 100 },
+    });
+    store.puts = 0;
+
+    await createCelldDriver({ store }).activateVersion(FLEET, NEXT_VERSION);
+
+    expect(store.puts).toBe(1);
+    expect(await pointerAt(ctx, NAMED_POINTER)).toMatchObject({
+      version: NEXT_VERSION,
+      prefix: `deploy/${SCRIPT}/${NEXT_VERSION}`,
+    });
+  });
+
+  it("writes when the named pointer is missing, however right the fleet-wide one looks", async () => {
+    const { store, ctx } = await seededFleet({
+      pointerVersion: NEXT_VERSION,
+      namedPointer: false,
+    });
+
+    await createCelldDriver({ store }).activateVersion(FLEET, NEXT_VERSION);
+
+    expect(await pointerAt(ctx, NAMED_POINTER)).toMatchObject({
+      script_name: SCRIPT,
+      version: NEXT_VERSION,
+      prefix: `deploy/${SCRIPT}/${NEXT_VERSION}`,
+    });
+  });
+
+  it("writes when the pointers name the version under another directory", async () => {
+    /* `prefix` is the load-bearing field — the runtime resolves modules under it
+       and never looks at `version` — so agreeing on the version alone is not
+       agreeing on what a process would load. */
+    const { store, ctx } = await seededFleet({
+      pointerVersion: NEXT_VERSION,
+      pointerPrefix: `deploy/${SCRIPT}/somewhere-else`,
+    });
+
+    await createCelldDriver({ store }).activateVersion(FLEET, NEXT_VERSION);
+
+    expect(store.puts).toBe(2);
+    for (const key of [NAMED_POINTER, FLEET_POINTER]) {
+      expect(await pointerAt(ctx, key), key).toMatchObject({
+        prefix: `deploy/${SCRIPT}/${NEXT_VERSION}`,
+      });
+    }
+  });
+
   it("recovers the deployment name from a pointer written without one", async () => {
     const { store, ctx } = await seededFleet({ scriptName: false });
 
@@ -470,6 +539,23 @@ describe("pointing a fleet at a version", () => {
     );
 
     expect(error.detail).toContain(`${FLEET}/deploy/${SCRIPT}/${NEXT_VERSION}/manifest.json`);
+    expect(store.puts).toBe(0);
+  });
+
+  it("does NOT re-ask about the modules of a version both pointers already name", async () => {
+    /*
+     * The one thing the early-out gives up, and the reading is that it gives up
+     * nothing: the assertion refuses to MOVE a pointer onto a version that was
+     * never uploaded, and here nothing moves — the pointer it would refuse to
+     * write is the one already standing, which raising cannot unwrite. A bucket
+     * in this state has had a version's modules deleted out from under a live
+     * pointer, and the process that starts next fails to boot either way.
+     */
+    const { store } = await seededFleet({ pointerVersion: NEXT_VERSION, manifest: false });
+
+    await expect(
+      createCelldDriver({ store }).activateVersion(FLEET, NEXT_VERSION),
+    ).resolves.toBeUndefined();
     expect(store.puts).toBe(0);
   });
 
@@ -766,6 +852,7 @@ async function seededFleet(
     await putJson(ctx, `${FLEET}/deploy/${SCRIPT}/${NEXT_VERSION}/manifest.json`, { modules: [] });
   }
 
+  store.gets = 0;
   store.puts = 0;
   return { store, ctx };
 }

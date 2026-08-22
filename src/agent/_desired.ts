@@ -12,6 +12,11 @@ import { listPlacements } from "../core/registry/placement.ts";
 import { listProjects } from "../core/registry/projects.ts";
 import { getVarsetEnvelope, openVarset } from "../core/registry/varsets.ts";
 import { listBuildWakes, readEnvironmentWake } from "../core/registry/wake.ts";
+import {
+  type ConcurrencyGate,
+  createConcurrencyGate,
+  mapConcurrent,
+} from "../core/utils/concurrency.ts";
 import type {
   EnvironmentRecord,
   NodeSelector,
@@ -133,15 +138,29 @@ export interface DesiredState {
  * decision waits for the coordinator, and the cost of waiting is a few seconds
  * of nothing running — against, in the other reading, an application placed on
  * hardware it was explicitly kept off.
+ *
+ * EVERY READ THIS DOES IS BOUNDED BY ONE GATE, and the whole pass shares it. A
+ * pass is a read per environment plus the reads that resolve it, and on a
+ * hundred-millisecond store one after another that is seconds of latency in
+ * front of every wake and every rollout. They are independent of each other, so
+ * they overlap — but the bound is fleet-wide rather than per project or per
+ * environment, because those nest and the product is what would reach the store.
+ * What comes back does NOT depend on the order it came back in: results are
+ * merged in listing order and a read that throws surfaces exactly as it did when
+ * they ran one after another.
  */
 export async function readDesired(
   registry: RegistryContext,
-  opts: { nodeId: string },
+  opts: { nodeId: string; concurrency?: number },
 ): Promise<DesiredState> {
   const projects = await listProjects(registry);
+  const gate = createConcurrencyGate(opts.concurrency);
 
+  /* The projects themselves are not gated, and must not be: each one below waits
+     on the gate, and a fan-out holding slots while its own work asks for them is
+     the one way to deadlock this. Slots are taken at the reads alone. */
   const perProject = await Promise.all(
-    projects.map(async (project) => readProject(registry, project, opts.nodeId)),
+    projects.map(async (project) => readProject(registry, project, opts.nodeId, gate)),
   );
   return {
     environments: perProject.flatMap((entry) => entry.environments),
@@ -188,44 +207,68 @@ async function readProject(
   registry: RegistryContext,
   project: string,
   nodeId: string,
+  gate: ConcurrencyGate,
 ): Promise<DesiredState> {
   /* One listing of each kind for the whole project, rather than two reads per
      environment: only the environments that HAVE a decision cost a placement
      read at all. */
   const [names, placements] = await Promise.all([
     listEnvironments(registry, project),
-    listPlacements(registry, project),
+    listPlacements(registry, project, { concurrency: gate }),
   ]);
 
+  /* One environment at a time is one slot: the reads that resolve an environment
+     depend on each other and stay in sequence, while the environments beside it
+     do not and overlap. Each answers with its own part, merged below in the
+     order the listing gave rather than the order the store answered in. */
+  const parts = await mapConcurrent(names, gate, async (name) =>
+    readEnvironment(registry, project, name, nodeId, placements.get(name)),
+  );
+
+  const state: DesiredState = { environments: [], placements: [], parked: [], failures: [] };
+  for (const part of parts) {
+    state.environments.push(...part.environments);
+    state.placements.push(...part.placements);
+    state.parked.push(...part.parked);
+    state.failures.push(...part.failures);
+  }
+  return state;
+}
+
+/** What one environment contributes to its project's state, and nothing else's. */
+async function readEnvironment(
+  registry: RegistryContext,
+  project: string,
+  name: string,
+  nodeId: string,
+  placement: PlacementRecord | undefined,
+): Promise<DesiredState> {
   const state: DesiredState = { environments: [], placements: [], parked: [], failures: [] };
 
-  for (const name of names) {
-    /* Read once and used for every question this loop asks: whether the
-       environment constrains where it runs, what its placement view should
-       report, and what there is to serve. */
-    const found = await readJson<EnvironmentRecord>(registry, environmentKey(project, name));
-    /* Deleted between the listing and the read: the next pass sees neither it
-       nor its placement, and nothing here has to pretend it was there. */
-    if (found === null) continue;
-    const environment = found.value;
+  /* Read once and used for every question below: whether the environment
+     constrains where it runs, what its placement view should report, and what
+     there is to serve. */
+  const found = await readJson<EnvironmentRecord>(registry, environmentKey(project, name));
+  /* Deleted between the listing and the read: the next pass sees neither it nor
+     its placement, and nothing here has to pretend it was there. */
+  if (found === null) return state;
+  const environment = found.value;
 
-    const placement = placements.get(name);
-    if (placement !== undefined) {
-      state.placements.push({
-        project,
-        env: name,
-        nodes: [...placement.nodes],
-        self: placement.nodes.includes(nodeId),
-        ...(environment.nodeSelector === undefined
-          ? {}
-          : { selector: { ...environment.nodeSelector } }),
-      });
-    }
-    if (!servedHere(placement, environment, nodeId)) continue;
-
-    const wanted = await resolveEnvironment(registry, project, environment, state);
-    if (wanted !== null) state.environments.push(wanted);
+  if (placement !== undefined) {
+    state.placements.push({
+      project,
+      env: name,
+      nodes: [...placement.nodes],
+      self: placement.nodes.includes(nodeId),
+      ...(environment.nodeSelector === undefined
+        ? {}
+        : { selector: { ...environment.nodeSelector } }),
+    });
   }
+  if (!servedHere(placement, environment, nodeId)) return state;
+
+  const wanted = await resolveEnvironment(registry, project, environment, state);
+  if (wanted !== null) state.environments.push(wanted);
   return state;
 }
 
@@ -279,6 +322,13 @@ function servedHere(
  * what the environment serves when there is no split, so a missing one is not a
  * gap in an environment, it is an environment nothing can be planned for. It
  * raises, the pass records it and plans nothing at all, and nothing is stopped.
+ *
+ * ONE ENVIRONMENT'S READS RUN IN SEQUENCE, because each of them decides what the
+ * next one is: whether the environment is parked decides whether its alias is
+ * wanted at all, and a split leg or a recalled build is skipped when a build
+ * already RESOLVED carries its id — a dependency on what came back, not merely
+ * on the ids the record names. They are also few, while the environments beside
+ * them are many, which is the axis {@link readDesired} overlaps instead.
  */
 async function resolveEnvironment(
   registry: RegistryContext,

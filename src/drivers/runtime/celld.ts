@@ -6,6 +6,7 @@
 
 import { ScafoError } from "../../core/error.ts";
 import { formatProcessId } from "../../core/placement/ids.ts";
+import { readJson } from "../../core/registry/cas.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
 import { fleetPrefix } from "../../core/registry/paths.ts";
 import type { CasStore } from "../../core/types/store.ts";
@@ -18,6 +19,7 @@ import type {
 import type { ProcessSpec } from "../../core/types/supervisor.ts";
 import { withRetry } from "../../core/utils/backoff.ts";
 import {
+  type DeployPointer,
   deployPointerKey,
   pointAtVersion,
   readFleetPointer,
@@ -228,6 +230,32 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
       const fleetKey = deployPointerKey(prefix);
       const current = await readFleetPointer(ctx, prefix);
       const script = scriptNameOf(current.value, fleetKey);
+      const namedKey = deployPointerKey(prefix, script);
+
+      /*
+       * ALREADY ACTIVE: BOTH pointers select this version, so there is nothing
+       * to move. Activation is planned again on every pass until a process for
+       * the build is running — a repeated wake of one build is the common case,
+       * not the exception — and the sequence below already declines to rewrite
+       * identical bytes. What this skips is the READS that would establish that
+       * one object at a time: four round trips to conclude the bucket says what
+       * it already said, in front of every process a wake starts.
+       *
+       * SOUND BECAUSE IT RUNS UNDER THE ENVIRONMENT'S POINTER LOCK, which is
+       * where every writer of these two objects is serialized. Nothing may move
+       * them between the reads and the decision not to write, so the state read
+       * here is still the state the process spawned next reads.
+       *
+       * ANY DOUBT TAKES THE FULL SEQUENCE. A fleet pointer naming another
+       * version or another directory, a named pointer that is missing or names
+       * either: each of them writes exactly as it did before. A fleet nothing
+       * was ever deployed to, or a pointer nothing can read, raises here as it
+       * always did — the reads that would have raised are the same reads, only
+       * made sooner. The upload assertion is skipped on this path alone, and
+       * only because nothing moves: the pointer it would refuse to write is the
+       * one already standing, and raising cannot unwrite it.
+       */
+      if (await alreadyActive(ctx, current.value, namedKey, script, celldVersionId)) return;
 
       await assertVersionUploaded(ctx, prefix, script, celldVersionId);
 
@@ -242,7 +270,7 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
           pointAtVersion(ctx, key, { script, version: celldVersionId, template }),
         );
       };
-      await write(deployPointerKey(prefix, script));
+      await write(namedKey);
       await write(fleetKey);
     },
 
@@ -363,6 +391,37 @@ function checkedExtraEnv(extraEnv?: Record<string, string>): Record<string, stri
     });
   }
   return extraEnv;
+}
+
+/**
+ * Whether both of an environment's pointers already select `version`, which is
+ * the whole of what an activation would leave behind.
+ *
+ * The named one is read because it is the object celld resolves the application
+ * through: a fleet-wide pointer that agrees with it is not evidence about it,
+ * and a writer interrupted between the two — they are moved named-first — leaves
+ * exactly that disagreement.
+ */
+async function alreadyActive(
+  ctx: RegistryContext,
+  fleet: DeployPointer,
+  namedKey: string,
+  script: string,
+  version: string,
+): Promise<boolean> {
+  if (!pointsAt(fleet, script, version)) return false;
+
+  const named = await readJson<DeployPointer>(ctx, namedKey);
+  return named !== null && pointsAt(named.value, script, version);
+}
+
+/**
+ * Whether one pointer selects `version`. `prefix` is the load-bearing half — it
+ * is what the runtime resolves modules under — and matching both is the same
+ * question {@link pointAtVersion} asks before declining to rewrite an object.
+ */
+function pointsAt(pointer: DeployPointer, script: string, version: string): boolean {
+  return pointer.version === version && pointer.prefix === versionPrefix(script, version);
 }
 
 /**

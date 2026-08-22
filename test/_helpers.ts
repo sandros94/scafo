@@ -92,6 +92,8 @@ export function ctxWith(store: CasStore, startMs: number = CLOCK_START_MS): Manu
  * competing writer. Reads are never faulted, so recovery paths stay observable.
  */
 export class FaultStore implements CasStore {
+  /** Reads dispatched to the wrapped store; never faulted, only counted. */
+  gets: number = 0;
   /** Puts dispatched to the wrapped store, including ones that then failed. */
   puts: number = 0;
   /** Deletes dispatched to the wrapped store. */
@@ -126,6 +128,7 @@ export class FaultStore implements CasStore {
   }
 
   get(key: string): Promise<StoredObject | null> {
+    this.gets++;
     return this.#inner.get(key);
   }
 
@@ -151,6 +154,68 @@ export class FaultStore implements CasStore {
     if (this.#budget === null) return;
     if (this.#budget <= 0) throw this.#error ?? new Error("Injected fault");
     this.#budget--;
+  }
+}
+
+/**
+ * Wraps a {@link CasStore} to observe HOW its reads run — how many were in
+ * flight at once, and in what order they started — and to hold one key's read
+ * back or fail it outright. Writes and listings pass straight through.
+ *
+ * A delay is what makes an ordering assertion mean anything: reads that answer
+ * in the order they were asked cannot tell a result assembled by input order
+ * from one assembled by completion order.
+ */
+export class ObservingStore implements CasStore {
+  /** Most reads in flight at one moment, since the last {@link ObservingStore.reset}. */
+  peakReads: number = 0;
+  /** Keys read since then, in the order the reads STARTED. */
+  reads: string[] = [];
+  /** Milliseconds a key's read waits before it answers. */
+  readonly delays: Map<string, number> = new Map();
+  /** What a key's read throws instead of answering. */
+  readonly faults: Map<string, Error> = new Map();
+
+  readonly #inner: CasStore;
+  #active = 0;
+
+  constructor(inner: CasStore) {
+    this.#inner = inner;
+  }
+
+  /** Forgets what has been read so far; the delays and faults stay. */
+  reset(): void {
+    this.peakReads = 0;
+    this.reads = [];
+  }
+
+  async get(key: string): Promise<StoredObject | null> {
+    this.reads.push(key);
+    this.#active++;
+    this.peakReads = Math.max(this.peakReads, this.#active);
+
+    try {
+      const ms = this.delays.get(key);
+      if (ms !== undefined) await new Promise((resolve) => setTimeout(resolve, ms));
+
+      const fault = this.faults.get(key);
+      if (fault !== undefined) throw fault;
+      return await this.#inner.get(key);
+    } finally {
+      this.#active--;
+    }
+  }
+
+  put(key: string, body: string, cas?: CasHeaders): Promise<{ etag: string }> {
+    return this.#inner.put(key, body, cas);
+  }
+
+  del(key: string): Promise<void> {
+    return this.#inner.del(key);
+  }
+
+  list(prefix: string): Promise<string[]> {
+    return this.#inner.list(prefix);
   }
 }
 

@@ -35,8 +35,9 @@ import {
 } from "../src/core/registry/index.ts";
 import type { RegistryContext } from "../src/core/registry/context.ts";
 import type { EnvironmentRecord } from "../src/core/types/registry.ts";
+import { DEFAULT_CONCURRENCY } from "../src/core/utils/concurrency.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock } from "./_helpers.ts";
+import { ctxWith, type ManualClock, ObservingStore } from "./_helpers.ts";
 
 const PROJECT = "shop";
 const OTHER_PROJECT = "blog";
@@ -680,6 +681,63 @@ describe("the builds a wake has recalled", () => {
   });
 });
 
+describe("how a pass reads all of that", () => {
+  /*
+   * A pass is a read per environment plus the reads that resolve it, and on a
+   * hundred-millisecond store one after another that is seconds in front of
+   * every wake and every rollout. What is asserted here is that overlapping
+   * them changes the LATENCY and nothing else: the same answer, in the same
+   * order, with the same failure — and never more of the store at once than the
+   * node said it would take.
+   */
+  it("overlaps the environments of a project, up to the bound and no further", async () => {
+    const { ctx, observing } = await watchedInstallation();
+    observing.reset();
+
+    await readDesired(ctx, { nodeId: SELF });
+
+    expect(observing.peakReads).toBeGreaterThan(1);
+    expect(observing.peakReads).toBeLessThanOrEqual(DEFAULT_CONCURRENCY);
+  });
+
+  it("takes exactly the bound it is given, however many environments there are", async () => {
+    const { ctx, observing } = await watchedInstallation();
+
+    for (const concurrency of [1, 3]) {
+      observing.reset();
+      await readDesired(ctx, { nodeId: SELF, concurrency });
+      expect(observing.peakReads, `bounded to ${String(concurrency)}`).toBe(concurrency);
+    }
+  });
+
+  it("answers exactly what it answered one read at a time", async () => {
+    const { ctx, observing, names } = await watchedInstallation();
+    /* The first environment of the listing answers LAST, so a state assembled
+       as the reads came back would be in another order than the one below. */
+    observing.delays.set(environmentKey(PROJECT, names[0]), 20);
+
+    const overlapped = await readDesired(ctx, { nodeId: SELF });
+    const sequential = await readDesired(ctx, { nodeId: SELF, concurrency: 1 });
+
+    expect(overlapped).toEqual(sequential);
+    expect(overlapped.environments.map((entry) => entry.env.name)).toEqual(names);
+    expect(overlapped.placements.map((view) => view.env)).toEqual(names);
+  });
+
+  it("surfaces the failure of the FIRST environment, not of the first read to fail", async () => {
+    const { ctx, observing, names } = await watchedInstallation();
+    /* The later one fails at once and the earlier one takes its time, so the
+       failure that settles first is not the one a sequential pass would hit. */
+    observing.delays.set(environmentKey(PROJECT, names[1]), 20);
+    observing.faults.set(environmentKey(PROJECT, names[1]), new Error("the second"));
+    observing.faults.set(environmentKey(PROJECT, names[5]), new Error("the sixth"));
+
+    await expect(readDesired(ctx, { nodeId: SELF })).rejects.toThrow("the second");
+    /* And it is the same failure the pass raised before any of this overlapped. */
+    await expect(readDesired(ctx, { nodeId: SELF, concurrency: 1 })).rejects.toThrow("the second");
+  });
+});
+
 /** An environment with a build its alias points at, ready to be served. */
 async function deployed(project: string, name: string): Promise<void> {
   await createEnvironment(registry, project, { name });
@@ -712,6 +770,32 @@ async function writeRecord(name: string, patch: Partial<EnvironmentRecord>): Pro
     ...(current?.value as EnvironmentRecord),
     ...patch,
   });
+}
+
+/**
+ * One project of a dozen deployed and decided environments, over a store that
+ * watches how its reads run.
+ */
+async function watchedInstallation(): Promise<{
+  ctx: RegistryContext;
+  observing: ObservingStore;
+  names: string[];
+}> {
+  const observing = new ObservingStore(new MemoryCasStore());
+  const { ctx } = ctxWith(observing);
+  await createProject(ctx, { slug: PROJECT });
+  await createBuild(ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
+
+  const taken = await acquireLease(ctx, SELF);
+  if (taken === null) throw new Error("the fixture could not take the lease");
+
+  const names = Array.from({ length: 12 }, (_, index) => `env-${String(index).padStart(2, "0")}`);
+  for (const name of names) {
+    await createEnvironment(ctx, PROJECT, { name });
+    await flipAlias(ctx, PROJECT, name, BUILD);
+    await writePlacement(ctx, PROJECT, name, [SELF], taken);
+  }
+  return { ctx, observing, names };
 }
 
 /** Leaves the environment with an alias flip nothing can read as a time. */

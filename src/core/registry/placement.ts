@@ -18,6 +18,7 @@ import type {
 } from "../types/registry.ts";
 import { assertReplicas } from "../placement/replicas.ts";
 import { assertSelector } from "../placement/selector.ts";
+import { type ConcurrencyGate, DEFAULT_CONCURRENCY, mapConcurrent } from "../utils/concurrency.ts";
 import { deepEqual, isCasConflict, namesFromKeys } from "./_shared.ts";
 import { createJson, deleteKey, putJson, readJson, updateJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
@@ -54,23 +55,42 @@ export async function readPlacement(
   return found?.value ?? null;
 }
 
+export interface ListPlacementsOptions {
+  /**
+   * How many of the reads run at a time, or a gate shared with whatever else
+   * the caller is reading in parallel. Defaults to {@link DEFAULT_CONCURRENCY}.
+   */
+  concurrency?: number | ConcurrencyGate;
+}
+
 /**
  * Every placement decision of one project, keyed by environment name.
  *
  * One listing plus a read per DECIDED environment, rather than a read per
  * environment that exists: the environments nobody has decided about — which is
  * all of them until a coordinator runs — cost nothing here.
+ *
+ * The reads are independent of each other and run in parallel under a bound. The
+ * map is keyed in LISTING order all the same, so what a caller iterates does not
+ * depend on which read came back first, and a read that throws surfaces the same
+ * failure it would have if they had run one after another.
  */
 export async function listPlacements(
   ctx: RegistryContext,
   project: string,
+  opts?: ListPlacementsOptions,
 ): Promise<Map<string, PlacementRecord>> {
   const prefix = placementPrefix(project);
-  const placements = new Map<string, PlacementRecord>();
+  const names = namesFromKeys(await ctx.store.list(prefix), prefix);
 
-  for (const env of namesFromKeys(await ctx.store.list(prefix), prefix)) {
-    const found = await readJson<PlacementRecord>(ctx, `${prefix}${env}.json`);
-    if (found !== null) placements.set(env, found.value);
+  const found = await mapConcurrent(names, opts?.concurrency ?? DEFAULT_CONCURRENCY, async (env) =>
+    readJson<PlacementRecord>(ctx, `${prefix}${env}.json`),
+  );
+
+  const placements = new Map<string, PlacementRecord>();
+  for (const [index, env] of names.entries()) {
+    const record = found[index];
+    if (record !== null) placements.set(env, record.value);
   }
   return placements;
 }
