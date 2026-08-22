@@ -52,10 +52,34 @@ those names for you — send the `Host` header, or add them to `/etc/hosts`.
 
   Read it before you run it — that is what it is written for. There are no
   releases yet, so point `SCAFO_INSTALL_BASE` at your own `pnpm compile` output
-  (`build/`) until there are. Two things it deliberately leaves to you:
-  wireguard-tools comes from your package manager, and the Caddy it installs is
-  the plain one, which keeps its certificates on that host — a fleet sharing one
-  certificate needs the `caddy.storage.scafo` build instead.
+  (`build/`) until there are. wireguard-tools it deliberately leaves to your
+  package manager: a tunnel needs a kernel module and `NET_ADMIN`.
+
+  **The ingress it installs is scafo-caddy by default** — Caddy built with the
+  [`caddy.storage.scafo`](https://github.com/sandros94/scafo-certmagic) module,
+  which keeps the certificates, their keys and the ACME account _in the bucket_
+  and reaches them through this node's own `/v1/storage`. That is what lets
+  every node in a fleet serve one certificate instead of each issuing its own
+  for the same names. It holds no bucket credential: a loopback URL and a bearer
+  token, and nothing else. `SCAFO_INSTALL_CADDY=plain` opts down to upstream
+  Caddy, pinned in the script, with certificates on that host — per-node TLS,
+  correct for one host and a rate limit waiting to happen on a fleet. Either one
+  is installed as `caddy`, so nothing else on the host knows which it is;
+  `SCAFO_CADDY_BASE` and `SCAFO_CADDY_SHA256` are its base URL and its pin, the
+  same integrity-by-default, authenticity-by-pin posture `scafo`'s own binary
+  has. **There is no scafo-caddy release yet either**, so until there is, the
+  default path fails with a message naming `SCAFO_INSTALL_CADDY=plain`, or point
+  `SCAFO_CADDY_BASE` at your own `xcaddy build` output.
+
+  The storage token is where that gets interesting. The node mints it `0600`
+  inside a `0700` directory it owns, and the ingress runs as another user that
+  cannot read it — and neither mode is loosened. The unit uses systemd's
+  `LoadCredential=`, which has the service manager read the file _as root_ and
+  hand the service a private read-only copy in `$CREDENTIALS_DIRECTORY`; the
+  config's `token_file` points at that copy. On a host's very first boot the
+  token does not exist yet, so the ingress fails and retries (`243/CREDENTIALS`,
+  with the start rate limit turned off) until the node has minted it — seconds,
+  normally. That is the design, and the unit says so in a comment.
 
 - **Undoing that:** [`scripts/uninstall.sh`](./scripts/uninstall.sh) — the same
   list, backwards. It stops the ingress, gives the node the full grace it needs
@@ -64,7 +88,10 @@ those names for you — send the `Host` header, or add them to `/etc/hosts`.
   the token the ingress presents to `/v1/storage`, neither of which anything can
   reissue. `--purge` takes those too, with Caddy's certificates, its ACME account
   and the system users that install created; `--dry-run` prints what either would
-  remove and touches nothing at all.
+  remove and touches nothing at all. It reads which Caddy the install used out of
+  the manifest, because that changes what `--purge` _means_: under plain Caddy
+  the certificates were on that host and go with it, and under scafo-caddy they
+  were never there — they are in the bucket, and the report says so.
 
   ```sh
   sudo sh scripts/uninstall.sh --dry-run   # then again without it, or with --purge

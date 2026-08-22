@@ -23,6 +23,17 @@
 #   ingress's certificates and its ACME account under /var/lib/caddy, which are
 #   rate-limited to reissue, and for whatever Caddy logged.
 #
+#   WHICH CADDY THIS WAS MATTERS TO WHAT THAT MEANS. install.sh installs the
+#   ingress as `caddy` whatever flavour it is — which is why nothing in this
+#   script has to branch on it — but it records the flavour in the manifest, and
+#   the report says it. With plain Caddy the certificates were in /var/lib/caddy
+#   and --purge takes them. With scafo-caddy they were never on this host at
+#   all: they are in the BUCKET, and no flag here reaches them, because other
+#   nodes are serving them right now. The copy of the storage token systemd made
+#   for the ingress needs no removal either — it lives in a tmpfs under
+#   /run/credentials and goes when the unit stops, which is the first thing
+#   below.
+#
 # WHAT IT NEVER TOUCHES: THE BUCKET
 #
 #   The registry belongs to the FLEET and not to this host, and an uninstall is
@@ -86,7 +97,12 @@ NODE_UNIT='scafo-node.service'
 # install.sh names the ingress unit after the account it runs as.
 INGRESS_UNIT='caddy.service'
 
-# The four executables one scafo node is made of, in install.sh's order.
+# The four executables one scafo node is made of, in install.sh's order. `caddy`
+# is one name for two possible binaries — scafo-caddy by default, upstream Caddy
+# under SCAFO_INSTALL_CADDY=plain — and install.sh puts BOTH there under that one
+# name precisely so this list, the unit and everything below stay one thing. The
+# manifest's `caddy_flavor=` says which it was, and it is used for the report
+# only: the file to remove is the same either way.
 BINARIES='scafo celld caddy esbuild'
 
 MANIFEST_NAME='install.manifest'
@@ -246,6 +262,7 @@ read_manifest() {
   MANIFEST_CONFIG_DIR=''
   MANIFEST_INGRESS_LOG_DIR=''
   MANIFEST_CADDY_STATE_DIR=''
+  MANIFEST_CADDY_FLAVOR=''
   manifest="${STATE_DIR}/${MANIFEST_NAME}"
 
   [ -f "$manifest" ] || return 0
@@ -266,6 +283,9 @@ read_manifest() {
       config_dir=*) MANIFEST_CONFIG_DIR="${line#config_dir=}" ;;
       ingress_log_dir=*) MANIFEST_INGRESS_LOG_DIR="${line#ingress_log_dir=}" ;;
       caddy_state_dir=*) MANIFEST_CADDY_STATE_DIR="${line#caddy_state_dir=}" ;;
+      # Report only — see BINARIES above. A host installed before this line
+      # existed leaves it empty, and the report simply says less.
+      caddy_flavor=*) MANIFEST_CADDY_FLAVOR="${line#caddy_flavor=}" ;;
       *) ;;
     esac
   done < "$manifest"
@@ -513,8 +533,33 @@ remove_units() {
 # have one.
 remove_binaries() {
   for name in $FOUND_BINARIES; do
-    remove_path "${BIN_DIR}/${name}" 'executable' || true
+    remove_path "${BIN_DIR}/${name}" "$(binary_note "$name")" || true
   done
+}
+
+# What the report calls one executable. Only `caddy` has anything to add: which
+# of the two Caddys it was is the one thing about this install that the file
+# name cannot say, and the manifest is the only place it is written down.
+binary_note() {
+  [ "$1" = 'caddy' ] || {
+    printf 'executable\n'
+    return 0
+  }
+  case "$MANIFEST_CADDY_FLAVOR" in
+    scafo) printf 'executable (scafo-caddy; its TLS material is in the bucket)\n' ;;
+    plain) printf 'executable (upstream Caddy; its certificates are on this host)\n' ;;
+    *) printf 'executable\n' ;;
+  esac
+}
+
+# The same question about /var/lib/caddy: with scafo-caddy there is nothing
+# irreplaceable in it, because the certificates and the ACME account were never
+# written there.
+caddy_state_note() {
+  case "$MANIFEST_CADDY_FLAVOR" in
+    scafo) printf 'scafo-caddy kept its certificates in the bucket, not here\n' ;;
+    *) printf 'certificates and the ACME account\n' ;;
+  esac
 }
 
 remove_config() {
@@ -534,7 +579,7 @@ remove_state() {
     # The manifest is kept with it ON PURPOSE: a --purge run days later still has
     # to know which system accounts THIS install created.
     [ ! -d "$STATE_DIR" ] || record_kept "$STATE_DIR" 'node identity, storage token, manifest'
-    [ ! -d "$CADDY_STATE_DIR" ] || record_kept "$CADDY_STATE_DIR" 'certificates and the ACME account'
+    [ ! -d "$CADDY_STATE_DIR" ] || record_kept "$CADDY_STATE_DIR" "$(caddy_state_note)"
     [ ! -d "$INGRESS_LOG_DIR" ] || record_kept "$INGRESS_LOG_DIR" 'what the ingress logged'
     for user in $(users_to_remove); do
       record_kept "the \"${user}\" user" 'system account'
@@ -543,7 +588,7 @@ remove_state() {
   fi
 
   remove_path "$STATE_DIR" 'node identity, storage token, tunnel keys' || true
-  remove_path "$CADDY_STATE_DIR" 'certificates and the ACME account' || true
+  remove_path "$CADDY_STATE_DIR" "$(caddy_state_note)" || true
   remove_path "$INGRESS_LOG_DIR" 'what the ingress logged' || true
 
   # After the directories, so that userdel never has to reason about a home it
@@ -629,6 +674,13 @@ report() {
   printf '  draining, so placement counted it out on the coordinator'\''s next pass,\n'
   printf '  and a node that never got to say so is counted out once its liveness\n'
   printf '  window runs out. Retiring what it served is "scafo env", from anywhere.\n'
+  if [ "$MANIFEST_CADDY_FLAVOR" = 'scafo' ]; then
+    printf '  THE TLS MATERIAL IS IN THERE TOO. This host ran scafo-caddy, so the\n'
+    printf '  certificates, their keys and the ACME account were in the bucket rather\n'
+    printf '  than on this disk — and every other node in the fleet is serving them\n'
+    printf '  right now. Nothing here removes them, and nothing should: this host\n'
+    printf '  leaving is not the certificate expiring.\n'
+  fi
 
   printf '\nWHAT THIS COULD NOT UNDO\n\n'
   printf '  * A PATH line you added to your shell profile for %s.\n' "$BIN_DIR"
