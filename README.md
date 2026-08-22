@@ -57,6 +57,24 @@ those names for you — send the `Host` header, or add them to `/etc/hosts`.
   the plain one, which keeps its certificates on that host — a fleet sharing one
   certificate needs the `caddy.storage.scafo` build instead.
 
+- **Undoing that:** [`scripts/uninstall.sh`](./scripts/uninstall.sh) — the same
+  list, backwards. It stops the ingress, gives the node the full grace it needs
+  to drain, then removes both units, the four executables and `/etc/scafo`, and
+  **keeps `/var/lib/scafo`**: the key pair this node's registry record names and
+  the token the ingress presents to `/v1/storage`, neither of which anything can
+  reissue. `--purge` takes those too, with Caddy's certificates, its ACME account
+  and the system users that install created; `--dry-run` prints what either would
+  remove and touches nothing at all.
+
+  ```sh
+  sudo sh scripts/uninstall.sh --dry-run   # then again without it, or with --purge
+  ```
+
+  **Neither of them goes near the bucket.** The registry is the fleet's, not one
+  host's, and a node that has stopped needs no cleanup: it marks itself draining
+  on the way out and placement counts it out on the coordinator's next pass.
+  Retiring what it served is `scafo env`, from anywhere.
+
 - **The binary:** `pnpm compile` — `deno compile` over the same `dist/` the image
   runs, producing `build/scafo-linux-amd64` and `build/scafo-linux-arm64` with a
   `.sha256` beside each. celld, an ingress and wireguard-tools stay separate

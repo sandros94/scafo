@@ -60,11 +60,25 @@
 # Everything else it installs is PINNED — a version and a sha256 per
 # architecture, written down below and verified before install. Moving to a new
 # celld, Caddy or esbuild is an edit of those constants.
+#
+# UNDOING IT: scripts/uninstall.sh, which stops and removes the units, the
+# executables and /etc/scafo and KEEPS the state directory unless --purge says
+# otherwise. It reads the manifest this script writes to /var/lib/scafo, and
+# works without one. THE TWO SCRIPTS ARE ONE LIST IN TWO FILES — see the comment
+# above the constants below.
 
 set -eu
 
 # ---------------------------------------------------------------------------
 # What is installed, and the bytes it must be.
+#
+# THIS LIST AND scripts/uninstall.sh's CONSTANTS ARE ONE LIST IN TWO FILES AND
+# MUST CHANGE TOGETHER. A binary, a unit, a directory or a system user added here
+# and not there is one left on every host forever — and the failure is invisible,
+# because an uninstall that removes four of five things still ends by reporting
+# success. write_manifest() below records what cannot be derived (which bin
+# directory, which accounts this run created); the uninstall does not depend on
+# it, so these constants have to stay true on their own.
 #
 # The checksums were computed from the artifacts these URLs serve. Caddy's own
 # `caddy_<v>_checksums.txt` publishes SHA-512; the sha256 below were taken from
@@ -93,6 +107,9 @@ CONFIG_DIR='/etc/scafo'
 INGRESS_LOG_DIR='/var/log/scafo-ingress'
 SERVICE_USER='scafo'
 CADDY_USER='caddy'
+# Where the ingress keeps its certificates and its ACME account. It is also what
+# `StateDirectory=caddy` in the unit below resolves to, so the two must agree.
+CADDY_STATE_DIR='/var/lib/caddy'
 
 # The stop grace is part of the product, not a tuning preference: on SIGTERM the
 # agent marks itself draining, releases the coordinator lease, stops
@@ -107,6 +124,10 @@ DEFAULT_INSTALL_BASE_TAGGED='https://github.com/sandros94/scafo/releases/downloa
 # ---------------------------------------------------------------------------
 
 main() {
+  # What this particular run made, for the manifest at the end of it.
+  INSTALLED_BINARIES=''
+  CREATED_USERS=''
+
   need_cmd uname
   need_cmd mktemp
   need_cmd install
@@ -141,6 +162,7 @@ main() {
     create_users
     write_config
     write_units
+    write_manifest
     UNITS_WRITTEN='yes'
   else
     UNITS_WRITTEN='no'
@@ -278,6 +300,7 @@ verify() {
 install_binary() {
   # install_binary <source file> <name>
   as_root install -m 0755 "$1" "${BIN_DIR}/$2"
+  INSTALLED_BINARIES="${INSTALLED_BINARIES} $2"
   say "installed ${BIN_DIR}/$2"
 }
 
@@ -381,14 +404,21 @@ fetch_esbuild() {
 create_users() {
   # System accounts, because neither of these ever logs in. The node's is what
   # owns its identity; Caddy's is what owns its certificates.
+  #
+  # WHICH OF THEM THIS RUN CREATED IS RECORDED, and it is the one fact the
+  # uninstall cannot work out for itself: a "caddy" account a distribution's own
+  # package made owns a Caddy neither script knows anything about, and deleting
+  # it would be a far worse mistake than leaving an unused account behind.
   if ! id "$SERVICE_USER" >/dev/null 2>&1; then
     useradd --system --home-dir "$STATE_DIR" --shell /usr/sbin/nologin "$SERVICE_USER" \
       || die "could not create the \"${SERVICE_USER}\" system user"
+    CREATED_USERS="${CREATED_USERS} ${SERVICE_USER}"
     say "created system user ${SERVICE_USER}"
   fi
   if ! id "$CADDY_USER" >/dev/null 2>&1; then
-    useradd --system --home-dir /var/lib/caddy --shell /usr/sbin/nologin "$CADDY_USER" \
+    useradd --system --home-dir "$CADDY_STATE_DIR" --shell /usr/sbin/nologin "$CADDY_USER" \
       || die "could not create the \"${CADDY_USER}\" system user"
+    CREATED_USERS="${CREATED_USERS} ${CADDY_USER}"
     say "created system user ${CADDY_USER}"
   fi
 
@@ -570,8 +600,8 @@ TimeoutStopSec=5s
 # Certificates and the ACME account, on this host's disk. Per-node: see the
 # note about fleet-shared TLS at the top of the installer.
 StateDirectory=caddy
-Environment=XDG_DATA_HOME=/var/lib/caddy
-Environment=XDG_CONFIG_HOME=/var/lib/caddy
+Environment=XDG_DATA_HOME=${CADDY_STATE_DIR}
+Environment=XDG_CONFIG_HOME=${CADDY_STATE_DIR}
 # What the node counts requests out of, when it is told to.
 LogsDirectory=scafo-ingress
 LogsDirectoryMode=0755
@@ -598,6 +628,47 @@ EOF
   else
     warn 'the units are written but "systemctl daemon-reload" did not run; run it yourself'
   fi
+}
+
+# The record of what this run made, written where the node's own state lives —
+# and read by scripts/uninstall.sh, which removes exactly what is in it.
+#
+# Two of these lines cannot be derived from anywhere else on the host: which
+# directory the executables went into when SCAFO_INSTALL_BIN_DIR moved them, and
+# which of the two system accounts this run CREATED rather than found. The rest
+# is written down for the same reason a receipt lists what is already obvious —
+# so that changing the installer changes what the uninstall is told, rather than
+# leaving the two to agree by memory.
+#
+# IT IS NOT A DEPENDENCY. The uninstall falls back to these same constants, to
+# the ExecStart of the unit below, and to whatever `scafo` is on PATH, so a host
+# installed before this file existed — or one whose state directory has already
+# been purged — comes apart just as cleanly, only more carefully. Written here
+# rather than under /etc because it describes THIS host's install and belongs
+# beside the identity that install has; a run that writes no units writes no
+# manifest either, having made no directory of its own to keep one in.
+write_manifest() {
+  manifest="${STATE_DIR}/install.manifest"
+  {
+    printf '# What scripts/install.sh made on this host, for scripts/uninstall.sh.\n'
+    printf '# Losing this file does not break the uninstall; it only makes it derive.\n'
+    printf 'manifest_version=1\n'
+    printf 'installed_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo 'unknown')"
+    printf 'bin_dir=%s\n' "$BIN_DIR"
+    for name in $INSTALLED_BINARIES; do printf 'binary=%s\n' "$name"; done
+    printf 'unit=/etc/systemd/system/scafo-node.service\n'
+    printf 'unit=/etc/systemd/system/%s.service\n' "$CADDY_USER"
+    printf 'config_dir=%s\n' "$CONFIG_DIR"
+    printf 'state_dir=%s\n' "$STATE_DIR"
+    printf 'ingress_log_dir=%s\n' "$INGRESS_LOG_DIR"
+    printf 'caddy_state_dir=%s\n' "$CADDY_STATE_DIR"
+    printf 'service_user=%s\n' "$SERVICE_USER"
+    printf 'caddy_user=%s\n' "$CADDY_USER"
+    for name in $CREATED_USERS; do printf 'created_user=%s\n' "$name"; done
+  } > "$manifest"
+  chmod 0644 "$manifest"
+  chown "${SERVICE_USER}:${SERVICE_USER}" "$manifest" 2>/dev/null || true
+  say "wrote ${manifest}"
 }
 
 explain_manual_setup() {
@@ -683,6 +754,7 @@ next_steps() {
     printf '  %-28s bucket credentials and every other setting\n' "${CONFIG_DIR}/node.env"
     printf '  %-28s the ingress config the node writes its routes into\n' "${CONFIG_DIR}/caddy.json"
     printf '  %-28s where Caddy logs what it served, when asked to\n' "${INGRESS_LOG_DIR}/"
+    printf '  %-28s what this run installed, for scripts/uninstall.sh\n' "${STATE_DIR}/install.manifest"
   fi
 
   printf '\nWHAT THIS INSTALL IS NOT\n\n'
@@ -699,6 +771,11 @@ next_steps() {
   printf '    Then "scafo wg init" writes wg0.conf and prints the wg-quick command.\n'
   printf '    A single node that never leaves loopback needs none of it.\n'
   printf '  * NOTHING WAS STARTED. See NEXT above.\n\n'
+  printf 'UNDOING IT: scripts/uninstall.sh stops and removes all of the above and\n'
+  printf 'KEEPS %s, which holds the one thing nothing can reissue —\n' "$STATE_DIR"
+  printf 'this node'\''s key pair. "--purge" takes that too, "--dry-run" only says so.\n'
+  printf 'Neither touches the bucket: a node that stops is counted out of placement\n'
+  printf 'on its own.\n\n'
 }
 
 scafo_version() {
