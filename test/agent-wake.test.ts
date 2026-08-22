@@ -25,9 +25,15 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { ParkedEnvironment } from "../src/agent/_desired.ts";
 import { type AgentContext, type AgentState, createAgentApp } from "../src/agent/app.ts";
 import type { AgentConfig } from "../src/agent/config.ts";
+import {
+  createObservability,
+  type Observability,
+  type ObservedEvent,
+} from "../src/agent/observe.ts";
 import type { Reconciler } from "../src/agent/reconcile.ts";
 import {
   FALLBACK_MAX_CONCURRENT_WAKES,
+  WAKE_HEADER,
   WAKE_POLL_INTERVAL_MS,
   WAKE_RETRY_AFTER_S,
   type WakeCounters,
@@ -101,10 +107,12 @@ let keys: { privateKey: JWK_OKP_Private<"EdDSA">; publicKey: JWK_OKP_Public<"EdD
 let lease: LeaseHandle;
 let loop: FakeReconciler;
 let upstream: UpstreamCall[];
+let observe: Observability;
 let app: H3;
 
 beforeEach(async () => {
   clock = ctxWith(new MemoryCasStore());
+  observe = createObservability({ enabled: true, now: (): Date => new Date(clock.nowMs()) });
   keys = await generateJWK("EdDSA", { kid: NODE_ID });
   await registerNode(clock.ctx, {
     v: 1,
@@ -747,6 +755,149 @@ describe("which node a wake runs on", () => {
   });
 });
 
+describe("what a wake says about itself", () => {
+  it("names every answer, whether or not this node is observing anything", async () => {
+    /* ON EVERY ANSWER: it costs a few random bytes and it is what ties a
+       caller's failed request, an ingress log line and the node's own events
+       together. What the switch decides is whether there is anything to
+       correlate WITH, never whether the request has a name. */
+    app = appWith({ observability: false });
+    loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+
+    const served = await ask(PARKED_HOST, "/");
+    const missing = await ask(`${PROJECT}--ghost.${DOMAIN}`, "/");
+
+    for (const [response, why] of [
+      [served, "served"],
+      [missing, "404"],
+    ] as const) {
+      expect(response.headers.get(WAKE_HEADER), why).toMatch(/^[\da-f]{12}$/);
+    }
+    /* Two requests, two names. */
+    expect(served.headers.get(WAKE_HEADER)).not.toBe(missing.headers.get(WAKE_HEADER));
+    /* And nothing was recorded, because nothing was watching. */
+    expect(observe.snapshot().events).toEqual([]);
+  });
+
+  it("leaves a served wake as admitted, resolved, stamped, kicked and served", async () => {
+    loop.onKick = (): void => {
+      loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+    };
+
+    const response = await ask(PARKED_HOST, "/cart");
+    const id = response.headers.get(WAKE_HEADER);
+
+    /* A successful wake must leave a trace, and this is it: the seams that were
+       reconstructed by hand the last time a wake had to be explained. */
+    expect(observe.snapshot().events.map((event) => event.type)).toEqual([
+      "wake.admitted",
+      "wake.resolved",
+      "wake.stamped",
+      "wake.kicked",
+      "wake.served",
+    ]);
+    /* One request, one id, on the answer and on all five. */
+    expect(id).not.toBeNull();
+    expect(new Set(wakeIds())).toEqual(new Set([id]));
+
+    expect(observe.snapshot().events[0]).toMatchObject({
+      type: "wake.admitted",
+      host: PARKED_HOST,
+      kind: "environment",
+      project: PROJECT,
+      env: PREVIEW,
+      inFlight: 1,
+    });
+    /* What resolving the Host and the placement cost the bucket, attributed to
+       the request now that there is an admitted one to attribute it to. */
+    expect(eventOf("wake.resolved")).toMatchObject({ storeOps: expect.any(Number) });
+    expect((eventOf("wake.resolved") as { storeOps: number }).storeOps).toBeGreaterThan(0);
+    expect(eventOf("wake.served")).toMatchObject({ port: 42_004, status: 200 });
+  });
+
+  it("names the build a recalled host asked for, and no environment leg", async () => {
+    loop.onKick = (): void => {
+      loop.processes = [ready(PREVIEW, SUPERSEDED, 42_006)];
+    };
+
+    await ask(`${PROJECT}--${SUPERSEDED}.${DOMAIN}`, "/");
+
+    expect(eventOf("wake.admitted")).toMatchObject({
+      kind: "build",
+      project: PROJECT,
+      env: PREVIEW,
+      build: SUPERSEDED,
+    });
+  });
+
+  it("records a refusal AT the cap, and records it as a refusal", async () => {
+    app = appWith({ maxConcurrentWakes: 1 });
+    const held = ask(PARKED_HOST, "/");
+    await sleep(WAKE_POLL_INTERVAL_MS / 2);
+
+    const refused = await ask(OTHER_PARKED_HOST, "/");
+
+    /* The refused request never became a wake — it was turned away before
+       anything was stamped — so ITS id is on this event and on no other. The
+       held request's own events are beside it and are not this request's. */
+    const id = refused.headers.get(WAKE_HEADER);
+    expect(eventOf("wake.refused")).toMatchObject({ id, host: OTHER_PARKED_HOST });
+    expect(
+      observe
+        .snapshot()
+        .events.filter((event) => "id" in event && event.id === id)
+        .map((event) => event.type),
+    ).toEqual(["wake.refused"]);
+
+    loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+    await held;
+  });
+
+  it("records a wake that was not woken in time as a failure with its reason", async () => {
+    await setParkPolicy(clock.ctx, PROJECT, PREVIEW, { wakeDeadlineS: 1 });
+
+    const response = await ask(PARKED_HOST, "/");
+
+    expect(response.status).toBe(503);
+    /* The 503 is named too, so a caller who reports one can be asked which. */
+    expect(response.headers.get(WAKE_HEADER)).toMatch(/^[\da-f]{12}$/);
+    expect(observe.snapshot().events.map((event) => event.type)).toEqual([
+      "wake.admitted",
+      "wake.resolved",
+      "wake.stamped",
+      "wake.kicked",
+      "wake.failed",
+    ]);
+    expect(eventOf("wake.failed")).toMatchObject({ reason: "deadline" });
+  });
+
+  it("records nothing for a wake it handed to a peer, which is that node's to record", async () => {
+    await placedOn(PREVIEW, [PEER]);
+
+    const response = await ask(PARKED_HOST, "/");
+
+    /* Nothing was admitted, stamped or started here — and the id the caller
+       gets is THIS node's, for the request it actually made, rather than the
+       one the peer answered under. */
+    expect(response.status).toBe(201);
+    expect(response.headers.get(WAKE_HEADER)).toMatch(/^[\da-f]{12}$/);
+    expect(observe.snapshot().events).toEqual([]);
+  });
+
+  it("stamps the events on the seam's own clock", async () => {
+    loop.onKick = (): void => {
+      loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+    };
+
+    await ask(PARKED_HOST, "/");
+
+    /* The manual clock never moved, so every event of the request is on it
+       rather than on the wall — which is what makes a timeline assertable. */
+    const stamped = new Date(clock.nowMs()).toISOString();
+    expect(observe.snapshot().events.map((event) => event.at)).toEqual(Array(5).fill(stamped));
+  });
+});
+
 describe("GET /v1/state", () => {
   it("reports what is parked and what this node has done about wakes", async () => {
     loop.onKick = (): void => {
@@ -825,6 +976,12 @@ interface AppOptions {
    * says which draw it took rather than sampling for it.
    */
   draws?: number[];
+  /**
+   * Whether this node reports on itself. On by default, so every case runs the
+   * observing path; `false` is the node that is not observing at all, which is
+   * an ABSENT seam rather than a disabled one.
+   */
+  observability?: boolean;
 }
 
 /** This node's agent app, over the shared registry, loop and upstream stand-in. */
@@ -837,6 +994,7 @@ function appWith(opts: AppOptions): H3 {
     version: VERSION,
     fetchFn: stubFetch,
   };
+  if (opts.observability !== false) agent.observability = observe;
   if (opts.capacity !== false) agent.capacity = capacityPlan(opts.maxConcurrentWakes ?? 2);
   if (opts.reconciler !== false) agent.reconciler = loop;
   if (opts.draws !== undefined) {
@@ -979,6 +1137,7 @@ function agentConfig(bindHost = "127.0.0.1"): AgentConfig {
       cellIdleEvictS: 900,
       pointerHoldMs: 3_000,
     },
+    observability: { enabled: false },
   };
 }
 
@@ -1010,6 +1169,16 @@ function idleSupervisor(): Supervisor {
 
 async function bearer(): Promise<Record<string, string>> {
   return { authorization: `Bearer ${await signNodeToken(keys.privateKey, NODE_ID)}` };
+}
+
+/** The first event of a type this node recorded, or undefined for none. */
+function eventOf(type: ObservedEvent["type"]): ObservedEvent | undefined {
+  return observe.snapshot().events.find((event) => event.type === type);
+}
+
+/** The request ids on every event that carries one, in order. */
+function wakeIds(): string[] {
+  return observe.snapshot().events.flatMap((event) => ("id" in event ? [event.id] : []));
 }
 
 /** The loopback ports the hops dialled, in the order they were dialled. */

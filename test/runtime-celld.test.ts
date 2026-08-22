@@ -712,6 +712,48 @@ describe("the readiness gate", () => {
     for (const url of probe.urls) expect(url.startsWith("http://127.0.0.1:42020")).toBe(true);
   });
 
+  it("reports each attempt as it begins it, for a caller counting them", async () => {
+    /* A gate that passed on the first attempt and one that passed on the fourth
+       both answer the same `true`, and only the count tells them apart — which
+       is a fact about the inside of this loop and knowable nowhere else. */
+    let healthChecks = 0;
+    const probe = probeFetch((url) => {
+      if (!url.endsWith(HEALTH_PATH)) return 200;
+      healthChecks++;
+      return healthChecks < 7 ? 500 : 200;
+    });
+    let attempts = 0;
+
+    const ready = await driver().probeReady(runtimeProcess(), {
+      ...probeSettings,
+      attempts: 8,
+      onAttempt: (): void => {
+        attempts++;
+      },
+      fetchFn: probe.fetchFn,
+    });
+
+    expect(ready).toBe(true);
+    expect(attempts).toBe(7);
+  });
+
+  it("counts the attempts of a gate that never passes as the ones it was given", async () => {
+    const probe = probeFetch(() => 500);
+    let attempts = 0;
+
+    const ready = await driver().probeReady(runtimeProcess(), {
+      ...probeSettings,
+      attempts: 3,
+      onAttempt: (): void => {
+        attempts++;
+      },
+      fetchFn: probe.fetchFn,
+    });
+
+    expect(ready).toBe(false);
+    expect(attempts).toBe(3);
+  });
+
   it("always asks at least once, however few attempts it is given", async () => {
     const probe = probeFetch(() => 500);
 

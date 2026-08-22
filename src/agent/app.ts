@@ -44,6 +44,7 @@ import type { AgentConfig } from "./config.ts";
 import type { Coordinator } from "./coordinator.ts";
 import type { DeployService, DeployStatus } from "./deploys.ts";
 import { renderProblem, requireNodeToken } from "./middleware.ts";
+import type { Observability } from "./observe.ts";
 import type { ParkedView, PlacementView, Reconciler, ReconcileStatus } from "./reconcile.ts";
 import { registerStorageRoutes } from "./_storage-routes.ts";
 import type { StorageService } from "./storage.ts";
@@ -80,6 +81,16 @@ export interface AgentContext {
   coordinator?: Coordinator;
   /** How this node calls its peers; defaults to the global `fetch`. */
   fetchFn?: typeof fetch;
+  /**
+   * Where this node reports what it did, when it reports at all.
+   *
+   * ABSENT IS THE OFF STATE, and it is off that this is optional FOR: every
+   * emission site is written `agent.observability?.emit({ ... })`, and optional
+   * chaining short-circuits the argument too — so a node that is not observing
+   * never builds a single event object. A seam is only ever attached here while
+   * `observability.enabled` says so.
+   */
+  observability?: Observability;
   /**
    * Where the wake surface's weighted pick between an environment's serving legs
    * comes from — a value in `[0, 1)`, drawn once per look at a held request.

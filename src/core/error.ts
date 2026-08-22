@@ -98,6 +98,22 @@ export function isScafoError(err: unknown): err is ScafoError {
 }
 
 /**
+ * One line describing whatever was thrown, for a status field or an event that
+ * records a failure rather than raising it.
+ *
+ * The specifics a scafo failure carries are the useful half — the message says
+ * what went wrong and the detail says about what — so both are kept. Anything
+ * else is reduced to its message, and a value that is not an error at all to
+ * whatever it stringifies as.
+ */
+export function describeError(error: unknown): string {
+  if (isScafoError(error)) {
+    return error.detail === undefined ? error.message : `${error.message}: ${error.detail}`;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
  * Reads a problem document back into the failure it was rendered from — the
  * inverse of {@link ScafoError.toProblem}, for a client holding one answer from
  * another process.

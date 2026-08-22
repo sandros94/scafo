@@ -1,8 +1,9 @@
 /* Internal: carrying out one reconcile plan against this node. */
 
-import { isScafoError, ScafoError } from "../core/error.ts";
+import { describeError, ScafoError } from "../core/error.ts";
 import { formatProcessId, parseProcessId } from "../core/placement/ids.ts";
 import type { DesiredEnvironment, ReconcileAction } from "../core/placement/reconcile.ts";
+import type { RegistryContext } from "../core/registry/context.ts";
 import { lockHolder, withLock } from "../core/registry/locks.ts";
 import { fleetPrefix } from "../core/registry/paths.ts";
 import {
@@ -53,6 +54,12 @@ export interface PointerLockOptions {
 /** Everything the executor acts through. */
 export interface ExecutorDeps {
   agent: AgentContext;
+  /**
+   * The registry this pass reads and writes through — the loop's own, which may
+   * be counted, and never `agent.registry` directly. Everything a pass costs the
+   * bucket has to go through one place for the pass to be able to report it.
+   */
+  registry: RegistryContext;
   driver: RuntimeDriver;
   /** Readiness gate settings applied to every process this executor gates. */
   probe: ProbeOptions;
@@ -79,10 +86,11 @@ export interface Executor {
 }
 
 export function createExecutor(deps: ExecutorDeps): Executor {
-  const { agent, driver, probe, baseEnv, known } = deps;
+  const { agent, registry, driver, probe, baseEnv, known } = deps;
   const holdMs = deps.pointerLock?.holdMs ?? POINTER_READ_HOLD_MS;
   const lockTimeoutMs = deps.pointerLock?.timeoutMs ?? ROLLOUT_LOCK_TIMEOUT_MS;
   const holder = lockHolder(agent.nodeId);
+  const observe = agent.observability;
 
   /**
    * Brings one build into service, as one uninterrupted sequence.
@@ -154,7 +162,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
          one keeps whatever process it already had. Starting it without its
          configuration would be a silent misconfiguration — the process would
          come up and serve requests against whatever its code defaults to. */
-      vars: await openEnvironmentVars(agent.registry, entry, agent.varsetKey),
+      vars: await openEnvironmentVars(registry, entry, agent.varsetKey),
       ports: action.ports,
       node: {
         endpoint: agent.config.bucket.endpoint,
@@ -191,7 +199,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     spawned.promise.catch(() => {});
 
     const section = withLock(
-      agent.registry,
+      registry,
       {
         space: POINTER_LOCK_SPACE,
         name: pointerLockName(action.project, action.env),
@@ -201,6 +209,10 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       async () => {
         await driver.activateVersion(fleetPrefix(action.project, action.env), version);
         await agent.supervisor.start(spec);
+        /* THE MOMENT THE PROCESS EXISTS, and the one a held wake is waiting on:
+           everything past here — the bookkeeping, the gate, the rest of the hold
+           — runs beside it rather than in front of it. */
+        observe?.emit({ type: "rollout.spawned", processId: spec.id, build: leg.build.id });
         spawned.resolve();
         /* The process is running and has not read the pointer yet. Held for it,
            because nothing here can observe the read itself. */
@@ -253,6 +265,10 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       }
       throw error;
     }
+    /* The hold is over and the environment's pointer lock is back. It may well
+       land AFTER the gate below has already reported: the hold guards the
+       POINTER, not the gate, and the two overlap on purpose. */
+    observe?.emit({ type: "rollout.holdEnded", processId: spec.id });
     await gating;
   }
 
@@ -263,7 +279,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
    * because the wake surface reads it from there.
    */
   async function gateStarted(started: RuntimeProcess, pending: ReconcileFailure[]): Promise<void> {
-    if (await driver.probeReady(started, probe)) {
+    if (await gate(started)) {
       known.set(started.processId, { ...started, ready: true });
       return;
     }
@@ -310,11 +326,48 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       return;
     }
 
-    if (await driver.probeReady(process, probe)) {
+    if (await gate(process)) {
       known.set(action.processId, { ...process, ready: true });
       return;
     }
     pending.push(noted(action.processId, "the process did not pass its readiness gate"));
+  }
+
+  /**
+   * The readiness gate, and the one place its outcome is reported from.
+   *
+   * THE ATTEMPTS COME FROM THE DRIVER AND THE DURATION FROM HERE, because a gate
+   * that passed on the first attempt and one that passed on the twelfth both
+   * answer the same `true` — and only the pair tells a build that is slow to come
+   * up from one that is merely up. Per-attempt reporting would be noise: what is
+   * worth knowing is how hard it had to try, not each try.
+   *
+   * The per-call probe options exist only while this node is observing; off, the
+   * shared object is handed straight through and no gate allocates anything.
+   */
+  async function gate(started: RuntimeProcess): Promise<boolean> {
+    if (observe === undefined) return driver.probeReady(started, probe);
+
+    let attempts = 0;
+    const startedMs = observe.nowMs();
+    const passed = await driver.probeReady(started, {
+      ...probe,
+      onAttempt: (): void => {
+        attempts++;
+      },
+    });
+
+    observe.emit(
+      passed
+        ? {
+            type: "gate.passed",
+            processId: started.processId,
+            attempts,
+            durationMs: observe.nowMs() - startedMs,
+          }
+        : { type: "gate.failed", processId: started.processId, attempts },
+    );
+    return passed;
   }
 
   return {
@@ -404,7 +457,7 @@ export function failureOf(
   error: unknown,
   about: { action?: ReconcileAction["type"]; subject?: string },
 ): ReconcileFailure {
-  return { at: new Date().toISOString(), ...about, detail: describe(error) };
+  return { at: new Date().toISOString(), ...about, detail: describeError(error) };
 }
 
 function placement(project: string, env: string): string {
@@ -421,12 +474,4 @@ function subjectOf(action: ReconcileAction): string {
   return action.type === "rollout"
     ? formatProcessId({ project: action.project, env: action.env, build: action.build })
     : action.processId;
-}
-
-/** The specifics a scafo failure carries are the useful half; keep both. */
-function describe(error: unknown): string {
-  if (isScafoError(error)) {
-    return error.detail === undefined ? error.message : `${error.message}: ${error.detail}`;
-  }
-  return error instanceof Error ? error.message : String(error);
 }

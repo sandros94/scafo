@@ -782,6 +782,154 @@ describe("the variables an operator hands every runtime process", () => {
   });
 });
 
+describe("whether the node reports on itself", () => {
+  it("is OFF when nothing turns it on", async () => {
+    const config = await loadAgentConfig({ env: REQUIRED_ENV });
+
+    /* The default that costs nothing: no ring, no events, and no telemetry
+       variable reaching a runtime process. */
+    expect(config.observability).toEqual({ enabled: false });
+    expect(config.runtime.celldEnv).toBeUndefined();
+  });
+
+  it("is turned on from a flag, the environment or the file alike", async () => {
+    const fromFlag = await loadAgentConfig({
+      env: REQUIRED_ENV,
+      flags: { observability: "true" },
+    });
+    const fromEnv = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCAFO_OBSERVABILITY: "1" },
+    });
+    const fromFile = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ observability: { enabled: true } })),
+      env: REQUIRED_ENV,
+    });
+
+    expect([fromFlag, fromEnv, fromFile].map((config) => config.observability.enabled)).toEqual([
+      true,
+      true,
+      true,
+    ]);
+  });
+
+  it("lets a flag override the environment and the environment the file", async () => {
+    const file = JSON.stringify({ observability: { enabled: true } });
+
+    const overriddenByEnv = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, file),
+      env: { ...REQUIRED_ENV, SCAFO_OBSERVABILITY: "0" },
+    });
+    const overriddenByFlag = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, file),
+      env: { ...REQUIRED_ENV, SCAFO_OBSERVABILITY: "0" },
+      flags: { observability: "true" },
+    });
+
+    expect(overriddenByEnv.observability.enabled).toBe(false);
+    expect(overriddenByFlag.observability.enabled).toBe(true);
+  });
+
+  it.each([
+    ["1", true],
+    ["true", true],
+    ["TRUE", true],
+    [" True ", true],
+    ["0", false],
+    ["false", false],
+    ["FALSE", false],
+  ])("reads %p as %p", async (written, expected) => {
+    const config = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCAFO_OBSERVABILITY: written },
+    });
+
+    expect(config.observability.enabled).toBe(expected);
+  });
+
+  it.each(["yes", "on", "2", "enabled", "off"])(
+    "REFUSES %p rather than reading it as off",
+    async (written) => {
+      const error = await rejectsWith(
+        () => loadAgentConfig({ env: { ...REQUIRED_ENV, SCAFO_OBSERVABILITY: written } }),
+        "invalid-input",
+      );
+
+      /* A switch silently off is the failure this whole surface exists to
+         avoid: `SCAFO_OBSERVABILITY=yes` is a node its operator believes is
+         reporting. The refusal names the setting and both spellings. */
+      expect(error.detail, written).toContain("observability.enabled");
+      expect(error.detail, written).toContain(`"1"`);
+      expect(error.detail, written).toContain(`"0"`);
+    },
+  );
+
+  it("refuses a file value that is neither a boolean nor one of those words", async () => {
+    const error = await rejectsWith(
+      () =>
+        loadAgentConfig({
+          configPath: CONFIG_PATH,
+          readFile: fileAt(CONFIG_PATH, JSON.stringify({ observability: { enabled: 1 } })),
+          env: REQUIRED_ENV,
+        }),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("observability.enabled");
+  });
+});
+
+describe("the runtime telemetry switch the node's own composes", () => {
+  it("defaults CELLD_OTEL=1 under the operator's own set when it is on", async () => {
+    const config = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCAFO_OBSERVABILITY: "1", SCAFO_CELLD_ENV: "RUST_LOG=debug" },
+    });
+
+    /* A node observing itself runs a runtime that is: the variable is the only
+       way that switch reaches a process, and nothing else can carry it. */
+    expect(config.runtime.celldEnv).toEqual({ RUST_LOG: "debug", CELLD_OTEL: "1" });
+  });
+
+  it("supplies the whole set when the operator handed over none", async () => {
+    const config = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCAFO_OBSERVABILITY: "1" },
+    });
+
+    expect(config.runtime.celldEnv).toEqual({ CELLD_OTEL: "1" });
+  });
+
+  it("LOSES to an operator who states it, in either direction", async () => {
+    const turnedOff = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCAFO_OBSERVABILITY: "1", SCAFO_CELLD_ENV: "CELLD_OTEL=0" },
+    });
+    const tuned = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(
+        CONFIG_PATH,
+        JSON.stringify({ runtime: { celldEnv: { CELLD_OTEL: "2", CELLD_OTEL_SINK: "bucket" } } }),
+      ),
+      env: { ...REQUIRED_ENV, SCAFO_OBSERVABILITY: "1" },
+    });
+
+    /* The escape hatch stays the escape hatch: the default only ever fills a
+       gap, and an operator who turned the runtime's telemetry off while the
+       agent reports on itself has stated something the node does not overrule. */
+    expect(turnedOff.runtime.celldEnv).toEqual({ CELLD_OTEL: "0" });
+    expect(tuned.runtime.celldEnv).toEqual({ CELLD_OTEL: "2", CELLD_OTEL_SINK: "bucket" });
+  });
+
+  it("adds nothing at all while the switch is off", async () => {
+    const bare = await loadAgentConfig({ env: REQUIRED_ENV });
+    const configured = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCAFO_CELLD_ENV: "RUST_LOG=debug" },
+    });
+
+    expect(bare.runtime.celldEnv).toBeUndefined();
+    expect(configured.runtime.celldEnv).toEqual({ RUST_LOG: "debug" });
+  });
+});
+
 describe("node identity and defaults", () => {
   it("falls back to a loopback listener, the default signing region and no extra addresses", async () => {
     const config = await loadAgentConfig({ env: REQUIRED_ENV });

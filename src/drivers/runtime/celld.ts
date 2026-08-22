@@ -70,6 +70,18 @@ const MIN_DRAIN_MS = 5_000;
 export const IDLE_EVICT_ENV: string = "CELLD_IDLE_EVICT_S";
 
 /**
+ * The runtime's own telemetry switch, and the ONE name that is neither derived
+ * here nor reserved from a caller.
+ *
+ * It is exported for the same reason the reserved names are — so that whatever
+ * turns a node's observability on can default it UNDER the operator's own
+ * `runtime.celldEnv` without the two spellings ever drifting apart — and it is
+ * absent from {@link RESERVED_ENV} on purpose: an operator who states it
+ * themselves, on or off, wins over that default.
+ */
+export const TELEMETRY_ENV: string = "CELLD_OTEL";
+
+/**
  * Variables this driver derives from the spec it is given. They are the
  * environment spellings of settings it pins on the command line, or credentials
  * that come from the node's own configuration; letting a caller pass them in
@@ -284,6 +296,7 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
 
       for (let attempt = 0; attempt < attempts; attempt++) {
         if (attempt > 0) await delay(delayMs);
+        probe?.onAttempt?.();
 
         /*
          * Both signals are required. The runtime answers its health endpoint

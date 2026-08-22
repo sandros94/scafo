@@ -641,6 +641,7 @@ function agentConfig(): AgentConfig {
       cellIdleEvictS: 900,
       pointerHoldMs: 3_000,
     },
+    observability: { enabled: false },
   };
 }
 

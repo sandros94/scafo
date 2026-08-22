@@ -12,6 +12,11 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentConfig } from "../src/agent/config.ts";
 import type { AgentContext } from "../src/agent/app.ts";
 import {
+  createObservability,
+  type Observability,
+  type ObservedEvent,
+} from "../src/agent/observe.ts";
+import {
   createReconciler,
   type PointerLockOptions,
   type Reconciler,
@@ -947,6 +952,175 @@ describe("the loop on a timer", () => {
   });
 });
 
+describe("what a pass says about itself", () => {
+  it("reports both ends of every pass, and what it cost the bucket", async () => {
+    const world = await seededWorld();
+
+    const plan = await world.reconciler.runOnce();
+
+    /* A pass START was invisible before this: what a node was doing between the
+       stamp that asked for one and the routing that came out of it could only be
+       inferred from what changed. */
+    expect(observed(world)[0]).toMatchObject({ type: "reconcile.pass.start", kicked: false });
+    expect(observed(world).at(-1)).toMatchObject({ type: "reconcile.pass.end" });
+
+    const cost = passEnd(world, 0);
+    expect(cost.actions).toBe(plan.length);
+    expect(cost.failures).toBe(0);
+    /* Reads, writes and the pointer lock together; the listings apart, because
+       one of those costs a page rather than a round trip. */
+    expect(cost.storeOps).toBeGreaterThan(0);
+    expect(cost.listOps).toBeGreaterThan(0);
+    expect(cost.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("counts each pass on its own rather than since the node booted", async () => {
+    const world = await seededWorld();
+
+    await world.reconciler.runOnce();
+    const first = passEnd(world, 0);
+    await world.reconciler.runOnce();
+    const second = passEnd(world, 1);
+
+    /* Deltas, not totals: the second pass has the same node to read and starts
+       from the counters the first one left behind. */
+    expect(first.storeOps).toBeGreaterThan(0);
+    expect(second.storeOps).toBeGreaterThan(0);
+    expect(second.storeOps).toBeLessThanOrEqual(first.storeOps);
+  });
+
+  it("reports the failures a pass recorded rather than aborting on them", async () => {
+    const world = await seededWorld({ celldVersionId: false });
+
+    await world.reconciler.runOnce();
+
+    /* The rollout could not be carried out, and the pass still ended and still
+       reported — which is the whole point of recording a failure instead of
+       throwing one. */
+    expect(passEnd(world, 0).failures).toBe(1);
+    expect(world.reconciler.status().failures).toHaveLength(1);
+  });
+
+  it("says which passes a wake asked for, the deferred one included", async () => {
+    const world = await seededWorld();
+    const gate = deferred<boolean>();
+    world.driver.gate = (): Promise<boolean> => gate.promise;
+
+    /* One pass the timer's way, one a kick's, and one a kick that arrived while
+       a pass was running and is honoured after it. */
+    const held = world.reconciler.runOnce();
+    await vi.waitFor(() => {
+      expect(world.driver.probed).toHaveLength(1);
+    });
+    world.reconciler.kick();
+
+    gate.resolve(true);
+    await held;
+    await vi.waitFor(() => {
+      expect(world.reconciler.status().running).toBe(false);
+    });
+
+    /* THE DEFERRED RERUN IS STILL THE KICK, honoured late: reading it as the
+       timer's pass would hide exactly the latency a wake is judged on. */
+    expect(
+      observed(world)
+        .filter((event) => event.type === "reconcile.pass.start")
+        .map((event) => (event as { kicked: boolean }).kicked),
+    ).toEqual([false, true]);
+  });
+});
+
+describe("what a rollout says about itself", () => {
+  it("records the spawn, the gate and the hold, and lets the gate land FIRST", async () => {
+    /* THE HOLD GUARDS THE POINTER, NOT THE GATE. The rollout keeps the
+       environment's deployment pointer for the process to read it, and registers
+       and gates that process alongside the rest of the hold rather than behind
+       it — which measured 66% of a median live wake when it did wait. */
+    const world = await seededWorld({ pointerLock: { holdMs: HOLD_MS } });
+
+    await world.reconciler.runOnce();
+    const rollout = observed(world).filter((event) => event.type !== "reconcile.pass.start");
+
+    expect(rollout.map((event) => event.type)).toEqual([
+      "rollout.spawned",
+      "gate.passed",
+      "rollout.holdEnded",
+      "reconcile.pass.end",
+    ]);
+    /* And the order is a fact about the clock rather than about the emission
+       sites: the gate is a whole hold ahead of the lock coming back. */
+    const at = (type: ObservedEvent["type"]): number =>
+      Date.parse(rollout.find((event) => event.type === type)?.at ?? "");
+    expect(at("gate.passed")).toBeLessThan(at("rollout.holdEnded"));
+    expect(at("rollout.holdEnded") - at("rollout.spawned")).toBeGreaterThanOrEqual(HOLD_MS - 50);
+  });
+
+  it("names the build a spawned process serves", async () => {
+    const world = await seededWorld();
+
+    await world.reconciler.runOnce();
+
+    expect(observed(world).find((event) => event.type === "rollout.spawned")).toMatchObject({
+      processId: processIdOf(BUILD_ONE),
+      build: BUILD_ONE,
+    });
+  });
+
+  it("reports a gate with how hard it had to try and how long it took", async () => {
+    const world = await seededWorld();
+    world.driver.gateAttempts = 3;
+
+    await world.reconciler.runOnce();
+
+    /* Attempts from the driver, duration from the executor: a gate that passed
+       first time and one that passed on the twelfth both answer the same `true`,
+       and only the pair tells a slow build from one that is merely up. */
+    const passed = observed(world).find((event) => event.type === "gate.passed");
+    expect(passed).toMatchObject({ processId: processIdOf(BUILD_ONE), attempts: 3 });
+    expect((passed as { durationMs: number }).durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("reports a gate that did not pass, with the attempts it spent", async () => {
+    const world = await seededWorld();
+    world.driver.gate = (): Promise<boolean> => Promise.resolve(false);
+    world.driver.gateAttempts = 2;
+
+    await world.reconciler.runOnce();
+
+    expect(observed(world).find((event) => event.type === "gate.failed")).toMatchObject({
+      processId: processIdOf(BUILD_ONE),
+      attempts: 2,
+    });
+    expect(observed(world).some((event) => event.type === "gate.passed")).toBe(false);
+  });
+
+  it("reports one leg of a split apart from the other", async () => {
+    const world = await seededWorld({
+      build: BUILD_ONE,
+      otherBuild: BUILD_TWO,
+      split: [
+        { build: BUILD_ONE, weight: 90 },
+        { build: BUILD_TWO, weight: 10 },
+      ],
+    });
+    world.driver.gate = (process): Promise<boolean> => Promise.resolve(process.build !== BUILD_TWO);
+
+    await world.reconciler.runOnce();
+
+    /* Every event names the process it concerns, which is what tells two legs of
+       one environment apart — the same reason a pass records its failures
+       against a process id rather than an environment. */
+    expect(
+      observed(world)
+        .filter((event) => event.type === "gate.passed" || event.type === "gate.failed")
+        .map((event) => [event.type, (event as { processId: string }).processId]),
+    ).toEqual([
+      ["gate.passed", processIdOf(BUILD_ONE)],
+      ["gate.failed", processIdOf(BUILD_TWO)],
+    ]);
+  });
+});
+
 /** The variables the seeded varset holds, when a case asks for one. */
 const VARSET: PlainVarset = {
   DATABASE_URL: { value: "postgres://db.test/app", secret: true },
@@ -999,6 +1173,12 @@ interface World {
    * activation and the start that loads it must be adjacent, per build.
    */
   events: string[];
+  /**
+   * What this node reported about itself. On in every world, so the counted
+   * registry and the emission sites are exercised by every case rather than only
+   * by the ones that read them back.
+   */
+  observe: Observability;
 }
 
 /** A node whose registry holds one project, one environment and its builds. */
@@ -1037,7 +1217,12 @@ async function seededWorld(opts?: WorldOptions): Promise<World> {
   const events: string[] = [];
   const supervisor = fakeSupervisor(events);
   const driver = fakeDriver(events);
+  /* The wall clock rather than a manual one: what a case reads off these events
+     is an ORDER — a gate that landed before the hold it overlapped — and a clock
+     that never moves cannot tell one moment from another. */
+  const observe = createObservability({ enabled: true });
   const agent = agentContext(ctx, supervisor, {
+    observability: observe,
     ...(varsetKey === undefined ? {} : { varsetKey }),
     ...(opts?.capacity === undefined ? {} : { capacity: opts.capacity }),
     ...(opts?.ingress === undefined ? {} : { ingress: opts.ingress }),
@@ -1049,6 +1234,7 @@ async function seededWorld(opts?: WorldOptions): Promise<World> {
     supervisor,
     driver,
     events,
+    observe,
     reconciler: createReconciler(agent, driver, {
       baseEnv: BASE_ENV,
       /* A rollout holds the environment's deployment pointer past the spawn, for
@@ -1065,6 +1251,7 @@ interface AgentOptions {
   varsetKey?: CryptoKey;
   capacity?: CapacityPlan;
   ingress?: IngressDriver;
+  observability?: Observability;
 }
 
 /** Everything the loop acts through, with this node's configuration. */
@@ -1093,6 +1280,7 @@ function agentContext(
       cellIdleEvictS: 900,
       pointerHoldMs: 3_000,
     },
+    observability: { enabled: false },
   };
 
   const agent: AgentContext = {
@@ -1105,6 +1293,7 @@ function agentContext(
   if (opts?.varsetKey !== undefined) agent.varsetKey = opts.varsetKey;
   if (opts?.capacity !== undefined) agent.capacity = opts.capacity;
   if (opts?.ingress !== undefined) agent.ingress = opts.ingress;
+  if (opts?.observability !== undefined) agent.observability = opts.observability;
   return agent;
 }
 
@@ -1182,6 +1371,8 @@ interface FakeDriver extends RuntimeDriver {
   readonly probeOptions: (ProbeOptions | undefined)[];
   /** Answer the readiness gate gives; replaced by a case that needs another. */
   gate: (process: RuntimeProcess) => Promise<boolean>;
+  /** Attempts the gate reports having made; what a caller counting them reads. */
+  gateAttempts: number;
   /** Failure every activation raises, when a case asks for one. */
   activationError: Error | null;
 }
@@ -1195,6 +1386,7 @@ function fakeDriver(events: string[] = []): FakeDriver {
     probed: [],
     probeOptions: [],
     gate: (): Promise<boolean> => Promise.resolve(true),
+    gateAttempts: 1,
     activationError: null,
 
     processSpec(input: RuntimeSpecInput): ProcessSpec {
@@ -1225,6 +1417,9 @@ function fakeDriver(events: string[] = []): FakeDriver {
       events.push(`gate ${process.processId}`);
       driver.probed.push(process);
       driver.probeOptions.push(probe);
+      /* A real driver reports each attempt as it begins it; how hard a gate had
+         to try is only knowable from inside one. */
+      for (let attempt = 0; attempt < driver.gateAttempts; attempt++) probe?.onAttempt?.();
       return driver.gate(process);
     },
   };
@@ -1291,4 +1486,22 @@ function randomVarsetKey(): Promise<CryptoKey> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Everything this node has reported about itself, oldest first. */
+function observed(world: World): ObservedEvent[] {
+  return world.observe.snapshot().events;
+}
+
+/** The `n`-th pass this node finished, as it reported it. */
+function passEnd(
+  world: World,
+  index: number,
+): { actions: number; failures: number; storeOps: number; listOps: number; durationMs: number } {
+  const ends = observed(world).filter((event) => event.type === "reconcile.pass.end");
+  const end = ends[index];
+  if (end === undefined || end.type !== "reconcile.pass.end") {
+    throw new Error(`pass ${String(index)} did not report an end`);
+  }
+  return end;
 }

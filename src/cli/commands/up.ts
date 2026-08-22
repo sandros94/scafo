@@ -6,6 +6,7 @@ import type { AgentContext } from "../../agent/app.ts";
 import { loadAgentConfig, runtimeDialHost } from "../../agent/config.ts";
 import { createCoordinator } from "../../agent/coordinator.ts";
 import { createHeartbeat } from "../../agent/heartbeat.ts";
+import { createObservability, OBSERVED_RING_SIZE } from "../../agent/observe.ts";
 import { createReconciler, runtimeBaseEnv } from "../../agent/reconcile.ts";
 import { startAgent } from "../../agent/serve.ts";
 import { createStorageService } from "../../agent/storage.ts";
@@ -17,7 +18,7 @@ import { createCelldDeployRunner } from "../../drivers/deploy/celld.ts";
 import { createNodeHostReader } from "../../drivers/host/node.ts";
 import { createCaddyDriver } from "../../drivers/ingress/caddy.ts";
 import { createTraefikDriver, DEFAULT_ENTRY_POINT } from "../../drivers/ingress/traefik.ts";
-import { createCelldDriver } from "../../drivers/runtime/celld.ts";
+import { createCelldDriver, TELEMETRY_ENV } from "../../drivers/runtime/celld.ts";
 import { createChildSupervisor } from "../../drivers/supervisor/child.ts";
 import {
   assertTransportConfigured,
@@ -87,6 +88,12 @@ const upArgs: ArgsDef = {
       "size it to the store's worst request stall (0 = release at the spawn)",
   },
   "probe-path": { type: "string", description: "Path the application readiness probe requests" },
+  "observability": {
+    type: "boolean",
+    description:
+      "Report what this node does: emit its own events, and give every runtime " +
+      "process CELLD_OTEL=1 unless runtime.celldEnv already states it",
+  },
   "ingress-driver": { type: "string", description: "Ingress this node drives (caddy, traefik)" },
   "caddy-admin": { type: "string", description: "Base URL of the Caddy admin API" },
   "caddy-server": { type: "string", description: "Caddy server the node writes its routes into" },
@@ -160,6 +167,25 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
     signingKey: state.privateKey,
   };
   if (varsetKey !== undefined) agent.varsetKey = varsetKey;
+
+  /*
+   * ATTACHED ONLY WHILE IT IS ON, and that is the whole of what the switch costs
+   * a node that leaves it off: every emission site reads `observability?.emit`,
+   * so an absent seam means the events are never even built. The other half of
+   * the switch — `CELLD_OTEL` under the operator's own `runtime.celldEnv` — was
+   * settled by the loader and travels with the rest of that set.
+   */
+  const observability = createObservability({ enabled: config.observability.enabled });
+  if (observability.enabled) {
+    agent.observability = observability;
+    /* Said once: what is recorded stays in this process, in a ring of a fixed
+       size, and nothing reads it off the node yet. */
+    console.log(
+      `scafo: observability on; this node records its own events in memory ` +
+        `(${String(OBSERVED_RING_SIZE)} kept, oldest dropped) and runs its processes with ` +
+        `${TELEMETRY_ENV}=1 unless "runtime.celldEnv" says otherwise`,
+    );
+  }
 
   /* What every dialer of a process this node starts uses — the ingress here, the
      readiness gate below, and the wake surface's own hop, which reads it off the
@@ -304,11 +330,20 @@ function untilSignalled(shutdown: () => Promise<void>): Promise<void> {
   });
 }
 
-/** The declared flags that were actually given; anything else the parser adds is not configuration. */
+/**
+ * The declared flags that were actually given; anything else the parser adds is
+ * not configuration.
+ *
+ * A switch reaches the loader as the text that loader accepts for one. Only a
+ * flag the operator actually WROTE gets here — an unpassed boolean is undefined
+ * rather than false — so a `--flag` says on, a `--no-flag` says off, and a flag
+ * nobody wrote leaves the environment and the config file to answer.
+ */
 function stringFlags(flags: Record<string, unknown>): Record<string, string | undefined> {
   const given: Record<string, string | undefined> = {};
   for (const [name, value] of Object.entries(flags)) {
     if (typeof value === "string") given[name] = value;
+    else if (typeof value === "boolean") given[name] = value ? "true" : "false";
   }
   return given;
 }

@@ -16,9 +16,10 @@
  */
 
 import type { H3Event } from "h3";
-import { ScafoError } from "../core/error.ts";
+import { describeError, ScafoError } from "../core/error.ts";
 import { readJson } from "../core/registry/cas.ts";
-import { nowDate } from "../core/registry/context.ts";
+import { nowDate, type RegistryContext } from "../core/registry/context.ts";
+import { countingRegistry, storeOpsOf } from "../core/registry/counting.ts";
 import { isNodeLive } from "../core/registry/nodes.ts";
 import { nodeKey } from "../core/registry/paths.ts";
 import { readPlacement } from "../core/registry/placement.ts";
@@ -32,6 +33,25 @@ import { resolveWakeTarget, type WakeTarget } from "./_wake-target.ts";
 import type { AgentContext } from "./app.ts";
 import { runtimeDialHost } from "./config.ts";
 import { problemResponse } from "./middleware.ts";
+import type { Reconciler } from "./reconcile.ts";
+
+/**
+ * Header every answer this surface makes carries, holding the id that request
+ * was handled under.
+ *
+ * ON EVERY ANSWER, whether or not this node is observing anything — served,
+ * held-then-503, 404, refused. It costs a few random bytes and it is what ties a
+ * caller's failed request, an ingress access log and (when the node IS
+ * observing) that request's own events together, which is exactly the
+ * correlation that was missing when a wake had to be reconstructed after the
+ * fact. What the switch decides is whether there is anything to correlate WITH,
+ * never whether the request has a name.
+ *
+ * A FORWARDED ANSWER CARRIES THIS NODE'S ID, not the peer's: the peer's answer
+ * arrives with its own, and the id a caller is given is the one for the request
+ * it actually made. The peer's is in the peer's own ring, under its own hop.
+ */
+export const WAKE_HEADER: string = "x-scafo-wake";
 
 /** Seconds a refused wake tells the caller to wait before asking again. */
 export const WAKE_RETRY_AFTER_S: number = 5;
@@ -217,12 +237,12 @@ export function createWakeService(agent: AgentContext): WakeService {
    * a wake that will not happen, and holding the request until the deadline
    * would only report it thirty seconds later.
    */
-  async function stamp(target: WakeTarget): Promise<void> {
+  async function stamp(registry: RegistryContext, target: WakeTarget): Promise<void> {
     if (target.kind === "build") {
-      await stampBuildWake(agent.registry, target.project, target.env.name, target.build.id);
+      await stampBuildWake(registry, target.project, target.env.name, target.build.id);
       return;
     }
-    await stampEnvironmentWake(agent.registry, target.project, target.env.name);
+    await stampEnvironmentWake(registry, target.project, target.env.name);
   }
 
   /**
@@ -240,12 +260,15 @@ export function createWakeService(agent: AgentContext): WakeService {
    * is a draining one — {@link isNodeLive} counts it out, and a node on its way
    * out will not boot anything.
    */
-  async function liveAssignedNode(nodes: string[]): Promise<NodeRecord | null> {
-    const now = nowDate(agent.registry);
+  async function liveAssignedNode(
+    registry: RegistryContext,
+    nodes: string[],
+  ): Promise<NodeRecord | null> {
+    const now = nowDate(registry);
 
     for (const id of nodes) {
       if (id === agent.nodeId) continue;
-      const found = await readJson<NodeRecord>(agent.registry, nodeKey(id));
+      const found = await readJson<NodeRecord>(registry, nodeKey(id));
       if (found !== null && isNodeLive(found.value, now)) return found.value;
     }
     return null;
@@ -275,24 +298,45 @@ export function createWakeService(agent: AgentContext): WakeService {
    * flight; that settles within a pass, so the caller is told to come back
    * rather than sent around a mesh of nodes each forwarding to the next.
    */
-  async function whereItRuns(event: H3Event, target: WakeTarget, host: string): Promise<WakeRun> {
-    const placement = await readPlacement(agent.registry, target.project, target.env.name);
+  async function whereItRuns(
+    registry: RegistryContext,
+    event: H3Event,
+    target: WakeTarget,
+    host: string,
+  ): Promise<WakeRun> {
+    const placement = await readPlacement(registry, target.project, target.env.name);
     if (placement === null || placement.nodes.includes(agent.nodeId)) return { kind: "local" };
 
     if (isProxiedHop(event.req.headers)) {
       return { kind: "unavailable", response: notAssignedHere(host, agent.nodeId, placement) };
     }
 
-    const node = await liveAssignedNode(placement.nodes);
+    const node = await liveAssignedNode(registry, placement.nodes);
     if (node === null) {
       return { kind: "unavailable", response: noAssignedNodeLive(host, placement) };
     }
     return { kind: "forward", node };
   }
 
-  async function handle(event: H3Event): Promise<Response> {
+  /**
+   * The answer itself, under the id the request is being handled as. Every path
+   * out of here returns a Response rather than raising, which is what lets
+   * {@link WAKE_HEADER} be stamped on all of them in one place.
+   */
+  async function answer(event: H3Event, id: string): Promise<Response> {
+    const observe = agent.observability;
     const host = requestHost(event);
-    const target = await resolveWakeTarget(agent.registry, {
+
+    /*
+     * Counted per REQUEST rather than per node, and only while observing: these
+     * counters are monotonic and a shared wrapper would read every other
+     * request's reads into this one's. Off, the ordinary registry is used and
+     * nothing is wrapped at all.
+     */
+    const counted = observe === undefined ? undefined : countingRegistry(agent.registry);
+    const registry = counted?.registry ?? agent.registry;
+
+    const target = await resolveWakeTarget(registry, {
       host,
       platformDomains: agent.config.platformDomains,
       parked: parked(),
@@ -302,12 +346,13 @@ export function createWakeService(agent: AgentContext): WakeService {
     const reconciler = agent.reconciler;
     if (reconciler === undefined) return noLoop(host);
 
-    const where = await whereItRuns(event, target, host);
+    const where = await whereItRuns(registry, event, target, host);
     if (where.kind === "unavailable") return where.response;
 
     const cap = agent.capacity?.maxConcurrentWakes ?? FALLBACK_MAX_CONCURRENT_WAKES;
     if (inFlight >= cap) {
       refused++;
+      observe?.emit({ type: "wake.refused", id, host });
       return overCapacity(host, cap);
     }
 
@@ -327,26 +372,88 @@ export function createWakeService(agent: AgentContext): WakeService {
       }
 
       admitted++;
-      await stamp(target);
-      /* Converge NOW rather than at the end of the interval: the whole of a
-         wake's latency that scafo controls is the gap between the stamp and the
-         pass that reads it. */
-      reconciler.kick();
+      if (observe !== undefined) {
+        observe.emit({
+          type: "wake.admitted",
+          id,
+          host,
+          kind: target.kind,
+          project: target.project,
+          env: target.env.name,
+          ...(target.kind === "build" ? { build: target.build.id } : {}),
+          inFlight,
+        });
+        /* What resolving the Host and the placement cost, attributed to the
+           request now that there is an admitted one to attribute it to. */
+        observe.emit({
+          type: "wake.resolved",
+          id,
+          ...(counted === undefined ? {} : { storeOps: storeOpsOf(counted.counts()) }),
+        });
+      }
 
-      const port = await awaitServing(target);
-      if (port === undefined) return notInTime(host, target);
-
-      return await proxyToProcess(event, {
-        port,
-        host,
-        upstreamHost,
-        ...(agent.fetchFn === undefined ? {} : { fetchFn: agent.fetchFn }),
-      });
+      return await served(event, { id, host, target, registry, reconciler });
+    } catch (error) {
+      observe?.emit({ type: "wake.failed", id, reason: describeError(error) });
+      throw error;
     } finally {
       /* Always, however the request ended: a slot held by a request that failed
          is a slot the next wake never gets. */
       inFlight--;
     }
+  }
+
+  /** The admitted path: stamp, kick, hold, and hand the request to the process. */
+  async function served(
+    event: H3Event,
+    opts: {
+      id: string;
+      host: string;
+      target: WakeTarget;
+      registry: RegistryContext;
+      reconciler: Reconciler;
+    },
+  ): Promise<Response> {
+    const observe = agent.observability;
+    const { id, host, target } = opts;
+
+    await stamp(opts.registry, target);
+    /* Emitted where the PUT came back rather than where its timestamp was taken:
+       what a wake waits on is the stamp being in the bucket, and the gap between
+       the two is a store's, not this node's. */
+    observe?.emit({ type: "wake.stamped", id });
+
+    /* Converge NOW rather than at the end of the interval: the whole of a
+       wake's latency that scafo controls is the gap between the stamp and the
+       pass that reads it. */
+    opts.reconciler.kick();
+    observe?.emit({ type: "wake.kicked", id });
+
+    const port = await awaitServing(target);
+    if (port === undefined) {
+      observe?.emit({ type: "wake.failed", id, reason: "deadline" });
+      return notInTime(host, target);
+    }
+
+    const response = await proxyToProcess(event, {
+      port,
+      host,
+      upstreamHost,
+      ...(agent.fetchFn === undefined ? {} : { fetchFn: agent.fetchFn }),
+    });
+    /* The application answered, and a successful wake leaves this trace and no
+       other — including WHAT it answered, since a wake that ends in a 502 from
+       the process it woke is not one that worked. */
+    observe?.emit({ type: "wake.served", id, port, status: response.status });
+    return response;
+  }
+
+  async function handle(event: H3Event): Promise<Response> {
+    const id = newWakeId();
+    const response = await answer(event, id);
+    /* On every answer this surface makes, whatever it is: see {@link WAKE_HEADER}. */
+    response.headers.set(WAKE_HEADER, id);
+    return response;
   }
 
   return {
@@ -514,4 +621,20 @@ function refusal(error: ScafoError, retryAfterS?: number): Response {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * The name one request on this surface is handled under: 48 random bits, hex.
+ *
+ * Short because it is READ — off a response header, out of an access log, beside
+ * a node's own events — and unique enough for that: it distinguishes the
+ * requests one node held in one window, which is the only place it is ever
+ * compared. It is not an identifier of anything that outlives the request.
+ */
+function newWakeId(): string {
+  let id = "";
+  for (const byte of crypto.getRandomValues(new Uint8Array(6))) {
+    id += byte.toString(16).padStart(2, "0");
+  }
+  return id;
 }

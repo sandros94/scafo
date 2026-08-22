@@ -8,6 +8,7 @@
 
 import { createPortAllocator } from "../core/placement/ports.ts";
 import { planReconcile, type ReconcileAction } from "../core/placement/reconcile.ts";
+import { countingRegistry, storeOpsOf } from "../core/registry/counting.ts";
 import type { ProbeOptions, RuntimeDriver, RuntimeProcess } from "../core/types/runtime.ts";
 import { type ParkedEnvironment, type PlacementView, readDesired } from "./_desired.ts";
 import {
@@ -126,11 +127,25 @@ export function createReconciler(
 ): Reconciler {
   const intervalMs = opts?.intervalMs ?? DEFAULT_RECONCILE_INTERVAL_MS;
 
+  const observe = agent.observability;
+
+  /*
+   * WHAT THE PASS COSTS THE BUCKET, counted only while this node is observing.
+   * The wrapper is the loop's OWN — the executor is handed it too, so a pass's
+   * locks and varset reads are in the same numbers as its listings — and nothing
+   * else on the node writes through it, which is what makes a delta taken across
+   * one pass exactly that pass's. Off, the agent's registry is used unwrapped
+   * and nothing here allocates.
+   */
+  const counted = observe === undefined ? undefined : countingRegistry(agent.registry);
+  const registry = counted?.registry ?? agent.registry;
+
   /* Soft state: what this node started. Lost on restart, and rebuilt from the
      supervisor's process ids the next time a pass runs. */
   const known = new Map<string, RuntimeProcess>();
   const executor = createExecutor({
     agent,
+    registry,
     driver,
     probe: { path: agent.config.runtime.probePath, ...opts?.probe },
     baseEnv: opts?.baseEnv ?? runtimeBaseEnv(globalThis.process?.env ?? {}),
@@ -148,12 +163,22 @@ export function createReconciler(
   let lastPlacements: PlacementView[] = [];
   let lastParked: ParkedEnvironment[] = [];
 
-  async function runOnce(): Promise<ReconcileAction[]> {
+  /**
+   * One pass. `fromKick` says whether a wake asked for this one rather than the
+   * timer coming round to it, which is the whole difference between a wake's
+   * latency and the interval's — and it is true of the DEFERRED rerun below too,
+   * because that rerun is the kick being honoured late.
+   */
+  async function runPass(fromKick: boolean): Promise<ReconcileAction[]> {
     /* Passes must not overlap: two of them would plan against the same gap and
        start the same environment twice. Every way in — the timer, a kick, a
        caller awaiting one pass — goes through this one gate. */
     if (inFlight) return [];
     inFlight = true;
+
+    observe?.emit({ type: "reconcile.pass.start", kicked: fromKick });
+    const startedMs = observe === undefined ? 0 : observe.nowMs();
+    const before = counted?.counts();
 
     const pending: ReconcileFailure[] = [];
     let plan: ReconcileAction[] = [];
@@ -162,7 +187,7 @@ export function createReconciler(
     try {
       /* Filtered to this node: an environment placed on other nodes is not
          desired here, and what still runs for it is planned for a stop. */
-      const state = await readDesired(agent.registry, { nodeId: agent.nodeId });
+      const state = await readDesired(registry, { nodeId: agent.nodeId });
       const desired = state.environments;
       placements = state.placements;
       parked = state.parked;
@@ -216,26 +241,41 @@ export function createReconciler(
       lastParked = parked;
       lastRunAt = new Date().toISOString();
       inFlight = false;
+
+      /* The three are made together and are undefined together; a pass reports
+         what it cost against the baseline it took at its own start. */
+      if (observe !== undefined && counted !== undefined && before !== undefined) {
+        const spent = counted.counts();
+        observe.emit({
+          type: "reconcile.pass.end",
+          actions: plan.length,
+          failures: pending.length,
+          storeOps: storeOpsOf(spent) - storeOpsOf(before),
+          listOps: spent.list - before.list,
+          durationMs: observe.nowMs() - startedMs,
+        });
+      }
+
       /* Exactly one more pass for however many kicks arrived while this one was
          running: they all asked for the same thing, which is a pass that starts
          after the state they stamped was written. */
       if (kicked) {
         kicked = false;
-        void runOnce();
+        void runPass(true);
       }
     }
     return plan;
   }
 
   return {
-    runOnce,
+    runOnce: (): Promise<ReconcileAction[]> => runPass(false),
 
     kick(): void {
       if (inFlight) {
         kicked = true;
         return;
       }
-      void runOnce();
+      void runPass(true);
     },
 
     parkedRecords(): ParkedEnvironment[] {
@@ -245,7 +285,7 @@ export function createReconciler(
     start(): void {
       if (timer !== null) return;
 
-      timer = setInterval(() => void runOnce(), intervalMs);
+      timer = setInterval(() => void runPass(false), intervalMs);
       /* The loop must never be the reason the process stays alive. */
       const handle = timer as { unref?: () => void };
       handle.unref?.();

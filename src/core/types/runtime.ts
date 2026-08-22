@@ -92,6 +92,18 @@ export interface ProbeOptions {
   delayMs?: number;
   /** Injected `fetch`; defaults to the global one. */
   fetchFn?: typeof fetch;
+  /**
+   * Called once as each attempt begins, for a caller counting how hard a gate
+   * had to try.
+   *
+   * How LONG a gate took is the caller's own measurement, but how MANY attempts
+   * it cost is only knowable from inside — a gate that passed first time and one
+   * that passed on the twelfth answer the same `true`, and the difference is
+   * what says a build is slow to come up rather than merely up. A driver that
+   * does not report attempts simply never calls this, and a caller counting them
+   * reads zero.
+   */
+  onAttempt?: () => void;
 }
 
 /** Runs one environment's build on a node, and says when it is ready to serve. */

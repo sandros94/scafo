@@ -19,7 +19,7 @@ import { assertLabels, parseLabels } from "../core/utils/labels.ts";
    drift: what an operator may not hand a runtime process is decided by what the
    driver derives for itself, and a copy here would go stale the first time that
    list grew. */
-import { IDLE_EVICT_ENV, RESERVED_ENV } from "../drivers/runtime/celld.ts";
+import { IDLE_EVICT_ENV, RESERVED_ENV, TELEMETRY_ENV } from "../drivers/runtime/celld.ts";
 
 export interface AgentConfig {
   bucket: {
@@ -66,6 +66,8 @@ export interface AgentConfig {
   platformDomains: string[];
   /** How this node runs and gates the processes that serve its environments. */
   runtime: RuntimeConfig;
+  /** Whether this node reports on itself at all. Off unless it was turned on. */
+  observability: ObservabilityConfig;
   /**
    * Where the node publishes what it serves. Absent means no ingress at all:
    * the processes still run and are simply not reachable from outside the node.
@@ -106,6 +108,26 @@ export interface WireguardConfig {
   endpoint?: string;
   /** UDP port the interface listens on; {@link DEFAULT_WIREGUARD_PORT} by default. */
   port: number;
+}
+
+/**
+ * Whether this node reports on itself, which is ONE switch and not a set of
+ * them.
+ *
+ * OFF BY DEFAULT, and turning it on does exactly two things. The agent starts
+ * emitting the events its own seams are instrumented with, into a bounded
+ * in-memory ring (`src/agent/observe.ts`); and every runtime process this node
+ * spawns is given {@link TELEMETRY_ENV}`=1` as a DEFAULT UNDER
+ * {@link RuntimeConfig.celldEnv}, so a node that is observing itself is also
+ * running a runtime that is. An operator who states that variable themselves
+ * wins in both directions — theirs is what the process gets, `0` included.
+ *
+ * Nothing else changes: no listener, no route, no bucket write. The one cost of
+ * leaving it off is that the ring is never allocated and the emission sites are
+ * never even evaluated.
+ */
+export interface ObservabilityConfig {
+  enabled: boolean;
 }
 
 /** How this node gets at the variables its environments are configured with. */
@@ -312,7 +334,11 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
   if (id !== undefined) assertNodeId(id);
 
   const ingress = resolveIngress(sources);
-  const celldEnv = resolveCelldEnv(sources);
+  const observing = resolveBoolean("observability", sources, false);
+  /* Composed HERE rather than in the driver: the runtime's telemetry switch is
+     one more variable an operator may state, so the node's own switch has to
+     meet it where the variables are resolved and lose to it if it is there. */
+  const celldEnv = withTelemetry(resolveCelldEnv(sources), observing);
   const keyFile = resolve("varsetKeyFile", sources);
   const transport = resolveTransport(sources);
   const wireguard = resolveWireguard(sources);
@@ -373,6 +399,7 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
       pointerHoldMs: resolvePointerHold(sources),
       ...(celldEnv === undefined ? {} : { celldEnv }),
     },
+    observability: { enabled: observing },
     ...(ingress === undefined ? {} : { ingress }),
     ...(keyFile === undefined ? {} : { varsets: { keyFile } }),
     ...(transport === undefined ? {} : { transport }),
@@ -512,6 +539,11 @@ const ORIGINS = {
     env: ["SCAFO_POINTER_HOLD_MS"],
     file: "runtime.pointerHoldMs",
   },
+  observability: {
+    flag: "observability",
+    env: ["SCAFO_OBSERVABILITY"],
+    file: "observability.enabled",
+  },
   ingressDriver: {
     flag: "ingress-driver",
     env: ["SCAFO_INGRESS_DRIVER"],
@@ -601,6 +633,51 @@ function resolvePort(setting: Setting, sources: Sources, fallback: number): numb
     });
   }
   return value;
+}
+
+/**
+ * A switch, in every spelling the sources can carry it.
+ *
+ * The config file holds the JSON boolean; a flag and an environment variable can
+ * only carry text, so `"1"`, `"true"`, `"0"` and `"false"` are accepted for it,
+ * in any case. Anything else is REFUSED rather than read as false: a switch
+ * silently off is the failure mode this whole surface exists to avoid, and
+ * `SCAFO_OBSERVABILITY=yes` is a node the operator believes is reporting.
+ */
+function resolveBoolean(setting: Setting, sources: Sources, fallback: boolean): boolean {
+  const origin: Origin = ORIGINS[setting];
+  const raw = flagOrEnv(origin, sources) ?? fileValue(sources.file, origin.file);
+  if (raw === undefined || raw === null || raw === "") return fallback;
+  if (typeof raw === "boolean") return raw;
+
+  const written = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  if (written === "1" || written === "true") return true;
+  if (written === "0" || written === "false") return false;
+
+  throw new ScafoError("invalid-input", "Invalid configuration value", {
+    detail:
+      `"${origin.file}" must be a switch, written "1" or "true" to turn it on and ` +
+      `"0" or "false" to turn it off, got ${JSON.stringify(raw)}`,
+  });
+}
+
+/**
+ * The variables every runtime process gets, with the runtime's own telemetry
+ * switch turned on UNDER them when this node is observing itself.
+ *
+ * The escape hatch stays the escape hatch: a `runtime.celldEnv` that names
+ * {@link TELEMETRY_ENV} is left exactly as it was written, whichever value it
+ * holds, because an operator who turned the runtime's telemetry OFF while the
+ * agent reports on itself has stated something the node has no business
+ * overruling. The default only ever fills a gap.
+ */
+function withTelemetry(
+  configured: Record<string, string> | undefined,
+  observing: boolean,
+): Record<string, string> | undefined {
+  if (!observing) return configured;
+  if (configured?.[TELEMETRY_ENV] !== undefined) return configured;
+  return { ...configured, [TELEMETRY_ENV]: "1" };
 }
 
 /**

@@ -1,4 +1,5 @@
 export * from "./context.ts";
+export * from "./counting.ts";
 export * from "./paths.ts";
 export * from "./cas.ts";
 export * from "./lease.ts";
