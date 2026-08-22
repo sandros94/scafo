@@ -61,9 +61,11 @@ async function runKeygen(flags: Record<string, unknown>): Promise<void> {
   const { privateKey, publicKey } = await generateJWK("EdDSA", { kid: id });
   const file: OperatorKeyFile = { id, privateKey, publicKey };
 
-  await writeFile(out, `${JSON.stringify(file, null, 2)}\n`, "utf8");
-  /* Written first, then narrowed: a key that briefly existed world-readable is
-     a key that has to be assumed read. */
+  /* The mode is given at CREATION, because it only applies there: a key that
+     briefly existed world-readable is a key that has to be assumed read. The
+     `chmod` after it is what narrows a file that was ALREADY on disk, which
+     `writeFile` would otherwise leave at whatever mode it had. */
+  await writeFile(out, `${JSON.stringify(file, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   await chmod(out, 0o600);
   console.log(`scafo: wrote operator key "${id}" to ${out}`);
 
