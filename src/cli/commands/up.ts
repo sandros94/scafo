@@ -3,7 +3,7 @@
 import { join } from "node:path";
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import type { AgentContext } from "../../agent/app.ts";
-import { loadAgentConfig } from "../../agent/config.ts";
+import { loadAgentConfig, runtimeDialHost } from "../../agent/config.ts";
 import { createCoordinator } from "../../agent/coordinator.ts";
 import { createHeartbeat } from "../../agent/heartbeat.ts";
 import { createReconciler, runtimeBaseEnv } from "../../agent/reconcile.ts";
@@ -161,13 +161,10 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   };
   if (varsetKey !== undefined) agent.varsetKey = varsetKey;
 
-  /* What the ingress dials for a process: loopback while processes bind a
-     wildcard (loopback is among what a wildcard answers on), and the EXACT
-     configured address otherwise — a process bound to a tunnel address alone
-     answers nothing on 127.0.0.1, however local the caller is. */
-  const upstreamHost = ["0.0.0.0", "::"].includes(config.runtime.bindHost)
-    ? "127.0.0.1"
-    : config.runtime.bindHost;
+  /* What every dialer of a process this node starts uses — the ingress here, the
+     readiness gate below, and the wake surface's own hop, which reads it off the
+     same configuration. */
+  const upstreamHost = runtimeDialHost(config.runtime);
 
   const ingress = config.ingress;
   if (ingress === undefined) {

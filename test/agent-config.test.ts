@@ -16,6 +16,7 @@ import {
   DEFAULT_REGION,
   loadAgentConfig,
   parseHostPort,
+  runtimeDialHost,
 } from "../src/agent/config.ts";
 import { POINTER_READ_HOLD_MS } from "../src/core/registry/pointer-lock.ts";
 import { rejectionOf, rejectsWith } from "./_helpers.ts";
@@ -498,6 +499,35 @@ describe("the address runtime processes bind", () => {
     /* A bare host: the ports come from the allocator, and a pair written here
        would be two sources of truth for what a process listens on. */
     expect(error.detail).toContain("runtime.bindHost");
+  });
+
+  /*
+   * Where this node DIALS its own processes, derived from where they bind and
+   * from nothing else. Three dialers take it — the readiness gate, the ingress,
+   * and the wake surface's hop down to a process it has just brought up — and
+   * they take it from HERE rather than each mapping it themselves, because a
+   * dialer that gets a different answer from the other two does all the work of
+   * a wake and then cannot deliver the request.
+   */
+  it("dials a wildcard bind on loopback, and every other bind exactly as configured", async () => {
+    const dialled = async (bindHost?: string): Promise<string> => {
+      const config = await loadAgentConfig({
+        env: bindHost === undefined ? REQUIRED_ENV : { ...REQUIRED_ENV, SCAFO_BIND_HOST: bindHost },
+      });
+      return runtimeDialHost(config.runtime);
+    };
+
+    /* Loopback is among what a wildcard answers on, so a wildcard needs no
+       address of its own — and a node that configured nothing binds loopback. */
+    await expect(dialled("0.0.0.0")).resolves.toBe("127.0.0.1");
+    await expect(dialled("::")).resolves.toBe("127.0.0.1");
+    await expect(dialled()).resolves.toBe(DEFAULT_BIND_HOST);
+    /* Anything else is taken EXACTLY — a process bound to a tunnel address alone
+       answers nothing on loopback, however local the caller is — and `::` is the
+       only address here that is not a DNS name or an IPv4 one, so what a dialer
+       is handed always writes as a plain authority. */
+    await expect(dialled("10.83.0.1")).resolves.toBe("10.83.0.1");
+    await expect(dialled("node-a.internal")).resolves.toBe("node-a.internal");
   });
 });
 

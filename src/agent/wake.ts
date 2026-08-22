@@ -30,6 +30,7 @@ import { forwardWake, proxyToProcess } from "./_wake-proxy.ts";
 import type { ParkedEnvironment } from "./_desired.ts";
 import { resolveWakeTarget, type WakeTarget } from "./_wake-target.ts";
 import type { AgentContext } from "./app.ts";
+import { runtimeDialHost } from "./config.ts";
 import { problemResponse } from "./middleware.ts";
 
 /** Seconds a refused wake tells the caller to wait before asking again. */
@@ -136,6 +137,13 @@ export function createWakeService(agent: AgentContext): WakeService {
 
   /** Where the weighted pick between an environment's legs comes from. */
   const draw = agent.random ?? Math.random;
+
+  /* Where a woken process is dialled: WHAT IT BINDS, which is loopback on a
+     single node and this node's tunnel address on a fleet. The same value the
+     readiness gate probes and the ingress routes to — dialling loopback here
+     while the listeners are elsewhere does the whole of a wake and then fails
+     the request it was for. */
+  const upstreamHost = runtimeDialHost(agent.config.runtime);
 
   /** What the last reconcile pass read as parked; empty on a node with no loop. */
   function parked(): ParkedEnvironment[] {
@@ -331,6 +339,7 @@ export function createWakeService(agent: AgentContext): WakeService {
       return await proxyToProcess(event, {
         port,
         host,
+        upstreamHost,
         ...(agent.fetchFn === undefined ? {} : { fetchFn: agent.fetchFn }),
       });
     } finally {

@@ -57,10 +57,16 @@ const HOP_BY_HOP_RESPONSE: ReadonlySet<string> = new Set([
  *
  * Status, headers and body come back untouched, including redirects: a `3xx` is
  * the application's answer to the caller and is never followed here.
+ *
+ * `upstreamHost` is WHERE THE PROCESS BINDS and is required for that reason: it
+ * is loopback on a single node and the node's tunnel address on a fleet, where
+ * `127.0.0.1` answers nothing at all. This is one of the three dialers of a
+ * process this node started — the readiness gate and the ingress are the others
+ * — and all three take the same value from `runtimeDialHost`.
  */
 export function proxyToProcess(
   event: H3Event,
-  opts: { port: number; host: string; fetchFn?: typeof fetch },
+  opts: { port: number; host: string; upstreamHost: string; fetchFn?: typeof fetch },
 ): Promise<Response> {
   const headers = carriedHeaders(event);
   headers.set("x-forwarded-host", opts.host);
@@ -69,7 +75,7 @@ export function proxyToProcess(
     event.req.headers.get("x-forwarded-proto") ?? event.url.protocol.replace(/:$/, ""),
   );
 
-  const url = `http://127.0.0.1:${String(opts.port)}${event.url.pathname}${event.url.search}`;
+  const url = `http://${opts.upstreamHost}:${String(opts.port)}${event.url.pathname}${event.url.search}`;
   return relay(event, url, headers, opts.fetchFn);
 }
 

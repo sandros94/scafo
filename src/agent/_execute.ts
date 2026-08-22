@@ -110,6 +110,19 @@ export function createExecutor(deps: ExecutorDeps): Executor {
    * ({@link POINTER_READ_HOLD_MS}). The gate is deliberately OUTSIDE it —
    * readiness takes tens of seconds, and every other writer of this environment
    * in the fleet would be waiting on them.
+   *
+   * THE HOLD GUARDS THE POINTER, NOT THE GATE, and the rollout goes on WITHOUT
+   * the lock from the spawn onwards. What the lock promises is about pointer
+   * WRITERS — none of them may move the pointer before the process it was moved
+   * for has made its one read — and neither registering that process nor probing
+   * it writes one. Made to wait for the hold, they cost a wake the whole of it:
+   * the surface holding the request cannot SEE a process that is in neither
+   * {@link ExecutorDeps.known} nor the status, and the gate that would make it
+   * servable has not started either, which measured 66% of a median live wake.
+   * So the rollout registers and gates alongside the rest of the hold. It still
+   * AWAITS that hold before it is done — the pass owes the process its read
+   * window either way — and a lock lost while it ran is still this rollout's
+   * failure.
    */
   async function runRollout(
     action: Extract<ReconcileAction, { type: "rollout" }>,
@@ -161,8 +174,23 @@ export function createExecutor(deps: ExecutorDeps): Executor {
        bucket read that may refuse the whole rollout, and the section below is
        only the three steps that must not be interleaved with another writer. */
     const spec = driver.processSpec(input);
+    const started: RuntimeProcess = {
+      processId: spec.id,
+      project: entry.project,
+      env: entry.env.name,
+      build: leg.build.id,
+      port: action.ports.public,
+      internalPort: action.ports.internal,
+      ready: false,
+    };
 
-    await withLock(
+    /* Settled AT THE SPAWN, which is where the rest of this rollout stops needing
+       the lock. Observed in every path below, but never before the section has
+       had its turn to fail. */
+    const spawned = Promise.withResolvers<void>();
+    spawned.promise.catch(() => {});
+
+    const section = withLock(
       agent.registry,
       {
         space: POINTER_LOCK_SPACE,
@@ -173,28 +201,73 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       async () => {
         await driver.activateVersion(fleetPrefix(action.project, action.env), version);
         await agent.supervisor.start(spec);
+        spawned.resolve();
         /* The process is running and has not read the pointer yet. Held for it,
            because nothing here can observe the read itself. */
         await delay(holdMs);
       },
     );
+    /* A section that failed BEFORE the spawn — a lock it could not take, an
+       activation that raised, a spawn that did not happen — fails the wait below,
+       so nothing is registered and nothing is gated. One that failed after finds
+       this already settled, and is raised by the await further down instead. */
+    section.catch((error: unknown) => {
+      spawned.reject(error);
+    });
 
-    const started: RuntimeProcess = {
-      processId: spec.id,
-      project: entry.project,
-      env: entry.env.name,
-      build: leg.build.id,
-      port: action.ports.public,
-      internalPort: action.ports.internal,
-      ready: false,
-    };
-    known.set(spec.id, started);
+    let gating: Promise<void> | undefined;
+    let spawnFailed = false;
+    await spawned.promise.catch(() => {
+      spawnFailed = true;
+    });
 
+    if (!spawnFailed) {
+      /* Both off the lock, and both the moment the spawn returned: this is what
+         the wake surface holding a request for this process is waiting to see. */
+      known.set(spec.id, started);
+      gating = gateStarted(started, pending);
+      /* Awaited in every path below; this only keeps a gate that fails while the
+         hold is still running from being read as unhandled. */
+      gating.catch(() => {});
+    }
+
+    try {
+      /* The rollout is not done until the hold it owes the spawned process has
+         run out, and a lock lost during it is this rollout's failure exactly as
+         it was when nothing overlapped it. */
+      await section;
+    } catch (error) {
+      if (gating !== undefined) {
+        /*
+         * The section stopped being serialized, so the process may have read a
+         * pointer another writer moved. It is left RUNNING — nothing here can
+         * unspawn one — and taken back out of this node's bookkeeping, which is
+         * where a lost lock left it before the gate moved off the hold: unrouted,
+         * unready, reported, and adopted by the next pass. The gate is awaited
+         * first, so it cannot register it back afterwards.
+         */
+        await gating.catch((failed: unknown) => {
+          pending.push(failureOf(failed, { action: "await-ready", subject: spec.id }));
+        });
+        known.delete(spec.id);
+      }
+      throw error;
+    }
+    await gating;
+  }
+
+  /**
+   * Gates the process a rollout has just spawned: the half of a rollout that
+   * holds no lock, and therefore the half that runs while the pointer hold is
+   * still counting down. Registering the process happens at the spawn itself,
+   * because the wake surface reads it from there.
+   */
+  async function gateStarted(started: RuntimeProcess, pending: ReconcileFailure[]): Promise<void> {
     if (await driver.probeReady(started, probe)) {
-      known.set(spec.id, { ...started, ready: true });
+      known.set(started.processId, { ...started, ready: true });
       return;
     }
-    pending.push(noted(spec.id, "the process did not pass its readiness gate"));
+    pending.push(noted(started.processId, "the process did not pass its readiness gate"));
 
     /*
      * A process this rollout started has never answered a request, so stopping
@@ -205,8 +278,8 @@ export function createExecutor(deps: ExecutorDeps): Executor {
      * TODO: a build that never passes its gate is started and stopped once per
      * pass. Backing that off belongs with the failure accounting that reports it.
      */
-    await agent.supervisor.stop(spec.id, { graceMs: driver.stopGraceMs });
-    known.delete(spec.id);
+    await agent.supervisor.stop(started.processId, { graceMs: driver.stopGraceMs });
+    known.delete(started.processId);
   }
 
   /**

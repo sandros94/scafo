@@ -11,21 +11,28 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AgentConfig } from "../src/agent/config.ts";
 import type { AgentContext } from "../src/agent/app.ts";
-import { createReconciler, type Reconciler } from "../src/agent/reconcile.ts";
+import {
+  createReconciler,
+  type PointerLockOptions,
+  type Reconciler,
+} from "../src/agent/reconcile.ts";
 import type { CapacityPlan } from "../src/core/capacity/compute.ts";
 import { ScafoError } from "../src/core/error.ts";
 import { formatProcessId } from "../src/core/placement/ids.ts";
-import { deleteKey } from "../src/core/registry/cas.ts";
+import { servingLegs } from "../src/core/placement/routes.ts";
+import { deleteKey, putJson, readJson } from "../src/core/registry/cas.ts";
 import type { RegistryContext } from "../src/core/registry/context.ts";
 import { createBuild } from "../src/core/registry/builds.ts";
 import {
   createEnvironment,
   flipAlias,
+  getEnvironment,
   setEnvironmentVarset,
   setSplit,
 } from "../src/core/registry/environments.ts";
 import { acquireLease } from "../src/core/registry/lease.ts";
-import { environmentKey } from "../src/core/registry/paths.ts";
+import { LOCK_REFRESH_MS } from "../src/core/registry/locks.ts";
+import { environmentKey, pointerLockKey } from "../src/core/registry/paths.ts";
 import { writePlacement } from "../src/core/registry/placement.ts";
 import { createProject } from "../src/core/registry/projects.ts";
 import { importVarsetKey, putVarset, sealVarset } from "../src/core/registry/varsets.ts";
@@ -58,9 +65,21 @@ const STARTED_AT = "2026-01-01T00:00:00.000Z";
 const THIS_NODE = "node-a";
 const ANOTHER_NODE = "node-b";
 
+/**
+ * A hold long enough for a case to look at the node WHILE it runs, and short
+ * enough not to be what the suite spends its time on.
+ */
+const HOLD_MS = 2_000;
+
 /** Id of the process that serves the seeded environment at a given build. */
 function processIdOf(build: string): string {
   return formatProcessId({ project: PROJECT, env: ENVIRONMENT, build });
+}
+
+/** Who holds the seeded environment's pointer lock right now, or null for nobody. */
+async function lockHolderOf(registry: RegistryContext): Promise<string | null> {
+  const found = await readJson<{ holder: string }>(registry, pointerLockKey(PROJECT, ENVIRONMENT));
+  return found?.value.holder ?? null;
 }
 
 /** Records a coordinator's decision about who serves the seeded environment. */
@@ -560,6 +579,105 @@ describe("a process that does not pass its gate", () => {
   });
 });
 
+describe("the hold a rollout keeps the deployment pointer for", () => {
+  /*
+   * THE HOLD GUARDS THE POINTER, NOT THE GATE. It is held past the spawn so no
+   * other writer moves the pointer before the spawned process's one read of it —
+   * a guarantee about pointer WRITERS. Registering that process and probing it
+   * write no pointer, so they do not wait for it: a wake surface holding a
+   * request cannot SEE a process that is in neither the node's bookkeeping nor
+   * its status, and the gate that makes it servable had not started either,
+   * which measured as 66% of a live wake.
+   */
+  it("registers and gates the process while the hold is still running", async () => {
+    const world = await seededWorld({ pointerLock: { holdMs: HOLD_MS } });
+    let atGate: { holder: string | null; processes: RuntimeProcess[] } | undefined;
+    world.driver.gate = async (): Promise<boolean> => {
+      atGate = {
+        holder: await lockHolderOf(world.registry),
+        processes: world.reconciler.status().processes,
+      };
+      return true;
+    };
+
+    const pass = world.reconciler.runOnce();
+    /* The readiness the gate answers is recorded a microtask after it; the hold
+       has the rest of its two seconds to run at that point. */
+    await expect
+      .poll(() => world.reconciler.status().processes.some((process) => process.ready))
+      .toBe(true);
+    const ready = world.reconciler.status().processes;
+
+    /* THE GATE RAN UNDER THE HOLD: the lock was still this node's when the probe
+       was made, which it could not be if the rollout had waited the hold out
+       first — and the process was already registered by then. */
+    expect(atGate?.holder).toContain(THIS_NODE);
+    expect(atGate?.processes.map((process) => process.processId)).toEqual([processIdOf(BUILD_ONE)]);
+    /* And once it is ready the wake surface can hand a held request to it, still
+       under the hold: `servingLegs` is what both that surface and the routing
+       pick among. */
+    await expect(lockHolderOf(world.registry)).resolves.toContain(THIS_NODE);
+    const environment = await getEnvironment(world.registry, PROJECT, ENVIRONMENT);
+    expect(servingLegs(PROJECT, environment, ready).map((leg) => leg.backend.port)).toEqual([
+      PORT_RANGE_START,
+    ]);
+
+    /* The rollout still waits the hold out before it is done, so the pointer is
+       given back only once the process has had its window — the pass's own clock
+       is unchanged, only what can be seen during it. */
+    await pass;
+    await expect(lockHolderOf(world.registry)).resolves.toBeNull();
+    expect(world.reconciler.status().failures).toEqual([]);
+  });
+
+  it("fails the rollout when the lock is lost mid-hold, and un-registers what it started", async () => {
+    vi.useFakeTimers();
+    try {
+      /* Long enough for the holder to restamp once while it holds it, which is
+         the only thing that can notice the lock is gone. */
+      const world = await seededWorld({ pointerLock: { holdMs: LOCK_REFRESH_MS * 2 } });
+      /* Another node takes the environment's pointer lock over while this rollout
+         is holding it: the restamp then conditions on a record that has moved. */
+      world.driver.gate = async (): Promise<boolean> => {
+        await putJson(world.registry, pointerLockKey(PROJECT, ENVIRONMENT), {
+          holder: ANOTHER_NODE,
+          acquiredAt: STARTED_AT,
+          refreshedAt: STARTED_AT,
+        });
+        return true;
+      };
+
+      const pass = world.reconciler.runOnce();
+      await vi.advanceTimersByTimeAsync(LOCK_REFRESH_MS * 2);
+      await pass;
+      const status = world.reconciler.status();
+
+      /* Never swallowed: the section stopped being serialized, so the rollout
+         failed even though every step of it went through. */
+      expect(status.failures).toHaveLength(1);
+      expect(status.failures[0]).toMatchObject({
+        action: "rollout",
+        subject: processIdOf(BUILD_ONE),
+      });
+      expect(status.failures[0].detail).toContain("no longer held");
+
+      /*
+       * And the process is where a lost lock has always left one: RUNNING —
+       * nothing here can unspawn one — and out of this node's bookkeeping, so it
+       * is neither routed nor handed a held request, because what it read out of
+       * the pointer is exactly what stopped being guaranteed. The next pass
+       * adopts it as a process with unknown listeners and reports it.
+       */
+      expect(world.supervisor.started.map((spec) => spec.id)).toEqual([processIdOf(BUILD_ONE)]);
+      expect(world.supervisor.stopped).toEqual([]);
+      expect(world.supervisor.status(processIdOf(BUILD_ONE))?.state).toBe("running");
+      expect(status.processes).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("a pass that cannot do everything it planned", () => {
   it("records a fleet it could not point at a build, and starts nothing for it", async () => {
     const world = await seededWorld();
@@ -574,6 +692,11 @@ describe("a pass that cannot do everything it planned", () => {
       action: "rollout",
       subject: processIdOf(BUILD_ONE),
     });
+    /* Nothing was registered and nothing was gated either: a process started
+       under the old pointer would serve the wrong build, so the sequence stops
+       at the step that failed and this node believes it runs nothing. */
+    expect(status.processes).toEqual([]);
+    expect(world.driver.probed).toEqual([]);
   });
 
   it("refuses to start a build that carries no runtime version id", async () => {
@@ -853,6 +976,11 @@ interface WorldOptions {
   intervalMs?: number;
   /** Where the node publishes what it serves; absent leaves it publishing nowhere. */
   ingress?: IngressDriver;
+  /**
+   * How a rollout holds the environment's deployment pointer. Defaults to a hold
+   * of zero, which is what every case that is not ABOUT the hold wants.
+   */
+  pointerLock?: PointerLockOptions;
 }
 
 interface World {
@@ -925,8 +1053,9 @@ async function seededWorld(opts?: WorldOptions): Promise<World> {
       baseEnv: BASE_ENV,
       /* A rollout holds the environment's deployment pointer past the spawn, for
          the process to read it. Nothing here spawns one, so there is nothing to
-         wait for — what that hold is FOR is `test/pointer-lock.test.ts`. */
-      pointerLock: { holdMs: 0 },
+         wait for — what that hold is FOR is `test/pointer-lock.test.ts`, and what
+         it must NOT hold up is the describe below. */
+      pointerLock: { holdMs: 0, ...opts?.pointerLock },
       ...(opts?.intervalMs === undefined ? {} : { intervalMs: opts.intervalMs }),
     }),
   };

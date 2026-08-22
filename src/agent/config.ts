@@ -261,6 +261,9 @@ export const DEFAULT_PROBE_PATH: string = "/";
 /** Address runtime processes bind to when none is configured: loopback only. */
 export const DEFAULT_BIND_HOST: string = "127.0.0.1";
 
+/** Bind addresses that answer on every address of the host, loopback included. */
+const WILDCARD_BIND_HOSTS: string[] = ["0.0.0.0", "::"];
+
 /** Durability when none is configured: a write acknowledged is a write in the bucket. */
 export const DEFAULT_DURABILITY: DurabilityMode = "bucket";
 
@@ -393,6 +396,24 @@ export function advertisedAddress(node: AgentConfig["node"]): HostPort {
     return parseHostPort(node.internalListen, "node.internalListen");
   }
   return parseHostPort(node.listen, "node.listen");
+}
+
+/**
+ * Where THIS NODE dials a runtime process it started, which is wherever that
+ * process BINDS: loopback while the listeners are on a wildcard (loopback is
+ * among what a wildcard answers on), and the EXACT configured address otherwise
+ * — a process bound to a tunnel address alone answers nothing on `127.0.0.1`,
+ * however local the caller is.
+ *
+ * THREE DIALERS ASK THIS QUESTION AND ALL THREE MUST GET THE SAME ANSWER: the
+ * readiness gate (`probeHost` on the runtime driver), the ingress the routes are
+ * rendered for (`upstreamHost` on both ingress drivers), and the wake surface's
+ * hop down to the process it has just brought up. A node whose processes bind a
+ * wildcard cannot tell them apart, which is why this is one function rather than
+ * three expressions.
+ */
+export function runtimeDialHost(runtime: AgentConfig["runtime"]): string {
+  return WILDCARD_BIND_HOSTS.includes(runtime.bindHost) ? DEFAULT_BIND_HOST : runtime.bindHost;
 }
 
 /**

@@ -504,6 +504,67 @@ describe("what a woken host is answered with", () => {
   });
 });
 
+describe("where a woken process is dialled", () => {
+  /*
+   * THE HOP GOES WHERE THE PROCESS BINDS, WHICH IS NOT ALWAYS LOOPBACK. Three
+   * dialers of one node ask the same question — the readiness gate (`probeHost`),
+   * the ingress (`upstreamHost`) and this hop — and on a tunnelled fleet the
+   * listeners are on the node's WireGuard address, where `127.0.0.1` answers
+   * nothing at all: the wake stamps, kicks, waits out the whole boot and then
+   * fails the request it did all of that for.
+   *
+   * WHY NO END-TO-END SUITE SEES IT: their nodes bind a wildcard, and a wildcard
+   * answers on loopback too, so a hop hardcoded to loopback is indistinguishable
+   * from a correct one there. It takes a bind host that is neither loopback nor a
+   * wildcard, which is exactly what a fleet on a tunnel runs.
+   */
+  it("dials the address the processes BIND rather than loopback", async () => {
+    app = appWith({ bindHost: "10.83.0.1" });
+    loop.onKick = (): void => {
+      loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+    };
+
+    const response = await ask(PARKED_HOST, "/cart?id=7");
+
+    expect(response.status).toBe(200);
+    await expect(response.text()).resolves.toBe(UPSTREAM_BODY);
+    expect(upstream.map((call) => call.url)).toEqual(["http://10.83.0.1:42004/cart?id=7"]);
+    /* The name asked for still travels as the header an ingress would have sent;
+       only where the request was addressed changed. */
+    expect(upstream[0].headers.get("x-forwarded-host")).toBe(PARKED_HOST);
+  });
+
+  it("dials loopback for a wildcard bind, and for the default", async () => {
+    /* Loopback is among what a wildcard answers on, so the exact address is not
+       needed there — and a node that configured nothing binds loopback anyway. */
+    for (const bindHost of ["0.0.0.0", "::", "127.0.0.1"]) {
+      upstream = [];
+      loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+      app = appWith(bindHost === "127.0.0.1" ? {} : { bindHost });
+
+      expect((await ask(PARKED_HOST, "/")).status, bindHost).toBe(200);
+      expect(
+        upstream.map((call) => call.url),
+        bindHost,
+      ).toEqual(["http://127.0.0.1:42004/"]);
+    }
+  });
+
+  it("leaves the peer hop alone, which is dialled at what the node advertises", async () => {
+    await placedOn(PREVIEW, [PEER]);
+    app = appWith({ bindHost: "10.83.0.1" });
+
+    const response = await ask(PARKED_HOST, "/");
+
+    /* A forward is addressed to the peer's own agent, from its registry record —
+       it has nothing to do with where either node's processes listen. */
+    expect(response.status).toBe(201);
+    expect(upstream.map((call) => call.url)).toEqual([
+      `http://${PEER_ADDRESS.internal}:${String(PEER_ADDRESS.agentPort)}/`,
+    ]);
+  });
+});
+
 describe("which node a wake runs on", () => {
   it("wakes it here when the placement names this node", async () => {
     await placedOn(PREVIEW, [NODE_ID, PEER]);
@@ -753,6 +814,11 @@ interface AppOptions {
   /** Whether this node runs a reconcile loop. */
   reconciler?: boolean;
   /**
+   * Address this node's runtime processes bind their listeners to, and therefore
+   * the one every dialer of theirs must use. Defaults to loopback.
+   */
+  bindHost?: string;
+  /**
    * The weighted-pick draws the wake surface takes, one per held request and in
    * this order, cycling once they run out. Defaults to none, which is
    * `Math.random` — a split is a distribution, and a case that means one leg
@@ -764,7 +830,7 @@ interface AppOptions {
 /** This node's agent app, over the shared registry, loop and upstream stand-in. */
 function appWith(opts: AppOptions): H3 {
   const agent: AgentContext = {
-    config: agentConfig(),
+    config: agentConfig(opts.bindHost),
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: idleSupervisor(),
@@ -893,7 +959,7 @@ async function seed(): Promise<void> {
   ];
 }
 
-function agentConfig(): AgentConfig {
+function agentConfig(bindHost = "127.0.0.1"): AgentConfig {
   return {
     bucket: {
       endpoint: "http://store.test:9000",
@@ -908,7 +974,7 @@ function agentConfig(): AgentConfig {
       binPath: "celld",
       portRangeStart: 42_000,
       probePath: "/",
-      bindHost: "127.0.0.1",
+      bindHost,
       durability: "bucket",
       cellIdleEvictS: 900,
       pointerHoldMs: 3_000,
