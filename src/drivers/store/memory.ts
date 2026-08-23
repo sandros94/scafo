@@ -5,8 +5,18 @@ import type { CasHeaders, CasStore, StoredObject } from "../../core/types/store.
  * In-process {@link CasStore} with the same conditional-write semantics as the
  * S3 driver. Intended for tests and local development — nothing is persisted.
  */
+/** An object as it was written, before a reader asked for it as text. */
+interface StoredBytes {
+  body: string | Uint8Array;
+  etag: string;
+}
+
 export class MemoryCasStore implements CasStore {
-  readonly #objects = new Map<string, StoredObject>();
+  /* Bodies are held EXACTLY as they were written, text or bytes, because a real
+     bucket does: `get` is what applies the text decode, mirroring the S3 driver's
+     own `Response.text()`. Keeping bytes as a string here instead would make this
+     store the one place a Parquet flush silently stopped being one. */
+  readonly #objects = new Map<string, StoredBytes>();
   #sequence = 0;
 
   /** Number of stored objects. */
@@ -16,11 +26,25 @@ export class MemoryCasStore implements CasStore {
 
   get(key: string): Promise<StoredObject | null> {
     const found = this.#objects.get(key);
-    return Promise.resolve(found === undefined ? null : { ...found });
+    if (found === undefined) return Promise.resolve(null);
+    return Promise.resolve({
+      body: typeof found.body === "string" ? found.body : new TextDecoder().decode(found.body),
+      etag: found.etag,
+    });
+  }
+
+  /**
+   * The object exactly as it was written, which is what a bucket holds and what a
+   * reader of a NON-TEXT encoding needs. Null when the key does not exist.
+   */
+  bytes(key: string): Uint8Array | null {
+    const found = this.#objects.get(key);
+    if (found === undefined) return null;
+    return typeof found.body === "string" ? new TextEncoder().encode(found.body) : found.body;
   }
 
   /* async so conflicts surface as rejections, matching the S3 driver. */
-  async put(key: string, body: string, cas?: CasHeaders): Promise<{ etag: string }> {
+  async put(key: string, body: string | Uint8Array, cas?: CasHeaders): Promise<{ etag: string }> {
     const current = this.#objects.get(key);
 
     if (cas?.ifNoneMatch === "*" && current !== undefined) {

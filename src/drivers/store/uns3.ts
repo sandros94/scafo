@@ -41,7 +41,10 @@ export function createUns3Store(client: S3Client, opts: Uns3StoreOptions): CasSt
           bucket,
           key: objectKey,
           body,
-          contentType: "application/json",
+          /* Every record this registry keeps is JSON; the one thing written as
+             bytes is an encoding that is not text at all, and claiming JSON for it
+             would be a lie the bucket then serves to whatever reads it. */
+          contentType: typeof body === "string" ? "application/json" : "application/octet-stream",
           ifMatch: cas?.ifMatch,
           ifNoneMatch: cas?.ifNoneMatch,
         });

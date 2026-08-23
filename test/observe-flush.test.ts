@@ -24,6 +24,7 @@ import {
   type ObserveRecord,
   OBSERVE_RECORD_VERSION,
 } from "../src/agent/observe-records.ts";
+import { PARQUET_CODEC } from "../src/agent/observe-parquet.ts";
 import { createObservability, type Observability } from "../src/agent/observe.ts";
 import { parseObserveKey } from "../src/core/registry/paths.ts";
 import type { CasStore } from "../src/core/types/store.ts";
@@ -331,6 +332,46 @@ describe("the encoder seam", () => {
   it("encodes an empty set as an empty file rather than a blank line", () => {
     expect(JSONL_CODEC.encode([]).bytes).toHaveLength(0);
     expect(JSONL_CODEC.decode(new Uint8Array())).toEqual({ records: [], malformed: 0 });
+  });
+
+  it("puts another codec's bytes at another codec's extension, and puts them WHOLE", async () => {
+    /* The seam's whole promise: swapping the encoding moves the extension on the
+       key and nothing else. And the bytes arrive intact — a columnar file is not
+       UTF-8, so a store that took only text would hand back replacement
+       characters and a `.parquet` object that is no longer a Parquet file. */
+    observe.emit({ type: "wake.kicked", id: "aaaa" });
+    const counters = createIngressCounters({
+      platformDomains: [DOMAIN],
+      now: (): Date => new Date(clock.nowMs()),
+    });
+    counters.ingest(caddyLine(`shop.${DOMAIN}`, 200, 1234, 0.02));
+
+    expect(await flusherWith({ codec: PARQUET_CODEC, counters }).flush()).toBe(true);
+
+    const [key] = await store.list("_scafo/observe/");
+    expect(parseObserveKey(key)?.extension).toBe("parquet");
+
+    const bytes = store.bytes(key);
+    expect(bytes).not.toBeNull();
+    const magic = new TextDecoder();
+    expect(magic.decode((bytes as Uint8Array).subarray(0, 4))).toBe("PAR1");
+    expect(magic.decode((bytes as Uint8Array).subarray(-4))).toBe("PAR1");
+    /* A header, the drained event and one counters record, and not a byte lost on
+       the way: an encode of the same records is the same file. */
+    expect((bytes as Uint8Array).length).toBeGreaterThan(1000);
+  });
+
+  it("still puts a JSON-LINES flush as the text it is", async () => {
+    observe.emit({ type: "wake.kicked", id: "aaaa" });
+
+    await flusherWith().flush();
+
+    const [key] = await store.list("_scafo/observe/");
+    const object = await store.get(key);
+    expect(object?.body.startsWith('{"v":')).toBe(true);
+    /* Byte for byte what the codec produced, which is what a store body being
+       text is FOR: nothing re-encodes it on the way in or out. */
+    expect(store.bytes(key)).toEqual(new TextEncoder().encode(object?.body ?? ""));
   });
 });
 

@@ -23,12 +23,15 @@
  * node restarted and its totals went back to zero, so the later run's snapshot
  * is taken whole rather than subtracted from anything.
  *
- * THE CODEC IS THE SEAM AND IT IS THE ONLY ONE. Nothing outside this file knows
+ * THE CODEC IS THE SEAM AND IT IS THE ONLY ONE. Nothing outside this seam knows
  * how a record becomes bytes: the flusher hands records to
  * {@link ObserveCodec.encode} and puts what comes back at the key its
  * `extension` names, and a reader picks a codec by the extension it read off the
- * key. Swapping JSON-LINES for a columnar encoding is therefore one object here
- * plus its extension, and nothing else moves.
+ * key. Swapping JSON-LINES for a columnar encoding is therefore one object plus
+ * its extension, and nothing else moves — which is what the Parquet codec next
+ * door (`src/agent/observe-parquet.ts`) is. The INTERFACE and the registry that
+ * names the implementations live here; a codec dense enough to need its own
+ * header comment lives in its own file and is named by {@link observeCodecFor}.
  */
 
 import { assertNodeId } from "../core/registry/paths.ts";
@@ -160,7 +163,16 @@ export const JSONL_CODEC: ObserveCodec = {
   },
 };
 
-/** The codec that reads an extension, or null when nothing here does. */
+/**
+ * The codec that READS an extension, or null when nothing here does.
+ *
+ * A codec that can only write is deliberately not named here. `PARQUET_CODEC`
+ * (`src/agent/observe-parquet.ts`) writes files this build cannot read back, and
+ * answering it from a lookup a READER calls would turn "a file I cannot read"
+ * into a thrown command — so `.parquet` keys stay unrecognized until the reader
+ * that handles them lands, and a reader counts and skips them exactly as it does
+ * any encoding a newer agent invented.
+ */
 export function observeCodecFor(extension: string): ObserveCodec | null {
   return extension === JSONL_CODEC.extension ? JSONL_CODEC : null;
 }
@@ -168,14 +180,23 @@ export function observeCodecFor(extension: string): ObserveCodec | null {
 /**
  * The store body an encoding lands in, and the inverse.
  *
- * THE STORE'S BODIES ARE TEXT (`CasStore.put(key, body: string)`), and JSON-LINES
- * is UTF-8, so the round trip here is exact and costs nothing. It is a function
- * rather than a `decode` at the call site because it is the ONE place the bytes
- * meet the store: a codec whose bytes are NOT UTF-8 — a columnar one — needs the
- * store to take bytes, and that is the single thing beyond this seam it changes.
+ * THE ONE PLACE THE BYTES MEET THE STORE, which is why it is a function rather
+ * than a `decode` at the call site. `CasStore` bodies are text OR bytes, and this
+ * hands it whichever the encoding actually produced: a UTF-8 encoding — JSON-LINES
+ * — goes as the string it already is, and a columnar one goes as bytes, because a
+ * Parquet file put through a `TextDecoder` comes back out full of replacement
+ * characters and is no longer a Parquet file.
+ *
+ * The test is the bytes themselves rather than a flag a codec sets, so it cannot
+ * be wrong in either direction: a STRICT decode succeeds exactly when the bytes
+ * are valid UTF-8, and bytes that are valid UTF-8 re-encode to themselves.
  */
-export function observeBody(encoded: ObserveEncoded): string {
-  return new TextDecoder().decode(encoded.bytes);
+export function observeBody(encoded: ObserveEncoded): string | Uint8Array {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(encoded.bytes);
+  } catch {
+    return encoded.bytes;
+  }
 }
 
 /** Inverse of {@link observeBody}: a stored body as the bytes a codec decodes. */
