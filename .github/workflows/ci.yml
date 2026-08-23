@@ -100,3 +100,33 @@ jobs:
 
       - name: Build packages
         run: pnpm build
+
+  preview:
+    # Continuous preview packages via pkg.pr.new — published only once the same
+    # commit has passed everything above, so a preview is never ahead of CI.
+    needs: [lint, typecheck, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.17.0
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare development build
+        run: pnpm dev:prepare
+
+      - name: Build packages
+        run: pnpm build
+
+      - name: Publish to pkg.pr.new
+        run: pnpx pkg-pr-new publish --pnpm
