@@ -27,10 +27,20 @@
  * what this file is for. Before it, every trusted key was equal — a single
  * compromised deploy key could revoke every other operator and own the
  * installation — and the fix is verb separation rather than a second credential.
+ *
+ * AND ACROSS THE SET THERE IS A SECOND AXIS: an operator-tier key may be SCOPED
+ * to a list of projects ({@link TrustedOperator.projects}), which is what a
+ * multi-tenant installation hands a tenant. It is opt-in and absent means every
+ * project, so a solo installation and every fleet older than this wave carry no
+ * list and notice nothing. The scope binds the KEY on the wire — the node API
+ * refuses a scoped key that names a project outside its list — and it is
+ * deliberately NOT a bucket-plane control: bucket credentials are root, and a
+ * multi-tenant platform hands tenants operator keys, never bucket credentials.
  */
 
 import { ScafoError } from "../error.ts";
 import type { NodeRecord, OperatorRole } from "../types/registry.ts";
+import { assertSlug } from "../utils/slug.ts";
 import { deleteKey, readJson } from "./cas.ts";
 import type { RegistryContext } from "./context.ts";
 import { nodeKey } from "./paths.ts";
@@ -74,6 +84,14 @@ export interface TrustedOperator {
   role: OperatorRole;
   /** Key it was registered to replace, when a rotation registered it. */
   supersedes?: string;
+  /**
+   * Projects this key may name on a node's API.
+   *
+   * ABSENT IS EVERY PROJECT and is the ordinary shape; see
+   * {@link canReachProject}. Never set on an admin — {@link assertOperatorScope}
+   * refuses that combination at write time.
+   */
+  projects?: string[];
 }
 
 /**
@@ -92,6 +110,13 @@ export function isOperatorRecord(record: NodeRecord): boolean {
  *
  * The ONE place a role is read out of a record, so the compat default lives here
  * and nowhere else: a record carrying none reads as {@link LEGACY_OPERATOR_ROLE}.
+ *
+ * THE SCOPE IS READ AS IT STANDS, whatever the tier says. {@link trustOperator}
+ * refuses a scoped admin, so a record carrying both was written straight to the
+ * bucket by hand — and reading it as scoped rather than dropping the list is the
+ * safe direction to be wrong in: a key that reaches less than intended is a
+ * refusal somebody fixes, and one that reaches more is the thing scoping exists
+ * to prevent.
  */
 export function readOperator(record: NodeRecord): TrustedOperator {
   const operator = record.operator;
@@ -100,6 +125,7 @@ export function readOperator(record: NodeRecord): TrustedOperator {
     publicKey: record.publicKey,
     role: operator?.role ?? LEGACY_OPERATOR_ROLE,
     ...(operator?.supersedes === undefined ? {} : { supersedes: operator.supersedes }),
+    ...(operator?.projects === undefined ? {} : { projects: [...operator.projects] }),
   };
 }
 
@@ -154,6 +180,74 @@ export function canRevoke(caller: TrustedOperator, targetId: string): boolean {
 }
 
 /**
+ * Whether `operator` may name `project` at all.
+ *
+ * A key carrying no scope reaches every project, which is what every key of
+ * every installation older than this wave carries and what a solo operator will
+ * always carry. A scoped key reaches the projects it names and no others.
+ *
+ * Pure, so the node API and the tests ask the same question of the same
+ * function. It says nothing about the BUCKET: whoever holds the bucket's
+ * credentials holds the fleet, and this is a control on operator keys.
+ */
+export function canReachProject(operator: TrustedOperator, project: string): boolean {
+  return operator.projects === undefined || operator.projects.includes(project);
+}
+
+/**
+ * Whether a caller may register a key scoped to `wanted` — `undefined` being a
+ * request for every project.
+ *
+ * NO WIDER THAN ONE'S OWN, which is {@link canGrantRole} one axis over and the
+ * reason a scoped key cannot rotate or enrol its way out of its scope. An
+ * unscoped caller may hand out anything, including another unscoped key, which
+ * is exactly what an admin does today.
+ */
+export function canGrantScope(caller: TrustedOperator, wanted: string[] | undefined): boolean {
+  const own = caller.projects;
+  if (own === undefined) return true;
+  if (wanted === undefined) return false;
+  return wanted.every((project) => own.includes(project));
+}
+
+/**
+ * Checks the scope a key is about to be written with.
+ *
+ * AN ADMIN IS NEVER SCOPED, and the refusal is the point rather than a
+ * formality: an admin administers every key the fleet trusts, so it can hand
+ * itself a key for any project it likes — a scope on one would read like a
+ * boundary while enforcing nothing, which is worse than no boundary at all.
+ *
+ * A scope naming NO project is refused too. It is a key that can do nothing, and
+ * the way to say "every project" is to name none at all rather than an empty
+ * list — the two spellings would otherwise mean opposite things.
+ *
+ * Throws `ScafoError("invalid-input")` for both, and `ScafoError("invalid-slug")`
+ * for a name that is not a project slug.
+ */
+export function assertOperatorScope(key: Pick<TrustedOperator, "role" | "projects">): void {
+  const projects = key.projects;
+  if (projects === undefined) return;
+
+  if (key.role === "admin") {
+    throw new ScafoError("invalid-input", "An admin cannot be scoped to projects", {
+      detail:
+        `an admin administers every key this fleet trusts, so it can grant itself a key for ` +
+        `any project at any time — a scope on one would state a boundary it does not have; ` +
+        `register it as an operator-tier key to scope it, or as an admin with no scope`,
+    });
+  }
+  if (projects.length === 0) {
+    throw new ScafoError("invalid-input", "A scope must name a project", {
+      detail:
+        `an empty list is a key that may reach nothing at all; a key meant to reach EVERY ` +
+        `project names no projects rather than an empty list of them`,
+    });
+  }
+  for (const project of projects) assertSlug(project);
+}
+
+/**
  * The tier a BUCKET-SIDE registration lands at, given what the operator asked
  * for.
  *
@@ -198,6 +292,10 @@ export async function bootstrapRole(
  * — the bucket ceremony ({@link bootstrapRole}) and `POST /v1/operators` — have
  * different rules, and a default living here would quietly be one of them.
  *
+ * THE SCOPE IS CHECKED HERE, by {@link assertOperatorScope}, so both ways a key
+ * enters a fleet meet the same rule: a scoped admin is a contradiction and is
+ * refused whether it was asked for over the wire or through the bucket ceremony.
+ *
  * Throws `ScafoError("reference-held")` when the id already belongs to a MACHINE
  * of this installation: replacing that record would hand the node's identity to
  * a person, and the node would be refused by every peer until it registered
@@ -207,6 +305,8 @@ export async function trustOperator(
   ctx: RegistryContext,
   key: TrustedOperator,
 ): Promise<TrustedOperator> {
+  assertOperatorScope(key);
+
   const existing = await readJson<NodeRecord>(ctx, nodeKey(key.id));
   if (existing !== null && !isOperatorRecord(existing.value)) {
     throw new ScafoError("reference-held", "Id belongs to a node of this installation", {
@@ -224,6 +324,7 @@ export async function trustOperator(
     operator: {
       role: key.role,
       ...(key.supersedes === undefined ? {} : { supersedes: key.supersedes }),
+      ...(key.projects === undefined ? {} : { projects: [...key.projects] }),
     },
   });
   return key;

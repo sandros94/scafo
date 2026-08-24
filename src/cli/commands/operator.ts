@@ -36,6 +36,7 @@ import {
   resolveRemote,
 } from "../_operator.ts";
 import {
+  assertScopedEnrollment,
   describeEnrollment,
   describeRevocation,
   enrollInBucket,
@@ -43,6 +44,7 @@ import {
   enrollPath,
   formatRemoteKeys,
   listRemoteKeys,
+  operatorProjects,
   operatorRole,
   revokeRemoteKey,
   showOperator,
@@ -92,6 +94,11 @@ const enrollArgs: ArgsDef = {
   },
   remote: { type: "string", description: "Remote whose node admits the key, admin-authed" },
   role: { type: "string", description: "Tier to admit it at: admin|operator" },
+  projects: {
+    type: "string",
+    description:
+      "Projects the key may name, comma-separated (default: every project; wire path only)",
+  },
   node: { type: "string", description: "Node to reach, instead of the remote's first endpoint" },
 };
 
@@ -266,17 +273,21 @@ async function runEnroll(flags: Record<string, unknown>): Promise<void> {
      costs no request and no bucket credential to refuse. */
   const pub = await loadPublicOperator(required(flags, "pubkey"));
   const role = operatorRole(flags.role);
+  const scope = operatorProjects(flags.projects);
   const named = text(flags.remote);
 
   const chosen = enrollPath({
     ...(named === undefined ? {} : { remote: named }),
     bucket: BUCKET_FLAGS.some((name) => text(flags[name]) !== undefined),
   });
+  /* The ceremony seeds and recovers ADMINS, and an admin is never scoped. */
+  assertScopedEnrollment(chosen, scope.projects);
 
   const enrolled =
     chosen === "wire"
       ? await enrollOnWire(resolveOperatorHome(), named as string, pub, {
           ...role,
+          ...scope,
           ...(text(flags.node) === undefined ? {} : { nodeUrl: text(flags.node) as string }),
         })
       : await enrollInBucket(await bucketRegistry(flags), pub, role);

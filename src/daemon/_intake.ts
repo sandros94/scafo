@@ -6,8 +6,10 @@ import type { OidcIdentity, OidcVerifier } from "../core/auth/oidc.ts";
 import { isScafoError, ScafoError } from "../core/error.ts";
 import { assertReplicas } from "../core/placement/replicas.ts";
 import { assertSelector } from "../core/placement/selector.ts";
+import type { RegistryContext } from "../core/registry/context.ts";
 import type { CanaryInput } from "../core/registry/environments.ts";
 import { assertId } from "../core/registry/paths.ts";
+import { assertProjectScope } from "./_scope.ts";
 import type { BuildSource, NodeSelector, ParkPolicy, SplitEntry } from "../core/types/registry.ts";
 import { assertSlug } from "../core/utils/slug.ts";
 import type { DeployMeta } from "./deploys.ts";
@@ -25,6 +27,11 @@ export type DeployCaller =
 export interface DeployVerifiers {
   node: NodeVerifier;
   oidc: OidcVerifier;
+  /**
+   * Where an admitted operator's own record is read from, which is what says
+   * whether the key is scoped to projects. See `_scope.ts`.
+   */
+  registry: RegistryContext;
 }
 
 /** The parts of a deploy upload. */
@@ -77,6 +84,12 @@ export interface AliasRequest {
  * whether the project exists. A trust denial is the single exception: the caller
  * proved who it is and the project simply does not admit it, which is
  * authorization and stays distinguishable as `ScafoError("trust-mismatch")`.
+ *
+ * An admitted operator's PROJECT SCOPE is checked here too, and here rather than
+ * in each route, because this function is already the place a caller and a
+ * project meet: a scoped key naming a project outside its list is
+ * `ScafoError("auth-scope")`. A `null` project is nothing to check against, and
+ * a workload's own scoping is its project's trust policy.
  */
 export async function verifyCaller(
   verifiers: DeployVerifiers,
@@ -84,7 +97,12 @@ export async function verifyCaller(
   project: string | null,
 ): Promise<DeployCaller> {
   const operator = await tryNodeToken(verifiers, event);
-  if (operator !== null) return operator;
+  if (operator !== null) {
+    if (project !== null && operator.kind === "node") {
+      await assertProjectScope(verifiers.registry, event, operator.identity.nodeId, project);
+    }
+    return operator;
+  }
 
   /* Nothing to check a workload token against, so the node token was the only
      way in and its rejection stands. */

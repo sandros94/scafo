@@ -19,6 +19,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   bootstrapRole,
   canGrantRole,
+  canGrantScope,
+  canReachProject,
   canRevoke,
   getOperator,
   isOperatorRecord,
@@ -276,6 +278,109 @@ describe("revoking a key", () => {
     await trustOperator(clock.ctx, operator("op-aaaa1111"));
 
     await rejectsWith(() => revokeOperator(clock.ctx, "op-ffff9999"), "not-found");
+  });
+});
+
+describe("the projects a key is scoped to", () => {
+  it("keeps the list it was given, and reads it back", async () => {
+    await trustOperator(clock.ctx, { ...operator("op-aaaa1111", "operator"), projects: ["acme"] });
+
+    await expect(getOperator(clock.ctx, "op-aaaa1111")).resolves.toMatchObject({
+      projects: ["acme"],
+    });
+  });
+
+  it("reads a key that names none as reaching EVERY project", async () => {
+    /* Absent is the compat shape and the ordinary one: a solo installation and
+       every fleet older than this wave carries it, and both must go on working
+       exactly as they did. */
+    await trustOperator(clock.ctx, operator("op-aaaa1111", "operator"));
+
+    const key = (await getOperator(clock.ctx, "op-aaaa1111")) as TrustedOperator;
+
+    expect("projects" in key).toBe(false);
+    expect(canReachProject(key, "anything-at-all")).toBe(true);
+  });
+
+  it("reads a record written before scopes existed as reaching every project", async () => {
+    await registerNode(clock.ctx, {
+      v: 1,
+      id: "op-aaaa1111",
+      publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-op-aaaa1111" },
+      addresses: { internal: OPERATOR_ADDRESS, apiPort: 0 },
+    });
+
+    const key = (await getOperator(clock.ctx, "op-aaaa1111")) as TrustedOperator;
+
+    expect(key.role).toBe("admin");
+    expect(canReachProject(key, "anything-at-all")).toBe(true);
+  });
+
+  it("REFUSES to scope an admin, because scoping one is a contradiction", async () => {
+    const error = await rejectsWith(
+      () => trustOperator(clock.ctx, { ...operator("op-aaaa1111", "admin"), projects: ["acme"] }),
+      "invalid-input",
+    );
+
+    /* An admin administers every key the fleet trusts — including the keys of
+       every other project — so a scope on one says nothing it could enforce. */
+    expect(error.detail).toContain("admin");
+    await expect(getOperator(clock.ctx, "op-aaaa1111")).resolves.toBeNull();
+  });
+
+  it("refuses a scope naming no project, which would be a key that can do nothing", async () => {
+    await rejectsWith(
+      () => trustOperator(clock.ctx, { ...operator("op-aaaa1111", "operator"), projects: [] }),
+      "invalid-input",
+    );
+  });
+
+  it("refuses a scope naming something that is not a project slug", async () => {
+    await rejectsWith(
+      () =>
+        trustOperator(clock.ctx, {
+          ...operator("op-aaaa1111", "operator"),
+          projects: ["Not A Slug"],
+        }),
+      "invalid-slug",
+    );
+  });
+
+  it("reads a hand-written record that claims BOTH as scoped, which is the safe direction", async () => {
+    /* Only reachable by writing to the bucket by hand, since the surface above
+       refuses it — and narrowing is the direction to be wrong in. */
+    await registerNode(clock.ctx, {
+      v: 1,
+      id: "op-aaaa1111",
+      publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-op-aaaa1111" },
+      addresses: { internal: OPERATOR_ADDRESS, apiPort: 0 },
+      operator: { role: "admin", projects: ["acme"] },
+    });
+
+    const key = (await getOperator(clock.ctx, "op-aaaa1111")) as TrustedOperator;
+
+    expect(canReachProject(key, "acme")).toBe(true);
+    expect(canReachProject(key, "globex")).toBe(false);
+  });
+});
+
+describe("which scope a caller may hand out", () => {
+  const unscoped: TrustedOperator = operator("op-aaaa1111", "operator");
+  const scoped: TrustedOperator = { ...operator("op-bbbb2222", "operator"), projects: ["acme"] };
+
+  it("lets a key that names no projects hand out anything, which is today's behaviour", () => {
+    expect(canGrantScope(unscoped, undefined)).toBe(true);
+    expect(canGrantScope(unscoped, ["acme", "globex"])).toBe(true);
+  });
+
+  it("refuses a scoped key handing out EVERY project", () => {
+    expect(canGrantScope(scoped, undefined)).toBe(false);
+  });
+
+  it("lets a scoped key hand out its own projects and no others", () => {
+    expect(canGrantScope(scoped, ["acme"])).toBe(true);
+    expect(canGrantScope(scoped, ["acme", "globex"])).toBe(false);
+    expect(canGrantScope(scoped, ["globex"])).toBe(false);
   });
 });
 

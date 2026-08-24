@@ -16,7 +16,12 @@ import type { NodeRecord } from "../core/types/registry.ts";
 /** Context key the verified caller is filed under for the rest of the request. */
 const IDENTITY_KEY = "scafoIdentity";
 
-/** Context key the caller's own operator record is filed under, tier included. */
+/**
+ * Context key the caller's own operator record is filed under, tier and scope
+ * included. `null` means the question has been ASKED and the caller is not an
+ * operator — a machine of the fleet, or an id nothing is filed under — which is
+ * what keeps a second route from reading the same record again.
+ */
 const OPERATOR_KEY = "scafoOperator";
 
 /**
@@ -69,25 +74,50 @@ export function requireOperatorToken(
     const identity = await verifier.verify(bearerToken(event));
     event.context[IDENTITY_KEY] = identity;
 
-    const record = await readJson<NodeRecord>(registry, nodeKey(identity.nodeId));
-    if (record === null || !isOperatorRecord(record.value)) {
+    if ((await callerOperator(event, registry, identity.nodeId)) === null) {
       throw new ScafoError("auth-scope", "Not an operator of this fleet", {
         detail:
           `"${identity.nodeId}" is not an operator key of this installation, and the keys a ` +
           `fleet trusts are an operator's to administer`,
       });
     }
-    event.context[OPERATOR_KEY] = readOperator(record.value);
     return next();
   };
 }
 
 /**
- * The caller as {@link requireOperatorToken} read it — its tier and the key it
- * supersedes — or undefined on a route that guard does not stand in front of.
+ * The operator record `id` is filed under, or null when what is filed is a
+ * MACHINE of this installation — or nothing at all.
+ *
+ * READ ONCE PER REQUEST and kept on the event, because two different questions
+ * are asked of the same record: which tier and lineage a caller of
+ * `/v1/operators` holds, and which PROJECTS a caller of everything else may
+ * name. A second read would be a second round trip to the bucket for a record
+ * this request has already been handed.
+ */
+export async function callerOperator(
+  event: H3Event,
+  registry: RegistryContext,
+  id: string,
+): Promise<TrustedOperator | null> {
+  const cached = event.context[OPERATOR_KEY] as TrustedOperator | null | undefined;
+  if (cached !== undefined) return cached;
+
+  const record = await readJson<NodeRecord>(registry, nodeKey(id));
+  const operator =
+    record === null || !isOperatorRecord(record.value) ? null : readOperator(record.value);
+
+  event.context[OPERATOR_KEY] = operator;
+  return operator;
+}
+
+/**
+ * The caller as {@link requireOperatorToken} read it — its tier, the key it
+ * supersedes and the projects it is scoped to — or undefined on a route that
+ * guard does not stand in front of.
  */
 export function operatorIdentity(event: H3Event): TrustedOperator | undefined {
-  return event.context[OPERATOR_KEY] as TrustedOperator | undefined;
+  return (event.context[OPERATOR_KEY] as TrustedOperator | null | undefined) ?? undefined;
 }
 
 /**

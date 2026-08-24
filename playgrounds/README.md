@@ -36,6 +36,14 @@ administers every key the fleet trusts, an `operator` may add keys no higher tha
 itself and revoke only the key it was registered to replace — so a stolen deploy key
 cannot lock the admins out.
 
+An operator-tier key can also be scoped to projects (`scafo operator enroll <pubkey>
+--remote <name> --projects acme,globex`), and a node then refuses it every project it
+does not name; a key that names none reaches all of them, which is what a solo
+installation and every fleet older than this carries. That binds the KEY on the wire
+and nothing else — the bucket plane is out of it entirely, because bucket credentials
+are root: a multi-tenant platform hands tenants operator keys, never bucket
+credentials.
+
 ## Prerequisites
 
 Docker with Compose v2, and this repository checked out.

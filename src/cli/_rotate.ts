@@ -90,6 +90,12 @@ export interface RotatedKey {
   newKeyPath: string;
   /** Tier both keys are at: a rotation replaces a key, it never re-tiers one. */
   role: OperatorRole;
+  /**
+   * Projects both keys reach, absent meaning every one. Read back off the fleet
+   * for the same reason the tier is: a rotation replaces a key, and it never
+   * widens or narrows what that key could name.
+   */
+  projects?: string[];
   /** Whether the new key was taken over from an interrupted run rather than minted. */
   resumed: boolean;
   /** Whether the old key was deregistered from the fleet. */
@@ -158,7 +164,13 @@ export async function rotateRemoteKey(
      always there — the call above was made with that very key — and a fleet that
      somehow does not name it is reported at the tier a role-less record reads
      as, which is what every other reader of one does. */
-  const role = trusted.find((key) => key.id === newKey.id)?.role ?? LEGACY_OPERATOR_ROLE;
+  const registered = trusted.find((key) => key.id === newKey.id);
+  const role = registered?.role ?? LEGACY_OPERATOR_ROLE;
+  /* And the SCOPE the same way. The expand step above named none, so whatever
+     is here is what the node inherited from the old key — which is the whole
+     guarantee: a rotation cannot widen a scope, because the widening would have
+     to be asked for and this never asks. */
+  const projects = registered?.projects;
 
   /* 4. FLIP. Everything above is repeatable; this is what stops being repeated. */
   await updateEntry(home, name, (current) => {
@@ -189,6 +201,7 @@ export async function rotateRemoteKey(
     newKeyId: newKey.id,
     newKeyPath,
     role,
+    ...(projects === undefined ? {} : { projects }),
     resumed: pending !== null,
     contracted,
     purged,
@@ -209,8 +222,11 @@ export function describeRotation(rotated: RotatedKey): string {
     `scafo: remote "${rotated.remote}" now signs with "${rotated.newKeyId}", kept in ` +
       `${rotated.newKeyPath}`,
     /* Stated rather than assumed: a rotation is a replacement, and an operator
-       who half-expected it to be a way up or down should read that it was not. */
-    `scafo: it is ${rotated.role}-tier, exactly as "${rotated.oldKeyId}" was`,
+       who half-expected it to be a way up or down — or a way wider — should read
+       that it was not. */
+    `scafo: it is ${rotated.role}-tier` +
+      `${rotated.projects === undefined ? "" : `, scoped to ${rotated.projects.join(", ")}`}, ` +
+      `exactly as "${rotated.oldKeyId}" was`,
   ];
 
   if (rotated.resumed) {

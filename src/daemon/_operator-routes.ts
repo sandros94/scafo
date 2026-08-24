@@ -24,6 +24,7 @@ import type { H3, H3Event, Middleware } from "h3";
 import { ScafoError } from "../core/error.ts";
 import {
   canGrantRole,
+  canGrantScope,
   canRevoke,
   DEFAULT_OPERATOR_ROLE,
   listOperators,
@@ -40,9 +41,14 @@ export const OPERATORS_PATH: string = "/v1/operators";
 
 /** What a registration asks for, over and above the key itself. */
 interface TrustRequest {
-  key: Omit<TrustedOperator, "role">;
+  key: Omit<TrustedOperator, "role" | "projects">;
   /** Tier the caller named, or undefined to take the surface's default. */
   role?: OperatorRole;
+  /**
+   * Projects the caller asked to scope the key to, or undefined to take the
+   * caller's own scope — which for an unscoped caller is every project.
+   */
+  projects?: string[];
 }
 
 /** Body of `GET /v1/operators`: every key the fleet trusts, in id order. */
@@ -123,7 +129,29 @@ export function registerOperatorRoutes(app: H3, daemon: DaemonContext, guard: Mi
         });
       }
 
-      const operator = await trustOperator(daemon.registry, { ...request.key, role });
+      /*
+       * THE SCOPE DEFAULTS TO THE CALLER'S OWN, which is the role rule one axis
+       * over and covers both registrations an operator-tier key can make. A
+       * rotation inherits the scope exactly as it inherits the tier, so a
+       * rotation is never a widening; and a key registered BESIDE the caller
+       * inherits it too, so an omitted `projects` is not the way out of a scope
+       * either. An unscoped caller inherits nothing, which is every project —
+       * so an admin enrolling a colleague behaves exactly as it did.
+       */
+      const projects = request.projects ?? caller.projects;
+      if (!canGrantScope(caller, projects)) {
+        throw new ScafoError("auth-scope", "Beyond this key's projects", {
+          detail:
+            `"${caller.id}" is scoped to the projects it was enrolled for, and cannot register ` +
+            `a key that reaches past them; an admin of this fleet can`,
+        });
+      }
+
+      const operator = await trustOperator(daemon.registry, {
+        ...request.key,
+        role,
+        ...(projects === undefined ? {} : { projects }),
+      });
       daemon.observability?.emit({
         type: "operator.trusted",
         actor: caller.id,
@@ -221,6 +249,7 @@ async function readTrustRequest(event: H3Event): Promise<TrustRequest> {
     publicKey?: unknown;
     role?: unknown;
     supersedes?: unknown;
+    projects?: unknown;
   };
   if (typeof body.id !== "string" || body.id === "") throw malformed(`"id" must be given`);
 
@@ -237,6 +266,15 @@ async function readTrustRequest(event: H3Event): Promise<TrustRequest> {
   if (body.supersedes !== undefined && typeof body.supersedes !== "string") {
     throw malformed(`"supersedes" must be the id of the key this one replaces`);
   }
+  /* SHAPE only. What a scope may hold — a slug, and at least one of them, and
+     never on an admin — belongs to the registry, so an operator reads the same
+     refusal whichever way they reached the installation. */
+  if (
+    body.projects !== undefined &&
+    (!Array.isArray(body.projects) || body.projects.some((entry) => typeof entry !== "string"))
+  ) {
+    throw malformed(`"projects" must be a list of project slugs, or absent for every project`);
+  }
 
   /*
    * The PUBLIC half and nothing else reaches the record. A body carrying a `d`
@@ -251,6 +289,7 @@ async function readTrustRequest(event: H3Event): Promise<TrustRequest> {
       ...(body.supersedes === undefined ? {} : { supersedes: body.supersedes }),
     },
     ...(body.role === undefined ? {} : { role: body.role }),
+    ...(body.projects === undefined ? {} : { projects: body.projects as string[] }),
   };
 }
 

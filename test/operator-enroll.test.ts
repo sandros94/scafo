@@ -33,10 +33,12 @@ import {
   readPublicOperator,
 } from "../src/cli/_operator-key.ts";
 import {
+  assertScopedEnrollment,
   describeEnrollment,
   enrollInBucket,
   enrollOnWire,
   enrollPath,
+  operatorProjects,
   showOperator,
 } from "../src/cli/_operators.ts";
 import { addRemote } from "../src/cli/_remotes.ts";
@@ -198,6 +200,69 @@ describe("admitting a key over the wire", () => {
     const enrolled = await enrollOnWire(home, REMOTE, joiner, { fetchFn: through(app) });
 
     expect(enrolled.role).toBe("operator");
+  });
+});
+
+describe("the projects an enrollment scopes a key to", () => {
+  it("reads a comma-separated list, the way endpoints and labels are read", () => {
+    expect(operatorProjects("acme,globex")).toEqual({ projects: ["acme", "globex"] });
+    expect(operatorProjects(" acme , globex ")).toEqual({ projects: ["acme", "globex"] });
+  });
+
+  it("leaves an absent list absent, which is every project", () => {
+    /* Absent must stay absent all the way down: it is what the registration
+       surface reads as "say nothing", and a `[]` here would be a key that can
+       reach nothing at all. */
+    expect(operatorProjects(undefined)).toEqual({});
+    expect(operatorProjects("")).toEqual({});
+  });
+
+  it("refuses a name that is not a project slug, here rather than at the node", async () => {
+    await rejectsWith(async () => operatorProjects("Not A Slug"), "invalid-slug");
+  });
+
+  it("scopes the key a node records, and reports the scope the node decided", async () => {
+    const { home } = await registeredRemote();
+    const joiner = publicOperator(await generateOperatorKey());
+
+    const enrolled = await enrollOnWire(home, REMOTE, joiner, {
+      projects: ["acme"],
+      fetchFn: through(app),
+    });
+
+    expect(enrolled.projects).toEqual(["acme"]);
+    await expect(getOperator(clock.ctx, joiner.id)).resolves.toMatchObject({
+      role: "operator",
+      projects: ["acme"],
+    });
+  });
+
+  it("says which projects the key may reach, where it is scoped at all", async () => {
+    const { home } = await registeredRemote();
+    const joiner = publicOperator(await generateOperatorKey());
+
+    const said = describeEnrollment(
+      await enrollOnWire(home, REMOTE, joiner, { projects: ["acme"], fetchFn: through(app) }),
+    );
+
+    expect(said).toContain("acme");
+  });
+
+  it("REFUSES the ceremony flags together with a scope", async () => {
+    /* The bucket path is for seeding and for recovery, both of which produce an
+       ADMIN — and an admin is never scoped, so the pair asks for something that
+       cannot exist. */
+    const error = await rejectsWith(
+      async () => assertScopedEnrollment("bucket", ["acme"]),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("admin");
+  });
+
+  it("lets the ceremony run when no scope is asked for", () => {
+    expect(() => assertScopedEnrollment("bucket", undefined)).not.toThrow();
+    expect(() => assertScopedEnrollment("wire", ["acme"])).not.toThrow();
   });
 });
 

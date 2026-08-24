@@ -44,7 +44,13 @@ import type { IngressCounters } from "./access-counters.ts";
 import type { DaemonConfig } from "./config.ts";
 import type { Coordinator } from "./coordinator.ts";
 import type { DeployService, DeployStatus } from "./deploys.ts";
-import { renderProblem, requireNodeToken, requireOperatorToken } from "./middleware.ts";
+import {
+  nodeIdentity,
+  renderProblem,
+  requireNodeToken,
+  requireOperatorToken,
+} from "./middleware.ts";
+import { assertProjectScope } from "./_scope.ts";
 import { registerOperatorRoutes } from "./_operator-routes.ts";
 import type { Observability } from "./observe.ts";
 import type { ParkedView, PlacementView, Reconciler, ReconcileStatus } from "./reconcile.ts";
@@ -224,6 +230,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
   const verifiers: DeployVerifiers = {
     node: nodeVerifier,
     oidc: createOidcVerifier(daemon.registry),
+    registry: daemon.registry,
   };
 
   const app = new H3({
@@ -347,7 +354,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
   app.post(
     "/v1/environments/:project/:env/retire",
     async (event): Promise<EnvironmentResult> => ({
-      environment: await retireEnvironment(daemon.registry, ...target(event)),
+      environment: await retireEnvironment(daemon.registry, ...(await scopedTarget(daemon, event))),
     }),
     { middleware: [authenticated] },
   );
@@ -357,7 +364,10 @@ export function createNodeApp(daemon: DaemonContext): H3 {
   app.post(
     "/v1/environments/:project/:env/unretire",
     async (event): Promise<EnvironmentResult> => ({
-      environment: await unretireEnvironment(daemon.registry, ...target(event)),
+      environment: await unretireEnvironment(
+        daemon.registry,
+        ...(await scopedTarget(daemon, event)),
+      ),
     }),
     { middleware: [authenticated] },
   );
@@ -374,8 +384,8 @@ export function createNodeApp(daemon: DaemonContext): H3 {
   app.post(
     "/v1/environments/:project/:env/selector",
     async (event): Promise<EnvironmentResult> => {
+      const [project, name] = await scopedTarget(daemon, event);
       const request = await readSelectorRequest(event);
-      const [project, name] = target(event);
       return {
         environment: await setNodeSelector(daemon.registry, project, name, request.selector),
       };
@@ -395,8 +405,8 @@ export function createNodeApp(daemon: DaemonContext): H3 {
   app.post(
     "/v1/environments/:project/:env/park",
     async (event): Promise<EnvironmentResult> => {
+      const [project, name] = await scopedTarget(daemon, event);
       const request = await readParkRequest(event);
-      const [project, name] = target(event);
       return {
         environment: await setParkPolicy(daemon.registry, project, name, request.policy),
       };
@@ -441,7 +451,14 @@ export function createNodeApp(daemon: DaemonContext): H3 {
    */
   app.delete(
     "/v1/environments/:project/:env",
-    (event): Promise<Response | EnvironmentDeleted> => deleteEnvironmentRequest(daemon, event),
+    async (event): Promise<Response | EnvironmentDeleted> => {
+      /* Before the hop, never after it: the request that reaches the
+         coordinator is signed by THIS node rather than by the operator, so a
+         scope checked at the far end would be a scope checked against a
+         machine. The node the operator addressed is the only one that can. */
+      await scopedTarget(daemon, event);
+      return deleteEnvironmentRequest(daemon, event);
+    },
     { middleware: [authenticated] },
   );
 
@@ -451,7 +468,19 @@ export function createNodeApp(daemon: DaemonContext): H3 {
        upload names, which cannot be known until the body has been read. */
     const operator = await tryNodeToken(verifiers, event);
     const request = await readDeployRequest(event);
-    if (operator === null) await verifyWorkload(verifiers, event, request.meta.project);
+    if (operator === null) {
+      await verifyWorkload(verifiers, event, request.meta.project);
+    } else if (operator.kind === "node") {
+      /* The project is in the BODY here, so the scope cannot be checked where
+         `verifyCaller` checks it for every other route — but it is still
+         checked before a single byte of the artifact is published. */
+      await assertProjectScope(
+        daemon.registry,
+        event,
+        operator.identity.nodeId,
+        request.meta.project,
+      );
+    }
 
     const status = await deployService(daemon).start(request.meta, request.artifact);
     /* Answered before the artifact has been published: the rest of the work
@@ -644,6 +673,29 @@ function servedLabel(daemon: DaemonContext, label: string): boolean {
 /** The `:project` and `:env` a route was matched on, as a positional pair. */
 function target(event: H3Event): [project: string, env: string] {
   return [event.context.params?.project ?? "", event.context.params?.env ?? ""];
+}
+
+/**
+ * The same, with the caller's PROJECT SCOPE checked against the `:project`
+ * before anything is read or written.
+ *
+ * Every route whose path names a project goes through this rather than through
+ * {@link target}, which is what makes the check hard to leave off one of them:
+ * the pair a handler needs and the refusal it owes come from the same call. A
+ * caller holding no node token — a workload, or nobody — has no operator record
+ * to be scoped by and passes through; the routes that admit one authenticate it
+ * against the project separately.
+ */
+async function scopedTarget(
+  daemon: DaemonContext,
+  event: H3Event,
+): Promise<[project: string, env: string]> {
+  const pair = target(event);
+  const callerId = nodeIdentity(event)?.nodeId;
+  if (callerId !== undefined) {
+    await assertProjectScope(daemon.registry, event, callerId, pair[0]);
+  }
+  return pair;
 }
 
 function deployService(daemon: DaemonContext): DeployService {

@@ -103,6 +103,19 @@ export interface NodeOperator {
    * it supersedes, whatever tier either of them is.
    */
   supersedes?: string;
+  /**
+   * Projects this key may name on a node's API, by slug.
+   *
+   * ABSENT IS EVERY PROJECT, which is what makes scoping opt-in: every key of
+   * every installation older than this carries no list, and a fleet nobody has
+   * scoped behaves exactly as it did. Present means these projects and no
+   * others — the shape a multi-tenant platform hands a tenant.
+   *
+   * Never present on an ADMIN: an admin administers every key the fleet trusts,
+   * so a scope on one could enforce nothing. `registry/operators.ts` refuses the
+   * combination at write time.
+   */
+  projects?: string[];
 }
 
 /** A registered node running the daemon. Key: `_scafo/nodes/<id>.json`. */

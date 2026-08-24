@@ -333,6 +333,43 @@ describe("the other remotes in the home", () => {
   });
 });
 
+describe("rotating a key that is scoped to projects", () => {
+  it("carries the scope onto the new key, exactly as it carries the tier", async () => {
+    const { home, key } = await registeredRemote("operator", ["acme"]);
+
+    const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
+
+    /* A rotation replaces a key. It is never a promotion, and it is never a
+       widening either — the node settles both from the caller's own record. */
+    expect(rotated.role).toBe("operator");
+    expect(rotated.projects).toEqual(["acme"]);
+    expect(rotated.newKeyId).not.toBe(key.id);
+    await expect(getOperator(clock.ctx, rotated.newKeyId)).resolves.toMatchObject({
+      role: "operator",
+      projects: ["acme"],
+      supersedes: key.id,
+    });
+  });
+
+  it("says which projects the rotated key still reaches", async () => {
+    const { home } = await registeredRemote("operator", ["acme"]);
+
+    const said = describeRotation(await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) }));
+
+    expect(said).toContain("acme");
+  });
+
+  it("leaves an UNSCOPED key unscoped, which is what every existing fleet has", async () => {
+    const { home } = await registeredRemote("operator");
+
+    const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
+
+    expect(rotated.projects).toBeUndefined();
+    const trusted = (await getOperator(clock.ctx, rotated.newKeyId)) as { projects?: string[] };
+    expect("projects" in trusted).toBe(false);
+  });
+});
+
 describe("reading what a fleet trusts", () => {
   it("names every key, and which of them this home signs with", async () => {
     const { home, key } = await registeredRemote();
@@ -356,7 +393,24 @@ describe("reading what a fleet trusts", () => {
 
     expect(printed).toContain("2 operator keys");
     expect(printed).toMatch(new RegExp(`${key.id}.*this home signs with it`));
-    expect(printed).toMatch(/op-cccc3333\s+operator\s*$/m);
+    expect(printed).toMatch(/op-cccc3333\s+operator\s+all\s*$/m);
+  });
+
+  it("names the PROJECTS each key may reach, and `all` for one that names none", async () => {
+    const { home, key } = await registeredRemote("admin");
+    await trustOperator(clock.ctx, {
+      id: "op-cccc3333",
+      publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-a-tenant" },
+      role: "operator",
+      projects: ["acme", "globex"],
+    });
+
+    const printed = formatRemoteKeys(await listRemoteKeys(home, REMOTE, { fetchFn: through(app) }));
+
+    /* The admin reaches everything, which is what an unscoped key is; the
+       tenant's key says which two projects it is for. */
+    expect(printed).toMatch(new RegExp(`${key.id}\\s+admin\\s+all`));
+    expect(printed).toMatch(/op-cccc3333\s+operator\s+acme,globex/);
   });
 
   it("names the TIER of every key, which is what says who may administer whom", async () => {
@@ -504,6 +558,7 @@ describe("revoking another operator's key", () => {
  */
 async function registeredRemote(
   role: OperatorRole = "admin",
+  projects?: string[],
 ): Promise<{ home: string; key: OperatorKeyFile }> {
   const home = await mkdtemp(join(tmpdir(), "scafo-rotate-"));
   homes.push(home);
@@ -521,6 +576,7 @@ async function registeredRemote(
     id: added.key.id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: added.key.publicKey.x },
     role,
+    ...(projects === undefined ? {} : { projects }),
   });
   return { home, key: added.key };
 }
