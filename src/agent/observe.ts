@@ -29,6 +29,8 @@
  * observability is on, so the allocations behind the guard are never paid for.
  */
 
+import type { OperatorRole } from "../core/types/registry.ts";
+
 /** Events the ring holds before the oldest are dropped to make room. */
 export const OBSERVED_RING_SIZE: number = 512;
 
@@ -108,7 +110,32 @@ export type ObservedEvent =
       attempts: number;
       durationMs: number;
     }
-  | { at: string; type: "gate.failed"; processId: string; attempts: number };
+  | { at: string; type: "gate.failed"; processId: string; attempts: number }
+  /**
+   * A key the fleet now trusts, and who said so. THE AUDIT PAIR: `actor` is the
+   * key the request was signed with, `subject` the key it was about, and `role`
+   * the tier the subject landed at.
+   *
+   * Emitted by the `/v1/operators` routes and by nothing else — the bucket-side
+   * ceremony (`scafo keygen --register`) writes the same record with NO AGENT IN
+   * THE PICTURE, so it has nowhere to emit from and these events honestly do not
+   * cover it. What covers that path is the bucket's own access log.
+   */
+  | {
+      at: string;
+      type: "operator.trusted";
+      actor: string;
+      subject: string;
+      role: OperatorRole;
+    }
+  /** A key the fleet has stopped trusting, at the tier it held when it went. */
+  | {
+      at: string;
+      type: "operator.revoked";
+      actor: string;
+      subject: string;
+      role: OperatorRole;
+    };
 
 /** An event as a caller writes it; the emitter stamps {@link ObservedEvent.at}. */
 export type ObservedEventInput = WithoutAt<ObservedEvent>;

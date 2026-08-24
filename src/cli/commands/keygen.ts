@@ -13,6 +13,8 @@
 import { chmod, writeFile } from "node:fs/promises";
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import { loadAgentConfig } from "../../agent/config.ts";
+import { ScafoError } from "../../core/error.ts";
+import type { OperatorRole } from "../../core/registry/operators.ts";
 import { assertNodeId } from "../../core/registry/paths.ts";
 import { createRegistry } from "../_bootstrap.ts";
 import {
@@ -30,6 +32,10 @@ const keygenArgs: ArgsDef = {
   "out": { type: "string", description: `File to write the key pair to (${DEFAULT_KEY_PATH})` },
   "id": { type: "string", description: "Id to register the key under (op-<hex>)" },
   "register": { type: "boolean", description: "Record the public half in the registry" },
+  "role": {
+    type: "string",
+    description: "Tier to register at: admin|operator (the first key is always admin)",
+  },
   "config": { type: "string", description: "Path to scafo.config.jsonc, for --register" },
   "endpoint": { type: "string", description: "S3-compatible endpoint URL" },
   "region": { type: "string", description: "Signing region of the bucket" },
@@ -78,18 +84,44 @@ async function runKeygen(flags: Record<string, unknown>): Promise<void> {
     return;
   }
 
-  await register(flags, file);
-  console.log(`scafo: registered "${file.id}"; tokens it signs are now accepted by every node`);
+  const role = await register(flags, file);
+  console.log(
+    `scafo: registered "${file.id}" as ${role}-tier; tokens it signs are now accepted by ` +
+      `every node`,
+  );
 }
 
-async function register(flags: Record<string, unknown>, file: OperatorKeyFile): Promise<void> {
+async function register(
+  flags: Record<string, unknown>,
+  file: OperatorKeyFile,
+): Promise<OperatorRole> {
   const config = await loadAgentConfig({
     configPath: text(flags.config),
     flags: stringFlags(flags),
     env: process.env,
     readFile: readTextFile,
   });
-  await registerOperatorKey(createRegistry(config), file);
+  return registerOperatorKey(createRegistry(config), file, { ...operatorRole(flags.role) });
+}
+
+/**
+ * The tier `--role` names, refused here rather than at the bucket: a misspelled
+ * one would otherwise be dropped and the key filed at whatever the default is,
+ * which is the kind of mistake an operator finds out about from a refusal months
+ * later.
+ *
+ * Absent stays absent, so the registration surface keeps its own defaults.
+ *
+ * @internal exported for its tests.
+ */
+export function operatorRole(value: unknown): { role?: OperatorRole } {
+  const wanted = text(value);
+  if (wanted === undefined) return {};
+  if (wanted === "admin" || wanted === "operator") return { role: wanted };
+
+  throw new ScafoError("invalid-input", "Unknown operator role", {
+    detail: `--role takes "admin" or "operator"; "${wanted}" is neither`,
+  });
 }
 
 function text(value: unknown): string | undefined {

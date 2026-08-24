@@ -723,6 +723,37 @@ describe("what the traces come to", () => {
     });
   });
 
+  it("shows what an operator did to the fleet's own keys, in a listing nobody narrowed", () => {
+    /* Only the reconcile loop is periodic. An audit line is the opposite of
+       that — it is a thing a person did, once — so the default view is exactly
+       where it has to appear. */
+    const records = [
+      ...passes(40),
+      event("node-a", CLOCK_START_MS - MINUTE_MS, {
+        type: "operator.trusted",
+        actor: "op-aaaa1111",
+        subject: "op-bbbb2222",
+        role: "operator",
+      }),
+      event("node-a", CLOCK_START_MS, {
+        type: "operator.revoked",
+        actor: "op-aaaa1111",
+        subject: "op-bbbb2222",
+        role: "operator",
+      }),
+    ];
+
+    const selection = selectTraces(records);
+
+    expect(selection.events.map((record) => record.type)).toEqual([
+      "operator.trusted",
+      "operator.revoked",
+    ]);
+    expect(formatTraces(selection)).toContain(
+      "actor=op-aaaa1111 subject=op-bbbb2222 role=operator",
+    );
+  });
+
   it("does not let the passes it hid take the window's room", () => {
     /* The trap the default is for: 40 passes and 5 wake events under a limit of
        10 used to show two of the wake events and thirty-eight passes. */

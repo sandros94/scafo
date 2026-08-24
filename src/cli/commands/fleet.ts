@@ -23,6 +23,7 @@ import {
 } from "../_operators.ts";
 import { describeRotation, rotateFleetKey } from "../_rotate.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
+import { operatorRole } from "./keygen.ts";
 
 /*
  * `--endpoint` here is the NODE AGENT's URL, which is the only address this
@@ -46,6 +47,10 @@ const addArgs: ArgsDef = {
     description: `Import a portable file: a path, or an inline "${INLINE_PREFIX}" value`,
   },
   register: { type: "boolean", description: "Record the key's public half in the registry" },
+  role: {
+    type: "string",
+    description: "Tier to register at: admin|operator (the first key is always admin)",
+  },
   config: { type: "string", description: "Path to scafo.config.jsonc, for --register" },
 };
 
@@ -202,9 +207,12 @@ async function runAdd(flags: Record<string, unknown>): Promise<void> {
     env: process.env,
     readFile: readTextFile,
   });
-  await registerOperatorKey(createRegistry(config), added.key);
+  const role = await registerOperatorKey(createRegistry(config), added.key, {
+    ...operatorRole(flags.role),
+  });
   console.log(
-    `scafo: registered "${added.key.id}"; tokens it signs are now accepted by every node`,
+    `scafo: registered "${added.key.id}" as ${role}-tier; tokens it signs are now accepted by ` +
+      `every node`,
   );
 }
 

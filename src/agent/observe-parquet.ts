@@ -145,6 +145,10 @@ const FIXED_COLUMNS = {
   durationMs: { type: "i64", optional: true },
   processId: { type: "string", optional: true },
   attempts: { type: "i64", optional: true },
+  /* The operator audit pair: who acted, on whom, at what tier. */
+  actor: { type: "string", optional: true },
+  subject: { type: "string", optional: true },
+  role: { type: "string", optional: true },
 
   /* ObserveCountersRecord, `status` and `durations` excepted. */
   since: { type: "timestamp", optional: true },
@@ -253,6 +257,9 @@ const COLUMN_OF: Record<ObserveField, ObserveParquetColumn | typeof SPREAD> = {
   durationMs: "durationMs",
   processId: "processId",
   attempts: "attempts",
+  actor: "actor",
+  subject: "subject",
+  role: "role",
 
   /* ObserveCountersRecord. */
   since: "since",

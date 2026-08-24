@@ -21,8 +21,14 @@ import { sign as signJws } from "unjwt/jws";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createAgentApp } from "../src/agent/app.ts";
 import type { AgentConfig } from "../src/agent/config.ts";
+import { createObservability, type Observability } from "../src/agent/observe.ts";
 import { signNodeToken } from "../src/core/auth/index.ts";
-import { listOperators, type TrustedOperator } from "../src/core/registry/operators.ts";
+import {
+  getOperator,
+  listOperators,
+  type OperatorRole,
+  type TrustedOperator,
+} from "../src/core/registry/operators.ts";
 import { registerNode } from "../src/core/registry/nodes.ts";
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
@@ -31,6 +37,8 @@ import { ctxWith, type ManualClock } from "./_helpers.ts";
 const NODE_ID = "node-a";
 const OPERATOR_ID = "op-aaaa1111";
 const SECOND_ID = "op-bbbb2222";
+const THIRD_ID = "op-cccc3333";
+const FOURTH_ID = "op-dddd4444";
 const VERSION = "0.0.0-test";
 
 /** Every problem body a caller that did not authenticate may see. */
@@ -45,12 +53,14 @@ type Keypair = { privateKey: JWK_OKP_Private<"EdDSA">; publicKey: JWK_OKP_Public
 let clock: ManualClock;
 let node: Keypair;
 let operator: Keypair;
+let observed: Observability;
 let app: H3;
 
 beforeEach(async () => {
   clock = ctxWith(new MemoryCasStore());
   node = await generateJWK("EdDSA", { kid: NODE_ID });
   operator = await generateJWK("EdDSA", { kid: OPERATOR_ID });
+  observed = createObservability({ enabled: true, now: () => new Date(clock.nowMs()) });
 
   await registerNode(clock.ctx, {
     v: 1,
@@ -58,6 +68,9 @@ beforeEach(async () => {
     publicKey: { kty: "OKP", crv: "Ed25519", x: node.publicKey.x },
     addresses: { internal: "10.0.0.4", agentPort: 7400 },
   });
+  /* Role-LESS on purpose: it is what every key an older installation trusts
+     looks like, and it must read as an admin. The tiered cases below file
+     their own keys explicitly. */
   await trust(OPERATOR_ID, operator);
 
   app = createAgentApp({
@@ -66,6 +79,7 @@ beforeEach(async () => {
     registry: clock.ctx,
     supervisor: idleSupervisor(),
     version: VERSION,
+    observability: observed,
   });
 });
 
@@ -81,6 +95,305 @@ describe("GET /v1/operators", () => {
     /* The public half is read back, so a caller can tell WHICH key landed rather
        than only that an id is trusted. */
     expect(body.operators[0]?.publicKey.x).toBe(operator.publicKey.x);
+  });
+});
+
+describe("the tier a listing shows", () => {
+  it("names each key's role, the compat one included", async () => {
+    await trustAs(SECOND_ID, await generateJWK("EdDSA", { kid: SECOND_ID }), "operator");
+
+    const body = (await listing(await asOperator())) as { operators: TrustedOperator[] };
+
+    expect(body.operators.map((entry) => [entry.id, entry.role])).toEqual([
+      [OPERATOR_ID, "admin"],
+      [SECOND_ID, "operator"],
+    ]);
+  });
+
+  it("lets an operator-tier caller list, because rotation's confirm step needs it", async () => {
+    const junior = await generateJWK("EdDSA", { kid: SECOND_ID });
+    await trustAs(SECOND_ID, junior, "operator");
+
+    const response = await app.request("/v1/operators", {
+      headers: await asKey(SECOND_ID, junior),
+    });
+
+    expect(response.status).toBe(200);
+  });
+});
+
+describe("what tier a POST may grant", () => {
+  const grants: Array<[OperatorRole, OperatorRole, number]> = [
+    ["admin", "admin", 200],
+    ["admin", "operator", 200],
+    ["operator", "operator", 200],
+    ["operator", "admin", 403],
+  ];
+
+  it.each(grants)("a %s registering a %s is answered %i", async (caller, wanted, status) => {
+    const callerKeys = await generateJWK("EdDSA", { kid: SECOND_ID });
+    await trustAs(SECOND_ID, callerKeys, caller);
+    const minted = await generateJWK("EdDSA", { kid: THIRD_ID });
+
+    const response = await app.request("/v1/operators", {
+      method: "POST",
+      headers: { ...(await asKey(SECOND_ID, callerKeys)), "content-type": "application/json" },
+      body: JSON.stringify({ ...publicHalf(THIRD_ID, minted), role: wanted }),
+    });
+
+    expect(response.status).toBe(status);
+    if (status === 200) {
+      await expect(getOperator(clock.ctx, THIRD_ID)).resolves.toMatchObject({ role: wanted });
+    } else {
+      /* Authorization, not authentication: the caller proved which key it holds,
+         so there is nothing left to withhold and the refusal names the rule. */
+      const problem = (await response.json()) as { type: string; detail?: string };
+      expect(problem.type).toBe("urn:scafo:auth-scope");
+      expect(await getOperator(clock.ctx, THIRD_ID)).toBeNull();
+    }
+  });
+
+  it("defaults a registration to the operator tier, which is least privilege", async () => {
+    await app.request("/v1/operators", {
+      method: "POST",
+      headers: { ...(await asOperator()), "content-type": "application/json" },
+      body: JSON.stringify(publicHalf(SECOND_ID, await generateJWK("EdDSA", { kid: SECOND_ID }))),
+    });
+
+    /* Even from an admin: a key is added at the lowest tier unless the caller
+       said otherwise, so an extra deploy key is never a second administrator. */
+    await expect(getOperator(clock.ctx, SECOND_ID)).resolves.toMatchObject({ role: "operator" });
+  });
+
+  it("gives a key that supersedes the caller the CALLER's tier, which is what a rotation needs", async () => {
+    const junior = await generateJWK("EdDSA", { kid: SECOND_ID });
+    await trustAs(SECOND_ID, junior, "operator");
+
+    await app.request("/v1/operators", {
+      method: "POST",
+      headers: { ...(await asKey(SECOND_ID, junior)), "content-type": "application/json" },
+      body: JSON.stringify({
+        ...publicHalf(THIRD_ID, await generateJWK("EdDSA", { kid: THIRD_ID })),
+        supersedes: SECOND_ID,
+      }),
+    });
+
+    /* A replacement inherits what it replaces — never more, because the caller's
+       own tier is the ceiling either way. */
+    await expect(getOperator(clock.ctx, THIRD_ID)).resolves.toMatchObject({
+      role: "operator",
+      supersedes: SECOND_ID,
+    });
+  });
+
+  it("REFUSES a lineage naming anyone but the caller", async () => {
+    const junior = await generateJWK("EdDSA", { kid: SECOND_ID });
+    await trustAs(SECOND_ID, junior, "operator");
+
+    const response = await app.request("/v1/operators", {
+      method: "POST",
+      headers: { ...(await asKey(SECOND_ID, junior)), "content-type": "application/json" },
+      body: JSON.stringify({
+        ...publicHalf(THIRD_ID, await generateJWK("EdDSA", { kid: THIRD_ID })),
+        supersedes: OPERATOR_ID,
+      }),
+    });
+
+    /* Otherwise lineage would be an escalation: a key claiming to supersede an
+       admin would be authorized to revoke that admin. */
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
+    expect(await getOperator(clock.ctx, THIRD_ID)).toBeNull();
+  });
+
+  it("refuses a role that is not one of the two tiers", async () => {
+    const response = await app.request("/v1/operators", {
+      method: "POST",
+      headers: { ...(await asOperator()), "content-type": "application/json" },
+      body: JSON.stringify({
+        ...publicHalf(SECOND_ID, await generateJWK("EdDSA", { kid: SECOND_ID })),
+        role: "root",
+      }),
+    });
+
+    expect(response.status).toBe(400);
+  });
+});
+
+describe("who a DELETE may take away", () => {
+  it("lets an admin revoke another operator's key", async () => {
+    await trustAs(SECOND_ID, await generateJWK("EdDSA", { kid: SECOND_ID }), "operator");
+
+    const response = await app.request(`/v1/operators/${SECOND_ID}`, {
+      method: "DELETE",
+      headers: await asOperator(),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await getOperator(clock.ctx, SECOND_ID)).toBeNull();
+  });
+
+  it("lets an operator-tier key revoke the one its own record supersedes", async () => {
+    await trustAs(SECOND_ID, await generateJWK("EdDSA", { kid: SECOND_ID }), "operator");
+    const heir = await generateJWK("EdDSA", { kid: THIRD_ID });
+    await trustAs(THIRD_ID, heir, "operator", SECOND_ID);
+
+    const response = await app.request(`/v1/operators/${SECOND_ID}`, {
+      method: "DELETE",
+      headers: await asKey(THIRD_ID, heir),
+    });
+
+    /* The contract half of a rotation, and the only removal an operator-tier
+       key is ever authorized to make. */
+    expect(response.status).toBe(200);
+    expect(await getOperator(clock.ctx, SECOND_ID)).toBeNull();
+  });
+
+  it("REFUSES an operator-tier key revoking one it does not supersede", async () => {
+    const junior = await generateJWK("EdDSA", { kid: SECOND_ID });
+    await trustAs(SECOND_ID, junior, "operator");
+    await trustAs(THIRD_ID, await generateJWK("EdDSA", { kid: THIRD_ID }), "operator");
+
+    const response = await app.request(`/v1/operators/${THIRD_ID}`, {
+      method: "DELETE",
+      headers: await asKey(SECOND_ID, junior),
+    });
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
+    await expect(getOperator(clock.ctx, THIRD_ID)).resolves.toBeDefined();
+  });
+
+  it("REFUSES a lineage whose removal would leave the fleet with no admin at all", async () => {
+    /*
+     * The one way an authorized removal could still strand a fleet: the only
+     * admin deliberately registers an operator-tier successor, which is then
+     * entitled by lineage to revoke it. Allowed by the tier rules, refused by
+     * the registry — nothing would be able to grant an admin afterwards.
+     */
+    const heir = await generateJWK("EdDSA", { kid: SECOND_ID });
+    await trustAs(SECOND_ID, heir, "operator", OPERATOR_ID);
+
+    const response = await app.request(`/v1/operators/${OPERATOR_ID}`, {
+      method: "DELETE",
+      headers: await asKey(SECOND_ID, heir),
+    });
+
+    expect(response.status).toBe(409);
+    const problem = (await response.json()) as { type: string; detail?: string };
+    expect(problem.type).toBe("urn:scafo:reference-held");
+    expect(problem.detail).toContain("admin");
+    await expect(getOperator(clock.ctx, OPERATOR_ID)).resolves.toMatchObject({ role: "admin" });
+  });
+
+  it("refuses an admin revoking its own key before it ever asks about tiers", async () => {
+    await trustAs(SECOND_ID, await generateJWK("EdDSA", { kid: SECOND_ID }), "operator");
+
+    const response = await app.request(`/v1/operators/${OPERATOR_ID}`, {
+      method: "DELETE",
+      headers: await asOperator(),
+    });
+
+    /* Self-revocation is the one removal nothing could verify afterwards, so it
+       is refused whatever the caller's tier — and it is checked first, which is
+       why this is a 400 rather than the registry's last-admin 409. */
+    expect(response.status).toBe(400);
+    await expect(getOperator(clock.ctx, OPERATOR_ID)).resolves.toMatchObject({ role: "admin" });
+  });
+});
+
+describe("the escalation this whole shape exists to stop", () => {
+  it("a stolen operator key cannot lock the admins out", async () => {
+    /*
+     * The state before this wave: every trusted key was equal, so ONE stolen
+     * deploy key could revoke every other operator and own the fleet. What the
+     * tiers buy is that the same theft now reaches nothing above itself.
+     */
+    const stolen = await generateJWK("EdDSA", { kid: SECOND_ID });
+    await trustAs(SECOND_ID, stolen, "operator");
+    const colleague = await generateJWK("EdDSA", { kid: THIRD_ID });
+    await trustAs(THIRD_ID, colleague, "operator");
+    const headers = (): Promise<Record<string, string>> => asKey(SECOND_ID, stolen);
+
+    /* It can add keys — but only at its own tier. */
+    const escalated = await app.request("/v1/operators", {
+      method: "POST",
+      headers: { ...(await headers()), "content-type": "application/json" },
+      body: JSON.stringify({
+        ...publicHalf(FOURTH_ID, await generateJWK("EdDSA", { kid: FOURTH_ID })),
+        role: "admin",
+      }),
+    });
+    expect(escalated.status).toBe(403);
+
+    /* It cannot revoke the admin that could revoke IT. */
+    const againstAdmin = await app.request(`/v1/operators/${OPERATOR_ID}`, {
+      method: "DELETE",
+      headers: await headers(),
+    });
+    expect(againstAdmin.status).toBe(403);
+
+    /* Nor an unrelated operator, so no colleague is locked out either. */
+    const againstPeer = await app.request(`/v1/operators/${THIRD_ID}`, {
+      method: "DELETE",
+      headers: await headers(),
+    });
+    expect(againstPeer.status).toBe(403);
+
+    /* Everything it could not touch is exactly where it was, so the admin's
+       revocation of the stolen key is still available. */
+    expect((await listOperators(clock.ctx)).map((entry) => entry.id)).toEqual([
+      OPERATOR_ID,
+      SECOND_ID,
+      THIRD_ID,
+    ]);
+  });
+});
+
+describe("what the fleet records about its own keys", () => {
+  it("records operator.trusted with the actor, the subject and the tier", async () => {
+    await app.request("/v1/operators", {
+      method: "POST",
+      headers: { ...(await asOperator()), "content-type": "application/json" },
+      body: JSON.stringify({
+        ...publicHalf(SECOND_ID, await generateJWK("EdDSA", { kid: SECOND_ID })),
+        role: "admin",
+      }),
+    });
+
+    expect(auditEvents()).toEqual([
+      { type: "operator.trusted", actor: OPERATOR_ID, subject: SECOND_ID, role: "admin" },
+    ]);
+  });
+
+  it("records operator.revoked with the tier the key had when it went", async () => {
+    await trustAs(SECOND_ID, await generateJWK("EdDSA", { kid: SECOND_ID }), "operator");
+
+    await app.request(`/v1/operators/${SECOND_ID}`, {
+      method: "DELETE",
+      headers: await asOperator(),
+    });
+
+    expect(auditEvents()).toEqual([
+      { type: "operator.revoked", actor: OPERATOR_ID, subject: SECOND_ID, role: "operator" },
+    ]);
+  });
+
+  it("records NOTHING for a call it refused", async () => {
+    const junior = await generateJWK("EdDSA", { kid: SECOND_ID });
+    await trustAs(SECOND_ID, junior, "operator");
+
+    await app.request("/v1/operators", {
+      method: "POST",
+      headers: { ...(await asKey(SECOND_ID, junior)), "content-type": "application/json" },
+      body: JSON.stringify({
+        ...publicHalf(THIRD_ID, await generateJWK("EdDSA", { kid: THIRD_ID })),
+        role: "admin",
+      }),
+    });
+
+    /* An audit line says a key WAS trusted; a refusal changed nothing. */
+    expect(auditEvents()).toEqual([]);
   });
 });
 
@@ -257,12 +570,19 @@ describe("who may reach /v1/operators at all", () => {
 
 /* ------------------------------------------------------------------ helpers */
 
-/** The public half of a keypair, as the trust route is given one. */
-function publicHalf(id: string, keys: Keypair): TrustedOperator {
+/**
+ * The public half of a keypair, as the trust route is given one — with NO role,
+ * which is the ordinary body and the one that takes the route's own default.
+ */
+function publicHalf(id: string, keys: Keypair): Omit<TrustedOperator, "role"> {
   return { id, publicKey: { kty: "OKP", crv: "Ed25519", x: keys.publicKey.x } };
 }
 
-/** Files a key as an operator's, straight into the registry. */
+/**
+ * Files a key as an operator's, straight into the registry and WITHOUT a role —
+ * which is the record every installation older than this wave holds, and which
+ * reads as an admin.
+ */
 async function trust(id: string, keys: Keypair): Promise<void> {
   await registerNode(clock.ctx, {
     v: 1,
@@ -272,9 +592,43 @@ async function trust(id: string, keys: Keypair): Promise<void> {
   });
 }
 
+/** The same, at a stated tier and with the lineage a rotation would have left. */
+async function trustAs(
+  id: string,
+  keys: Keypair,
+  role: OperatorRole,
+  supersedes?: string,
+): Promise<void> {
+  await registerNode(clock.ctx, {
+    v: 1,
+    id,
+    publicKey: { kty: "OKP", crv: "Ed25519", x: keys.publicKey.x },
+    addresses: { internal: "operator", agentPort: 0 },
+    operator: { role, ...(supersedes === undefined ? {} : { supersedes }) },
+  });
+}
+
 /** A header carrying a token good for exactly one request. */
 async function asOperator(): Promise<Record<string, string>> {
-  return { authorization: `Bearer ${await signNodeToken(operator.privateKey, OPERATOR_ID)}` };
+  return asKey(OPERATOR_ID, operator);
+}
+
+/** The same, signed by any keypair this test filed. */
+async function asKey(id: string, keys: Keypair): Promise<Record<string, string>> {
+  return { authorization: `Bearer ${await signNodeToken(keys.privateKey, id)}` };
+}
+
+/** The listing as a caller reads it back. */
+async function listing(headers: Record<string, string>): Promise<unknown> {
+  return (await app.request("/v1/operators", { headers })).json();
+}
+
+/** The audit lines the node recorded, stripped of what every event carries. */
+function auditEvents(): Array<Record<string, unknown>> {
+  return observed
+    .snapshot()
+    .events.filter((entry) => entry.type.startsWith("operator."))
+    .map(({ at: _at, ...rest }) => rest);
 }
 
 /** An RS256 JWS shaped like the token a CI workload presents. */

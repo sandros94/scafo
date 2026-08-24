@@ -43,9 +43,9 @@ scafo fleet add playground --endpoint http://127.0.0.1:7401 --register
 ```
 
 **You should see** a key minted into `.scafo/` here rather than into your real
-`~/.scafo`, and `registered "op-…"; tokens it signs are now accepted by every
-node`. **One key, and both nodes trust it**, because both read the same registry —
-so nothing below passes `--key` or `--agent`.
+`~/.scafo`, and `registered "op-…" as admin-tier; tokens it signs are now accepted
+by every node`. **One key, and both nodes trust it**, because both read the same
+registry — so nothing below passes `--key` or `--agent`.
 
 > **No node toolchain?** Use `alias scafo='docker compose run --rm cli'` instead,
 > and register at `http://node-a:7400`.

@@ -76,6 +76,35 @@ export interface NodeWireguard {
   address: string;
 }
 
+/**
+ * What an operator key is allowed to do to the set of keys the fleet trusts.
+ *
+ * TWO TIERS AND NO MORE, shaped the way an RBAC role is: `admin` administers
+ * every key of the fleet, `operator` administers none but the one it replaced.
+ * Everything else a token authorizes — deploying, retiring, reading — is the
+ * same for both, because the split exists to stop a lockout and nothing else.
+ */
+export type OperatorRole = "admin" | "operator";
+
+/**
+ * What an operator key IS, as its record carries it.
+ *
+ * Present on operator records alone, and ABSENT from one written before roles
+ * existed — which reads as an `admin`; see `registry/operators.ts`. It is not a
+ * discriminator and must never be used as one: the address marker is what tells
+ * an operator from a machine, and a record carrying no role is still an
+ * operator's.
+ */
+export interface NodeOperator {
+  role: OperatorRole;
+  /**
+   * Key this one was registered to replace, recorded by the expand half of a
+   * rotation. It is what authorizes the contract half: a key may revoke the one
+   * it supersedes, whatever tier either of them is.
+   */
+  supersedes?: string;
+}
+
 /** A registered node running the agent. Key: `_scafo/nodes/<id>.json`. */
 export interface NodeRecord {
   v: 1;
@@ -104,6 +133,12 @@ export interface NodeRecord {
   drainingAt?: string;
   /** Its place on the tunnel, when the installation runs one. */
   wireguard?: NodeWireguard;
+  /**
+   * What this key may do to the fleet's trusted set, when the record is an
+   * OPERATOR's rather than a machine's. A machine never carries one, and an
+   * operator record written before roles existed does not either.
+   */
+  operator?: NodeOperator;
   capabilities?: Record<string, unknown>;
   /**
    * What an operator said this node IS — its region, its hardware, its provider

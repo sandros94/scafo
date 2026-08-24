@@ -130,6 +130,18 @@ const EVERY_EVENT: ObserveEventRecord[] = [
   event({ type: "rollout.holdEnded", processId: "shop--prod--b1b1b1b1" }),
   event({ type: "gate.passed", processId: "shop--prod--b1b1b1b1", attempts: 3, durationMs: 900 }),
   event({ type: "gate.failed", processId: "shop--prod--b1b1b1b1", attempts: 5 }),
+  event({
+    type: "operator.trusted",
+    actor: "op-aaaa1111",
+    subject: "op-bbbb2222",
+    role: "operator",
+  }),
+  event({
+    type: "operator.revoked",
+    actor: "op-aaaa1111",
+    subject: "op-bbbb2222",
+    role: "operator",
+  }),
 ];
 
 /** Rows written straight through the wide schema, bypassing the record mapping. */
@@ -196,6 +208,9 @@ describe("the wide schema a flush declares", () => {
       durationMs: "i64?",
       processId: "string?",
       attempts: "i64?",
+      actor: "string?",
+      subject: "string?",
+      role: "string?",
 
       /* The counter snapshot, its two nested fields flattened. */
       since: "timestamp?",
@@ -341,6 +356,8 @@ describe("what one record becomes", () => {
         "rollout.holdEnded",
         "gate.passed",
         "gate.failed",
+        "operator.trusted",
+        "operator.revoked",
       ]),
     );
 
@@ -384,12 +401,12 @@ describe("the file a flush encodes to", () => {
     const records: ObserveRecord[] = [flush(), ...EVERY_EVENT, counters()];
     const { bytes } = PARQUET_CODEC.encode(records);
 
-    /* A footer for 44 columns is the floor whatever the rows say, and 17 rows of
+    /* A footer for 47 columns is the floor whatever the rows say, and 19 rows of
        mostly-null columns cannot reach 64 KiB. Loose on purpose: this is a sanity
        bound on the encoder, not a golden size to be updated on every change. */
     expect(bytes.length).toBeGreaterThan(1000);
     expect(bytes.length).toBeLessThan(65_536);
-    expect(records).toHaveLength(17);
+    expect(records).toHaveLength(19);
   });
 
   it("compresses every data page, and says in the file which codec it used", () => {
@@ -580,13 +597,13 @@ describe.skipIf(DUCKDB === undefined)("what DuckDB makes of a flush", () => {
        query names them quoted — the column is the record's own field name and
        stays that, because a schema that renamed fields to please one reader would
        stop matching the records it encodes. */
-    expect(query(file, "SELECT count(*) FROM read_parquet('$FILE')")).toBe("17");
+    expect(query(file, "SELECT count(*) FROM read_parquet('$FILE')")).toBe("19");
     expect(
       query(
         file,
         `SELECT "record", count(*) FROM read_parquet('$FILE') GROUP BY "record" ORDER BY "record"`,
       ),
-    ).toBe(["counters,1", "event,15", "flush,1"].join("\n"));
+    ).toBe(["counters,1", "event,17", "flush,1"].join("\n"));
 
     /* A counter snapshot reads as the numbers it was written from, timestamp
        included — which is what makes these files answerable without scafo. */
@@ -611,7 +628,7 @@ describe.skipIf(DUCKDB === undefined)("what DuckDB makes of a flush", () => {
         `SELECT count(*) FROM read_parquet('$FILE') WHERE "record" = 'event' ` +
           `AND "requests" IS NULL`,
       ),
-    ).toBe("15");
+    ).toBe("17");
     expect(
       query(file, `SELECT "status" FROM read_parquet('$FILE') WHERE "type" = 'wake.served'`),
     ).toBe("200");

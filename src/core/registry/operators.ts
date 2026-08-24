@@ -13,20 +13,50 @@
  * an operator key is added and dropped by another operator. Crossing the two
  * would let a compromised agent write itself an operator, or let a key rotation
  * take a serving node out of the fleet.
+ *
+ * THE TRUST MODEL, IN ONE PARAGRAPH. The BUCKET is the root anchor: whoever
+ * holds its credentials holds the fleet, because every record here is a write
+ * they could make by hand. Keys enter the trusted set two ways and no others —
+ * the bucket-side ceremony (`scafo keygen --register`, `scafo fleet add
+ * --register`), which is how an installation is bootstrapped and how one whose
+ * keys are all lost is recovered, or an ADMIN adding one through a node. Within
+ * the set there are two tiers ({@link OperatorRole}): an admin administers every
+ * key the fleet trusts, while an operator-tier key may add keys no higher than
+ * itself and may revoke only the key it was registered to replace. That split is
+ * what this file is for. Before it, every trusted key was equal — a single
+ * compromised deploy key could revoke every other operator and own the
+ * installation — and the fix is verb separation rather than a second credential.
  */
 
 import { ScafoError } from "../error.ts";
-import type { NodeRecord } from "../types/registry.ts";
+import type { NodeRecord, OperatorRole } from "../types/registry.ts";
 import { deleteKey, readJson } from "./cas.ts";
 import type { RegistryContext } from "./context.ts";
 import { nodeKey } from "./paths.ts";
 import { listNodeRecords, registerNode } from "./nodes.ts";
+
+export type { OperatorRole };
 
 /**
  * What an operator record carries where a node carries a host. Nothing resolves
  * or connects to it; it is a marker, and it is the one the record is read by.
  */
 export const OPERATOR_ADDRESS: string = "operator";
+
+/**
+ * The tier a record carrying none reads as.
+ *
+ * COMPAT, AND IT IS DELIBERATELY THE HIGH ONE. Every key an installation trusted
+ * before roles existed is full-power today, so reading a role-less record as an
+ * operator-tier key would silently demote every operator of every fleet that
+ * upgrades — locking people out of their own installations at the moment they
+ * needed to do something about it. A demotion must be an explicit act; a read is
+ * never allowed to be an upgrade surprise in either direction.
+ */
+export const LEGACY_OPERATOR_ROLE: OperatorRole = "admin";
+
+/** The tier a key lands at when nobody says otherwise: the least privilege there is. */
+export const DEFAULT_OPERATOR_ROLE: OperatorRole = "operator";
 
 /** The public half of an Ed25519 operator key, as the registry files it. */
 export interface OperatorPublicKey {
@@ -35,10 +65,14 @@ export interface OperatorPublicKey {
   x: string;
 }
 
-/** One key a fleet trusts: the id its tokens carry, and what verifies them. */
+/** One key a fleet trusts: the id its tokens carry, what verifies them, and what it may do. */
 export interface TrustedOperator {
   id: string;
   publicKey: OperatorPublicKey;
+  /** What it may do to the trusted set. Always present here; see {@link readOperator}. */
+  role: OperatorRole;
+  /** Key it was registered to replace, when a rotation registered it. */
+  supersedes?: string;
 }
 
 /**
@@ -52,12 +86,102 @@ export function isOperatorRecord(record: NodeRecord): boolean {
   return record.addresses.internal === OPERATOR_ADDRESS && record.addresses.agentPort === 0;
 }
 
+/**
+ * One operator record as the key it describes, its tier resolved.
+ *
+ * The ONE place a role is read out of a record, so the compat default lives here
+ * and nowhere else: a record carrying none reads as {@link LEGACY_OPERATOR_ROLE}.
+ */
+export function readOperator(record: NodeRecord): TrustedOperator {
+  const operator = record.operator;
+  return {
+    id: record.id,
+    publicKey: record.publicKey,
+    role: operator?.role ?? LEGACY_OPERATOR_ROLE,
+    ...(operator?.supersedes === undefined ? {} : { supersedes: operator.supersedes }),
+  };
+}
+
 /** Every operator key the fleet trusts, in id order. */
 export async function listOperators(ctx: RegistryContext): Promise<TrustedOperator[]> {
   const records = await listNodeRecords(ctx);
-  return records
-    .filter((record) => isOperatorRecord(record))
-    .map((record) => ({ id: record.id, publicKey: record.publicKey }));
+  return records.filter((record) => isOperatorRecord(record)).map((record) => readOperator(record));
+}
+
+/**
+ * The key filed under `id`, or null when nothing is — or when what is filed is a
+ * MACHINE of this installation rather than an operator.
+ *
+ * Null for both misses on purpose: a caller asking what an operator may do has
+ * no use for a node's record, and answering one would invite the crossing this
+ * file exists to prevent.
+ */
+export async function getOperator(
+  ctx: RegistryContext,
+  id: string,
+): Promise<TrustedOperator | null> {
+  const found = await readJson<NodeRecord>(ctx, nodeKey(id));
+  if (found === null || !isOperatorRecord(found.value)) return null;
+  return readOperator(found.value);
+}
+
+/**
+ * Whether a caller of `caller` tier may register a key at `wanted`.
+ *
+ * NO HIGHER THAN ONE'S OWN, which is the whole rule and the reason a stolen
+ * operator-tier key cannot make itself an administrator by way of a second key.
+ * Pure, so the routes and the tests ask the same question of the same function.
+ */
+export function canGrantRole(caller: OperatorRole, wanted: OperatorRole): boolean {
+  return caller === "admin" || wanted === "operator";
+}
+
+/**
+ * Whether `caller` may stop the fleet trusting `targetId`.
+ *
+ * An admin may revoke anyone; anyone else may revoke ONLY the key their own
+ * record supersedes. That second clause is what keeps rotation working below the
+ * admin tier — the expand half registers the replacement with `supersedes` set,
+ * and the contract half is authorized by it — while leaving an operator-tier key
+ * unable to touch an admin or an unrelated colleague.
+ *
+ * Self-revocation is a separate refusal and is NOT decided here: it is about
+ * what can be verified afterwards rather than about what a tier may do.
+ */
+export function canRevoke(caller: TrustedOperator, targetId: string): boolean {
+  return caller.role === "admin" || caller.supersedes === targetId;
+}
+
+/**
+ * The tier a BUCKET-SIDE registration lands at, given what the operator asked
+ * for.
+ *
+ * A FLEET MUST NEVER EXIST WITH ZERO ADMINS, and this is where that is decided,
+ * because the bucket ceremony is the only way a key enters a fleet that has no
+ * admin to add one. So the first key of an installation is an admin whatever
+ * else is convenient, an explicit `--role operator` for it is REFUSED rather
+ * than quietly promoted — the operator asked for something that cannot be
+ * administered afterwards, and silently doing the opposite is worse than saying
+ * so — and every key after it is least privilege unless an admin is asked for.
+ *
+ * Throws `ScafoError("invalid-input")` for that refusal.
+ */
+export async function bootstrapRole(
+  ctx: RegistryContext,
+  wanted?: OperatorRole,
+): Promise<OperatorRole> {
+  const hasAdmin = (await listOperators(ctx)).some((entry) => entry.role === "admin");
+  if (hasAdmin) return wanted ?? DEFAULT_OPERATOR_ROLE;
+
+  if (wanted === "operator") {
+    throw new ScafoError("invalid-input", "A fleet cannot start without an admin", {
+      detail:
+        `this installation trusts no admin key yet, and an operator-tier key may neither add ` +
+        `one nor revoke one — the fleet could then only be administered by writing to the ` +
+        `bucket by hand; register this key as an admin and add operator-tier keys through it`,
+    });
+  }
+  return "admin";
 }
 
 /**
@@ -67,6 +191,11 @@ export async function listOperators(ctx: RegistryContext): Promise<TrustedOperat
  * IDEMPOTENT: trusting a key that is already trusted rewrites the same record,
  * so a rotation interrupted after this step and rerun costs nothing. That is
  * what lets the expand half of an expand-contract be retried blindly.
+ *
+ * THE TIER IS THE CALLER'S TO DECIDE and is required here, because this surface
+ * writes what it is told and never guesses: the two places a key is granted from
+ * — the bucket ceremony ({@link bootstrapRole}) and `POST /v1/operators` — have
+ * different rules, and a default living here would quietly be one of them.
  *
  * Throws `ScafoError("reference-held")` when the id already belongs to a MACHINE
  * of this installation: replacing that record would hand the node's identity to
@@ -91,12 +220,18 @@ export async function trustOperator(
     id: key.id,
     publicKey: key.publicKey,
     addresses: { internal: OPERATOR_ADDRESS, agentPort: 0 },
+    operator: {
+      role: key.role,
+      ...(key.supersedes === undefined ? {} : { supersedes: key.supersedes }),
+    },
   });
   return key;
 }
 
 /**
- * Stops the fleet trusting the key filed under `id`.
+ * Stops the fleet trusting the key filed under `id`, and answers the key that
+ * went — tier included, because that is what an audit line records and it cannot
+ * be read back afterwards.
  *
  * THE LAST ONE IS REFUSED. A fleet trusting no operator key has nobody who can
  * put one back through a node — every route that could is itself operator-authed
@@ -105,18 +240,26 @@ export async function trustOperator(
  * meets this refusal, because it registers the new key BEFORE dropping the old:
  * there are always two at the moment one is removed.
  *
+ * AND SO IS THE LAST ADMIN, which is the same refusal one tier up. A fleet whose
+ * remaining keys are all operator-tier trusts plenty of keys and can still be
+ * deployed from — but no caller is allowed to grant an admin, and none is
+ * allowed to revoke anything but its own lineage, so the set can never be
+ * administered through a node again. Counting keys is not enough to see that;
+ * counting ADMINS is.
+ *
  * Throws `ScafoError("not-found")` when nothing is filed under the id,
  * `ScafoError("invalid-input")` when what is filed is a machine rather than an
- * operator, and `ScafoError("reference-held")` for the last trusted key.
+ * operator, and `ScafoError("reference-held")` for the last trusted key and for
+ * the last admin.
  *
  * No lease is taken, unlike `removeNode`. What a lease buys there is a
  * multi-record deletion carried out by one writer at a time; this removes ONE
- * independent record, and the count it is guarded by is re-read immediately
+ * independent record, and the counts it is guarded by are re-read immediately
  * before. Two operators revoking the two last keys at the same instant could
  * still empty the set, and the way back from that is the bucket-side
  * registration `scafo keygen --register` has always been.
  */
-export async function revokeOperator(ctx: RegistryContext, id: string): Promise<void> {
+export async function revokeOperator(ctx: RegistryContext, id: string): Promise<TrustedOperator> {
   const found = await readJson<NodeRecord>(ctx, nodeKey(id));
   if (found === null) {
     throw new ScafoError("not-found", "No such operator key", {
@@ -131,6 +274,7 @@ export async function revokeOperator(ctx: RegistryContext, id: string): Promise<
     });
   }
 
+  const removed = readOperator(found.value);
   const trusted = await listOperators(ctx);
   if (trusted.length <= 1) {
     throw new ScafoError("reference-held", "This is the last trusted operator key", {
@@ -139,6 +283,15 @@ export async function revokeOperator(ctx: RegistryContext, id: string): Promise<
         `be administered through no node at all; register another one first, then remove this`,
     });
   }
+  if (removed.role === "admin" && trusted.filter((key) => key.role === "admin").length <= 1) {
+    throw new ScafoError("reference-held", "This is the last admin key", {
+      detail:
+        `"${id}" is the only admin key this fleet trusts; removing it would leave nothing able ` +
+        `to add or revoke a key here, whatever else stays trusted — register another admin ` +
+        `first, then remove this`,
+    });
+  }
 
   await deleteKey(ctx, nodeKey(id));
+  return removed;
 }

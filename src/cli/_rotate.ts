@@ -12,8 +12,16 @@
  *      pending. Nothing has been told to the fleet yet. Interrupted here, the
  *      fleet is untouched and the rerun picks the pending key up.
  *   2. EXPAND: register the public half with the fleet, AUTHENTICATED BY THE OLD
- *      KEY — the only credential this operator has. Idempotent, so the rerun of
- *      an interrupted run re-registers what it had already registered.
+ *      KEY — the only credential this operator has — and SUPERSEDING it.
+ *      Idempotent, so the rerun of an interrupted run re-registers what it had
+ *      already registered.
+ *
+ *      The lineage is not bookkeeping: below the admin tier it is the only thing
+ *      that authorizes step 5. An operator-tier key may revoke nothing but the
+ *      key it was registered to replace, so a rotation that did not record what
+ *      it replaces would leave its own contract step refused. It also settles
+ *      the new key's TIER — a node gives a key that supersedes the caller the
+ *      caller's own tier — so a rotation is never a promotion or a demotion.
  *   3. CONFIRM: an authenticated call made WITH THE NEW KEY. Read-back alone
  *      would only say the record was written; this says the fleet accepts what
  *      the key signs, which is the thing about to be relied on. Interrupted at
@@ -36,6 +44,7 @@
 
 import { rm } from "node:fs/promises";
 import { ScafoError } from "../core/error.ts";
+import { LEGACY_OPERATOR_ROLE, type OperatorRole } from "../core/registry/operators.ts";
 import { SLUG_MAX_LENGTH } from "../core/utils/slug.ts";
 import { operatorSigner } from "./_agent.ts";
 import {
@@ -79,6 +88,8 @@ export interface RotatedKey {
   newKeyId: string;
   /** Absolute path of the file the new key was written to. */
   newKeyPath: string;
+  /** Tier both keys are at: a rotation replaces a key, it never re-tiers one. */
+  role: OperatorRole;
   /** Whether the new key was taken over from an interrupted run rather than minted. */
   resumed: boolean;
   /** Whether the old key was deregistered from the fleet. */
@@ -132,14 +143,22 @@ export async function rotateFleetKey(
   const asOld = operatorApi({ ...connection, authorize: operatorSigner(oldKey) });
   const asNew = operatorApi({ ...connection, authorize: operatorSigner(newKey) });
 
-  /* 2. EXPAND, under the old key — the only credential this operator has. */
+  /* 2. EXPAND, under the old key — the only credential this operator has — and
+     superseding it, which is what will authorize step 5 and what settles the new
+     key's tier as the old key's own. */
   await asOld.trust({
     id: newKey.id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: newKey.publicKey.x },
+    supersedes: oldKey.id,
   });
 
   /* 3. CONFIRM, under the NEW key: the fleet accepts what it signs. */
   const trusted = await asNew.list();
+  /* What the fleet says the new key is, rather than what this end assumed. It is
+     always there — the call above was made with that very key — and a fleet that
+     somehow does not name it is reported at the tier a role-less record reads
+     as, which is what every other reader of one does. */
+  const role = trusted.find((key) => key.id === newKey.id)?.role ?? LEGACY_OPERATOR_ROLE;
 
   /* 4. FLIP. Everything above is repeatable; this is what stops being repeated. */
   await updateEntry(home, name, (current) => {
@@ -169,6 +188,7 @@ export async function rotateFleetKey(
     oldKeyPath,
     newKeyId: newKey.id,
     newKeyPath,
+    role,
     resumed: pending !== null,
     contracted,
     purged,
@@ -188,6 +208,9 @@ export function describeRotation(rotated: RotatedKey): string {
   const lines = [
     `scafo: fleet "${rotated.fleet}" now signs with "${rotated.newKeyId}", kept in ` +
       `${rotated.newKeyPath}`,
+    /* Stated rather than assumed: a rotation is a replacement, and an operator
+       who half-expected it to be a way up or down should read that it was not. */
+    `scafo: it is ${rotated.role}-tier, exactly as "${rotated.oldKeyId}" was`,
   ];
 
   if (rotated.resumed) {

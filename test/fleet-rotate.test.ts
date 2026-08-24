@@ -32,7 +32,12 @@ import type { OperatorKeyFile } from "../src/cli/_operator-key.ts";
 import { formatFleetKeys, listFleetKeys, revokeFleetKey } from "../src/cli/_operators.ts";
 import { describeRotation, rotateFleetKey } from "../src/cli/_rotate.ts";
 import { signNodeToken } from "../src/core/auth/index.ts";
-import { listOperators, trustOperator } from "../src/core/registry/operators.ts";
+import {
+  getOperator,
+  type OperatorRole,
+  listOperators,
+  trustOperator,
+} from "../src/core/registry/operators.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
@@ -40,6 +45,9 @@ import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
 const AGENT_URL = "http://10.0.0.4:7400";
 const FLEET = "prod";
 const VERSION = "0.0.0-test";
+
+/** The admin an operator-tier home is set up beside; see `registeredFleet`. */
+const ADMIN_ID = "op-9999admin";
 
 const homes: string[] = [];
 
@@ -112,6 +120,60 @@ describe("the whole rotation", () => {
       (entry) => entry.key.path,
     );
     expect(referenced).not.toContain(refOf(home, rotated.oldKeyPath));
+  });
+});
+
+describe("rotating across the two tiers", () => {
+  it("rotates an ADMIN key end to end, and records the lineage for the audit trail", async () => {
+    const { home, key } = await registeredFleet("admin");
+
+    const rotated = await rotateFleetKey(home, FLEET, { fetchFn: through(app) });
+
+    expect(rotated.role).toBe("admin");
+    expect(rotated.contracted).toBe(true);
+    /* An admin passes the admin check anyway; the lineage is recorded all the
+       same, because it is what says which key replaced which. */
+    await expect(getOperator(clock.ctx, rotated.newKeyId)).resolves.toMatchObject({
+      role: "admin",
+      supersedes: key.id,
+    });
+  });
+
+  it("rotates an OPERATOR-tier key end to end, contracting through its own lineage", async () => {
+    const { home, key } = await registeredFleet("operator");
+
+    const rotated = await rotateFleetKey(home, FLEET, { fetchFn: through(app) });
+
+    /*
+     * The wrinkle the whole design turns on: DELETE is no longer open to every
+     * trusted key, so an operator-tier rotation would have nothing authorizing
+     * its contract step. The new key superseding the old is what does.
+     */
+    expect(rotated.role).toBe("operator");
+    expect(rotated.contracted).toBe(true);
+    expect(await trustedIds()).toEqual([ADMIN_ID, rotated.newKeyId].sort());
+    await expect(getOperator(clock.ctx, rotated.newKeyId)).resolves.toMatchObject({
+      role: "operator",
+      supersedes: key.id,
+    });
+  });
+
+  it("never promotes a rotated key, whatever tier the fleet's other keys are", async () => {
+    const { home } = await registeredFleet("operator");
+
+    const rotated = await rotateFleetKey(home, FLEET, { fetchFn: through(app) });
+
+    /* A rotation replaces a key; it is not a way to acquire a better one. */
+    expect(rotated.role).not.toBe("admin");
+    await expect(getOperator(clock.ctx, ADMIN_ID)).resolves.toMatchObject({ role: "admin" });
+  });
+
+  it("says which tier the new key landed at", async () => {
+    const { home } = await registeredFleet("operator");
+
+    const said = describeRotation(await rotateFleetKey(home, FLEET, { fetchFn: through(app) }));
+
+    expect(said).toContain("operator-tier");
   });
 });
 
@@ -287,13 +349,38 @@ describe("reading what a fleet trusts", () => {
     await trustOperator(clock.ctx, {
       id: "op-cccc3333",
       publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-a-colleague" },
+      role: "operator",
     });
 
     const printed = formatFleetKeys(await listFleetKeys(home, FLEET, { fetchFn: through(app) }));
 
     expect(printed).toContain("2 operator keys");
     expect(printed).toMatch(new RegExp(`${key.id}.*this home signs with it`));
-    expect(printed).toMatch(/op-cccc3333\s*$/m);
+    expect(printed).toMatch(/op-cccc3333\s+operator\s*$/m);
+  });
+
+  it("names the TIER of every key, which is what says who may administer whom", async () => {
+    const { home, key } = await registeredFleet("admin");
+    await trustOperator(clock.ctx, {
+      id: "op-cccc3333",
+      publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-a-colleague" },
+      role: "operator",
+    });
+
+    const printed = formatFleetKeys(await listFleetKeys(home, FLEET, { fetchFn: through(app) }));
+
+    expect(printed).toMatch(new RegExp(`${key.id}\\s+admin`));
+    expect(printed).toMatch(/op-cccc3333\s+operator/);
+  });
+
+  it("names the key a rotated one replaced, where there is one", async () => {
+    const { home, key } = await registeredFleet("admin");
+    const rotated = await rotateFleetKey(home, FLEET, { fetchFn: through(app), keepOld: true });
+
+    const printed = formatFleetKeys(await listFleetKeys(home, FLEET, { fetchFn: through(app) }));
+
+    expect(printed).toContain(`replaces ${key.id}`);
+    expect(printed).toContain(rotated.newKeyId);
   });
 });
 
@@ -365,6 +452,7 @@ describe("revoking another operator's key", () => {
     await trustOperator(clock.ctx, {
       id: "op-cccc3333",
       publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-a-colleague" },
+      role: "operator",
     });
 
     const revoked = await revokeFleetKey(home, FLEET, "op-cccc3333", { fetchFn: through(app) });
@@ -378,6 +466,7 @@ describe("revoking another operator's key", () => {
     await trustOperator(clock.ctx, {
       id: "op-cccc3333",
       publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-a-colleague" },
+      role: "operator",
     });
 
     const error = await rejectsWith(
@@ -405,15 +494,33 @@ describe("revoking another operator's key", () => {
 
 /* ------------------------------------------------------------------ helpers */
 
-/** A home holding one fleet whose key the installation already trusts. */
-async function registeredFleet(): Promise<{ home: string; key: OperatorKeyFile }> {
+/**
+ * A home holding one fleet whose key the installation already trusts, at the
+ * tier asked for.
+ *
+ * An operator-tier home comes with an ADMIN beside it, because that is the only
+ * way a fleet ever reaches that state: the first key of an installation is
+ * always an admin, and operator-tier keys are what an admin adds afterwards.
+ */
+async function registeredFleet(
+  role: OperatorRole = "admin",
+): Promise<{ home: string; key: OperatorKeyFile }> {
   const home = await mkdtemp(join(tmpdir(), "scafo-rotate-"));
   homes.push(home);
+
+  if (role === "operator") {
+    await trustOperator(clock.ctx, {
+      id: ADMIN_ID,
+      publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-the-admin" },
+      role: "admin",
+    });
+  }
 
   const added = await addFleet(home, { name: FLEET, endpoints: [AGENT_URL] });
   await trustOperator(clock.ctx, {
     id: added.key.id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: added.key.publicKey.x },
+    role,
   });
   return { home, key: added.key };
 }

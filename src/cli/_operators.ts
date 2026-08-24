@@ -10,7 +10,7 @@
  */
 
 import { ScafoError } from "../core/error.ts";
-import type { TrustedOperator } from "../core/registry/operators.ts";
+import type { OperatorRole, TrustedOperator } from "../core/registry/operators.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
 import {
   type AgentCallOptions,
@@ -21,7 +21,23 @@ import {
 } from "./_agent.ts";
 import { type FleetEntry, getFleet, readFleetKey } from "./_fleets.ts";
 
-export type { TrustedOperator };
+export type { OperatorRole, TrustedOperator };
+
+/**
+ * A key as it is offered to a fleet: the public half, and at most the tier and
+ * the lineage it claims.
+ *
+ * Both are OPTIONAL because the node decides them — least privilege when no role
+ * is named, and the caller's own tier for a key that supersedes the caller — and
+ * a client that stated a default here would be stating a policy it does not own.
+ */
+export interface OperatorGrant {
+  id: string;
+  publicKey: TrustedOperator["publicKey"];
+  role?: OperatorRole;
+  /** Key this one replaces; a node accepts only the CALLER's own id here. */
+  supersedes?: string;
+}
 
 /** What every command about a fleet's keys needs beyond the fleet itself. */
 export interface FleetKeyOptions {
@@ -38,7 +54,7 @@ export interface OperatorApi {
   /** Every key the fleet trusts, in id order. */
   list(): Promise<TrustedOperator[]>;
   /** Records a public half. Repeating it is a no-op, not a failure. */
-  trust(key: TrustedOperator): Promise<TrustedOperator>;
+  trust(key: OperatorGrant): Promise<TrustedOperator>;
   /** Stops the fleet trusting `id`; answers the id that went. */
   revoke(id: string): Promise<string>;
 }
@@ -80,7 +96,12 @@ export function operatorApi(opts: AgentOptions): OperatorApi {
         /* The public half alone leaves here. A node has no use for the private
            one, and a registry every node of the fleet reads is the last place
            it would belong. */
-        body: JSON.stringify({ id: key.id, publicKey: key.publicKey }),
+        body: JSON.stringify({
+          id: key.id,
+          publicKey: key.publicKey,
+          ...(key.role === undefined ? {} : { role: key.role }),
+          ...(key.supersedes === undefined ? {} : { supersedes: key.supersedes }),
+        }),
       });
       return (answer as { operator: TrustedOperator }).operator;
     },
@@ -172,14 +193,28 @@ export function describeRevocation(revoked: RevokedKey): string {
   );
 }
 
-/** The keys a fleet trusts, as an operator reads them. */
+/**
+ * The keys a fleet trusts, as an operator reads them: the id, the TIER, and
+ * — where a rotation left one — the key it replaced.
+ *
+ * The tier is a column of its own because it is what decides who may administer
+ * whom: an operator looking at a refusal needs to see, in the same listing, that
+ * their key is operator-tier and which keys are not.
+ */
 export function formatFleetKeys(keys: FleetKeys): string {
   const lines = [
     `scafo: fleet "${keys.fleet}" trusts ${String(keys.trusted.length)} operator ` +
       `key${keys.trusted.length === 1 ? "" : "s"}`,
   ];
+  const width = Math.max(...keys.trusted.map((key) => key.id.length), 0);
+
   for (const key of keys.trusted) {
-    lines.push(`  ${key.id}${key.id === keys.own ? "  (this home signs with it)" : ""}`);
+    const notes = [
+      ...(key.supersedes === undefined ? [] : [`replaces ${key.supersedes}`]),
+      ...(key.id === keys.own ? ["this home signs with it"] : []),
+    ];
+    const suffix = notes.length === 0 ? "" : `  (${notes.join(", ")})`;
+    lines.push(`  ${key.id.padEnd(width)}  ${key.role}${suffix}`);
   }
   return lines.join("\n");
 }

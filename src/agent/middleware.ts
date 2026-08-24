@@ -5,12 +5,19 @@ import type { NodeIdentity, NodeVerifier } from "../core/auth/node-token.ts";
 import { isScafoError, type ProblemDetails, ScafoError } from "../core/error.ts";
 import { readJson } from "../core/registry/cas.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
-import { isOperatorRecord } from "../core/registry/operators.ts";
+import {
+  isOperatorRecord,
+  readOperator,
+  type TrustedOperator,
+} from "../core/registry/operators.ts";
 import { nodeKey } from "../core/registry/paths.ts";
 import type { NodeRecord } from "../core/types/registry.ts";
 
 /** Context key the verified caller is filed under for the rest of the request. */
 const IDENTITY_KEY = "scafoIdentity";
+
+/** Context key the caller's own operator record is filed under, tier included. */
+const OPERATOR_KEY = "scafoOperator";
 
 /**
  * Guards a route with a node or operator token: `Authorization: Bearer <jws>`,
@@ -48,6 +55,11 @@ export function nodeIdentity(event: H3Event): NodeIdentity | undefined {
  * which key it holds, so there is nothing left to withhold, and telling it that
  * this surface is an operator's is the difference between a fixable mistake and
  * a mystery. A caller holding no node key at all never reaches the question.
+ *
+ * The record it had to read to answer that question is KEPT on the event, where
+ * {@link operatorIdentity} reads it back: the routes behind this guard decide
+ * what the caller may do from its tier and its lineage, and reading the same
+ * object twice would be a second round trip to the bucket per request.
  */
 export function requireOperatorToken(
   verifier: NodeVerifier,
@@ -65,8 +77,17 @@ export function requireOperatorToken(
           `fleet trusts are an operator's to administer`,
       });
     }
+    event.context[OPERATOR_KEY] = readOperator(record.value);
     return next();
   };
+}
+
+/**
+ * The caller as {@link requireOperatorToken} read it — its tier and the key it
+ * supersedes — or undefined on a route that guard does not stand in front of.
+ */
+export function operatorIdentity(event: H3Event): TrustedOperator | undefined {
+  return event.context[OPERATOR_KEY] as TrustedOperator | undefined;
 }
 
 /**

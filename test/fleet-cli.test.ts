@@ -21,14 +21,18 @@ import {
 } from "../src/cli/_fleets.ts";
 import { homeKeyPath } from "../src/cli/_home.ts";
 import {
+  generateOperatorKey,
   INLINE_PREFIX,
   type OperatorKeyFile,
   PORTABLE_KIND,
   PORTABLE_VERSION,
   type PortableOperator,
+  registerOperatorKey,
 } from "../src/cli/_operator-key.ts";
+import { getOperator } from "../src/core/registry/operators.ts";
 import { toBase64 } from "../src/core/utils/base64.ts";
-import { rejectsWith } from "./_helpers.ts";
+import { MemoryCasStore } from "../src/drivers/store/memory.ts";
+import { ctxWith, rejectsWith } from "./_helpers.ts";
 
 const ENDPOINT = "http://10.0.0.4:7400";
 const OTHER_ENDPOINT = "http://10.0.0.5:7400";
@@ -344,5 +348,54 @@ describe("the endpoints one --endpoint value may carry", () => {
   it("keeps a single plain value as the one-entry list it is", async () => {
     const { urls } = await import("../src/cli/commands/fleet.ts");
     expect(urls("http://a:7400")).toEqual(["http://a:7400"]);
+  });
+});
+
+describe("the tier a bucket-side registration files a key at", () => {
+  it("makes the FIRST key of an installation an admin, whatever else is asked", async () => {
+    const clock = ctxWith(new MemoryCasStore());
+    const key = await generateOperatorKey();
+
+    await registerOperatorKey(clock.ctx, key);
+
+    /* A fleet must never exist with zero admins, and the first key is the only
+       one there is to be one. */
+    await expect(getOperator(clock.ctx, key.id)).resolves.toMatchObject({ role: "admin" });
+  });
+
+  it("REFUSES an explicit operator-tier first key rather than creating an adminless fleet", async () => {
+    const clock = ctxWith(new MemoryCasStore());
+    const key = await generateOperatorKey();
+
+    const error = await rejectsWith(
+      () => registerOperatorKey(clock.ctx, key, { role: "operator" }),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("admin");
+    await expect(getOperator(clock.ctx, key.id)).resolves.toBeNull();
+  });
+
+  it("files every later key at the operator tier unless an admin is asked for", async () => {
+    const clock = ctxWith(new MemoryCasStore());
+    await registerOperatorKey(clock.ctx, await generateOperatorKey());
+    const second = await generateOperatorKey();
+    const third = await generateOperatorKey();
+
+    await registerOperatorKey(clock.ctx, second);
+    await registerOperatorKey(clock.ctx, third, { role: "admin" });
+
+    await expect(getOperator(clock.ctx, second.id)).resolves.toMatchObject({ role: "operator" });
+    await expect(getOperator(clock.ctx, third.id)).resolves.toMatchObject({ role: "admin" });
+  });
+
+  it("is asked for by --role on both commands that register a key", async () => {
+    const { fleet } = await import("../src/cli/commands/fleet.ts");
+    const { keygen } = await import("../src/cli/commands/keygen.ts");
+
+    expect(keygen.args).toHaveProperty("role");
+    expect(fleet.subCommands).toBeDefined();
+    const add = (fleet.subCommands as Record<string, { args?: Record<string, unknown> }>).add;
+    expect(add.args).toHaveProperty("role");
   });
 });

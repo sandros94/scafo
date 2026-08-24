@@ -16,7 +16,7 @@ import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { ScafoError } from "../core/error.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
-import { trustOperator } from "../core/registry/operators.ts";
+import { bootstrapRole, type OperatorRole, trustOperator } from "../core/registry/operators.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
 import { fromBase64 } from "../core/utils/base64.ts";
 
@@ -189,15 +189,30 @@ export function formatPortable(portable: PortableOperator): string {
  * how one whose operator keys have all been lost is recovered. An operator who
  * already holds a working key changes it through a node instead — `scafo fleet
  * rotate` — and needs no bucket credential at all.
+ *
+ * `role` is what `--role` carries. The tier it actually lands at is
+ * {@link bootstrapRole}'s to decide, because this is the one path a key can
+ * enter a fleet that has no admin to add one: the first key of an installation
+ * is always an admin, an explicit operator-tier first key is REFUSED, and every
+ * key after it is least privilege unless an admin is asked for.
+ *
+ * Nothing is emitted about it. There is no agent in this path — that is the
+ * point of it — so the observability seam a node reports its own trust changes
+ * through does not exist here, and the record of the ceremony is the bucket's
+ * own access log rather than the fleet's traces.
  */
 export async function registerOperatorKey(
   registry: RegistryContext,
   key: OperatorKeyFile,
-): Promise<void> {
+  opts: { role?: OperatorRole } = {},
+): Promise<OperatorRole> {
+  const role = await bootstrapRole(registry, opts.role);
   await trustOperator(registry, {
     id: key.id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: key.publicKey.x },
+    role,
   });
+  return role;
 }
 
 /* ---------------------------------------------------------------- internals */

@@ -26,6 +26,16 @@ Nothing is installed, no system service registered, no port claimed once the
 containers stop, and `.scafo/` is a throwaway `SCAFO_HOME` so your real `~/.scafo`
 is never touched.
 
+## Who a fleet trusts
+
+The bucket is the root anchor: whoever holds its credentials holds the fleet. A key
+becomes trusted either through the bucket-side ceremony (`--register`, which is how
+an installation is bootstrapped and how one whose keys are lost is recovered) or by
+an admin adding it through a node. Trusted keys come in two tiers — an `admin`
+administers every key the fleet trusts, an `operator` may add keys no higher than
+itself and revoke only the key it was registered to replace — so a stolen deploy key
+cannot lock the admins out.
+
 ## Prerequisites
 
 Docker with Compose v2, and this repository checked out.

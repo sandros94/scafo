@@ -61,8 +61,8 @@ scafo fleet list
 ```
 
 **You should see** a key minted into `.scafo/keys/playground.json`, then
-`registered "op-cf99eff4"; tokens it signs are now accepted by every node`, then
-the one fleet listed back. A fleet entry holds what every other command would
+`registered "op-cf99eff4" as admin-tier; tokens it signs are now accepted by every
+node`, then the one fleet listed back. A fleet entry holds what every other command would
 otherwise be told — **where** the installation is and **who** is speaking — and a
 single registered fleet resolves automatically: nothing below passes `--key` or
 `--agent`.
