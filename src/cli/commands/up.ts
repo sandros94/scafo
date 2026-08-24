@@ -14,6 +14,7 @@ import {
   OBSERVE_RETENTION_DAYS,
   type ObserveFlusher,
 } from "../../agent/observe-flush.ts";
+import { parquetReadHint } from "../../agent/observe-parquet.ts";
 import { observeNodePrefix } from "../../core/registry/paths.ts";
 import { createReconciler, runtimeBaseEnv } from "../../agent/reconcile.ts";
 import { startAgent } from "../../agent/serve.ts";
@@ -223,7 +224,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
       `scafo: flushing them to "${observeNodePrefix(state.id)}" every ` +
         `${String(OBSERVE_FLUSH_INTERVAL_MS / 1000)}s, keeping ` +
         `${String(OBSERVE_RETENTION_DAYS)} days; read them back with "scafo metrics" and ` +
-        `"scafo traces"`,
+        `"scafo traces", or ${parquetReadHint(observeNodePrefix(state.id))}`,
     );
   }
 

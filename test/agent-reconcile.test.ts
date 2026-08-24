@@ -1433,6 +1433,10 @@ class UnreadableStore implements CasStore {
     return Promise.reject(this.#down());
   }
 
+  getBytes(): Promise<Uint8Array | null> {
+    return Promise.reject(this.#down());
+  }
+
   put(): Promise<{ etag: string }> {
     return Promise.reject(this.#down());
   }

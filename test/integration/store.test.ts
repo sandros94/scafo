@@ -130,6 +130,18 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
       await expect(store.del(key)).resolves.toBeUndefined();
     });
 
+    it("gives back a non-text body byte for byte", async () => {
+      /* What an observation flush is: bytes that are not UTF-8, written and read
+         without a text round trip anywhere. `get` is allowed to mangle these —
+         that is what its documented decode does — and `getBytes` is not. */
+      const key = `v1/bytes-${randomHex(4)}.parquet`;
+      const written = new Uint8Array([0x50, 0x41, 0x52, 0x31, 0xff, 0xfe, 0x00, 0x80, 0xc0]);
+      await store.put(key, written);
+
+      await expect(store.getBytes(key)).resolves.toEqual(written);
+      await expect(store.getBytes(`${key}.missing`)).resolves.toBeNull();
+    });
+
     it("lists every key under a prefix, and nothing outside it", async () => {
       const run = randomHex(4);
       for (const name of ["b", "a", "nested/c"]) {

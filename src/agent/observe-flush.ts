@@ -9,7 +9,8 @@
  *
  * WHAT A FLUSH IS: everything drained since the last one, plus a fresh snapshot
  * of the ingress counters when this node counts any, encoded through the codec
- * seam (`src/agent/observe-records.ts`) and written as ONE plain put at
+ * seam (`src/agent/observe-records.ts`) and written as ONE plain put of the BYTES
+ * that came back, at
  * `_scafo/observe/<node>/<YYYY>/<MM>/<DD>/<HH>/<epochMs>-<seq>.<ext>`. Plain,
  * because a flush is this node's own account of its own past: nothing else
  * writes that key, so there is nothing to serialize against.
@@ -39,9 +40,8 @@ import { isScafoError } from "../core/error.ts";
 import { stableStringify } from "../core/utils/json.ts";
 import type { IngressCounters } from "./access-counters.ts";
 import type { Observability } from "./observe.ts";
+import { PARQUET_CODEC } from "./observe-parquet.ts";
 import {
-  JSONL_CODEC,
-  observeBody,
   type ObserveCodec,
   type ObserveCountersRecord,
   type ObserveEventRecord,
@@ -128,7 +128,7 @@ export interface ObserveFlusherOptions {
   observability: Observability;
   /** What the ingress served, when this node counts it at all. */
   counters?: IngressCounters;
-  /** How records become bytes. Defaults to {@link JSONL_CODEC}. */
+  /** How records become bytes. Defaults to {@link PARQUET_CODEC}. */
   codec?: ObserveCodec;
   /** Time between flushes. Defaults to {@link OBSERVE_FLUSH_INTERVAL_MS}. */
   intervalMs?: number;
@@ -160,7 +160,7 @@ export function createObserveFlusher(
   opts: ObserveFlusherOptions,
 ): ObserveFlusher {
   const store: CasStore = registry.store;
-  const codec = opts.codec ?? JSONL_CODEC;
+  const codec = opts.codec ?? PARQUET_CODEC;
   const intervalMs = opts.intervalMs ?? OBSERVE_FLUSH_INTERVAL_MS;
   const drainIntervalMs = opts.drainIntervalMs ?? OBSERVE_DRAIN_INTERVAL_MS;
   const maxRecords = Math.max(1, opts.maxRecords ?? OBSERVE_FLUSH_MAX_RECORDS);
@@ -296,7 +296,10 @@ export function createObserveFlusher(
     writes++;
     try {
       const encoded = codec.encode(records);
-      await store.put(observeKey(opts.nodeId, at, writes, encoded.extension), observeBody(encoded));
+      /* The bytes go to the store verbatim: a columnar file is not text, and a
+         flush put through a UTF-8 round trip would come back full of replacement
+         characters and stop being one. */
+      await store.put(observeKey(opts.nodeId, at, writes, encoded.extension), encoded.bytes);
     } catch (error) {
       const failure = describe(error);
       /* Said when the state CHANGES rather than on every attempt: a bucket that

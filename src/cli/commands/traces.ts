@@ -111,7 +111,7 @@ async function runTraces(flags: Record<string, unknown>): Promise<void> {
     );
   }
   if (found.malformed > 0) {
-    console.log(`scafo: ${String(found.malformed)} line(s) were not records and were skipped`);
+    console.log(`scafo: ${String(found.malformed)} row(s) were not records and were skipped`);
   }
 }
 

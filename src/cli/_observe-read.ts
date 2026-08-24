@@ -16,16 +16,21 @@
  * meaningfully older. Records are then filtered exactly, by their own `at`.
  *
  * NOTHING IN THE WINDOW IS AN ANSWER, NOT A FAILURE. A file whose extension no
- * codec here reads is counted and skipped, a line that is not a record is
- * counted and skipped, and a run that found nothing at all says so in the one
- * way that is actually useful — by naming the switch that would have recorded it.
+ * codec here reads is counted and skipped, so is one whose bytes turn out not to
+ * be that encoding at all, a row that is not a record is counted and skipped, and
+ * a run that found nothing at all says so in the one way that is actually useful
+ * — by naming the switch that would have recorded it.
+ *
+ * THE OBJECTS ARE READ AS BYTES, because the encoding is columnar. That is what
+ * `CasStore.getBytes` is for: `get` applies the UTF-8 decode every record in the
+ * registry wants and every observation file would be destroyed by.
  */
 
 import { observePrefix, parseObserveKey } from "../core/registry/paths.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
 import { ScafoError } from "../core/error.ts";
 import { DEFAULT_CONCURRENCY, mapConcurrent } from "../core/utils/concurrency.ts";
-import { observeBytes, type ObserveRecord, observeCodecFor } from "../agent/observe-records.ts";
+import { type ObserveRecord, observeCodecFor } from "../agent/observe-records.ts";
 
 /**
  * How far before the window a file may have been written and still be read.
@@ -52,9 +57,13 @@ export interface ObserveReadResult {
   nodes: string[];
   /** Files read. */
   files: number;
-  /** Lines no record could be read out of. Skipped, never thrown over. */
+  /** Rows no record could be read out of. Skipped, never thrown over. */
   malformed: number;
-  /** Keys whose extension nothing here decodes; a newer agent's encoding. */
+  /**
+   * Keys nothing here could read: an extension no codec claims, or bytes that
+   * were not the encoding the extension promised. A newer agent's file, or a
+   * truncated one — either way it is reported rather than failed over.
+   */
   unreadable: string[];
 }
 
@@ -97,23 +106,39 @@ export async function readObservations(
   }
 
   let malformed = 0;
+  const unread: string[] = [];
   const perFile = await mapConcurrent(
     keys,
     opts.concurrency ?? DEFAULT_CONCURRENCY,
     async (key): Promise<ObserveRecord[]> => {
       const parts = parseObserveKey(key);
       const codec = parts === null ? null : observeCodecFor(parts.extension);
-      const object = await registry.store.get(key);
-      if (codec === null || object === null) return [];
+      const bytes = await registry.store.getBytes(key);
+      if (codec === null || bytes === null) return [];
 
-      const decoded = codec.decode(observeBytes(object.body));
+      let decoded;
+      try {
+        decoded = codec.decode(bytes);
+      } catch {
+        /* The extension promised an encoding the bytes are not: a half-written
+           object, or one something else put there. One unreadable file must not
+           take the whole window with it. */
+        unread.push(key);
+        return [];
+      }
       malformed += decoded.malformed;
       return decoded.records.filter((record) => inWindow(record, opts.window));
     },
   );
 
   const records = perFile.flat().sort(byTime);
-  return { records, nodes: [...nodes].sort(), files: keys.length, malformed, unreadable };
+  return {
+    records,
+    nodes: [...nodes].sort(),
+    files: keys.length - unread.length,
+    malformed,
+    unreadable: [...unreadable, ...unread].sort(),
+  };
 }
 
 /**

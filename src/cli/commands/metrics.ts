@@ -91,12 +91,12 @@ async function runMetrics(flags: Record<string, unknown>): Promise<void> {
   );
   console.log(formatMetrics(summary));
   if (found.malformed > 0) {
-    console.log(`scafo: ${String(found.malformed)} line(s) were not records and were skipped`);
+    console.log(`scafo: ${String(found.malformed)} row(s) were not records and were skipped`);
   }
   if (found.unreadable.length > 0) {
     console.log(
-      `scafo: ${String(found.unreadable.length)} file(s) are in an encoding this build does not ` +
-        `read; upgrade the CLI to see them`,
+      `scafo: ${String(found.unreadable.length)} file(s) could not be read — a newer agent's ` +
+        `encoding, or an object that is not the one its name promises`,
     );
   }
 }

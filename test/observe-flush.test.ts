@@ -7,6 +7,7 @@
  * same contract, and a flush is a plain put.
  */
 
+import { readParquet } from "tavolato";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createIngressCounters, DURATION_BANDS_MS } from "../src/agent/access-counters.ts";
 import {
@@ -19,12 +20,14 @@ import {
   counterRecords,
   eventRecords,
   flushRecords,
-  JSONL_CODEC,
-  observeBytes,
   type ObserveRecord,
   OBSERVE_RECORD_VERSION,
 } from "../src/agent/observe-records.ts";
-import { PARQUET_CODEC } from "../src/agent/observe-parquet.ts";
+import {
+  OBSERVE_PARQUET_COMPRESSION,
+  OBSERVE_PARQUET_EXTENSION,
+  PARQUET_CODEC,
+} from "../src/agent/observe-parquet.ts";
 import { createObservability, type Observability } from "../src/agent/observe.ts";
 import { parseObserveKey } from "../src/core/registry/paths.ts";
 import type { CasStore } from "../src/core/types/store.ts";
@@ -60,8 +63,10 @@ function flusherWith(
 async function written(from: CasStore = store): Promise<ObserveRecord[]> {
   const records: ObserveRecord[] = [];
   for (const key of await from.list("_scafo/observe/")) {
-    const object = await from.get(key);
-    if (object !== null) records.push(...JSONL_CODEC.decode(observeBytes(object.body)).records);
+    /* Read as BYTES, which is the whole point of a columnar flush: the same
+       object through `get` is a UTF-8 decode and no longer a Parquet file. */
+    const bytes = await from.getBytes(key);
+    if (bytes !== null) records.push(...PARQUET_CODEC.decode(bytes).records);
   }
   return records;
 }
@@ -221,13 +226,13 @@ describe("where a flush lands", () => {
 
     const [key] = await store.list("_scafo/observe/");
     expect(key).toBe(
-      `_scafo/observe/${NODE}/2026/03/04/05/${String(Date.parse("2026-03-04T05:06:07.008Z"))}-000001.jsonl`,
+      `_scafo/observe/${NODE}/2026/03/04/05/${String(Date.parse("2026-03-04T05:06:07.008Z"))}-000001.parquet`,
     );
     expect(parseObserveKey(key)).toEqual({
       node: NODE,
       atMs: Date.parse("2026-03-04T05:06:07.008Z"),
       seq: 1,
-      extension: "jsonl",
+      extension: OBSERVE_PARQUET_EXTENSION,
     });
   });
 
@@ -244,101 +249,66 @@ describe("where a flush lands", () => {
 });
 
 describe("the encoder seam", () => {
-  it("round-trips every record through JSON.parse, one per line", () => {
-    const records: ObserveRecord[] = [
-      {
-        v: OBSERVE_RECORD_VERSION,
-        record: "flush",
-        node: NODE,
-        at: new Date(CLOCK_START_MS).toISOString(),
-        events: 1,
-        counters: 1,
-        ringDropped: 0,
-        pendingDropped: 0,
-      },
-      {
-        v: OBSERVE_RECORD_VERSION,
-        record: "event",
-        node: NODE,
-        at: new Date(CLOCK_START_MS).toISOString(),
-        type: "wake.admitted",
-        id: "aaaa",
-        host: `shop.${DOMAIN}`,
-        kind: "environment",
-        project: "shop",
-        env: "production",
-        inFlight: 1,
-      },
-      {
-        v: OBSERVE_RECORD_VERSION,
-        record: "counters",
-        node: NODE,
-        at: new Date(CLOCK_START_MS).toISOString(),
-        since: new Date(CLOCK_START_MS).toISOString(),
-        project: "shop",
-        env: "production",
-        requests: 2,
-        bytes: 30,
-        status: { "2xx": 2, "3xx": 0, "4xx": 0, "5xx": 0, "other": 0 },
-        durations: [2, 0, 0, 0, 0, 0, 0],
-      },
-    ];
-
-    const encoded = JSONL_CODEC.encode(records);
-
-    expect(encoded.extension).toBe("jsonl");
-    const text = new TextDecoder().decode(encoded.bytes);
-    /* One record per line, and a trailing newline so concatenation cannot merge
-       the last record of one file into the first of the next. */
-    expect(text.endsWith("\n")).toBe(true);
-    expect(
-      text
-        .trimEnd()
-        .split("\n")
-        .map((line) => JSON.parse(line)),
-    ).toEqual(records);
-    expect(JSONL_CODEC.decode(encoded.bytes)).toEqual({ records, malformed: 0 });
-  });
-
-  it("skips and counts what is not a record, keeping what is", () => {
-    const good = JSON.stringify({
-      v: 1,
+  const records: ObserveRecord[] = [
+    {
+      v: OBSERVE_RECORD_VERSION,
+      record: "flush",
+      node: NODE,
+      at: new Date(CLOCK_START_MS).toISOString(),
+      events: 1,
+      counters: 1,
+      ringDropped: 0,
+      pendingDropped: 0,
+    },
+    {
+      v: OBSERVE_RECORD_VERSION,
       record: "event",
       node: NODE,
       at: new Date(CLOCK_START_MS).toISOString(),
-      type: "wake.kicked",
+      type: "wake.admitted",
       id: "aaaa",
-    });
-    const lines = [
-      good,
-      "{ not json",
-      JSON.stringify({ record: "event", node: NODE }),
-      JSON.stringify({
-        record: "invented",
-        node: NODE,
-        at: new Date(CLOCK_START_MS).toISOString(),
-      }),
-      JSON.stringify([1, 2, 3]),
-      "",
-      good,
-    ].join("\n");
+      host: `shop.${DOMAIN}`,
+      kind: "environment",
+      project: "shop",
+      env: "production",
+      inFlight: 1,
+    },
+    {
+      v: OBSERVE_RECORD_VERSION,
+      record: "counters",
+      node: NODE,
+      at: new Date(CLOCK_START_MS).toISOString(),
+      since: new Date(CLOCK_START_MS).toISOString(),
+      project: "shop",
+      env: "production",
+      requests: 2,
+      bytes: 30,
+      status: { "2xx": 2, "3xx": 0, "4xx": 0, "5xx": 0, "other": 0 },
+      durations: [2, 0, 0, 0, 0, 0, 0],
+    },
+  ];
 
-    const decoded = JSONL_CODEC.decode(new TextEncoder().encode(lines));
+  it("round-trips every record kind through the codec that writes them", () => {
+    const encoded = PARQUET_CODEC.encode(records);
 
-    expect(decoded.records).toHaveLength(2);
-    expect(decoded.malformed).toBe(4);
+    expect(encoded.extension).toBe(OBSERVE_PARQUET_EXTENSION);
+    /* The decisive property of the seam, and the only one that matters to a
+       reader: what the flusher wrote is what a reader gets back, field for
+       field, across all three record kinds and both nested fields. */
+    expect(PARQUET_CODEC.decode(encoded.bytes)).toEqual({ records, malformed: 0 });
   });
 
-  it("encodes an empty set as an empty file rather than a blank line", () => {
-    expect(JSONL_CODEC.encode([]).bytes).toHaveLength(0);
-    expect(JSONL_CODEC.decode(new Uint8Array())).toEqual({ records: [], malformed: 0 });
+  it("encodes an empty set as a whole file that reads back as no records", () => {
+    const encoded = PARQUET_CODEC.encode([]);
+
+    expect(encoded.bytes.length).toBeGreaterThan(8);
+    expect(PARQUET_CODEC.decode(encoded.bytes)).toEqual({ records: [], malformed: 0 });
   });
 
-  it("puts another codec's bytes at another codec's extension, and puts them WHOLE", async () => {
-    /* The seam's whole promise: swapping the encoding moves the extension on the
-       key and nothing else. And the bytes arrive intact — a columnar file is not
-       UTF-8, so a store that took only text would hand back replacement
-       characters and a `.parquet` object that is no longer a Parquet file. */
+  it("puts the codec's bytes at the codec's extension, and puts them WHOLE", async () => {
+    /* The bytes have to arrive intact — a columnar file is not UTF-8, so a store
+       that took only text would hand back replacement characters and a
+       `.parquet` object that is no longer a Parquet file. */
     observe.emit({ type: "wake.kicked", id: "aaaa" });
     const counters = createIngressCounters({
       platformDomains: [DOMAIN],
@@ -346,32 +316,38 @@ describe("the encoder seam", () => {
     });
     counters.ingest(caddyLine(`shop.${DOMAIN}`, 200, 1234, 0.02));
 
-    expect(await flusherWith({ codec: PARQUET_CODEC, counters }).flush()).toBe(true);
+    expect(await flusherWith({ counters }).flush()).toBe(true);
 
     const [key] = await store.list("_scafo/observe/");
-    expect(parseObserveKey(key)?.extension).toBe("parquet");
+    expect(parseObserveKey(key)?.extension).toBe(OBSERVE_PARQUET_EXTENSION);
 
-    const bytes = store.bytes(key);
+    const bytes = await store.getBytes(key);
     expect(bytes).not.toBeNull();
     const magic = new TextDecoder();
     expect(magic.decode((bytes as Uint8Array).subarray(0, 4))).toBe("PAR1");
     expect(magic.decode((bytes as Uint8Array).subarray(-4))).toBe("PAR1");
-    /* A header, the drained event and one counters record, and not a byte lost on
-       the way: an encode of the same records is the same file. */
-    expect((bytes as Uint8Array).length).toBeGreaterThan(1000);
+
+    /* And not a byte lost on the way: the object decodes to the header, the
+       drained event and the one counters snapshot the flush was made of. */
+    const decoded = PARQUET_CODEC.decode(bytes as Uint8Array);
+    expect(decoded.malformed).toBe(0);
+    expect(decoded.records.map((record) => record.record)).toEqual(["flush", "event", "counters"]);
   });
 
-  it("still puts a JSON-LINES flush as the text it is", async () => {
+  it("compresses the flush, and reads it back only because the codec is registered", async () => {
     observe.emit({ type: "wake.kicked", id: "aaaa" });
 
     await flusherWith().flush();
 
     const [key] = await store.list("_scafo/observe/");
-    const object = await store.get(key);
-    expect(object?.body.startsWith('{"v":')).toBe(true);
-    /* Byte for byte what the codec produced, which is what a store body being
-       text is FOR: nothing re-encodes it on the way in or out. */
-    expect(store.bytes(key)).toEqual(new TextEncoder().encode(object?.body ?? ""));
+    const bytes = (await store.getBytes(key)) as Uint8Array;
+
+    /* The compression is stamped into every column chunk rather than agreed out
+       of band, which is how DuckDB and anything else reads these without being
+       told: a reader that registers no decompressor refuses BY NAME. */
+    expect(() => readParquet(bytes)).toThrow(new RegExp(OBSERVE_PARQUET_COMPRESSION));
+    /* And registering one is the whole difference. */
+    expect(PARQUET_CODEC.decode(bytes).records).toHaveLength(2);
   });
 });
 
@@ -617,7 +593,7 @@ function observeKeyFor(node: string, at: Date): string {
     String(at.getUTCDate()).padStart(2, "0"),
     String(at.getUTCHours()).padStart(2, "0"),
   ].join("/");
-  return `_scafo/observe/${node}/${day}/${String(at.getTime())}-000001.jsonl`;
+  return `_scafo/observe/${node}/${day}/${String(at.getTime())}-000001.${OBSERVE_PARQUET_EXTENSION}`;
 }
 
 /** One line of a Caddy JSON access log, as the tailer would hand it over. */

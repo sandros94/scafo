@@ -57,6 +57,13 @@ export function createCountingStore(inner: CasStore): CountingStore {
       return inner.get(key);
     },
 
+    /* Counted as a read, because that is what it costs: the same round trip,
+       answered without the text decode. */
+    getBytes(key: string): Promise<Uint8Array | null> {
+      counts.get++;
+      return inner.getBytes(key);
+    },
+
     put(key: string, body: string, cas?: CasHeaders): Promise<{ etag: string }> {
       counts.put++;
       return inner.put(key, body, cas);

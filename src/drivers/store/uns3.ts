@@ -20,17 +20,30 @@ export function createUns3Store(client: S3Client, opts: Uns3StoreOptions): CasSt
   const toStoreKey = (objectKey: string): string =>
     objectKey.startsWith(prefix) ? objectKey.slice(prefix.length) : objectKey;
 
+  /** One GET, with a missing key answered as null rather than raised. */
+  const fetchObject = async (objectKey: string): Promise<Response | null> => {
+    try {
+      return await client.get({ bucket, key: objectKey });
+    } catch (error) {
+      if (statusOf(error) === 404) return null;
+      throw error;
+    }
+  };
+
   return {
     async get(key: string): Promise<StoredObject | null> {
       const objectKey = toObjectKey(key);
-      let response: Response;
-      try {
-        response = await client.get({ bucket, key: objectKey });
-      } catch (error) {
-        if (statusOf(error) === 404) return null;
-        throw error;
-      }
+      const response = await fetchObject(objectKey);
+      if (response === null) return null;
       return { body: await response.text(), etag: etagOf(response, objectKey) };
+    },
+
+    async getBytes(key: string): Promise<Uint8Array | null> {
+      const response = await fetchObject(toObjectKey(key));
+      if (response === null) return null;
+      /* No ETag is read here on purpose: the only bodies this answers are the
+         observation flushes, which are plain puts nothing ever conditions on. */
+      return new Uint8Array(await response.arrayBuffer());
     },
 
     async put(key, body, cas): Promise<{ etag: string }> {

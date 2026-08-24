@@ -37,10 +37,12 @@ export class MemoryCasStore implements CasStore {
    * The object exactly as it was written, which is what a bucket holds and what a
    * reader of a NON-TEXT encoding needs. Null when the key does not exist.
    */
-  bytes(key: string): Uint8Array | null {
+  getBytes(key: string): Promise<Uint8Array | null> {
     const found = this.#objects.get(key);
-    if (found === undefined) return null;
-    return typeof found.body === "string" ? new TextEncoder().encode(found.body) : found.body;
+    if (found === undefined) return Promise.resolve(null);
+    return Promise.resolve(
+      typeof found.body === "string" ? new TextEncoder().encode(found.body) : found.body,
+    );
   }
 
   /* async so conflicts surface as rejections, matching the S3 driver. */

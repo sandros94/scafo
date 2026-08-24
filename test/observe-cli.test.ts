@@ -7,14 +7,22 @@
  * operator's command takes rather than a stand-in for it.
  */
 
+import { createWriter } from "tavolato";
+import type { SyncParquetWriter } from "tavolato";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  JSONL_CODEC,
   type ObserveCountersRecord,
   type ObserveEventRecord,
   type ObserveRecord,
   OBSERVE_RECORD_VERSION,
 } from "../src/agent/observe-records.ts";
+import {
+  OBSERVE_PARQUET_EXTENSION,
+  OBSERVE_PARQUET_SCHEMA,
+  OBSERVE_PARQUET_WRITER_CODEC,
+  observeParquetRow,
+  PARQUET_CODEC,
+} from "../src/agent/observe-parquet.ts";
 import { bandAt, formatMetrics, noCounters, summarizeMetrics } from "../src/cli/_metrics.ts";
 import {
   nothingRecorded,
@@ -45,9 +53,9 @@ beforeEach(() => {
 /** Writes one flush file exactly where and how the flusher would have. */
 async function seed(node: string, atMs: number, records: ObserveRecord[]): Promise<string> {
   sequence++;
-  const encoded = JSONL_CODEC.encode(records);
+  const encoded = PARQUET_CODEC.encode(records);
   const key = observeKey(node, new Date(atMs), sequence, encoded.extension);
-  await store.put(key, new TextDecoder().decode(encoded.bytes));
+  await store.put(key, encoded.bytes);
   return key;
 }
 
@@ -149,10 +157,19 @@ describe("what a window reads", () => {
     expect(found.records.map((record) => record.node)).toEqual(["node-a", "node-b"]);
   });
 
-  it("skips and counts the lines that are not records, keeping the file's good ones", async () => {
+  it("skips and counts the rows that are not records, keeping the file's good ones", async () => {
     const good = event("node-a", CLOCK_START_MS - MINUTE_MS, { type: "wake.kicked", id: "kept" });
-    const key = observeKey("node-a", new Date(CLOCK_START_MS), 1, "jsonl");
-    await store.put(key, [JSON.stringify(good), "{ truncated", ""].join("\n"));
+    const writer = createWriter(OBSERVE_PARQUET_SCHEMA, {
+      codec: OBSERVE_PARQUET_WRITER_CODEC,
+    }) as SyncParquetWriter;
+    writer.appendAll([
+      observeParquetRow(good),
+      /* A record kind this build does not know: written through the same schema,
+         which is the only way such a row can reach a reader at all. */
+      { v: 1, record: "invented", node: "node-a", at: CLOCK_START_MS - MINUTE_MS },
+    ]);
+    const key = observeKey("node-a", new Date(CLOCK_START_MS), 1, OBSERVE_PARQUET_EXTENSION);
+    await store.put(key, writer.finish());
 
     const found = await readObservations(registry, {
       window: { sinceMs: CLOCK_START_MS - HOUR_MS, untilMs: CLOCK_START_MS },
@@ -162,8 +179,8 @@ describe("what a window reads", () => {
     expect(found.malformed).toBe(1);
   });
 
-  it("reports a file it cannot decode instead of failing over it", async () => {
-    await store.put(observeKey("node-a", new Date(CLOCK_START_MS), 1, "parquet"), "binary");
+  it("reports a file in an encoding it does not know instead of failing over it", async () => {
+    await store.put(observeKey("node-a", new Date(CLOCK_START_MS), 1, "invented"), "who knows");
 
     const found = await readObservations(registry, {
       window: { sinceMs: CLOCK_START_MS - HOUR_MS, untilMs: CLOCK_START_MS },
@@ -171,6 +188,26 @@ describe("what a window reads", () => {
 
     expect(found.unreadable).toHaveLength(1);
     expect(found.files).toBe(0);
+  });
+
+  it("reports a file that is not what its name promised, and reads the rest", async () => {
+    /* A half-written object, or something else at that key. One of them must not
+       take the whole window with it. */
+    await seed("node-a", CLOCK_START_MS, [
+      event("node-a", CLOCK_START_MS - MINUTE_MS, { type: "wake.kicked", id: "kept" }),
+    ]);
+    await store.put(
+      observeKey("node-a", new Date(CLOCK_START_MS), 99, OBSERVE_PARQUET_EXTENSION),
+      "PAR1 and then some nonsense",
+    );
+
+    const found = await readObservations(registry, {
+      window: { sinceMs: CLOCK_START_MS - HOUR_MS, untilMs: CLOCK_START_MS },
+    });
+
+    expect(found.unreadable).toHaveLength(1);
+    expect(found.records).toHaveLength(1);
+    expect(found.files).toBe(1);
   });
 });
 

@@ -132,6 +132,11 @@ export class FaultStore implements CasStore {
     return this.#inner.get(key);
   }
 
+  getBytes(key: string): Promise<Uint8Array | null> {
+    this.gets++;
+    return this.#inner.getBytes(key);
+  }
+
   async put(key: string, body: string, cas?: CasHeaders): Promise<{ etag: string }> {
     await this.onBeforePut?.(key);
     this.#spend();
@@ -204,6 +209,12 @@ export class ObservingStore implements CasStore {
     } finally {
       this.#active--;
     }
+  }
+
+  /* Not instrumented: the delays and faults above are about the registry's own
+     reads, and nothing observed here reads an object as bytes. */
+  getBytes(key: string): Promise<Uint8Array | null> {
+    return this.#inner.getBytes(key);
   }
 
   put(key: string, body: string, cas?: CasHeaders): Promise<{ etag: string }> {

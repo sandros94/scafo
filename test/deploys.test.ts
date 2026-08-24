@@ -685,6 +685,7 @@ function refusingWakeStamps(inner: CasStore): CasStore {
   const stamp = envWakeKey(PROJECT, ENVIRONMENT);
   return {
     get: (key) => inner.get(key),
+    getBytes: (key) => inner.getBytes(key),
     put: (key, body, cas) =>
       key === stamp
         ? Promise.reject(new Error("the bucket refused the stamp"))

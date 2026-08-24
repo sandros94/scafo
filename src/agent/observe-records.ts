@@ -27,22 +27,19 @@
  * how a record becomes bytes: the flusher hands records to
  * {@link ObserveCodec.encode} and puts what comes back at the key its
  * `extension` names, and a reader picks a codec by the extension it read off the
- * key. Swapping JSON-LINES for a columnar encoding is therefore one object plus
- * its extension, and nothing else moves — which is what the Parquet codec next
- * door (`src/agent/observe-parquet.ts`) is. The INTERFACE and the registry that
- * names the implementations live here; a codec dense enough to need its own
- * header comment lives in its own file and is named by {@link observeCodecFor}.
+ * key. Swapping the encoding is therefore one object plus its extension, and
+ * nothing else moves. The INTERFACE and the registry that names the
+ * implementations live here; the one implementation is dense enough to need its
+ * own header comment and lives next door (`src/agent/observe-parquet.ts`), named
+ * from {@link observeCodecFor}.
  */
 
-import { assertNodeId } from "../core/registry/paths.ts";
+import { PARQUET_CODEC } from "./observe-parquet.ts";
 import type { StatusClassCounts } from "./access-counters.ts";
 import type { ObservedEvent } from "./observe.ts";
 
 /** Version every record carries, so a reader can tell an old file from a new shape. */
 export const OBSERVE_RECORD_VERSION: number = 1;
-
-/** Extension the JSON-LINES codec files its objects under. */
-export const OBSERVE_JSONL_EXTENSION: string = "jsonl";
 
 /**
  * The header of one flush: what the file carries, and what was lost getting it
@@ -114,7 +111,7 @@ export interface ObserveEncoded {
 /** What one file read back into, and what could not be read out of it. */
 export interface ObserveDecoded {
   records: ObserveRecord[];
-  /** Lines that were not a record. Skipped and counted, never thrown over. */
+  /** Rows that were not a record. Skipped and counted, never thrown over. */
   malformed: number;
 }
 
@@ -127,81 +124,15 @@ export interface ObserveCodec {
 }
 
 /**
- * JSON-LINES: one record per line, no framing, no header.
+ * The codec that reads an extension, or null when nothing here does.
  *
- * Chosen because it needs nothing to read it — `JSON.parse` per line, or
- * DuckDB's `read_json_auto` straight off the bucket — and because a truncated
- * file loses its last line rather than all of them.
- */
-export const JSONL_CODEC: ObserveCodec = {
-  extension: OBSERVE_JSONL_EXTENSION,
-
-  encode(records: ObserveRecord[]): ObserveEncoded {
-    const text = records.map((record) => JSON.stringify(record)).join("\n");
-    return {
-      /* Trailing newline: a file that is appended to or concatenated with
-         another must not merge its last record into the next one's first. */
-      bytes: new TextEncoder().encode(records.length === 0 ? "" : `${text}\n`),
-      extension: OBSERVE_JSONL_EXTENSION,
-    };
-  },
-
-  decode(bytes: Uint8Array): ObserveDecoded {
-    const records: ObserveRecord[] = [];
-    let malformed = 0;
-
-    for (const line of new TextDecoder().decode(bytes).split("\n")) {
-      /* Blank lines are framing rather than data: the trailing newline above
-         makes one at the end of every file. */
-      if (line.trim() === "") continue;
-
-      const record = readRecord(line);
-      if (record === null) malformed++;
-      else records.push(record);
-    }
-    return { records, malformed };
-  },
-};
-
-/**
- * The codec that READS an extension, or null when nothing here does.
- *
- * A codec that can only write is deliberately not named here. `PARQUET_CODEC`
- * (`src/agent/observe-parquet.ts`) writes files this build cannot read back, and
- * answering it from a lookup a READER calls would turn "a file I cannot read"
- * into a thrown command — so `.parquet` keys stay unrecognized until the reader
- * that handles them lands, and a reader counts and skips them exactly as it does
- * any encoding a newer agent invented.
+ * A KEY IS WHAT SELECTS AN ENCODING, and this is the whole lookup. Anything else
+ * a bucket holds under the observation prefix — an older agent's encoding, or one
+ * a newer agent invents — answers null here, and a reader counts and skips it
+ * rather than failing the whole command over one object.
  */
 export function observeCodecFor(extension: string): ObserveCodec | null {
-  return extension === JSONL_CODEC.extension ? JSONL_CODEC : null;
-}
-
-/**
- * The store body an encoding lands in, and the inverse.
- *
- * THE ONE PLACE THE BYTES MEET THE STORE, which is why it is a function rather
- * than a `decode` at the call site. `CasStore` bodies are text OR bytes, and this
- * hands it whichever the encoding actually produced: a UTF-8 encoding — JSON-LINES
- * — goes as the string it already is, and a columnar one goes as bytes, because a
- * Parquet file put through a `TextDecoder` comes back out full of replacement
- * characters and is no longer a Parquet file.
- *
- * The test is the bytes themselves rather than a flag a codec sets, so it cannot
- * be wrong in either direction: a STRICT decode succeeds exactly when the bytes
- * are valid UTF-8, and bytes that are valid UTF-8 re-encode to themselves.
- */
-export function observeBody(encoded: ObserveEncoded): string | Uint8Array {
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(encoded.bytes);
-  } catch {
-    return encoded.bytes;
-  }
-}
-
-/** Inverse of {@link observeBody}: a stored body as the bytes a codec decodes. */
-export function observeBytes(body: string): Uint8Array {
-  return new TextEncoder().encode(body);
+  return extension === PARQUET_CODEC.extension ? PARQUET_CODEC : null;
 }
 
 /** The event records of a set, in the order they were read. */
@@ -217,44 +148,4 @@ export function counterRecords(records: readonly ObserveRecord[]): ObserveCounte
 /** The flush headers of a set, in the order they were read. */
 export function flushRecords(records: readonly ObserveRecord[]): ObserveFlushRecord[] {
   return records.filter((record): record is ObserveFlushRecord => record.record === "flush");
-}
-
-/* ------------------------------------------------------------------ internal */
-
-/**
- * One line read as a record, or null when it is not one.
- *
- * Deliberately shallow: the discriminant, the node and the timestamp are what every
- * reader here dispatches on, so those are checked and everything else is taken
- * as written. A stricter reader would reject records a later version of the
- * agent added a field to, which is the opposite of what a log format is for.
- */
-function readRecord(line: string): ObserveRecord | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(line);
-  } catch {
-    return null;
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-
-  const record = parsed as Partial<ObserveRecord>;
-  if (typeof record.at !== "string" || typeof record.node !== "string") return null;
-  if (Number.isNaN(Date.parse(record.at))) return null;
-  try {
-    assertNodeId(record.node);
-  } catch {
-    return null;
-  }
-
-  switch (record.record) {
-    case "flush":
-    case "event":
-    case "counters": {
-      return record as ObserveRecord;
-    }
-    default: {
-      return null;
-    }
-  }
 }

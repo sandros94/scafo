@@ -14,7 +14,7 @@ export interface StoredObject {
    * The object as TEXT, which is what every record in this registry is. An object
    * written as bytes — the columnar observation files, and nothing else — reads
    * back through the same UTF-8 decode a bucket's own `Response.text()` applies,
-   * so it is not read this way: those keys are read by whatever understands them.
+   * so it is not read this way: {@link CasStore.getBytes} is.
    */
   body: string;
   /** Store-supplied ETag, kept verbatim (quotes included) so it round-trips into `ifMatch`. */
@@ -24,6 +24,18 @@ export interface StoredObject {
 export interface CasStore {
   /* Returns null when the key does not exist. */
   get(key: string): Promise<StoredObject | null>;
+  /*
+   * The object EXACTLY as it was written, or null when the key does not exist.
+   *
+   * The one read that is not text, and it is a second method rather than a
+   * second field on {@link StoredObject} because the two reads want different
+   * things. A registry read wants the record AND the ETag that conditions the
+   * next write; a read of an observation flush wants a columnar file, is never
+   * conditioned on anything, and would be destroyed by the UTF-8 decode `get`
+   * applies — a Parquet file through a `TextDecoder` is no longer one. Nothing
+   * needs both, so nothing pays for both.
+   */
+  getBytes(key: string): Promise<Uint8Array | null>;
   /*
    * MUST throw ScafoError("cas-conflict") when a condition fails (HTTP 412).
    *
