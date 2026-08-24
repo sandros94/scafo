@@ -32,7 +32,7 @@ import {
   wireguardStateDir,
 } from "../_wireguard.ts";
 
-/* The bucket the registry lives in, exactly as `scafo up` takes it. */
+/* The bucket the registry lives in, exactly as `scafo sail` takes it. */
 const bucketArgs: ArgsDef = {
   "config": { type: "string", description: "Path to scafo.config.jsonc" },
   "endpoint": { type: "string", description: "S3-compatible endpoint URL" },
@@ -43,7 +43,7 @@ const bucketArgs: ArgsDef = {
   "secret-key": { type: "string", description: "Bucket secret access key" },
 };
 
-/* The tunnel itself, as `scafo up` takes it too: one node, one description. */
+/* The tunnel itself, as `scafo sail` takes it too: one node, one description. */
 const tunnelArgs: ArgsDef = {
   ...bucketArgs,
   "node-id": { type: "string", description: "Id this node registers under" },

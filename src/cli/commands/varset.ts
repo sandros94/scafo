@@ -17,7 +17,7 @@ import {
   toPlainVarset,
 } from "../_varset.ts";
 
-/* The bucket the registry lives in, exactly as `scafo up` takes it. */
+/* The bucket the registry lives in, exactly as `scafo sail` takes it. */
 const bucketArgs: ArgsDef = {
   "config": { type: "string", description: "Path to scafo.config.jsonc" },
   "endpoint": { type: "string", description: "S3-compatible endpoint URL" },

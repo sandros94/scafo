@@ -17,9 +17,10 @@
  * THE TRUST MODEL, IN ONE PARAGRAPH. The BUCKET is the root anchor: whoever
  * holds its credentials holds the fleet, because every record here is a write
  * they could make by hand. Keys enter the trusted set two ways and no others —
- * the bucket-side ceremony (`scafo keygen --register`, `scafo fleet add
- * --register`), which is how an installation is bootstrapped and how one whose
- * keys are all lost is recovered, or an ADMIN adding one through a node. Within
+ * the bucket-side ceremony (`scafo operator keygen --register`, `scafo operator
+ * enroll` with the bucket flags, `scafo remote add --register`), which is how an
+ * installation is bootstrapped and how one whose keys are all lost is recovered,
+ * or an ADMIN adding one through a node. Within
  * the set there are two tiers ({@link OperatorRole}): an admin administers every
  * key the fleet trusts, while an operator-tier key may add keys no higher than
  * itself and may revoke only the key it was registered to replace. That split is
@@ -257,7 +258,7 @@ export async function trustOperator(
  * independent record, and the counts it is guarded by are re-read immediately
  * before. Two operators revoking the two last keys at the same instant could
  * still empty the set, and the way back from that is the bucket-side
- * registration `scafo keygen --register` has always been.
+ * registration `scafo operator keygen --register` has always been.
  */
 export async function revokeOperator(ctx: RegistryContext, id: string): Promise<TrustedOperator> {
   const found = await readJson<NodeRecord>(ctx, nodeKey(id));

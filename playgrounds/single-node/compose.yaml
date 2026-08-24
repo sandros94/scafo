@@ -79,7 +79,7 @@ services:
       # write `${SCAFO_STORAGE_TOKEN:-}` here.
       SCAFO_STORAGE_TOKEN: ${SCAFO_STORAGE_TOKEN:?set SCAFO_STORAGE_TOKEN in .env}
 
-    command: ["up", "--config", "/etc/scafo/scafo.config.jsonc"]
+    command: ["sail", "--config", "/etc/scafo/scafo.config.jsonc"]
 
     # `curl` and `wget` are not in this image, so the check is written in the
     # runtime that is.

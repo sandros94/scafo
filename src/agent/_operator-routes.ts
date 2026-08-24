@@ -119,7 +119,7 @@ export function registerOperatorRoutes(app: H3, agent: AgentContext, guard: Midd
         throw new ScafoError("auth-scope", "Beyond this operator's tier", {
           detail:
             `"${caller.id}" is an ${caller.role}-tier key and cannot register an ${role}-tier ` +
-            `one; an admin of this fleet can, and "scafo fleet keys" says which keys those are`,
+            `one; an admin of this fleet can, and "scafo operator list" says which keys those are`,
         });
       }
 
@@ -162,7 +162,7 @@ export function registerOperatorRoutes(app: H3, agent: AgentContext, guard: Midd
         throw new ScafoError("invalid-input", "An operator cannot revoke its own key", {
           detail:
             `"${id}" is the key this request was signed with; replace it with ` +
-            `"scafo fleet rotate", which registers the new key and proves it before this one ` +
+            `"scafo operator rotate", which registers the new key and proves it before this one ` +
             `is dropped, or have another operator revoke it`,
         });
       }
@@ -171,7 +171,7 @@ export function registerOperatorRoutes(app: H3, agent: AgentContext, guard: Midd
           detail:
             `"${caller.id}" is an ${caller.role}-tier key: it may revoke only the key it was ` +
             `registered to replace, which "${id}" is not; an admin of this fleet can revoke it, ` +
-            `and "scafo fleet keys" says which keys those are`,
+            `and "scafo operator list" says which keys those are`,
         });
       }
 

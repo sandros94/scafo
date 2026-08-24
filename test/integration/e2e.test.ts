@@ -41,7 +41,7 @@ import type { Readable } from "node:stream";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AgentState } from "../../src/agent/app.ts";
-import type { OperatorKeyFile } from "../../src/cli/commands/keygen.ts";
+import type { OperatorKeyFile } from "../../src/cli/_operator-key.ts";
 import { signNodeToken } from "../../src/core/auth/node-token.ts";
 import {
   getEnvironment,
@@ -213,7 +213,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       .withCommand([
         "node",
         "dist/cli/index.mjs",
-        "up",
+        "sail",
         "--listen",
         `0.0.0.0:${String(AGENT_PORT)}`,
       ])
@@ -276,7 +276,10 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       tmpDirs.push(dir);
       keyPath = join(dir, "operator.json");
 
-      const result = await runCli(["keygen", "--out", keyPath, "--register"], storeEnv());
+      const result = await runCli(
+        ["operator", "keygen", "--out", keyPath, "--register"],
+        storeEnv(),
+      );
       expectCleanExit(result);
 
       operatorKey = JSON.parse(await readFile(keyPath, "utf8")) as OperatorKeyFile;

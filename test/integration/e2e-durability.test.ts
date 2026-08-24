@@ -91,7 +91,7 @@ describeE2e("durability, end to end", () => {
     tmpDirs.push(dir);
     keyPath = join(dir, "operator.json");
     const keygen = await runCli(
-      ["keygen", "--out", keyPath, "--register"],
+      ["operator", "keygen", "--out", keyPath, "--register"],
       storeEnv(store.fromHost, SETTINGS),
     );
     expect(keygen.code, keygen.output).toBe(0);
@@ -269,7 +269,7 @@ describeE2e("durability, end to end", () => {
       .withCommand([
         "node",
         "dist/cli/index.mjs",
-        "up",
+        "sail",
         "--listen",
         `0.0.0.0:${String(AGENT_PORT)}`,
       ])

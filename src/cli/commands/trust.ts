@@ -5,7 +5,7 @@
  * This is the operator's half of the workload-deploy path: a CI job holds
  * nothing but its own OIDC token — no operator key, no bucket credential — and
  * what admits it is the policy edited here. Written straight into the bucket the
- * way `scafo keygen --register` and `scafo varset` are, because a trust policy
+ * way `scafo operator keygen --register` and `scafo varset` are, because a trust policy
  * is usually set up before there is a node to ask.
  */
 
@@ -24,7 +24,7 @@ import {
 } from "../_trust.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
 
-/* The bucket the registry lives in, exactly as `scafo up` takes it. */
+/* The bucket the registry lives in, exactly as `scafo sail` takes it. */
 const bucketArgs: ArgsDef = {
   "config": { type: "string", description: "Path to scafo.config.jsonc" },
   "endpoint": { type: "string", description: "S3-compatible endpoint URL" },

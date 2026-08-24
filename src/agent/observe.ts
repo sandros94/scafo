@@ -117,7 +117,7 @@ export type ObservedEvent =
    * the tier the subject landed at.
    *
    * Emitted by the `/v1/operators` routes and by nothing else — the bucket-side
-   * ceremony (`scafo keygen --register`) writes the same record with NO AGENT IN
+   * ceremony (`scafo operator keygen --register`) writes the same record with NO AGENT IN
    * THE PICTURE, so it has nowhere to emit from and these events honestly do not
    * cover it. What covers that path is the bucket's own access log.
    */

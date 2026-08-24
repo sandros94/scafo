@@ -22,9 +22,9 @@ const deployArgs: ArgsDef = {
   "dir": { type: "positional", description: "Directory holding the built project" },
   "agent": {
     type: "string",
-    description: "Base URL of the node agent; without it the chosen fleet says where",
+    description: "Base URL of the node agent; without it the chosen remote says where",
   },
-  "fleet": { type: "string", description: "Fleet to deploy to, out of this operator's home" },
+  "remote": { type: "string", description: "Remote to deploy to, out of this operator's home" },
   "project": { type: "string", description: "Project slug to deploy into", required: true },
   "env": { type: "string", description: "Environment to deploy into (production)" },
   "script": { type: "string", description: "Name the runtime files the app under" },
@@ -47,7 +47,10 @@ const deployArgs: ArgsDef = {
     description: "Labels a node must carry to serve this environment (region=eu-west-1,tier=fast)",
   },
   "key": { type: "string", description: `Operator key to sign with: ${OPERATOR_KEY_FORMS}` },
-  "config": { type: "string", description: "Path to scafo.config.jsonc, read for its fleet pin" },
+  "config": {
+    type: "string",
+    description: "Path to scafo.config.jsonc, read for its remote pin",
+  },
   "token": {
     type: "string",
     /* A node token is spent by the first request that presents it, so one passed
@@ -212,8 +215,8 @@ function requiredAgent(url: string | undefined): string {
 
   throw new ScafoError("invalid-input", "No node to deploy to", {
     detail:
-      `pass --agent <url>, or register the fleet this belongs to with ` +
-      `"scafo fleet add <name> --endpoint <url>" so that it says where`,
+      `pass --agent <url>, or register the installation this belongs to with ` +
+      `"scafo remote add <name> --endpoint <url>" so that it says where`,
   });
 }
 

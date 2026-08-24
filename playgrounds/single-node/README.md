@@ -1,7 +1,7 @@
 # The single-node playground
 
 One bucket, one scafo node, one ingress, thrown away when you are done — the
-whole product loop: register a fleet, deploy, reach it by name, deploy a second
+whole product loop: register a remote, deploy, reach it by name, deploy a second
 build, watch the alias move. Type the steps one at a time; each says what you
 should see. First: [`../README.md`](../README.md) for what this needs.
 
@@ -45,26 +45,26 @@ alias scafo='node ../../dist/cli/index.mjs'
 ```
 
 **You should see** nothing. `SCAFO_HOME` extends the disposability promise to your
-operator state: keys and fleet registrations land in `.scafo/` here rather than in
+operator state: keys and remote registrations land in `.scafo/` here rather than in
 your real `~/.scafo`, and `rm -rf .scafo` is the whole undo. Sourcing `.env` gives
 the CLI the bucket credentials two steps below need.
 
 > **No node toolchain?** Use `alias scafo='docker compose run --rm cli'` instead,
-> and register the fleet at `http://node:7400` in step 3 — the CLI is then a
+> and register the remote at `http://node:7400` in step 3 — the CLI is then a
 > container on this stack's network. Every other command here is unchanged.
 
-## 3. Register the fleet
+## 3. Register the remote
 
 ```sh
-scafo fleet add playground --endpoint http://127.0.0.1:7400 --register
-scafo fleet list
+scafo remote add playground --endpoint http://127.0.0.1:7400 --register
+scafo remote list
 ```
 
 **You should see** a key minted into `.scafo/keys/playground.json`, then
 `registered "op-cf99eff4" as admin-tier; tokens it signs are now accepted by every
-node`, then the one fleet listed back. A fleet entry holds what every other command would
+node`, then the one remote listed back. A remote entry holds what every other command would
 otherwise be told — **where** the installation is and **who** is speaking — and a
-single registered fleet resolves automatically: nothing below passes `--key` or
+single registered remote resolves automatically: nothing below passes `--key` or
 `--agent`.
 
 ## 4. Deploy the application

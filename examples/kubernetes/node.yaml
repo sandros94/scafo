@@ -202,7 +202,7 @@ spec:
           # moving one: every pod of this Deployment is a node, and a rollout
           # that changes what a node IS should be a decision, not a restart.
           image: scafo:local
-          args: ["up"]
+          args: ["sail"]
           securityContext:
             runAsNonRoot: true
             runAsUser: 10001

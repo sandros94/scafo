@@ -9,7 +9,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { addFleet, FLEETS_VERSION, readFleets, writeFleets } from "../src/cli/_fleets.ts";
+import { addRemote, REMOTES_VERSION, readRemotes, writeRemotes } from "../src/cli/_remotes.ts";
 import {
   HOME_CONFIG_FILE,
   homeConfigPath,
@@ -60,17 +60,17 @@ describe("where an operator's home is", () => {
   });
 });
 
-describe("the fleet registry file", () => {
+describe("the remote registry file", () => {
   it("reads as empty when the operator has no home yet", async () => {
     const home = join(await scratch(), "never-created");
 
-    expect(await readFleets(home)).toEqual({ v: FLEETS_VERSION, fleets: {} });
+    expect(await readRemotes(home)).toEqual({ v: REMOTES_VERSION, remotes: {} });
   });
 
   it("creates a home only its owner can enter, and a registry only its owner can read", async () => {
     const home = await scratch();
 
-    await writeFleets(home, { v: FLEETS_VERSION, fleets: {} });
+    await writeRemotes(home, { v: REMOTES_VERSION, remotes: {} });
 
     expect((await stat(home)).mode & 0o777).toBe(0o700);
     expect((await stat(homeConfigPath(home))).mode & 0o777).toBe(0o600);
@@ -78,9 +78,9 @@ describe("the fleet registry file", () => {
 
   it("reads back what it wrote, comments and all", async () => {
     const home = await scratch();
-    await writeFleets(home, {
-      v: FLEETS_VERSION,
-      fleets: {
+    await writeRemotes(home, {
+      v: REMOTES_VERSION,
+      remotes: {
         prod: { endpoints: ["http://a:7400"], key: { kind: "file", path: "keys/prod.json" } },
       },
     });
@@ -88,17 +88,17 @@ describe("the fleet registry file", () => {
     /* Written as JSONC and read as JSONC: the header explaining what the file is
        has to survive being read back. */
     expect(await readFile(homeConfigPath(home), "utf8")).toContain("/*");
-    expect((await readFleets(home)).fleets.prod?.endpoints).toEqual(["http://a:7400"]);
+    expect((await readRemotes(home)).remotes.prod?.endpoints).toEqual(["http://a:7400"]);
   });
 
   it("refuses a registry file it cannot read rather than starting an empty one", async () => {
     const home = await scratch();
-    await writeFleets(home, { v: FLEETS_VERSION, fleets: {} });
-    /* A home that silently forgot every fleet would send the next command
+    await writeRemotes(home, { v: REMOTES_VERSION, remotes: {} });
+    /* A home that silently forgot every remote would send the next command
        somewhere else entirely, or nowhere at all. */
     await writeFile(homeConfigPath(home), "{ not json", "utf8");
 
-    await rejectsWith(() => readFleets(home), "invalid-input");
+    await rejectsWith(() => readRemotes(home), "invalid-input");
   });
 });
 
@@ -106,7 +106,7 @@ describe("the key files a home keeps", () => {
   it("writes a fresh key only its owner can read, in a directory only its owner can enter", async () => {
     const home = await scratch();
 
-    const added = await addFleet(home, { name: "prod", endpoints: ["http://a:7400"] });
+    const added = await addRemote(home, { name: "prod", endpoints: ["http://a:7400"] });
 
     expect(added.keyPath).toBe(homeKeyPath(home, "prod"));
     expect((await stat(added.keyPath)).mode & 0o777).toBe(0o600);

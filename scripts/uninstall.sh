@@ -346,7 +346,7 @@ resolve_bin_dir() {
 bin_dir_from_unit() {
   UNIT_BIN_DIR=''
   [ -r "${UNIT_DIR}/${NODE_UNIT}" ] || return 1
-  # `ExecStart=/usr/local/bin/scafo up` -> /usr/local/bin
+  # `ExecStart=/usr/local/bin/scafo sail` -> /usr/local/bin
   unit_exec="$(sed -n 's/^ExecStart=\([^ ]*\)\/scafo .*$/\1/p' "${UNIT_DIR}/${NODE_UNIT}" 2>/dev/null | head -n 1)"
   [ -n "$unit_exec" ] || return 1
   UNIT_BIN_DIR="$unit_exec"

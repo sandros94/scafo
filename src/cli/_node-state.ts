@@ -70,7 +70,7 @@ export async function loadOrCreateNodeState(
   return state;
 }
 
-/** A fresh identity, unwritten. Mirrors the key `scafo keygen` mints for an operator. */
+/** A fresh identity, unwritten. Mirrors the key `scafo operator keygen` mints for an operator. */
 async function generateNodeState(id: string): Promise<NodeState> {
   assertNodeId(id);
   const { privateKey, publicKey } = await generateJWK("EdDSA", { kid: id });

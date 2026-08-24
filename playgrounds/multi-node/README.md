@@ -39,7 +39,7 @@ healthy — then two nodes naming themselves `node-a` and `node-b`.
 export SCAFO_HOME="$PWD/.scafo"
 set -a; . ./.env; set +a
 alias scafo='node ../../dist/cli/index.mjs'
-scafo fleet add playground --endpoint http://127.0.0.1:7401 --register
+scafo remote add playground --endpoint http://127.0.0.1:7401 --register
 ```
 
 **You should see** a key minted into `.scafo/` here rather than into your real

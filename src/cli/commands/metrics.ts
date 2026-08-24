@@ -22,7 +22,7 @@ import { readMetricsNaming } from "../_metrics-names.ts";
 import { nothingRecorded, readObservations, windowFrom } from "../_observe-read.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
 
-/* The bucket the registry lives in, exactly as `scafo up` takes it. */
+/* The bucket the registry lives in, exactly as `scafo sail` takes it. */
 const bucketArgs: ArgsDef = {
   "config": { type: "string", description: "Path to scafo.config.jsonc" },
   "endpoint": { type: "string", description: "S3-compatible endpoint URL" },

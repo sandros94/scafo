@@ -1,0 +1,131 @@
+/*
+ * Internal: the machines. What `scafo fleet nodes` reads and how it prints.
+ *
+ * STRAIGHT OUT OF THE BUCKET, and deliberately not through a node. Every other
+ * question about an installation is best asked of a node, because a node knows
+ * things the registry does not; this one is the opposite. "Which machines are
+ * there, and which of them are still answering?" is exactly the question an
+ * operator asks when a node is NOT answering, and routing it through one of the
+ * machines being asked about would make the failure case the case it cannot
+ * serve.
+ *
+ * Liveness is read the same way placement reads it — the freshness of what each
+ * node last wrote about itself — so what this prints is what the coordinator
+ * will act on, rather than a second opinion about it.
+ */
+
+import type { RegistryContext } from "../core/registry/context.ts";
+import { isNodeLive, listNodeRecords, NODE_LIVENESS_WINDOW_MS } from "../core/registry/nodes.ts";
+import type { NodeRecord } from "../core/types/registry.ts";
+import { formatLabels } from "../core/utils/labels.ts";
+
+/**
+ * What a node is, for placement.
+ *
+ * `draining` is its own state rather than a flavour of `lost` because the two
+ * mean opposite things about the operator's day: a draining node said it was
+ * leaving and is doing so in order, while a lost one stopped saying anything.
+ */
+export type NodeState = "live" | "draining" | "lost";
+
+/** One node as this listing reads it. */
+export interface NodeListing {
+  id: string;
+  state: NodeState;
+  /** Last sign of life the record carries, when it carries one. */
+  seenAt?: string;
+  /** Where its peers reach it, and the port its agent answers on. */
+  internal: string;
+  agentPort: number;
+  /** What the operator said this machine IS, as an environment's selector matches it. */
+  labels: Record<string, string>;
+  /** When it said it was leaving. Only ever set on a `draining` node. */
+  drainingAt?: string;
+}
+
+/** Every registered node, in id order, judged against `now`. */
+export async function listFleetNodes(
+  ctx: RegistryContext,
+  opts: { now?: Date } = {},
+): Promise<NodeListing[]> {
+  const now = opts.now ?? ctx.now?.() ?? new Date();
+  return (await listNodeRecords(ctx)).map((record) => readNode(record, now));
+}
+
+/** One record as the listing reads it. Pure, so the caller decides what "now" is. */
+export function readNode(record: NodeRecord, now: Date): NodeListing {
+  const seenAt = record.heartbeatAt ?? record.capacity?.probedAt;
+
+  return {
+    id: record.id,
+    state: record.drainingAt !== undefined ? "draining" : isNodeLive(record, now) ? "live" : "lost",
+    ...(seenAt === undefined ? {} : { seenAt }),
+    internal: record.addresses.internal,
+    agentPort: record.addresses.agentPort,
+    labels: record.labels ?? {},
+    ...(record.drainingAt === undefined ? {} : { drainingAt: record.drainingAt }),
+  };
+}
+
+/**
+ * The listing as an operator reads it: one row per machine, and a header saying
+ * how many of them are still counted in.
+ *
+ * The COUNT is the line worth having. An operator running this is usually asking
+ * "is the fleet the size I think it is?", and answering that by making them
+ * count rows would be answering a different question.
+ */
+export function formatNodeTable(nodes: NodeListing[], now: Date = new Date()): string {
+  if (nodes.length === 0) {
+    return (
+      `scafo: no node is registered in this bucket; a machine joins the fleet by running ` +
+      `"scafo sail"`
+    );
+  }
+
+  const live = nodes.filter((node) => node.state === "live").length;
+  const rows = nodes.map((node) => [
+    node.id,
+    node.state,
+    describeSeen(node.seenAt, now),
+    `${node.internal}:${String(node.agentPort)}`,
+    formatLabels(node.labels),
+  ]);
+  const head = ["NODE", "STATE", "SEEN", "AGENT", "LABELS"];
+  const width = head.map((_, column) =>
+    Math.max(...[head, ...rows].map((row) => (row[column] as string).length)),
+  );
+
+  const lines = [
+    `scafo: ${String(nodes.length)} node${nodes.length === 1 ? "" : "s"}, ${String(live)} live ` +
+      `(a node counts as live for ${String(NODE_LIVENESS_WINDOW_MS / 1000)}s after it last ` +
+      `said so)`,
+    "",
+    ...[head, ...rows].map((row) => `  ${row.map(pad(width)).join("  ").trimEnd()}`),
+  ];
+  return lines.join("\n");
+}
+
+/* ---------------------------------------------------------------- internals */
+
+function pad(width: number[]): (cell: string, column: number) => string {
+  return (cell, column) => cell.padEnd(width[column] as number);
+}
+
+/**
+ * How long ago a node was last seen, in the largest unit that still says
+ * something. A record with no sign of life at all reads as `never`, which is
+ * exactly what it means: nothing in it says when that machine was last up.
+ */
+function describeSeen(seenAt: string | undefined, now: Date): string {
+  if (seenAt === undefined) return "never";
+
+  const seen = Date.parse(seenAt);
+  if (!Number.isFinite(seen)) return seenAt;
+
+  const seconds = Math.max(0, Math.round((now.getTime() - seen) / 1000));
+  if (seconds < 60) return `${String(seconds)}s ago`;
+  if (seconds < 3600) return `${String(Math.floor(seconds / 60))}m ago`;
+  if (seconds < 86_400) return `${String(Math.floor(seconds / 3600))}h ago`;
+  return `${String(Math.floor(seconds / 86_400))}d ago`;
+}

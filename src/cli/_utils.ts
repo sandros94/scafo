@@ -3,6 +3,7 @@
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import type { CommandDef } from "citty";
 import { isScafoError } from "../core/error.ts";
 
 /** Directory a node run by root keeps its state in. */
@@ -82,6 +83,57 @@ export async function readPackageVersion(): Promise<string> {
     /* Falls through to the placeholder below. */
   }
   return "unknown";
+}
+
+/** An old command name kept alive, and what it is now called. */
+export interface DeprecatedAlias {
+  /** The old name, as it is still typed. */
+  name: string;
+  /** The command line to run instead, exactly as an operator would type it. */
+  replacedBy: string;
+  /** What it delegates to. Flags, subcommands and behaviour are taken wholesale. */
+  command: CommandDef;
+  /** Where the notice goes. Defaults to stderr. */
+  warn?: (line: string) => void;
+}
+
+/**
+ * An old command name, kept working and kept out of the way.
+ *
+ * HIDDEN, WORKING, AND NOISY EXACTLY ONCE. Hidden because help is what the
+ * surface IS, and an old name listed there teaches it to somebody who has never
+ * typed it; working because a rename is not a reason to break a script that is
+ * already deployed; noisy once because the person running it has to learn the
+ * new name before the old one goes.
+ *
+ * Delegation is a spread rather than a wrapper: the alias cannot drift from what
+ * it aliases, because it IS what it aliases, with a different `meta` and one
+ * line said first.
+ *
+ * These live only until the surface goes public, and are then deleted.
+ */
+export function deprecatedAlias(spec: DeprecatedAlias): CommandDef {
+  const say =
+    spec.warn ??
+    ((line: string): void => {
+      console.warn(line);
+    });
+
+  return {
+    ...spec.command,
+    meta: {
+      name: spec.name,
+      description: `Deprecated: renamed to "${spec.replacedBy}"`,
+      hidden: true,
+    },
+    setup: async (context): Promise<void> => {
+      say(
+        `scafo: "${spec.name}" has been renamed to "${spec.replacedBy}" and goes away at ` +
+          `launch; it still works, but run "${spec.replacedBy}" from now on`,
+      );
+      await spec.command.setup?.(context);
+    },
+  };
 }
 
 /**

@@ -1,5 +1,5 @@
 /*
- * Internal: where an operator keeps their own scafo state — the fleets they can
+ * Internal: where an operator keeps their own scafo state — the remotes they can
  * reach and the keys that speak for them.
  *
  * This is the OPERATOR's home, not a node's state directory: a node is a machine
@@ -16,7 +16,7 @@ import { isSlug } from "../core/utils/slug.ts";
 /** Environment variable naming the home outright, whatever the platform would say. */
 export const SCAFO_HOME_ENV: string = "SCAFO_HOME";
 
-/** The fleet registry, within the home. JSONC, so it can be commented by hand. */
+/** The remote registry, within the home. JSONC, so it can be commented by hand. */
 export const HOME_CONFIG_FILE: string = "config.jsonc";
 
 /** Directory the keypairs live in, within the home. */
@@ -31,7 +31,7 @@ export const KEYS_DIR: string = "keys";
  * ALWAYS ABSOLUTE. A relative {@link SCAFO_HOME_ENV} is REFUSED rather than
  * resolved against the working directory: an operator runs commands from
  * wherever they happen to be standing, and a home derived from that would be a
- * different home — a different set of fleets — on the next invocation.
+ * different home — a different set of remotes — on the next invocation.
  *
  * Throws `ScafoError("invalid-input")` for a relative override.
  */
@@ -53,7 +53,7 @@ export function resolveOperatorHome(env: Record<string, string | undefined> = pr
   return join(homedir(), ".scafo");
 }
 
-/** The fleet registry file of a home. */
+/** The remote registry file of a home. */
 export function homeConfigPath(home: string): string {
   return join(home, HOME_CONFIG_FILE);
 }
@@ -84,16 +84,16 @@ export function resolveHomePath(home: string, path: string): string {
 }
 
 /**
- * Throws `ScafoError("invalid-slug")` for a fleet or key name that could not
+ * Throws `ScafoError("invalid-slug")` for a remote or key name that could not
  * safely be a file in the home — which is the same charset every other name in
  * this system is held to.
  */
 export function assertKeyName(name: string): void {
   if (isSlug(name)) return;
 
-  throw new ScafoError("invalid-slug", "Invalid fleet name", {
+  throw new ScafoError("invalid-slug", "Invalid remote name", {
     detail:
       `"${name}" must be 1-63 lowercase alphanumeric characters, optionally separated by ` +
-      `single hyphens; it names both a fleet and the file its key lives in`,
+      `single hyphens; it names both a remote and the file its key lives in`,
   });
 }

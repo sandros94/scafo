@@ -68,7 +68,7 @@ services:
       # WHERE THE OTHER NODE DIALS THIS ONE, and the whole of discovery. Getting
       # it wrong is invisible until a durable object is owned across the pair.
       SCAFO_ADVERTISE: node-a:7400
-    command: ["up", "--config", "/etc/scafo/scafo.config.jsonc"]
+    command: ["sail", "--config", "/etc/scafo/scafo.config.jsonc"]
     healthcheck:
       test:
         - CMD
@@ -128,7 +128,7 @@ services:
       SCAFO_STORAGE_TOKEN: ${SCAFO_STORAGE_TOKEN:?set SCAFO_STORAGE_TOKEN in .env}
       SCAFO_NODE_ID: node-b
       SCAFO_ADVERTISE: node-b:7400
-    command: ["up", "--config", "/etc/scafo/scafo.config.jsonc"]
+    command: ["sail", "--config", "/etc/scafo/scafo.config.jsonc"]
     healthcheck:
       test:
         - CMD

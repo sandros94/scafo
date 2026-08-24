@@ -6,7 +6,7 @@
  * both run the agent off a bind-mounted worktree, which is exactly what an
  * operator never does. What is unproven until here is the artifact: that the
  * repository's Dockerfile builds, that the image carries celld and esbuild where
- * the code looks for them, that its entrypoint takes `up` and its arguments,
+ * the code looks for them, that its entrypoint takes `sail` and its arguments,
  * that a node works with no write access outside its state directory because it
  * does not run as root, and that a container stopped inside the grace the image
  * documents exits cleanly.
@@ -32,7 +32,7 @@ import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { OperatorKeyFile } from "../../src/cli/commands/keygen.ts";
+import type { OperatorKeyFile } from "../../src/cli/_operator-key.ts";
 import {
   listBuilds,
   nodeKey,
@@ -167,7 +167,7 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
       })
       /* The image's ENTRYPOINT supplies `node /app/dist/cli/index.mjs`; this is
          the CMD an operator overrides, which is what makes it worth passing. */
-      .withCommand(["up", "--listen", `0.0.0.0:${String(AGENT_PORT)}`])
+      .withCommand(["sail", "--listen", `0.0.0.0:${String(AGENT_PORT)}`])
       .withLogConsumer((stream: Readable) => {
         stream.on("data", (chunk) => nodeLog.push(String(chunk)));
         stream.on("err", (chunk) => nodeLog.push(String(chunk)));
@@ -240,7 +240,7 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
       keyPath = join(dir, "operator.json");
 
       const keygen = await runCli(
-        ["keygen", "--out", keyPath, "--register"],
+        ["operator", "keygen", "--out", keyPath, "--register"],
         storeEnv(store.fromHost, BUCKET),
       );
       expectCleanExit(keygen);

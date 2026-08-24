@@ -33,7 +33,7 @@ import { resolveOperatorHome } from "../_home.ts";
 import { OPERATOR_KEY_FORMS, operatorFlags, resolveOperator } from "../_operator.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
 
-/* The bucket the registry lives in, exactly as `scafo up` takes it. Only read
+/* The bucket the registry lives in, exactly as `scafo sail` takes it. Only read
    when no --agent is given: with one, the node holds the bucket credentials and
    the operator needs none of their own. */
 const bucketArgs: ArgsDef = {
@@ -53,10 +53,10 @@ const targetArgs: ArgsDef = {
   agent: {
     type: "string",
     description:
-      "Base URL of a node agent to ask; without it the chosen fleet says where, and " +
-      "without a fleet the bucket is written directly",
+      "Base URL of a node agent to ask; without it the chosen remote says where, and " +
+      "without a remote the bucket is written directly",
   },
-  fleet: { type: "string", description: "Fleet to act on, out of this operator's home" },
+  remote: { type: "string", description: "Remote to act on, out of this operator's home" },
   key: { type: "string", description: `Operator key to sign with: ${OPERATOR_KEY_FORMS}` },
 };
 
@@ -256,7 +256,7 @@ async function runDelete(flags: Record<string, unknown>): Promise<void> {
 
 /**
  * Which way this invocation reaches the installation. A node is asked whenever
- * one is named — by `--agent`, or by the fleet this operator's home resolved —
+ * one is named — by `--agent`, or by the remote this operator's home resolved —
  * and everything else falls back to the bucket, which is what an installation
  * with no node running has, and what `scafo trust` and `scafo varset` do too.
  */

@@ -66,7 +66,7 @@ describe("where a node's tunnel keys come from", () => {
     const dir = await stateDir();
     await writeKeys(dir, STORED_PRIVATE, STORED_PUBLIC);
     /* Nothing on PATH at all: a node whose keys are on disk must never need the
-       tool that made them, so `scafo up` works on a host without it. */
+       tool that made them, so `scafo sail` works on a host without it. */
     await usePath(await emptyDir());
 
     const keys = await ensureWireguardKeys(dir);
@@ -204,7 +204,7 @@ describe("where a node's tunnel keys come from", () => {
   });
 });
 
-describe("what `scafo up` reads back, and what it will not do", () => {
+describe("what `scafo sail` reads back, and what it will not do", () => {
   it("reads a complete pair without touching PATH", async () => {
     const dir = await stateDir();
     await writeKeys(dir, STORED_PRIVATE, STORED_PUBLIC);
@@ -468,7 +468,7 @@ describe("what a node publishes about its place on the tunnel", () => {
   });
 
   it("registers a node outright when it has no record yet", async () => {
-    /* `scafo wg init` before the first `scafo up` is the order the setup
+    /* `scafo wg init` before the first `scafo sail` is the order the setup
        instructions ask for, so there is nothing to narrow an update to. */
     const { ctx } = ctxWith(new MemoryCasStore());
     const config = await tunnelConfig();

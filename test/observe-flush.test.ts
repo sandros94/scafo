@@ -409,7 +409,7 @@ describe("the cadence", () => {
     const flusher = flusherWith();
     flusher.start();
     /* The same rule every other loop on the node follows: a timer that held the
-       event loop open would stop `scafo up` from ever exiting. */
+       event loop open would stop `scafo sail` from ever exiting. */
     expect(() => flusher.stop()).not.toThrow();
   });
 });

@@ -1,5 +1,5 @@
 /*
- * Rotating the key a fleet signs with, expand-contract, against the real agent
+ * Rotating the key a remote signs with, expand-contract, against the real agent
  * app over an injected `fetch`.
  *
  * THE ORDER IS THE DESIGN, and it is what these cases are about. The new key is
@@ -26,11 +26,11 @@ import type { H3 } from "h3";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createAgentApp } from "../src/agent/app.ts";
 import type { AgentConfig } from "../src/agent/config.ts";
-import { addFleet, type FleetEntry, readFleets } from "../src/cli/_fleets.ts";
+import { addRemote, type RemoteEntry, readRemotes } from "../src/cli/_remotes.ts";
 import { homeKeysDir, resolveHomePath } from "../src/cli/_home.ts";
 import type { OperatorKeyFile } from "../src/cli/_operator-key.ts";
-import { formatFleetKeys, listFleetKeys, revokeFleetKey } from "../src/cli/_operators.ts";
-import { describeRotation, rotateFleetKey } from "../src/cli/_rotate.ts";
+import { formatRemoteKeys, listRemoteKeys, revokeRemoteKey } from "../src/cli/_operators.ts";
+import { describeRotation, rotateRemoteKey } from "../src/cli/_rotate.ts";
 import { signNodeToken } from "../src/core/auth/index.ts";
 import {
   getOperator,
@@ -43,10 +43,10 @@ import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
 
 const AGENT_URL = "http://10.0.0.4:7400";
-const FLEET = "prod";
+const REMOTE = "prod";
 const VERSION = "0.0.0-test";
 
-/** The admin an operator-tier home is set up beside; see `registeredFleet`. */
+/** The admin an operator-tier home is set up beside; see `registeredRemote`. */
 const ADMIN_ID = "op-9999admin";
 
 const homes: string[] = [];
@@ -65,9 +65,9 @@ beforeEach(() => {
 
 describe("the whole rotation", () => {
   it("mints a key, has the fleet trust it, repoints the home and drops the old one", async () => {
-    const { home, key } = await registeredFleet();
+    const { home, key } = await registeredRemote();
 
-    const rotated = await rotateFleetKey(home, FLEET, { fetchFn: through(app) });
+    const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
 
     expect(rotated.oldKeyId).toBe(key.id);
     expect(rotated.newKeyId).not.toBe(key.id);
@@ -76,13 +76,13 @@ describe("the whole rotation", () => {
 
     /* One key trusted, and it is the new one: expand, then contract. */
     expect(await trustedIds()).toEqual([rotated.newKeyId]);
-    expect((await entryOf(home, FLEET)).key.path).toBe(refOf(home, rotated.newKeyPath));
+    expect((await entryOf(home, REMOTE)).key.path).toBe(refOf(home, rotated.newKeyPath));
   });
 
   it("leaves a fleet the new key can work and the old key cannot", async () => {
-    const { home, key } = await registeredFleet();
+    const { home, key } = await registeredRemote();
 
-    const rotated = await rotateFleetKey(home, FLEET, { fetchFn: through(app) });
+    const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
     const rotatedKey = await keyFileAt(rotated.newKeyPath);
 
     /*
@@ -105,10 +105,10 @@ describe("the whole rotation", () => {
     expect(withOld.status).toBe(401);
   });
 
-  it("keeps the old key FILE, referenced by no fleet, rather than deleting it", async () => {
-    const { home, key } = await registeredFleet();
+  it("keeps the old key FILE, referenced by no remote, rather than deleting it", async () => {
+    const { home, key } = await registeredRemote();
 
-    const rotated = await rotateFleetKey(home, FLEET, { fetchFn: through(app) });
+    const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
 
     /* A private key is not scafo's to destroy on its own initiative: whatever
        else that file signed for, and whatever an operator archived it against,
@@ -116,7 +116,7 @@ describe("the whole rotation", () => {
     expect(rotated.purged).toBe(false);
     await expect(keyFileAt(rotated.oldKeyPath)).resolves.toMatchObject({ id: key.id });
 
-    const referenced = Object.values((await readFleets(home)).fleets).map(
+    const referenced = Object.values((await readRemotes(home)).remotes).map(
       (entry) => entry.key.path,
     );
     expect(referenced).not.toContain(refOf(home, rotated.oldKeyPath));
@@ -125,9 +125,9 @@ describe("the whole rotation", () => {
 
 describe("rotating across the two tiers", () => {
   it("rotates an ADMIN key end to end, and records the lineage for the audit trail", async () => {
-    const { home, key } = await registeredFleet("admin");
+    const { home, key } = await registeredRemote("admin");
 
-    const rotated = await rotateFleetKey(home, FLEET, { fetchFn: through(app) });
+    const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
 
     expect(rotated.role).toBe("admin");
     expect(rotated.contracted).toBe(true);
@@ -140,9 +140,9 @@ describe("rotating across the two tiers", () => {
   });
 
   it("rotates an OPERATOR-tier key end to end, contracting through its own lineage", async () => {
-    const { home, key } = await registeredFleet("operator");
+    const { home, key } = await registeredRemote("operator");
 
-    const rotated = await rotateFleetKey(home, FLEET, { fetchFn: through(app) });
+    const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
 
     /*
      * The wrinkle the whole design turns on: DELETE is no longer open to every
@@ -159,9 +159,9 @@ describe("rotating across the two tiers", () => {
   });
 
   it("never promotes a rotated key, whatever tier the fleet's other keys are", async () => {
-    const { home } = await registeredFleet("operator");
+    const { home } = await registeredRemote("operator");
 
-    const rotated = await rotateFleetKey(home, FLEET, { fetchFn: through(app) });
+    const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
 
     /* A rotation replaces a key; it is not a way to acquire a better one. */
     expect(rotated.role).not.toBe("admin");
@@ -169,9 +169,9 @@ describe("rotating across the two tiers", () => {
   });
 
   it("says which tier the new key landed at", async () => {
-    const { home } = await registeredFleet("operator");
+    const { home } = await registeredRemote("operator");
 
-    const said = describeRotation(await rotateFleetKey(home, FLEET, { fetchFn: through(app) }));
+    const said = describeRotation(await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) }));
 
     expect(said).toContain("operator-tier");
   });
@@ -179,10 +179,10 @@ describe("rotating across the two tiers", () => {
 
 describe("a rotation that was interrupted", () => {
   it("dies before the flip leaving BOTH keys trusted and the home on the old one", async () => {
-    const { home, key } = await registeredFleet();
+    const { home, key } = await registeredRemote();
 
     await rejectsWith(
-      () => rotateFleetKey(home, FLEET, { fetchFn: crashOn(app, "GET") }),
+      () => rotateRemoteKey(home, REMOTE, { fetchFn: crashOn(app, "GET") }),
       "draining",
     );
 
@@ -190,18 +190,18 @@ describe("a rotation that was interrupted", () => {
        points at, so every other command goes on working. */
     expect(await trustedIds()).toHaveLength(2);
     expect(await trustedIds()).toContain(key.id);
-    expect((await entryOf(home, FLEET)).key.path).toBe("keys/prod.json");
+    expect((await entryOf(home, REMOTE)).key.path).toBe("keys/prod.json");
   });
 
   it("is finished by a rerun that ADOPTS the pending key rather than minting a third", async () => {
-    const { home, key } = await registeredFleet();
+    const { home, key } = await registeredRemote();
     await rejectsWith(
-      () => rotateFleetKey(home, FLEET, { fetchFn: crashOn(app, "GET") }),
+      () => rotateRemoteKey(home, REMOTE, { fetchFn: crashOn(app, "GET") }),
       "draining",
     );
     const pending = (await trustedIds()).find((id) => id !== key.id) as string;
 
-    const rotated = await rotateFleetKey(home, FLEET, { fetchFn: through(app) });
+    const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
 
     expect(rotated.resumed).toBe(true);
     expect(rotated.newKeyId).toBe(pending);
@@ -211,14 +211,14 @@ describe("a rotation that was interrupted", () => {
   });
 
   it("dies after the flip leaving the home on the new key and the old one still trusted", async () => {
-    const { home, key } = await registeredFleet();
+    const { home, key } = await registeredRemote();
 
     await rejectsWith(
-      () => rotateFleetKey(home, FLEET, { fetchFn: crashOn(app, "DELETE") }),
+      () => rotateRemoteKey(home, REMOTE, { fetchFn: crashOn(app, "DELETE") }),
       "draining",
     );
 
-    const entry = await entryOf(home, FLEET);
+    const entry = await entryOf(home, REMOTE);
     const flipped = await keyFileAt(resolveHomePath(home, entry.key.path));
     expect(flipped.id).not.toBe(key.id);
     /* A key too many, never a key too few — and the home holds the one that
@@ -228,26 +228,26 @@ describe("a rotation that was interrupted", () => {
   });
 
   it("is finished by revoking the old key, which the NEW key is what authorizes", async () => {
-    const { home, key } = await registeredFleet();
+    const { home, key } = await registeredRemote();
     await rejectsWith(
-      () => rotateFleetKey(home, FLEET, { fetchFn: crashOn(app, "DELETE") }),
+      () => rotateRemoteKey(home, REMOTE, { fetchFn: crashOn(app, "DELETE") }),
       "draining",
     );
 
-    const revoked = await revokeFleetKey(home, FLEET, key.id, { fetchFn: through(app) });
+    const revoked = await revokeRemoteKey(home, REMOTE, key.id, { fetchFn: through(app) });
 
     expect(revoked.removed).toBe(key.id);
     expect(await trustedIds()).not.toContain(key.id);
   });
 
   it("is also survivable by rerunning the rotation, which then names what is left over", async () => {
-    const { home, key } = await registeredFleet();
+    const { home, key } = await registeredRemote();
     await rejectsWith(
-      () => rotateFleetKey(home, FLEET, { fetchFn: crashOn(app, "DELETE") }),
+      () => rotateRemoteKey(home, REMOTE, { fetchFn: crashOn(app, "DELETE") }),
       "draining",
     );
 
-    const rotated = await rotateFleetKey(home, FLEET, { fetchFn: through(app) });
+    const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
 
     /* A rerun rotates again rather than finishing the previous run's contract —
        it can only deregister the key the home was pointing at — so the one the
@@ -259,23 +259,23 @@ describe("a rotation that was interrupted", () => {
 
 describe("--keep-old", () => {
   it("stops after the flip, leaving both keys trusted", async () => {
-    const { home, key } = await registeredFleet();
+    const { home, key } = await registeredRemote();
 
-    const rotated = await rotateFleetKey(home, FLEET, { fetchFn: through(app), keepOld: true });
+    const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app), keepOld: true });
 
     expect(rotated.contracted).toBe(false);
     expect((await trustedIds()).sort()).toEqual([key.id, rotated.newKeyId].sort());
-    expect((await entryOf(home, FLEET)).key.path).toBe(refOf(home, rotated.newKeyPath));
+    expect((await entryOf(home, REMOTE)).key.path).toBe(refOf(home, rotated.newKeyPath));
   });
 
   it("is refused together with --purge-old, which asks for the opposite thing", async () => {
-    const { home } = await registeredFleet();
+    const { home } = await registeredRemote();
 
     /* Keeping a key trusted while destroying the only copy of its private half
        leaves a way in that nobody holds — refused rather than resolved in
        either direction. */
     const error = await rejectsWith(
-      () => rotateFleetKey(home, FLEET, { fetchFn: through(app), keepOld: true, purgeOld: true }),
+      () => rotateRemoteKey(home, REMOTE, { fetchFn: through(app), keepOld: true, purgeOld: true }),
       "invalid-input",
     );
 
@@ -286,19 +286,19 @@ describe("--keep-old", () => {
 
 describe("--purge-old", () => {
   it("deletes the old key file once the fleet no longer trusts it", async () => {
-    const { home } = await registeredFleet();
+    const { home } = await registeredRemote();
 
-    const rotated = await rotateFleetKey(home, FLEET, { fetchFn: through(app), purgeOld: true });
+    const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app), purgeOld: true });
 
     expect(rotated.purged).toBe(true);
     await expect(keyFileAt(rotated.oldKeyPath)).rejects.toThrow("ENOENT");
   });
 
-  it("KEEPS it when another fleet in this home still signs with it", async () => {
-    const { home } = await registeredFleet();
-    await addFleet(home, { name: "mirror", endpoints: [AGENT_URL], keyName: FLEET });
+  it("KEEPS it when another remote in this home still signs with it", async () => {
+    const { home } = await registeredRemote();
+    await addRemote(home, { name: "mirror", endpoints: [AGENT_URL], keyName: REMOTE });
 
-    const rotated = await rotateFleetKey(home, FLEET, { fetchFn: through(app), purgeOld: true });
+    const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app), purgeOld: true });
 
     expect(rotated.purged).toBe(false);
     expect(rotated.sharedWith).toEqual(["mirror"]);
@@ -306,13 +306,13 @@ describe("--purge-old", () => {
   });
 });
 
-describe("the other fleets in the home", () => {
+describe("the other remotes in the home", () => {
   it("are left exactly as they were, key reference included", async () => {
-    const { home, key } = await registeredFleet();
-    await addFleet(home, { name: "mirror", endpoints: [AGENT_URL], keyName: FLEET });
+    const { home, key } = await registeredRemote();
+    await addRemote(home, { name: "mirror", endpoints: [AGENT_URL], keyName: REMOTE });
     const before = await entryOf(home, "mirror");
 
-    const rotated = await rotateFleetKey(home, FLEET, { fetchFn: through(app) });
+    const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
 
     /* Repointing them would rotate installations the operator never named. */
     expect(await entryOf(home, "mirror")).toEqual(before);
@@ -322,9 +322,9 @@ describe("the other fleets in the home", () => {
   });
 
   it("do not get a key file of their own out of the rotation", async () => {
-    const { home } = await registeredFleet();
+    const { home } = await registeredRemote();
 
-    const rotated = await rotateFleetKey(home, FLEET, { fetchFn: through(app) });
+    const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
 
     /* The old file and the new one, and nothing else: a rotation writes one key. */
     const files = (await readdir(homeKeysDir(home))).sort();
@@ -335,24 +335,24 @@ describe("the other fleets in the home", () => {
 
 describe("reading what a fleet trusts", () => {
   it("names every key, and which of them this home signs with", async () => {
-    const { home, key } = await registeredFleet();
-    const rotated = await rotateFleetKey(home, FLEET, { fetchFn: through(app), keepOld: true });
+    const { home, key } = await registeredRemote();
+    const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app), keepOld: true });
 
-    const view = await listFleetKeys(home, FLEET, { fetchFn: through(app) });
+    const view = await listRemoteKeys(home, REMOTE, { fetchFn: through(app) });
 
     expect(view.own).toBe(rotated.newKeyId);
     expect(view.trusted.map((entry) => entry.id).sort()).toEqual([key.id, rotated.newKeyId].sort());
   });
 
   it("marks the operator's own key in what it prints", async () => {
-    const { home, key } = await registeredFleet();
+    const { home, key } = await registeredRemote();
     await trustOperator(clock.ctx, {
       id: "op-cccc3333",
       publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-a-colleague" },
       role: "operator",
     });
 
-    const printed = formatFleetKeys(await listFleetKeys(home, FLEET, { fetchFn: through(app) }));
+    const printed = formatRemoteKeys(await listRemoteKeys(home, REMOTE, { fetchFn: through(app) }));
 
     expect(printed).toContain("2 operator keys");
     expect(printed).toMatch(new RegExp(`${key.id}.*this home signs with it`));
@@ -360,24 +360,24 @@ describe("reading what a fleet trusts", () => {
   });
 
   it("names the TIER of every key, which is what says who may administer whom", async () => {
-    const { home, key } = await registeredFleet("admin");
+    const { home, key } = await registeredRemote("admin");
     await trustOperator(clock.ctx, {
       id: "op-cccc3333",
       publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-a-colleague" },
       role: "operator",
     });
 
-    const printed = formatFleetKeys(await listFleetKeys(home, FLEET, { fetchFn: through(app) }));
+    const printed = formatRemoteKeys(await listRemoteKeys(home, REMOTE, { fetchFn: through(app) }));
 
     expect(printed).toMatch(new RegExp(`${key.id}\\s+admin`));
     expect(printed).toMatch(/op-cccc3333\s+operator/);
   });
 
   it("names the key a rotated one replaced, where there is one", async () => {
-    const { home, key } = await registeredFleet("admin");
-    const rotated = await rotateFleetKey(home, FLEET, { fetchFn: through(app), keepOld: true });
+    const { home, key } = await registeredRemote("admin");
+    const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app), keepOld: true });
 
-    const printed = formatFleetKeys(await listFleetKeys(home, FLEET, { fetchFn: through(app) }));
+    const printed = formatRemoteKeys(await listRemoteKeys(home, REMOTE, { fetchFn: through(app) }));
 
     expect(printed).toContain(`replaces ${key.id}`);
     expect(printed).toContain(rotated.newKeyId);
@@ -385,11 +385,11 @@ describe("reading what a fleet trusts", () => {
 });
 
 describe("what a rotation says it did", () => {
-  it("names the fleets it deliberately did NOT repoint, and why they matter", async () => {
-    const { home } = await registeredFleet();
-    await addFleet(home, { name: "mirror", endpoints: [AGENT_URL], keyName: FLEET });
+  it("names the remotes it deliberately did NOT repoint, and why they matter", async () => {
+    const { home } = await registeredRemote();
+    await addRemote(home, { name: "mirror", endpoints: [AGENT_URL], keyName: REMOTE });
 
-    const said = describeRotation(await rotateFleetKey(home, FLEET, { fetchFn: through(app) }));
+    const said = describeRotation(await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) }));
 
     /* Silence here is the failure mode worth guarding: a fleet reaching this
        same installation with the key just revoked stops working, and nothing
@@ -400,47 +400,47 @@ describe("what a rotation says it did", () => {
   });
 
   it("says the old key file was kept, and what deletes it", async () => {
-    const { home } = await registeredFleet();
+    const { home } = await registeredRemote();
 
-    const said = describeRotation(await rotateFleetKey(home, FLEET, { fetchFn: through(app) }));
+    const said = describeRotation(await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) }));
 
     expect(said).toContain("was kept");
     expect(said).toContain("--purge-old");
   });
 
   it("says what is still trusted after --keep-old, and how to remove it", async () => {
-    const { home, key } = await registeredFleet();
+    const { home, key } = await registeredRemote();
 
     const said = describeRotation(
-      await rotateFleetKey(home, FLEET, { fetchFn: through(app), keepOld: true }),
+      await rotateRemoteKey(home, REMOTE, { fetchFn: through(app), keepOld: true }),
     );
 
     expect(said).toContain("STILL trusted");
-    expect(said).toContain(`scafo fleet revoke ${FLEET} --id ${key.id}`);
+    expect(said).toContain(`scafo operator revoke --remote ${REMOTE} --id ${key.id}`);
   });
 
   it("names the leftovers of an earlier interrupted run rather than hiding them", async () => {
-    const { home, key } = await registeredFleet();
+    const { home, key } = await registeredRemote();
     await rejectsWith(
-      () => rotateFleetKey(home, FLEET, { fetchFn: crashOn(app, "DELETE") }),
+      () => rotateRemoteKey(home, REMOTE, { fetchFn: crashOn(app, "DELETE") }),
       "draining",
     );
 
-    const said = describeRotation(await rotateFleetKey(home, FLEET, { fetchFn: through(app) }));
+    const said = describeRotation(await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) }));
 
     expect(said).toContain(key.id);
     expect(said).toContain("also trusts");
-    expect(said).toContain("scafo fleet revoke");
+    expect(said).toContain("scafo operator revoke");
   });
 
   it("says when it took over a key an interrupted run had already minted", async () => {
-    const { home } = await registeredFleet();
+    const { home } = await registeredRemote();
     await rejectsWith(
-      () => rotateFleetKey(home, FLEET, { fetchFn: crashOn(app, "GET") }),
+      () => rotateRemoteKey(home, REMOTE, { fetchFn: crashOn(app, "GET") }),
       "draining",
     );
 
-    const said = describeRotation(await rotateFleetKey(home, FLEET, { fetchFn: through(app) }));
+    const said = describeRotation(await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) }));
 
     expect(said).toContain("took over");
   });
@@ -448,21 +448,21 @@ describe("what a rotation says it did", () => {
 
 describe("revoking another operator's key", () => {
   it("removes it without touching the caller's own", async () => {
-    const { home, key } = await registeredFleet();
+    const { home, key } = await registeredRemote();
     await trustOperator(clock.ctx, {
       id: "op-cccc3333",
       publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-a-colleague" },
       role: "operator",
     });
 
-    const revoked = await revokeFleetKey(home, FLEET, "op-cccc3333", { fetchFn: through(app) });
+    const revoked = await revokeRemoteKey(home, REMOTE, "op-cccc3333", { fetchFn: through(app) });
 
     expect(revoked.removed).toBe("op-cccc3333");
     expect(await trustedIds()).toEqual([key.id]);
   });
 
   it("REFUSES the caller's own key, naming rotation as the way to replace it", async () => {
-    const { home, key } = await registeredFleet();
+    const { home, key } = await registeredRemote();
     await trustOperator(clock.ctx, {
       id: "op-cccc3333",
       publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-a-colleague" },
@@ -470,7 +470,7 @@ describe("revoking another operator's key", () => {
     });
 
     const error = await rejectsWith(
-      () => revokeFleetKey(home, FLEET, key.id, { fetchFn: through(app) }),
+      () => revokeRemoteKey(home, REMOTE, key.id, { fetchFn: through(app) }),
       "invalid-input",
     );
 
@@ -479,13 +479,13 @@ describe("revoking another operator's key", () => {
   });
 
   it("cannot leave the fleet trusting nothing, the last key being the caller's own", async () => {
-    const { home, key } = await registeredFleet();
+    const { home, key } = await registeredRemote();
 
     /* The same refusal as above, and it is the one that matters: the caller is
        always one of the trusted keys, so the key it is refused is exactly the
        key whose removal would leave nobody able to put one back. */
     await rejectsWith(
-      () => revokeFleetKey(home, FLEET, key.id, { fetchFn: through(app) }),
+      () => revokeRemoteKey(home, REMOTE, key.id, { fetchFn: through(app) }),
       "invalid-input",
     );
     expect(await trustedIds()).toEqual([key.id]);
@@ -495,14 +495,14 @@ describe("revoking another operator's key", () => {
 /* ------------------------------------------------------------------ helpers */
 
 /**
- * A home holding one fleet whose key the installation already trusts, at the
+ * A home holding one remote whose key the installation already trusts, at the
  * tier asked for.
  *
  * An operator-tier home comes with an ADMIN beside it, because that is the only
  * way a fleet ever reaches that state: the first key of an installation is
  * always an admin, and operator-tier keys are what an admin adds afterwards.
  */
-async function registeredFleet(
+async function registeredRemote(
   role: OperatorRole = "admin",
 ): Promise<{ home: string; key: OperatorKeyFile }> {
   const home = await mkdtemp(join(tmpdir(), "scafo-rotate-"));
@@ -516,7 +516,7 @@ async function registeredFleet(
     });
   }
 
-  const added = await addFleet(home, { name: FLEET, endpoints: [AGENT_URL] });
+  const added = await addRemote(home, { name: REMOTE, endpoints: [AGENT_URL] });
   await trustOperator(clock.ctx, {
     id: added.key.id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: added.key.publicKey.x },
@@ -530,8 +530,8 @@ async function trustedIds(): Promise<string[]> {
   return (await listOperators(clock.ctx)).map((entry) => entry.id);
 }
 
-async function entryOf(home: string, name: string): Promise<FleetEntry> {
-  return (await readFleets(home)).fleets[name] as FleetEntry;
+async function entryOf(home: string, name: string): Promise<RemoteEntry> {
+  return (await readRemotes(home)).remotes[name] as RemoteEntry;
 }
 
 /** How the home REFERS to a key file it holds. */

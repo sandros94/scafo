@@ -7,7 +7,7 @@ ingress and real deploys; only the bucket stands in — a SeaweedFS container, w
 honours the conditional writes scafo's registry is built on. No cloud account, no
 credentials, no DNS.
 
-- [`single-node/`](single-node/README.md) — **start here.** Register a fleet,
+- [`single-node/`](single-node/README.md) — **start here.** Register a remote,
   deploy, reach it by name, flip a build, wake a parked one, read what it counted.
 - [`multi-node/`](multi-node/README.md) — what only happens at two: the
   coordinator lease, one cell owned across machines, a node killed mid-service.

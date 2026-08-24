@@ -246,7 +246,7 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
       .withCommand([
         "node",
         "dist/cli/index.mjs",
-        "up",
+        "sail",
         "--listen",
         `0.0.0.0:${String(AGENT_PORT)}`,
       ])

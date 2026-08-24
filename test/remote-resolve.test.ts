@@ -1,14 +1,14 @@
 /*
- * Which fleet a command acts on, and which key it signs with.
+ * Which remote a command acts on, and which key it signs with.
  *
  * The precedence chain is the whole contract of the redesign: a flag beats the
- * environment, which beats what the project pinned, which beats the single fleet
+ * environment, which beats what the project pinned, which beats the single remote
  * a home holds — and an ambiguous home is REFUSED rather than guessed at. The
  * interactive pick is driven through the same seam consola is wired into, so the
  * terminal path is pinned here without a terminal.
  *
  * The last case runs the resolution into the REAL agent app over an injected
- * `fetch`, so what it proves is that a fleet-resolved key signs tokens a node
+ * `fetch`, so what it proves is that a remote-resolved key signs tokens a node
  * actually accepts.
  */
 
@@ -19,7 +19,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createAgentApp } from "../src/agent/app.ts";
 import type { AgentConfig } from "../src/agent/config.ts";
 import { agentOps } from "../src/cli/_environments.ts";
-import { addFleet, exportFleet } from "../src/cli/_fleets.ts";
+import { addRemote, exportRemote } from "../src/cli/_remotes.ts";
 import { homeKeyPath } from "../src/cli/_home.ts";
 import { operatorSigner } from "../src/cli/_agent.ts";
 import {
@@ -27,8 +27,12 @@ import {
   type OperatorKeyFile,
   type PortableOperator,
 } from "../src/cli/_operator-key.ts";
-import { resolveOperator, SCAFO_FLEET_ENV, SCAFO_OPERATOR_KEY_ENV } from "../src/cli/_operator.ts";
-import { DEFAULT_KEY_PATH } from "../src/cli/commands/keygen.ts";
+import {
+  DEFAULT_KEY_PATH,
+  resolveOperator,
+  SCAFO_OPERATOR_KEY_ENV,
+  SCAFO_REMOTE_ENV,
+} from "../src/cli/_operator.ts";
 import { registerNode } from "../src/core/registry/nodes.ts";
 import { createEnvironment, createProject, getEnvironment } from "../src/core/registry/index.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
@@ -45,32 +49,32 @@ afterAll(async () => {
   await Promise.all(homes.map((path) => rm(path, { recursive: true, force: true })));
 });
 
-describe("which fleet a command acts on", () => {
-  it("takes the one --fleet names, over everything else", async () => {
+describe("which remote a command acts on", () => {
+  it("takes the one --remote names, over everything else", async () => {
     const home = await twoFleets();
 
     const resolved = await resolveOperator({
       home,
-      env: { [SCAFO_FLEET_ENV]: "staging" },
-      flags: { fleet: "prod" },
+      env: { [SCAFO_REMOTE_ENV]: "staging" },
+      flags: { remote: "prod" },
       readFile: pinned("staging"),
     });
 
-    expect(resolved.fleet).toBe("prod");
+    expect(resolved.remote).toBe("prod");
     expect(resolved.agentUrl).toBe(PROD_URL);
   });
 
-  it("takes the one SCAFO_FLEET names when no flag does", async () => {
+  it("takes the one SCAFO_REMOTE names when no flag does", async () => {
     const home = await twoFleets();
 
     const resolved = await resolveOperator({
       home,
-      env: { [SCAFO_FLEET_ENV]: "staging" },
+      env: { [SCAFO_REMOTE_ENV]: "staging" },
       flags: {},
       readFile: pinned("prod"),
     });
 
-    expect(resolved.fleet).toBe("staging");
+    expect(resolved.remote).toBe("staging");
   });
 
   it("takes the one the project pinned when neither names one", async () => {
@@ -85,7 +89,7 @@ describe("which fleet a command acts on", () => {
 
     /* The pin holds NO SECRET — a name and nothing else — so committing it is
        the point of it. */
-    expect(resolved.fleet).toBe("staging");
+    expect(resolved.remote).toBe("staging");
   });
 
   it("reads the pin out of the file --config names, when one is named", async () => {
@@ -96,18 +100,18 @@ describe("which fleet a command acts on", () => {
       home,
       env: {},
       flags: { config: path },
-      readFile: async (asked) => (asked === path ? `{ "fleet": "staging" }` : null),
+      readFile: async (asked) => (asked === path ? `{ "remote": "staging" }` : null),
     });
 
-    expect(resolved.fleet).toBe("staging");
+    expect(resolved.remote).toBe("staging");
   });
 
-  it("uses the only fleet there is when nothing names one", async () => {
+  it("uses the only remote there is when nothing names one", async () => {
     const home = await oneFleet();
 
     const resolved = await resolveOperator({ home, env: {}, flags: {}, readFile: noConfig });
 
-    expect(resolved.fleet).toBe("prod");
+    expect(resolved.remote).toBe("prod");
     expect(resolved.agentUrl).toBe(PROD_URL);
   });
 
@@ -128,10 +132,10 @@ describe("which fleet a command acts on", () => {
     });
 
     expect(asked).toEqual([["prod", "staging"]]);
-    expect(resolved.fleet).toBe("staging");
+    expect(resolved.remote).toBe("staging");
   });
 
-  it("refuses off a terminal, naming every fleet and every way to choose one", async () => {
+  it("refuses off a terminal, naming every remote and every way to choose one", async () => {
     const home = await twoFleets();
 
     const error = await rejectsWith(
@@ -139,20 +143,20 @@ describe("which fleet a command acts on", () => {
       "invalid-input",
     );
 
-    /* A command that picked one by itself would deploy to the wrong fleet, so
+    /* A command that picked one by itself would deploy to the wrong remote, so
        the refusal has to carry everything needed to pick. */
     expect(error.detail).toContain("prod");
     expect(error.detail).toContain("staging");
-    expect(error.detail).toContain("--fleet");
-    expect(error.detail).toContain(SCAFO_FLEET_ENV);
+    expect(error.detail).toContain("--remote");
+    expect(error.detail).toContain(SCAFO_REMOTE_ENV);
     expect(error.detail).toContain("scafo.config.jsonc");
   });
 
-  it("reports a --fleet that is not registered rather than inventing one", async () => {
+  it("reports a --remote that is not registered rather than inventing one", async () => {
     const home = await twoFleets();
 
     const error = await rejectsWith(
-      () => resolveOperator({ home, env: {}, flags: { fleet: "ghost" }, readFile: noConfig }),
+      () => resolveOperator({ home, env: {}, flags: { remote: "ghost" }, readFile: noConfig }),
       "not-found",
     );
 
@@ -174,12 +178,12 @@ describe("which fleet a command acts on", () => {
     const error = await rejectsWith(() => resolved.readKey(), "invalid-input");
 
     expect(resolved.agentUrl).toBeUndefined();
-    expect(error.detail).toContain("scafo fleet add");
+    expect(error.detail).toContain("scafo remote add");
   });
 });
 
 describe("which key a command signs with", () => {
-  it("takes the file --key names, over the environment and the fleet", async () => {
+  it("takes the file --key names, over the environment and the remote", async () => {
     const home = await oneFleet();
     const loose = await looseKeyFile(home, "loose.json");
 
@@ -191,14 +195,14 @@ describe("which key a command signs with", () => {
     });
 
     expect((await resolved.readKey()).id).toBe(loose.key.id);
-    /* The fleet still says WHERE, because --key only ever said WITH WHAT. */
+    /* The remote still says WHERE, because --key only ever said WITH WHAT. */
     expect(resolved.agentUrl).toBe(PROD_URL);
   });
 
   it("takes SCAFO_OPERATOR_KEY when no flag names one", async () => {
     const home = await oneFleet();
     const other = await scratch();
-    const added = await addFleet(other, { name: "elsewhere", endpoints: [STAGING_URL] });
+    const added = await addRemote(other, { name: "elsewhere", endpoints: [STAGING_URL] });
 
     const resolved = await resolveOperator({
       home,
@@ -210,7 +214,7 @@ describe("which key a command signs with", () => {
     expect((await resolved.readKey()).id).toBe(added.key.id);
   });
 
-  it("falls back to the key the fleet carries", async () => {
+  it("falls back to the key the remote carries", async () => {
     const home = await oneFleet();
     const stored = JSON.parse(await readText(homeKeyPath(home, "prod"))) as OperatorKeyFile;
 
@@ -219,7 +223,7 @@ describe("which key a command signs with", () => {
     expect((await resolved.readKey()).id).toBe(stored.id);
   });
 
-  it("reads a key file written by scafo keygen, byte for byte", async () => {
+  it("reads a key file written by scafo operator keygen, byte for byte", async () => {
     const home = await scratch();
     const loose = await looseKeyFile(home, "operator.json");
 
@@ -249,7 +253,7 @@ describe("which key a command signs with", () => {
     /* A bare machine holding one file: it says where to go as well as who to
        be, which is what makes it portable at all. */
     expect(resolved.agentUrl).toBe(PROD_URL);
-    expect(resolved.fleet).toBe("prod");
+    expect(resolved.remote).toBe("prod");
   });
 
   it("reads an inline base64: value the same way", async () => {
@@ -294,7 +298,7 @@ describe("which key a command signs with", () => {
     expect(error.detail).toContain(INLINE_PREFIX);
   });
 
-  it("lets --agent override the endpoint the fleet carries", async () => {
+  it("lets --agent override the endpoint the remote carries", async () => {
     const home = await oneFleet();
 
     const resolved = await resolveOperator({
@@ -305,10 +309,10 @@ describe("which key a command signs with", () => {
     });
 
     expect(resolved.agentUrl).toBe(STAGING_URL);
-    expect(resolved.fleet).toBe("prod");
+    expect(resolved.remote).toBe("prod");
   });
 
-  it("still finds the key scafo keygen left in the working directory, when no fleet is registered", async () => {
+  it("still finds the key scafo operator keygen left in the working directory, when no remote is registered", async () => {
     const home = await scratch();
     const loose = await looseKeyFile(home, DEFAULT_KEY_PATH);
 
@@ -320,13 +324,13 @@ describe("which key a command signs with", () => {
       defaultKeyPath: loose.path,
     });
 
-    /* The world before fleets existed: keygen wrote a file here and every
+    /* The world before remotes existed: keygen wrote a file here and every
        command found it without being told. */
     expect((await resolved.readKey()).id).toBe(loose.key.id);
   });
 });
 
-describe("the resolved fleet against a real node", () => {
+describe("the resolved remote against a real node", () => {
   let clock: ManualClock;
 
   beforeEach(() => {
@@ -380,23 +384,23 @@ async function scratch(): Promise<string> {
 
 async function oneFleet(): Promise<string> {
   const home = await scratch();
-  await addFleet(home, { name: "prod", endpoints: [PROD_URL] });
+  await addRemote(home, { name: "prod", endpoints: [PROD_URL] });
   return home;
 }
 
 async function twoFleets(): Promise<string> {
   const home = await oneFleet();
-  await addFleet(home, { name: "staging", endpoints: [STAGING_URL] });
+  await addRemote(home, { name: "staging", endpoints: [STAGING_URL] });
   return home;
 }
 
-/** A key file outside the home, exactly as `scafo keygen` writes one. */
+/** A key file outside the home, exactly as `scafo operator keygen` writes one. */
 async function looseKeyFile(
   home: string,
   name: string,
 ): Promise<{ path: string; key: OperatorKeyFile }> {
   const source = await scratch();
-  const added = await addFleet(source, { name: "temp", endpoints: [PROD_URL] });
+  const added = await addRemote(source, { name: "temp", endpoints: [PROD_URL] });
   const path = join(home, name);
   await writeFile(path, `${JSON.stringify(added.key, null, 2)}\n`, "utf8");
   return { path, key: added.key };
@@ -404,7 +408,7 @@ async function looseKeyFile(
 
 async function portableText(home: string, name: string): Promise<string> {
   const lines: string[] = [];
-  await exportFleet(home, name, { write: (line) => lines.push(line) });
+  await exportRemote(home, name, { write: (line) => lines.push(line) });
   return `${lines.join("\n")}\n`;
 }
 
@@ -418,10 +422,10 @@ async function readText(path: string): Promise<string> {
   return readFile(path, "utf8");
 }
 
-/** A project directory that pins a fleet by name, and holds nothing else. */
+/** A project directory that pins a remote by name, and holds nothing else. */
 function pinned(name: string): (path: string) => Promise<string | null> {
   return async (path) =>
-    path.endsWith("scafo.config.jsonc") ? `{ /* no secrets here */ "fleet": "${name}" }` : null;
+    path.endsWith("scafo.config.jsonc") ? `{ /* no secrets here */ "remote": "${name}" }` : null;
 }
 
 const noConfig = async (): Promise<null> => null;

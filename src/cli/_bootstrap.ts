@@ -317,7 +317,7 @@ export async function drainThisNode(
  * would report it until a peer failed to reach it.
  *
  * A node with no record yet is registered outright: `scafo wg init` before the
- * first `scafo up` is the order the setup instructions ask for.
+ * first `scafo sail` is the order the setup instructions ask for.
  */
 export async function publishWireguard(
   registry: RegistryContext,

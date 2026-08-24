@@ -1,14 +1,14 @@
 /*
- * Internal: replacing the key a fleet signs with, expand-contract.
+ * Internal: replacing the key a remote signs with, expand-contract.
  *
  * THE ORDER IS THE DESIGN. A rotation is three writes in three different places
  * — a key file here, a trust record in the fleet, a reference in this home — and
  * any of them can be the last thing that happens before the process is killed,
  * the laptop closed or the network taken away. They are sequenced so that every
- * stopping point leaves a fleet the operator can still reach, and so that the
+ * stopping point leaves a remote the operator can still reach, and so that the
  * command is simply run again:
  *
- *   1. MINT the new key into the home, and record it on the fleet's entry as
+ *   1. MINT the new key into the home, and record it on the remote's entry as
  *      pending. Nothing has been told to the fleet yet. Interrupted here, the
  *      fleet is untouched and the rerun picks the pending key up.
  *   2. EXPAND: register the public half with the fleet, AUTHENTICATED BY THE OLD
@@ -35,7 +35,7 @@
  *      sequence safe — the old key is never taken away until the new one has
  *      demonstrably been accepted in its place. Interrupted here, the old key
  *      stays trusted: a key too many, never a key too few, cleared by rerunning
- *      or by `scafo fleet revoke`.
+ *      or by `scafo operator revoke`.
  *
  * The order that must never be written is contract-before-confirm. It is the one
  * arrangement whose interruption can leave a fleet trusting no key this operator
@@ -48,14 +48,14 @@ import { LEGACY_OPERATOR_ROLE, type OperatorRole } from "../core/registry/operat
 import { SLUG_MAX_LENGTH } from "../core/utils/slug.ts";
 import { operatorSigner } from "./_agent.ts";
 import {
-  type FleetEntry,
-  type FleetKeyRef,
-  fleetsReferencing,
-  getFleet,
-  readFleetKey,
-  readFleets,
-  writeFleets,
-} from "./_fleets.ts";
+  type RemoteEntry,
+  type RemoteKeyRef,
+  remotesReferencing,
+  getRemote,
+  readRemoteKey,
+  readRemotes,
+  writeRemotes,
+} from "./_remotes.ts";
 import {
   assertKeyName,
   homeKeyPath,
@@ -68,10 +68,10 @@ import {
   type OperatorKeyFile,
   readOperatorDocument,
 } from "./_operator-key.ts";
-import { type FleetKeyOptions, fleetConnection, operatorApi } from "./_operators.ts";
+import { type RemoteKeyOptions, remoteConnection, operatorApi } from "./_operators.ts";
 import { readTextFile, writeSecretFile } from "./_utils.ts";
 
-export interface RotateOptions extends FleetKeyOptions {
+export interface RotateOptions extends RemoteKeyOptions {
   /** Stops after the flip, leaving the old key trusted for an explicit removal later. */
   keepOld?: boolean;
   /** Deletes the old key FILE once the fleet no longer trusts it. */
@@ -80,8 +80,8 @@ export interface RotateOptions extends FleetKeyOptions {
 
 /** A rotation as it happened. */
 export interface RotatedKey {
-  fleet: string;
-  /** Key the fleet signed with before this run. */
+  remote: string;
+  /** Key the remote signed with before this run. */
   oldKeyId: string;
   /** Absolute path of the file that key is in. */
   oldKeyPath: string;
@@ -96,28 +96,28 @@ export interface RotatedKey {
   contracted: boolean;
   /** Whether the old key FILE was deleted. */
   purged: boolean;
-  /** Fleets in this home still signing with the old key file, which is why it stayed. */
+  /** Remotes in this home still signing with the old key file, which is why it stayed. */
   sharedWith: string[];
   /** Ids the fleet trusts besides this rotation's two, in id order. */
   alsoTrusted: string[];
 }
 
 /**
- * Replaces the key a fleet signs with, in the order documented at the top of
+ * Replaces the key a remote signs with, in the order documented at the top of
  * this file.
  *
  * `keepOld` stops after the flip: both keys stay trusted, and the old one is
- * removed later with {@link revokeFleetKey}. `purgeOld` deletes the old key FILE
+ * removed later with {@link revokeRemoteKey}. `purgeOld` deletes the old key FILE
  * once the fleet no longer trusts it, and is refused together with `keepOld` —
  * they ask for opposite things, and what the pair would produce is a way into
  * the fleet whose private half nobody holds.
  *
- * OTHER FLEETS IN THIS HOME ARE NEVER TOUCHED. One key can speak for several,
+ * OTHER REMOTES IN THIS HOME ARE NEVER TOUCHED. One key can speak for several,
  * and repointing the rest at a key they were not rotated onto would rotate
  * installations the operator never named — so a shared key file is left where it
- * is, and the fleets sharing it are reported.
+ * is, and the remotes sharing it are reported.
  */
-export async function rotateFleetKey(
+export async function rotateRemoteKey(
   home: string,
   name: string,
   opts: RotateOptions = {},
@@ -130,8 +130,8 @@ export async function rotateFleetKey(
     });
   }
 
-  const entry = await getFleet(home, name);
-  const oldKey = await readFleetKey(home, entry);
+  const entry = await getRemote(home, name);
+  const oldKey = await readRemoteKey(home, entry);
   const oldKeyPath = resolveHomePath(home, entry.key.path);
 
   /* 1. MINT, or take over what an interrupted run already minted. */
@@ -139,7 +139,7 @@ export async function rotateFleetKey(
   const { key: newKey, ref: newRef } = pending ?? (await mintPending(home, name));
   const newKeyPath = resolveHomePath(home, newRef.path);
 
-  const connection = fleetConnection(entry, name, opts);
+  const connection = remoteConnection(entry, name, opts);
   const asOld = operatorApi({ ...connection, authorize: operatorSigner(oldKey) });
   const asNew = operatorApi({ ...connection, authorize: operatorSigner(newKey) });
 
@@ -162,7 +162,7 @@ export async function rotateFleetKey(
 
   /* 4. FLIP. Everything above is repeatable; this is what stops being repeated. */
   await updateEntry(home, name, (current) => {
-    const flipped: FleetEntry = { ...current, key: newRef };
+    const flipped: RemoteEntry = { ...current, key: newRef };
     delete flipped.rotating;
     return flipped;
   });
@@ -175,7 +175,7 @@ export async function rotateFleetKey(
   }
 
   /* Read afresh: the flip has just rewritten the file this is asked of. */
-  const sharedWith = fleetsReferencing(await readFleets(home), name, [entry.key.path]);
+  const sharedWith = remotesReferencing(await readRemotes(home), name, [entry.key.path]);
   let purged = false;
   if (opts.purgeOld === true && sharedWith.length === 0) {
     await rm(oldKeyPath, { force: true });
@@ -183,7 +183,7 @@ export async function rotateFleetKey(
   }
 
   return {
-    fleet: name,
+    remote: name,
     oldKeyId: oldKey.id,
     oldKeyPath,
     newKeyId: newKey.id,
@@ -206,7 +206,7 @@ export async function rotateFleetKey(
  */
 export function describeRotation(rotated: RotatedKey): string {
   const lines = [
-    `scafo: fleet "${rotated.fleet}" now signs with "${rotated.newKeyId}", kept in ` +
+    `scafo: remote "${rotated.remote}" now signs with "${rotated.newKeyId}", kept in ` +
       `${rotated.newKeyPath}`,
     /* Stated rather than assumed: a rotation is a replacement, and an operator
        who half-expected it to be a way up or down should read that it was not. */
@@ -226,8 +226,8 @@ export function describeRotation(rotated: RotatedKey): string {
           `goes on accepting it for up to a minute, which is how long revocation takes to ` +
           `reach the whole installation`
       : `scafo: "${rotated.oldKeyId}" is STILL trusted, as --keep-old asked; remove it with ` +
-          `"scafo fleet revoke ${rotated.fleet} --id ${rotated.oldKeyId}" once everything ` +
-          `using it has been moved over`,
+          `"scafo operator revoke --remote ${rotated.remote} --id ${rotated.oldKeyId}" once ` +
+          `everything using it has been moved over`,
   );
 
   lines.push(
@@ -250,8 +250,8 @@ export function describeRotation(rotated: RotatedKey): string {
 
   if (rotated.alsoTrusted.length > 0) {
     lines.push(
-      `scafo: this fleet also trusts ${rotated.alsoTrusted.join(", ")}; "scafo fleet keys ` +
-        `${rotated.fleet}" lists them and "scafo fleet revoke" removes one`,
+      `scafo: this fleet also trusts ${rotated.alsoTrusted.join(", ")}; "scafo operator list ` +
+        `--remote ${rotated.remote}" lists them and "scafo operator revoke" removes one`,
     );
   }
   return lines.join("\n");
@@ -270,8 +270,8 @@ export function describeRotation(rotated: RotatedKey): string {
 async function pendingKey(
   home: string,
   name: string,
-  entry: FleetEntry,
-): Promise<{ key: OperatorKeyFile; ref: FleetKeyRef } | null> {
+  entry: RemoteEntry,
+): Promise<{ key: OperatorKeyFile; ref: RemoteKeyRef } | null> {
   const ref = entry.rotating;
   if (ref === undefined) return null;
 
@@ -281,8 +281,9 @@ async function pendingKey(
     throw new ScafoError("not-found", "Pending rotation key is missing", {
       detail:
         `"${name}" was left mid-rotation and the key it had minted, "${path}", is not there; ` +
-        `"scafo fleet keys ${name}" shows what the fleet trusts and "scafo fleet revoke ` +
-        `${name} --id <key-id>" removes what that run left behind`,
+        `"scafo operator list --remote ${name}" shows what the fleet trusts and ` +
+        `"scafo operator revoke --remote ${name} --id <key-id>" removes what that run left ` +
+        `behind`,
     });
   }
   return { key: readOperatorDocument(stored, path).key, ref };
@@ -298,10 +299,10 @@ async function pendingKey(
 async function mintPending(
   home: string,
   name: string,
-): Promise<{ key: OperatorKeyFile; ref: FleetKeyRef }> {
+): Promise<{ key: OperatorKeyFile; ref: RemoteKeyRef }> {
   const key = await generateOperatorKey();
   const keyName = pendingKeyName(name, key.id);
-  const ref: FleetKeyRef = { kind: "file", path: homeKeyRefPath(keyName) };
+  const ref: RemoteKeyRef = { kind: "file", path: homeKeyRefPath(keyName) };
 
   await writeSecretFile(
     homeKeysDir(home),
@@ -313,12 +314,12 @@ async function mintPending(
 }
 
 /**
- * What a rotation calls the file it mints: the fleet and the key's own id, which
- * can collide with nothing and says which rotation produced it. A fleet named
+ * What a rotation calls the file it mints: the remote and the key's own id, which
+ * can collide with nothing and says which rotation produced it. A remote named
  * too long for the pair keeps the id alone rather than being refused.
  */
-function pendingKeyName(fleet: string, id: string): string {
-  const paired = `${fleet}-${id}`;
+function pendingKeyName(remote: string, id: string): string {
+  const paired = `${remote}-${id}`;
   const name = paired.length <= SLUG_MAX_LENGTH ? paired : id;
   assertKeyName(name);
   return name;
@@ -328,14 +329,14 @@ function pendingKeyName(fleet: string, id: string): string {
 async function updateEntry(
   home: string,
   name: string,
-  change: (entry: FleetEntry) => FleetEntry,
+  change: (entry: RemoteEntry) => RemoteEntry,
 ): Promise<void> {
-  const file = await readFleets(home);
-  const entry = file.fleets[name];
+  const file = await readRemotes(home);
+  const entry = file.remotes[name];
   if (entry === undefined) {
-    throw new ScafoError("not-found", "Fleet is not registered", {
+    throw new ScafoError("not-found", "Remote is not registered", {
       detail: `"${name}" left this operator's home while it was being rotated`,
     });
   }
-  await writeFleets(home, { ...file, fleets: { ...file.fleets, [name]: change(entry) } });
+  await writeRemotes(home, { ...file, remotes: { ...file.remotes, [name]: change(entry) } });
 }

@@ -1,10 +1,10 @@
 /*
  * Internal: the operator keypair, and the two files it is written in.
  *
- * The KEY FILE is what `scafo keygen` has always written: an id and both halves
+ * The KEY FILE is what `scafo operator keygen` has always written: an id and both halves
  * of an Ed25519 pair, and nothing about where it is meant to be used. The
  * PORTABLE FILE wraps one together with the endpoints it reaches, so a single
- * self-contained value carries a whole fleet to a machine that has never seen
+ * self-contained value carries a whole remote to a machine that has never seen
  * this installation — a CI secret, a password-store entry, a pipe.
  *
  * The two are told apart by what they carry rather than guessed at: a portable
@@ -21,7 +21,7 @@ import { assertNodeId } from "../core/registry/paths.ts";
 import { fromBase64 } from "../core/utils/base64.ts";
 
 /**
- * The key file, as `scafo keygen` writes it and as every operator command reads
+ * The key file, as `scafo operator keygen` writes it and as every operator command reads
  * it back.
  *
  * Both halves live in one file: the public half so `--register` can be re-run
@@ -35,6 +35,16 @@ export interface OperatorKeyFile {
   publicKey: JWK_OKP_Public<"EdDSA">;
 }
 
+/**
+ * An operator's PUBLIC half: who they are, and what verifies what they sign.
+ *
+ * Every registration surface takes one of these rather than a whole key file,
+ * because a registration is the one thing a private half is never needed for —
+ * and a signature is the one thing it must never leave the operator's own
+ * machine to produce.
+ */
+export type PublicHalf = Pick<OperatorKeyFile, "id" | "publicKey">;
+
 /** What a portable operator file says it is. */
 export const PORTABLE_KIND: string = "scafo-operator";
 
@@ -45,18 +55,38 @@ export const PORTABLE_VERSION: number = 1;
 export const INLINE_PREFIX: string = "base64:";
 
 /**
- * Everything needed to operate one fleet from a bare machine: who to be, and
+ * Everything needed to operate one remote from a bare machine: who to be, and
  * where to go.
  *
- * `fleet` is the name it was exported under, and is only a suggestion — the
+ * `remote` is the name it was exported under, and is only a suggestion — the
  * machine importing it may file it under any name it likes.
  */
 export interface PortableOperator {
   v: number;
   kind: string;
-  fleet?: string;
+  remote?: string;
   endpoints: string[];
   key: OperatorKeyFile;
+}
+
+/** What a public operator document says it is. */
+export const PUBLIC_KIND: string = "scafo-operator-public";
+
+/** Version of the public format written today. */
+export const PUBLIC_VERSION: number = 1;
+
+/**
+ * An operator's public half as a document: what `scafo operator show` prints and
+ * what `scafo operator enroll` takes in.
+ *
+ * THE WHOLE POINT IS WHAT IS NOT IN IT. This is the artifact that travels — over
+ * chat, in a ticket, through a pipe — from somebody who wants to be admitted to
+ * somebody who can admit them, so it carries the id and the verifying key and
+ * nothing that could sign.
+ */
+export interface PublicOperator extends PublicHalf {
+  v: number;
+  kind: string;
 }
 
 /** An operator key, and whatever the document it came in also said. */
@@ -64,8 +94,8 @@ export interface OperatorKeySource {
   key: OperatorKeyFile;
   /** Endpoints the document carried; empty for a plain key file. */
   endpoints: string[];
-  /** Fleet name the document suggested, when it carried one. */
-  fleet?: string;
+  /** Remote name the document suggested, when it carried one. */
+  remote?: string;
   /** What is named in a failure: the path, or the inline form. */
   from: string;
 }
@@ -93,7 +123,7 @@ export async function loadOperatorKeySource(spec: string): Promise<OperatorKeySo
       throw new ScafoError("invalid-input", "Inline operator key is not base64", {
         detail:
           `the value after "${INLINE_PREFIX}" is not base64; it must hold a portable operator ` +
-          `file, as "scafo fleet export" prints one`,
+          `file, as "scafo remote export" prints one`,
         cause: error,
       });
     }
@@ -106,8 +136,8 @@ export async function loadOperatorKeySource(spec: string): Promise<OperatorKeySo
   } catch (error) {
     throw new ScafoError("invalid-input", "Operator key could not be read", {
       detail:
-        `"${spec}" could not be opened; it must be a key file written by "scafo keygen", ` +
-        `a portable file written by "scafo fleet export", or an inline value prefixed ` +
+        `"${spec}" could not be opened; it must be a key file written by "scafo operator keygen", ` +
+        `a portable file written by "scafo remote export", or an inline value prefixed ` +
         `with "${INLINE_PREFIX}"`,
       cause: error,
     });
@@ -149,12 +179,12 @@ export function readOperatorDocument(text: string, source: string): OperatorKeyS
 
   const endpoints = readEndpoints(document.endpoints, source);
   const key = readKeyFile(document.key, source);
-  const fleet = document.fleet;
-  if (fleet !== undefined && typeof fleet !== "string") {
-    throw notAnOperatorFile(source, `its "fleet" is not a name`);
+  const remote = document.remote;
+  if (remote !== undefined && typeof remote !== "string") {
+    throw notAnOperatorFile(source, `its "remote" is not a name`);
   }
 
-  return { key, endpoints, ...(fleet === undefined ? {} : { fleet }), from: source };
+  return { key, endpoints, ...(remote === undefined ? {} : { remote }), from: source };
 }
 
 /** A fresh operator keypair, unwritten. */
@@ -181,14 +211,135 @@ export function formatPortable(portable: PortableOperator): string {
 }
 
 /**
+ * The public document of a key, BUILT FIELD BY FIELD rather than by stripping.
+ *
+ * A spread with `d` deleted afterwards is one refactor away from printing a
+ * private key; naming the two fields that may leave is not.
+ */
+export function publicOperator(key: PublicHalf): PublicOperator {
+  return {
+    v: PUBLIC_VERSION,
+    kind: PUBLIC_KIND,
+    id: key.id,
+    publicKey: { kty: "OKP", crv: "Ed25519", x: key.publicKey.x },
+  };
+}
+
+/** A public document as text, the way it is printed and read back. */
+export function formatPublicOperator(pub: PublicOperator): string {
+  return JSON.stringify(pub, null, 2);
+}
+
+/**
+ * Reads a public operator document out of `text`. `source` names it in a
+ * failure.
+ *
+ * A document carrying a PRIVATE half is refused rather than narrowed. It would
+ * be trivial to take the public fields out of it and carry on, and that is
+ * exactly the wrong thing to do: somebody has just sent their private key to
+ * somebody else, and the only useful thing this can do about it is say so, out
+ * loud, before it is enrolled and forgotten about.
+ *
+ * Throws `ScafoError("invalid-input")` for anything that is not one.
+ */
+export function readPublicOperator(text: string, source: string): PublicOperator {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw notAPublicOperator(source, "it does not hold valid JSON", error);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw notAPublicOperator(source, "it does not hold a JSON object");
+  }
+
+  const document = parsed as Record<string, unknown>;
+  if (document.privateKey !== undefined) {
+    throw new ScafoError("invalid-input", "That is a PRIVATE operator key", {
+      detail:
+        `"${source}" carries a private half, so it is somebody's whole key file rather than ` +
+        `the public document "scafo operator show" prints. Nothing needs a private key to ` +
+        `enrol one — ask for the output of "scafo operator show" instead, and treat the key ` +
+        `that was sent here as compromised`,
+    });
+  }
+  if (document.kind !== PUBLIC_KIND) {
+    throw notAPublicOperator(source, `its "kind" is not "${PUBLIC_KIND}"`);
+  }
+  if (document.v !== PUBLIC_VERSION) {
+    throw notAPublicOperator(
+      source,
+      `it is version ${JSON.stringify(document.v)} and this scafo writes version ` +
+        `${String(PUBLIC_VERSION)}`,
+    );
+  }
+  if (typeof document.id !== "string" || document.id === "") {
+    throw notAPublicOperator(source, `it carries no "id"`);
+  }
+
+  const key = document.publicKey as { kty?: unknown; crv?: unknown; x?: unknown } | null;
+  if (typeof key !== "object" || key === null || key.kty !== "OKP" || key.crv !== "Ed25519") {
+    throw notAPublicOperator(source, `its "publicKey" is not an Ed25519 JWK`);
+  }
+  if (typeof key.x !== "string" || key.x === "") {
+    throw notAPublicOperator(source, `its "publicKey" carries no "x"`);
+  }
+
+  return {
+    v: PUBLIC_VERSION,
+    kind: PUBLIC_KIND,
+    id: document.id,
+    publicKey: { kty: "OKP", crv: "Ed25519", x: key.x },
+  };
+}
+
+/**
+ * Reads a public operator document from one of the three forms an enrollment
+ * accepts: a path to a file, an inline `base64:` value, or the document itself
+ * written out on the command line.
+ *
+ * THE VALUE'S OWN SHAPE DECIDES, and nothing sniffs the filesystem: the
+ * {@link INLINE_PREFIX} is decoded, a value that opens with `{` is the document,
+ * and anything else is a path — so a mistyped filename fails as a filename.
+ */
+export async function loadPublicOperator(spec: string): Promise<PublicOperator> {
+  const value = spec.trim();
+
+  if (value.startsWith(INLINE_PREFIX)) {
+    let decoded: string;
+    try {
+      decoded = new TextDecoder().decode(fromBase64(value.slice(INLINE_PREFIX.length)));
+    } catch (error) {
+      throw notAPublicOperator(INLINE_PREFIX, `the value after it is not base64`, error);
+    }
+    return readPublicOperator(decoded, INLINE_PREFIX);
+  }
+  if (value.startsWith("{"))
+    return readPublicOperator(value, "the value given on the command line");
+
+  let text: string;
+  try {
+    text = await readFile(value, "utf8");
+  } catch (error) {
+    throw notAPublicOperator(
+      value,
+      `it could not be opened, and it is neither an inline "${INLINE_PREFIX}" value nor a ` +
+        `document written out on the command line`,
+      error,
+    );
+  }
+  return readPublicOperator(text, value);
+}
+
+/**
  * Records the public half in the registry, which is what makes a node accept the
  * tokens this key signs.
  *
  * STRAIGHT TO THE BUCKET, which is what it is for: this is how an installation
  * is bootstrapped, before there is an agent whose trust could be asked for, and
  * how one whose operator keys have all been lost is recovered. An operator who
- * already holds a working key changes it through a node instead — `scafo fleet
- * rotate` — and needs no bucket credential at all.
+ * already holds a working key changes it through a node instead — `scafo
+ * operator rotate` — and needs no bucket credential at all.
  *
  * `role` is what `--role` carries. The tier it actually lands at is
  * {@link bootstrapRole}'s to decide, because this is the one path a key can
@@ -203,7 +354,7 @@ export function formatPortable(portable: PortableOperator): string {
  */
 export async function registerOperatorKey(
   registry: RegistryContext,
-  key: OperatorKeyFile,
+  key: PublicHalf,
   opts: { role?: OperatorRole } = {},
 ): Promise<OperatorRole> {
   const role = await bootstrapRole(registry, opts.role);
@@ -257,11 +408,18 @@ function assertEd25519(
   }
 }
 
+function notAPublicOperator(source: string, why: string, cause?: unknown): ScafoError {
+  return new ScafoError("invalid-input", "Operator public document is unusable", {
+    detail: `"${source}" is not a public operator document as "scafo operator show" prints one: ${why}`,
+    ...(cause === undefined ? {} : { cause }),
+  });
+}
+
 function notAnOperatorFile(source: string, why: string, cause?: unknown): ScafoError {
   return new ScafoError("invalid-input", "Operator key file is unusable", {
     detail:
-      `"${source}" is neither a key file written by "scafo keygen" nor a portable file ` +
-      `written by "scafo fleet export": ${why}`,
+      `"${source}" is neither a key file written by "scafo operator keygen" nor a portable file ` +
+      `written by "scafo remote export": ${why}`,
     ...(cause === undefined ? {} : { cause }),
   });
 }

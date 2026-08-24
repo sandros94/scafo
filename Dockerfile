@@ -120,4 +120,4 @@ EXPOSE 7400
 STOPSIGNAL SIGTERM
 
 ENTRYPOINT ["node", "/app/dist/cli/index.mjs"]
-CMD ["up"]
+CMD ["sail"]

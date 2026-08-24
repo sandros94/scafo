@@ -37,7 +37,7 @@ import { GenericContainer, type StartedTestContainer, Wait } from "testcontainer
 import { S3Client } from "uns3";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AgentState } from "../../src/agent/app.ts";
-import type { OperatorKeyFile } from "../../src/cli/commands/keygen.ts";
+import type { OperatorKeyFile } from "../../src/cli/_operator-key.ts";
 import { signNodeToken } from "../../src/core/auth/node-token.ts";
 import {
   claimDomain,
@@ -246,7 +246,9 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
     const dir = await mkdtemp(join(tmpdir(), "scafo-e2e-multi-key-"));
     tmpDirs.push(dir);
     keyPath = join(dir, "operator.json");
-    expectCleanExit(await runCli(["keygen", "--out", keyPath, "--register"], storeEnv()));
+    expectCleanExit(
+      await runCli(["operator", "keygen", "--out", keyPath, "--register"], storeEnv()),
+    );
     operatorKey = JSON.parse(await readFile(keyPath, "utf8")) as OperatorKeyFile;
   }, SETUP_TIMEOUT_MS);
 
@@ -1090,7 +1092,13 @@ async function startNode(id: string, labels?: string): Promise<Node> {
       ESBUILD_BINARY_PATH: "/usr/local/bin/esbuild",
       ...(labels === undefined ? {} : { SCAFO_NODE_LABELS: labels }),
     })
-    .withCommand(["node", "dist/cli/index.mjs", "up", "--listen", `0.0.0.0:${String(AGENT_PORT)}`])
+    .withCommand([
+      "node",
+      "dist/cli/index.mjs",
+      "sail",
+      "--listen",
+      `0.0.0.0:${String(AGENT_PORT)}`,
+    ])
     .withLogConsumer((stream: Readable) => {
       stream.on("data", (chunk) => log.push(String(chunk)));
       stream.on("err", (chunk) => log.push(String(chunk)));

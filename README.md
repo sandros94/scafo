@@ -25,7 +25,7 @@ Then mint an operator key and deploy something. The key lands in
 export SCAFO_S3_ENDPOINT=http://127.0.0.1:8333 SCAFO_S3_BUCKET=scafo \
        SCAFO_S3_ACCESS_KEY=scafo SCAFO_S3_SECRET_KEY=scafo-secret
 
-node dist/cli/index.mjs keygen --register
+node dist/cli/index.mjs operator keygen --register
 node dist/cli/index.mjs deploy ./my-app --agent http://127.0.0.1:7400 \
   --project shop --env production --flip
 
@@ -107,7 +107,7 @@ those names for you — send the `Host` header, or add them to `/etc/hosts`.
   `.sha256` beside each. celld, an ingress and wireguard-tools stay separate
   prerequisites; the binary carries none of them.
 - **The node image:** `docker build -t scafo .` — the agent, celld and esbuild in
-  one image. `ENTRYPOINT` is the CLI, so `docker run scafo up --listen 0.0.0.0:7400`
+  one image. `ENTRYPOINT` is the CLI, so `docker run scafo sail --listen 0.0.0.0:7400`
   is the whole invocation. **Give it a stop grace of at least 35 seconds**
   (`stop_grace_period: 35s`, `terminationGracePeriodSeconds: 35`): a node drains
   its in-flight requests on the way out, and a shorter grace kills it mid-drain.

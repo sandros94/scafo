@@ -1,6 +1,6 @@
 /*
- * `scafo fleet add|list|remove|export`: what registering a fleet writes, what
- * unregistering one takes away, and the portable file that carries one fleet to
+ * `scafo remote add|list|remove|export`: what registering a remote writes, what
+ * unregistering one takes away, and the portable file that carries one remote to
  * a machine that has never seen this installation.
  *
  * Every case runs against a temporary home of its own, so nothing here touches
@@ -12,13 +12,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
-  addFleet,
-  exportFleet,
-  formatFleetList,
-  readFleets,
-  removeFleet,
+  addRemote,
+  exportRemote,
+  formatRemoteList,
+  readRemotes,
+  removeRemote,
   STDOUT_KEY_WARNING,
-} from "../src/cli/_fleets.ts";
+} from "../src/cli/_remotes.ts";
 import { homeKeyPath } from "../src/cli/_home.ts";
 import {
   generateOperatorKey,
@@ -43,15 +43,15 @@ afterAll(async () => {
   await Promise.all(homes.map((path) => rm(path, { recursive: true, force: true })));
 });
 
-describe("registering a fleet", () => {
-  it("mints a key named after the fleet and files both", async () => {
+describe("registering a remote", () => {
+  it("mints a key named after the remote and files both", async () => {
     const home = await scratch();
 
-    const added = await addFleet(home, { name: "prod", endpoints: [ENDPOINT] });
+    const added = await addRemote(home, { name: "prod", endpoints: [ENDPOINT] });
 
     expect(added.minted).toBe(true);
     expect(added.key.id).toMatch(/^op-[0-9a-f]{8}$/);
-    const entry = (await readFleets(home)).fleets.prod;
+    const entry = (await readRemotes(home)).remotes.prod;
     expect(entry?.endpoints).toEqual([ENDPOINT]);
     expect(entry?.key).toEqual({ kind: "file", path: `keys/prod.json` });
     /* Filed by a path RELATIVE to the home, so a home that is copied or moved
@@ -60,11 +60,11 @@ describe("registering a fleet", () => {
     expect(stored.id).toBe(added.key.id);
   });
 
-  it("reuses a named key, so one key can serve several fleets", async () => {
+  it("reuses a named key, so one key can serve several remotes", async () => {
     const home = await scratch();
-    const first = await addFleet(home, { name: "prod", endpoints: [ENDPOINT] });
+    const first = await addRemote(home, { name: "prod", endpoints: [ENDPOINT] });
 
-    const second = await addFleet(home, {
+    const second = await addRemote(home, {
       name: "staging",
       endpoints: [OTHER_ENDPOINT],
       keyName: "prod",
@@ -72,7 +72,7 @@ describe("registering a fleet", () => {
 
     expect(second.minted).toBe(false);
     expect(second.key.id).toBe(first.key.id);
-    expect((await readFleets(home)).fleets.staging?.key).toEqual({
+    expect((await readRemotes(home)).remotes.staging?.key).toEqual({
       kind: "file",
       path: `keys/prod.json`,
     });
@@ -82,41 +82,41 @@ describe("registering a fleet", () => {
     const home = await scratch();
 
     const error = await rejectsWith(
-      () => addFleet(home, { name: "prod", endpoints: [ENDPOINT], keyName: "ghost" }),
+      () => addRemote(home, { name: "prod", endpoints: [ENDPOINT], keyName: "ghost" }),
       "not-found",
     );
 
     expect(error.detail).toContain("ghost");
   });
 
-  it("refuses to overwrite a fleet that is already registered", async () => {
+  it("refuses to overwrite a remote that is already registered", async () => {
     const home = await scratch();
-    await addFleet(home, { name: "prod", endpoints: [ENDPOINT] });
+    await addRemote(home, { name: "prod", endpoints: [ENDPOINT] });
 
     const error = await rejectsWith(
-      () => addFleet(home, { name: "prod", endpoints: [OTHER_ENDPOINT] }),
+      () => addRemote(home, { name: "prod", endpoints: [OTHER_ENDPOINT] }),
       "invalid-input",
     );
 
     /* Overwriting silently would strand the key the old entry pointed at and
        send every later command somewhere else. */
-    expect(error.detail).toContain("scafo fleet remove");
+    expect(error.detail).toContain("scafo remote remove");
   });
 
   it("refuses a name that could not be a file in the home", async () => {
     const home = await scratch();
 
     await rejectsWith(
-      () => addFleet(home, { name: "../../etc/passwd", endpoints: [ENDPOINT] }),
+      () => addRemote(home, { name: "../../etc/passwd", endpoints: [ENDPOINT] }),
       "invalid-slug",
     );
   });
 
-  it("refuses a fleet with no endpoint, which nothing could reach", async () => {
+  it("refuses a remote with no endpoint, which nothing could reach", async () => {
     const home = await scratch();
 
     const error = await rejectsWith(
-      () => addFleet(home, { name: "prod", endpoints: [] }),
+      () => addRemote(home, { name: "prod", endpoints: [] }),
       "invalid-input",
     );
 
@@ -124,43 +124,43 @@ describe("registering a fleet", () => {
   });
 });
 
-describe("importing a fleet from a portable file", () => {
+describe("importing a remote from a portable file", () => {
   it("takes one in from a path", async () => {
     const home = await scratch();
     const path = join(home, "portable.json");
     await writeFile(path, `${JSON.stringify(await portable("prod"))}\n`, "utf8");
 
-    const added = await addFleet(home, { from: path });
+    const added = await addRemote(home, { from: path });
 
     expect(added.name).toBe("prod");
     expect(added.minted).toBe(false);
-    expect((await readFleets(home)).fleets.prod?.endpoints).toEqual([ENDPOINT]);
+    expect((await readRemotes(home)).remotes.prod?.endpoints).toEqual([ENDPOINT]);
   });
 
   it("takes one in from an inline base64: value", async () => {
     const home = await scratch();
     const file = await portable("prod");
 
-    const added = await addFleet(home, { from: inline(file) });
+    const added = await addRemote(home, { from: inline(file) });
 
     expect(added.key.id).toBe(file.key.id);
-    expect((await readFleets(home)).fleets.prod?.endpoints).toEqual([ENDPOINT]);
+    expect((await readRemotes(home)).remotes.prod?.endpoints).toEqual([ENDPOINT]);
   });
 
-  it("lets the command name the fleet something else", async () => {
+  it("lets the command name the remote something else", async () => {
     const home = await scratch();
 
-    const added = await addFleet(home, { name: "eu", from: inline(await portable("prod")) });
+    const added = await addRemote(home, { name: "eu", from: inline(await portable("prod")) });
 
     expect(added.name).toBe("eu");
-    expect(Object.keys((await readFleets(home)).fleets)).toEqual(["eu"]);
+    expect(Object.keys((await readRemotes(home)).remotes)).toEqual(["eu"]);
   });
 
-  it("refuses a portable file that names no fleet when the command names none either", async () => {
+  it("refuses a portable file that names no remote when the command names none either", async () => {
     const home = await scratch();
 
     const error = await rejectsWith(
-      async () => addFleet(home, { from: inline(await portable(undefined)) }),
+      async () => addRemote(home, { from: inline(await portable(undefined)) }),
       "invalid-input",
     );
 
@@ -171,7 +171,7 @@ describe("importing a fleet from a portable file", () => {
     const home = await scratch();
 
     const error = await rejectsWith(
-      () => addFleet(home, { name: "prod", from: `${INLINE_PREFIX}!!!not-base64!!!` }),
+      () => addRemote(home, { name: "prod", from: `${INLINE_PREFIX}!!!not-base64!!!` }),
       "invalid-input",
     );
 
@@ -184,7 +184,7 @@ describe("importing a fleet from a portable file", () => {
     /* THE PREFIX DECIDES. A path that is not there is a path failure, and never
        a value quietly decoded instead. */
     const error = await rejectsWith(
-      () => addFleet(home, { name: "prod", from: "eyJ2IjoxfQ==" }),
+      () => addRemote(home, { name: "prod", from: "eyJ2IjoxfQ==" }),
       "invalid-input",
     );
 
@@ -193,13 +193,13 @@ describe("importing a fleet from a portable file", () => {
   });
 });
 
-describe("listing the fleets a home holds", () => {
-  it("names each fleet, where it is reached and the key that speaks for it", async () => {
+describe("listing the remotes a home holds", () => {
+  it("names each remote, where it is reached and the key that speaks for it", async () => {
     const home = await scratch();
-    await addFleet(home, { name: "prod", endpoints: [ENDPOINT] });
-    await addFleet(home, { name: "staging", endpoints: [OTHER_ENDPOINT], keyName: "prod" });
+    await addRemote(home, { name: "prod", endpoints: [ENDPOINT] });
+    await addRemote(home, { name: "staging", endpoints: [OTHER_ENDPOINT], keyName: "prod" });
 
-    const printed = formatFleetList(await readFleets(home));
+    const printed = formatRemoteList(await readRemotes(home));
 
     expect(printed).toContain("prod");
     expect(printed).toContain(ENDPOINT);
@@ -209,76 +209,76 @@ describe("listing the fleets a home holds", () => {
   });
 
   it("says plainly when there is nothing registered", async () => {
-    expect(formatFleetList(await readFleets(await scratch()))).toContain("scafo fleet add");
+    expect(formatRemoteList(await readRemotes(await scratch()))).toContain("scafo remote add");
   });
 });
 
-describe("unregistering a fleet", () => {
+describe("unregistering a remote", () => {
   it("takes the entry and the key nothing else references", async () => {
     const home = await scratch();
-    await addFleet(home, { name: "prod", endpoints: [ENDPOINT] });
+    await addRemote(home, { name: "prod", endpoints: [ENDPOINT] });
 
-    const removed = await removeFleet(home, "prod");
+    const removed = await removeRemote(home, "prod");
 
     expect(removed.keyRemoved).toBe(true);
-    expect(Object.keys((await readFleets(home)).fleets)).toEqual([]);
+    expect(Object.keys((await readRemotes(home)).remotes)).toEqual([]);
     await expect(stat(homeKeyPath(home, "prod"))).rejects.toThrow(/ENOENT/);
   });
 
-  it("keeps a key another fleet still speaks with, and says which", async () => {
+  it("keeps a key another remote still speaks with, and says which", async () => {
     const home = await scratch();
-    await addFleet(home, { name: "prod", endpoints: [ENDPOINT] });
-    await addFleet(home, { name: "staging", endpoints: [OTHER_ENDPOINT], keyName: "prod" });
+    await addRemote(home, { name: "prod", endpoints: [ENDPOINT] });
+    await addRemote(home, { name: "staging", endpoints: [OTHER_ENDPOINT], keyName: "prod" });
 
-    const removed = await removeFleet(home, "prod");
+    const removed = await removeRemote(home, "prod");
 
     expect(removed.keyRemoved).toBe(false);
     expect(removed.sharedWith).toEqual(["staging"]);
-    /* The key outlives the fleet it was named after: "staging" still signs with
-       it, and deleting it would take that fleet down with this one. */
+    /* The key outlives the remote it was named after: "staging" still signs with
+       it, and deleting it would take that remote down with this one. */
     expect((await stat(homeKeyPath(home, "prod"))).isFile()).toBe(true);
   });
 
-  it("reports a fleet that is not registered rather than doing nothing quietly", async () => {
+  it("reports a remote that is not registered rather than doing nothing quietly", async () => {
     const home = await scratch();
 
-    await rejectsWith(() => removeFleet(home, "ghost"), "not-found");
+    await rejectsWith(() => removeRemote(home, "ghost"), "not-found");
   });
 });
 
-describe("exporting a fleet", () => {
+describe("exporting a remote", () => {
   it("prints the whole portable file on stdout", async () => {
     const home = await scratch();
-    const added = await addFleet(home, { name: "prod", endpoints: [ENDPOINT] });
+    const added = await addRemote(home, { name: "prod", endpoints: [ENDPOINT] });
     const lines: string[] = [];
 
-    await exportFleet(home, "prod", { write: (line) => lines.push(line) });
+    await exportRemote(home, "prod", { write: (line) => lines.push(line) });
 
     const printed = JSON.parse(lines.join("\n")) as PortableOperator;
-    expect(printed).toMatchObject({ v: PORTABLE_VERSION, kind: PORTABLE_KIND, fleet: "prod" });
+    expect(printed).toMatchObject({ v: PORTABLE_VERSION, kind: PORTABLE_KIND, remote: "prod" });
     expect(printed.endpoints).toEqual([ENDPOINT]);
     expect(printed.key.privateKey.d).toBe(added.key.privateKey.d);
   });
 
   it("says nothing on stdout when it is asked for a file, and writes it 0600", async () => {
     const home = await scratch();
-    await addFleet(home, { name: "prod", endpoints: [ENDPOINT] });
+    await addRemote(home, { name: "prod", endpoints: [ENDPOINT] });
     const out = join(home, "prod.operator.json");
     const lines: string[] = [];
 
-    await exportFleet(home, "prod", { out, write: (line) => lines.push(line) });
+    await exportRemote(home, "prod", { out, write: (line) => lines.push(line) });
 
     expect((await stat(out)).mode & 0o777).toBe(0o600);
-    expect(JSON.parse(await readFile(out, "utf8"))).toMatchObject({ fleet: "prod" });
+    expect(JSON.parse(await readFile(out, "utf8"))).toMatchObject({ remote: "prod" });
     expect(lines.join("\n")).not.toContain("privateKey");
   });
 
   it("warns before it puts a private key on a terminal", async () => {
     const home = await scratch();
-    await addFleet(home, { name: "prod", endpoints: [ENDPOINT] });
+    await addRemote(home, { name: "prod", endpoints: [ENDPOINT] });
     const warnings: string[] = [];
 
-    await exportFleet(home, "prod", {
+    await exportRemote(home, "prod", {
       isTTY: true,
       write: () => {},
       warn: (l) => warnings.push(l),
@@ -289,10 +289,10 @@ describe("exporting a fleet", () => {
 
   it("says nothing extra when it is piped somewhere", async () => {
     const home = await scratch();
-    await addFleet(home, { name: "prod", endpoints: [ENDPOINT] });
+    await addRemote(home, { name: "prod", endpoints: [ENDPOINT] });
     const warnings: string[] = [];
 
-    await exportFleet(home, "prod", {
+    await exportRemote(home, "prod", {
       isTTY: false,
       write: () => {},
       warn: (l) => warnings.push(l),
@@ -301,32 +301,32 @@ describe("exporting a fleet", () => {
     expect(warnings).toEqual([]);
   });
 
-  it("reports a fleet that is not registered", async () => {
+  it("reports a remote that is not registered", async () => {
     const home = await scratch();
 
-    await rejectsWith(() => exportFleet(home, "ghost", { write: () => {} }), "not-found");
+    await rejectsWith(() => exportRemote(home, "ghost", { write: () => {} }), "not-found");
   });
 });
 
 /* ------------------------------------------------------------------ helpers */
 
 async function scratch(): Promise<string> {
-  const home = await mkdtemp(join(tmpdir(), "scafo-fleet-"));
+  const home = await mkdtemp(join(tmpdir(), "scafo-remote-"));
   homes.push(home);
   return home;
 }
 
-/** A portable file built the only way one is ever built: by exporting a fleet. */
-async function portable(fleet: string | undefined): Promise<PortableOperator> {
+/** A portable file built the only way one is ever built: by exporting a remote. */
+async function portable(remote: string | undefined): Promise<PortableOperator> {
   const home = await scratch();
-  await addFleet(home, { name: "prod", endpoints: [ENDPOINT] });
+  await addRemote(home, { name: "prod", endpoints: [ENDPOINT] });
 
   const lines: string[] = [];
-  await exportFleet(home, "prod", { write: (line) => lines.push(line) });
+  await exportRemote(home, "prod", { write: (line) => lines.push(line) });
   const file = JSON.parse(lines.join("\n")) as PortableOperator;
 
-  if (fleet !== undefined) return { ...file, fleet };
-  const { fleet: _dropped, ...rest } = file;
+  if (remote !== undefined) return { ...file, remote };
+  const { remote: _dropped, ...rest } = file;
   return rest;
 }
 
@@ -336,17 +336,17 @@ function inline(file: PortableOperator): string {
 
 describe("the endpoints one --endpoint value may carry", () => {
   it("splits a comma-separated value into every endpoint it names", async () => {
-    const { urls } = await import("../src/cli/commands/fleet.ts");
+    const { urls } = await import("../src/cli/commands/remote.ts");
     expect(urls("http://a:7400,http://b:7400")).toEqual(["http://a:7400", "http://b:7400"]);
   });
 
   it("trims around the commas and drops empty entries", async () => {
-    const { urls } = await import("../src/cli/commands/fleet.ts");
+    const { urls } = await import("../src/cli/commands/remote.ts");
     expect(urls(" http://a:7400 , ,http://b:7400,")).toEqual(["http://a:7400", "http://b:7400"]);
   });
 
   it("keeps a single plain value as the one-entry list it is", async () => {
-    const { urls } = await import("../src/cli/commands/fleet.ts");
+    const { urls } = await import("../src/cli/commands/remote.ts");
     expect(urls("http://a:7400")).toEqual(["http://a:7400"]);
   });
 });
@@ -390,12 +390,14 @@ describe("the tier a bucket-side registration files a key at", () => {
   });
 
   it("is asked for by --role on both commands that register a key", async () => {
-    const { fleet } = await import("../src/cli/commands/fleet.ts");
-    const { keygen } = await import("../src/cli/commands/keygen.ts");
+    const { remote } = await import("../src/cli/commands/remote.ts");
+    const { operator } = await import("../src/cli/commands/operator.ts");
 
+    const keygen = (operator.subCommands as Record<string, { args?: Record<string, unknown> }>)
+      .keygen;
     expect(keygen.args).toHaveProperty("role");
-    expect(fleet.subCommands).toBeDefined();
-    const add = (fleet.subCommands as Record<string, { args?: Record<string, unknown> }>).add;
+    expect(remote.subCommands).toBeDefined();
+    const add = (remote.subCommands as Record<string, { args?: Record<string, unknown> }>).add;
     expect(add.args).toHaveProperty("role");
   });
 });

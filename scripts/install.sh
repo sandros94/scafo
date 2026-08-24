@@ -766,7 +766,7 @@ Environment=SCAFO_STATE_DIR=${STATE_DIR}
 # what happens to be on PATH.
 Environment=ESBUILD_BINARY_PATH=${BIN_DIR}/esbuild
 Environment=SCAFO_CELLD_BIN=${BIN_DIR}/celld
-ExecStart=${BIN_DIR}/scafo up
+ExecStart=${BIN_DIR}/scafo sail
 Restart=on-failure
 RestartSec=5s
 
@@ -973,7 +973,7 @@ explain_manual_setup() {
   say "  SCAFO_S3_ENDPOINT=... SCAFO_S3_BUCKET=... SCAFO_S3_ACCESS_KEY=... \\"
   say "  SCAFO_S3_SECRET_KEY=... SCAFO_PLATFORM_DOMAINS=... \\"
   say "  SCAFO_CADDY_ADMIN=http://127.0.0.1:2019 \\"
-  say "    ${BIN_DIR}/scafo up --listen 127.0.0.1:7400"
+  say "    ${BIN_DIR}/scafo sail --listen 127.0.0.1:7400"
   say ''
   say "  ${BIN_DIR}/caddy run --config ./caddy.json"
   say ''
@@ -1039,7 +1039,7 @@ next_steps() {
     printf '     systemctl status scafo-node.service %s.service\n\n' "$CADDY_USER"
     printf '3. Mint an operator key. It signs everything you ask a node to do, and\n'
     printf '   it reads the SAME bucket settings — export them into your shell first:\n\n'
-    printf '     scafo keygen --register\n\n'
+    printf '     scafo operator keygen --register\n\n'
     printf '   The key lands in ./scafo-operator.json, which is where "scafo deploy"\n'
     printf '   looks for it. Back it up: nothing can reissue it.\n\n'
     printf '4. Deploy something:\n\n'
@@ -1048,7 +1048,7 @@ next_steps() {
   else
     printf '1. Run the node and the ingress as described above.\n'
     printf '2. Mint an operator key with the same bucket settings exported:\n\n'
-    printf '     scafo keygen --register\n\n'
+    printf '     scafo operator keygen --register\n\n'
     printf '3. Deploy something:\n\n'
     printf '     scafo deploy ./my-app --agent http://127.0.0.1:7400 \\\n'
     printf '       --project shop --env production --flip\n\n'

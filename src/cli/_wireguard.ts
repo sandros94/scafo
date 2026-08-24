@@ -125,7 +125,7 @@ export function resolveWireguardSettings(
  * The keypair as it stands on disk, or null when this node has none yet.
  *
  * Reads only. Nothing here starts a process or writes a file, because this is
- * what `scafo up` calls: a node coming back up must not quietly mint an identity
+ * what `scafo sail` calls: a node coming back up must not quietly mint an identity
  * its peers have never been told about.
  *
  * Throws `ScafoError("invalid-input")` when a key file exists but does not hold

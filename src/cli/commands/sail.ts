@@ -1,4 +1,11 @@
-/* `scafo up`: register this machine as a node and serve the agent API. */
+/*
+ * `scafo sail`: register this machine as a node of the fleet and serve the agent
+ * API.
+ *
+ * The machine sets sail — it joins the fleet and starts carrying work. Every
+ * other command here acts on an installation from outside it; this is the one
+ * that makes the machine it runs on part of one.
+ */
 
 import { join } from "node:path";
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
@@ -42,10 +49,10 @@ import {
   registerThisNode,
 } from "../_bootstrap.ts";
 import { STORAGE_TOKEN_FILE, storageTokenNotice } from "../_storage-token.ts";
-import { readPackageVersion, readTextFile, reportFailure } from "../_utils.ts";
+import { deprecatedAlias, readPackageVersion, readTextFile, reportFailure } from "../_utils.ts";
 
 /* Flag names are kebab-case, matching the keys `loadAgentConfig` reads them under. */
-const upArgs: ArgsDef = {
+const sailArgs: ArgsDef = {
   "config": { type: "string", description: "Path to scafo.config.jsonc" },
   "endpoint": { type: "string", description: "S3-compatible endpoint URL" },
   "region": { type: "string", description: "Signing region of the bucket" },
@@ -133,9 +140,9 @@ const upArgs: ArgsDef = {
   },
 };
 
-export const up: CommandDef = defineCommand({
-  meta: { name: "up", description: "Start the node agent" },
-  args: upArgs,
+export const sail: CommandDef = defineCommand({
+  meta: { name: "sail", description: "Join this machine to the fleet and serve the node agent" },
+  args: sailArgs,
   async run({ args }): Promise<void> {
     try {
       await runAgent(args as Record<string, unknown>);
@@ -143,6 +150,13 @@ export const up: CommandDef = defineCommand({
       reportFailure(error);
     }
   },
+});
+
+/** What `scafo sail` was called before the rename. Removed at launch. */
+export const up: CommandDef = deprecatedAlias({
+  name: "up",
+  replacedBy: "scafo sail",
+  command: sail,
 });
 
 async function runAgent(flags: Record<string, unknown>): Promise<void> {
