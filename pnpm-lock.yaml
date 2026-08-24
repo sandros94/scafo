@@ -213,6 +213,9 @@ importers:
       confbox:
         specifier: ^0.2.4
         version: 0.2.4
+      consola:
+        specifier: ^3.4.2
+        version: 3.4.2
       esbuild:
         specifier: ^0.28.2
         version: 0.28.2

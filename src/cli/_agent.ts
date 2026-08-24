@@ -7,32 +7,22 @@
  * sees.
  */
 
-import { readFile } from "node:fs/promises";
 import { signNodeToken } from "../core/auth/node-token.ts";
 import { fromProblem, type ProblemDetails, ScafoError } from "../core/error.ts";
-import type { OperatorKeyFile } from "./commands/keygen.ts";
+import type { OperatorKeyFile } from "./_operator-key.ts";
 
 /** Mints one bearer token per request; a spent one is refused as a replay. */
 export type Authorize = () => Promise<string>;
 
 /**
- * Signs one token per request from an operator key file.
+ * Signs one token per request with an operator key.
  *
  * A fresh token every time is not caution but necessity: a node spends the `jti`
  * of each token it accepts, so the second request to present the same one is
  * refused as a replay.
  */
-export async function operatorSigner(path: string): Promise<Authorize> {
-  let file: OperatorKeyFile;
-  try {
-    file = JSON.parse(await readFile(path, "utf8")) as OperatorKeyFile;
-  } catch (error) {
-    throw new ScafoError("invalid-input", "Operator key could not be read", {
-      detail: `"${path}" is not a key file written by "scafo keygen"`,
-      cause: error,
-    });
-  }
-  return () => signNodeToken(file.privateKey, file.id);
+export function operatorSigner(key: OperatorKeyFile): Authorize {
+  return () => signNodeToken(key.privateKey, key.id);
 }
 
 /** A {@link RequestInit}, plus the seam that decides who actually makes the call. */

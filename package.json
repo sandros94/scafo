@@ -103,6 +103,7 @@
   "dependencies": {
     "citty": "^0.2.2",
     "confbox": "^0.2.4",
+    "consola": "^3.4.2",
     "esbuild": "^0.28.2",
     "h3": "2.0.1-rc.26",
     "tar": "^7.5.22",

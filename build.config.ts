@@ -25,7 +25,17 @@ export default defineBuildConfig({
       ],
       rolldown: {
         platform: "neutral",
-        external: ["uns3", "unjwt", /^unjwt\//, "h3", "confbox", "citty", "tar", /^node:/],
+        external: [
+          "uns3",
+          "unjwt",
+          /^unjwt\//,
+          "h3",
+          "confbox",
+          "citty",
+          "consola",
+          "tar",
+          /^node:/,
+        ],
       },
     },
   ],

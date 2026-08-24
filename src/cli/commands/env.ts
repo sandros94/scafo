@@ -29,8 +29,9 @@ import {
   readSelectorFlags,
   readSplitFlags,
 } from "../_environments.ts";
+import { resolveOperatorHome } from "../_home.ts";
+import { OPERATOR_KEY_FORMS, operatorFlags, resolveOperator } from "../_operator.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
-import { DEFAULT_KEY_PATH } from "./keygen.ts";
 
 /* The bucket the registry lives in, exactly as `scafo up` takes it. Only read
    when no --agent is given: with one, the node holds the bucket credentials and
@@ -51,9 +52,12 @@ const targetArgs: ArgsDef = {
   env: { type: "string", description: "Environment to act on", required: true },
   agent: {
     type: "string",
-    description: "Base URL of a node agent to ask; without it the bucket is written directly",
+    description:
+      "Base URL of a node agent to ask; without it the chosen fleet says where, and " +
+      "without a fleet the bucket is written directly",
   },
-  key: { type: "string", description: `Operator key file to sign with (${DEFAULT_KEY_PATH})` },
+  fleet: { type: "string", description: "Fleet to act on, out of this operator's home" },
+  key: { type: "string", description: `Operator key to sign with: ${OPERATOR_KEY_FORMS}` },
 };
 
 const deleteArgs: ArgsDef = {
@@ -251,16 +255,23 @@ async function runDelete(flags: Record<string, unknown>): Promise<void> {
 }
 
 /**
- * Which way this invocation reaches the installation. `--agent` picks the node,
- * and everything else falls back to the bucket — which is what an installation
+ * Which way this invocation reaches the installation. A node is asked whenever
+ * one is named — by `--agent`, or by the fleet this operator's home resolved —
+ * and everything else falls back to the bucket, which is what an installation
  * with no node running has, and what `scafo trust` and `scafo varset` do too.
  */
 async function opsFor(flags: Record<string, unknown>): Promise<EnvironmentOps> {
-  const url = text(flags.agent);
-  if (url !== undefined) {
+  const resolved = await resolveOperator({
+    home: resolveOperatorHome(),
+    env: process.env,
+    flags: operatorFlags(flags),
+    readFile: readTextFile,
+  });
+
+  if (resolved.agentUrl !== undefined) {
     return agentOps({
-      url: agentBaseUrl(url),
-      authorize: await operatorSigner(text(flags.key) ?? DEFAULT_KEY_PATH),
+      url: agentBaseUrl(resolved.agentUrl),
+      authorize: operatorSigner(await resolved.readKey()),
     });
   }
 

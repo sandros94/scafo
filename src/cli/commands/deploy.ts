@@ -6,10 +6,11 @@ import { ScafoError } from "../../core/error.ts";
 import { parseReplicas } from "../../core/placement/replicas.ts";
 import { parseLabels } from "../../core/utils/labels.ts";
 import { packDirectory } from "../../drivers/archive/tar-zst.ts";
-import { DEFAULT_KEY_PATH } from "./keygen.ts";
 import { agentBaseUrl, agentRequest, type Authorize, operatorSigner } from "../_agent.ts";
 import { agentOps, describeSplitChange } from "../_environments.ts";
-import { reportFailure } from "../_utils.ts";
+import { resolveOperatorHome } from "../_home.ts";
+import { OPERATOR_KEY_FORMS, operatorFlags, resolveOperator } from "../_operator.ts";
+import { readTextFile, reportFailure } from "../_utils.ts";
 
 /** Time between two looks at a deploy's status. */
 export const DEFAULT_POLL_MS: number = 1000;
@@ -19,7 +20,11 @@ const SETTLED: string[] = ["routed", "deployed", "failed"];
 
 const deployArgs: ArgsDef = {
   "dir": { type: "positional", description: "Directory holding the built project" },
-  "agent": { type: "string", description: "Base URL of the node agent", required: true },
+  "agent": {
+    type: "string",
+    description: "Base URL of the node agent; without it the chosen fleet says where",
+  },
+  "fleet": { type: "string", description: "Fleet to deploy to, out of this operator's home" },
   "project": { type: "string", description: "Project slug to deploy into", required: true },
   "env": { type: "string", description: "Environment to deploy into (production)" },
   "script": { type: "string", description: "Name the runtime files the app under" },
@@ -41,7 +46,8 @@ const deployArgs: ArgsDef = {
     type: "string",
     description: "Labels a node must carry to serve this environment (region=eu-west-1,tier=fast)",
   },
-  "key": { type: "string", description: `Operator key file to sign with (${DEFAULT_KEY_PATH})` },
+  "key": { type: "string", description: `Operator key to sign with: ${OPERATOR_KEY_FORMS}` },
+  "config": { type: "string", description: "Path to scafo.config.jsonc, read for its fleet pin" },
   "token": {
     type: "string",
     /* A node token is spent by the first request that presents it, so one passed
@@ -64,13 +70,27 @@ export const deploy: CommandDef = defineCommand({
 
 async function runDeploy(flags: Record<string, unknown>): Promise<void> {
   const dir = text(flags.dir) ?? ".";
-  const agent = agentBaseUrl(text(flags.agent) as string);
   const project = text(flags.project) as string;
   const environment = text(flags.env) ?? "production";
   const fixed = text(flags.token);
-  const mint =
-    fixed === undefined ? await operatorSigner(text(flags.key) ?? DEFAULT_KEY_PATH) : null;
-  const authorize = async (): Promise<string> => fixed ?? (await (mint as Authorize)());
+
+  /*
+   * A token stands in for the whole operator identity — it is what a CI job
+   * holds INSTEAD of a key — so nothing is resolved for one beyond the address,
+   * which the flag has to carry because a workload has no operator home.
+   */
+  const resolved =
+    fixed === undefined
+      ? await resolveOperator({
+          home: resolveOperatorHome(),
+          env: process.env,
+          flags: operatorFlags(flags),
+          readFile: readTextFile,
+        })
+      : null;
+  const agent = agentBaseUrl(requiredAgent(text(flags.agent) ?? resolved?.agentUrl));
+  const signer = resolved === null ? null : operatorSigner(await resolved.readKey());
+  const authorize = async (): Promise<string> => fixed ?? (await (signer as Authorize)());
 
   /* Read before the directory is packed, so a malformed flag costs nothing. */
   const wantedReplicas = text(flags.replicas);
@@ -184,6 +204,17 @@ function readCanaryFlag(flags: Record<string, unknown>): number | undefined {
     });
   }
   return Number(stated);
+}
+
+/** Where the deploy is sent, which nothing here can guess at. */
+function requiredAgent(url: string | undefined): string {
+  if (url !== undefined) return url;
+
+  throw new ScafoError("invalid-input", "No node to deploy to", {
+    detail:
+      `pass --agent <url>, or register the fleet this belongs to with ` +
+      `"scafo fleet add <name> --endpoint <url>" so that it says where`,
+  });
 }
 
 function text(value: unknown): string | undefined {

@@ -1,32 +1,30 @@
-/* `scafo keygen`: mint the operator key that signs tokens to a node's API. */
+/*
+ * `scafo keygen`: mint the operator key that signs tokens to a node's API,
+ * as a FILE in the working directory.
+ *
+ * The guided path is `scafo fleet add`, which mints the same key into the
+ * operator's home and records where it is meant to be used, so that no later
+ * command has to be told either. This command stays for what it has always been
+ * good at: producing one key file, at a path of the caller's choosing, for
+ * something else to place — a secret store, a configuration manager, a machine
+ * that has no home to keep.
+ */
 
 import { chmod, writeFile } from "node:fs/promises";
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
-import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
-import { generateJWK } from "unjwt/jwk";
 import { loadAgentConfig } from "../../agent/config.ts";
 import { assertNodeId } from "../../core/registry/paths.ts";
-import { registerNode } from "../../core/registry/nodes.ts";
-import type { NodeRecord } from "../../core/types/registry.ts";
 import { createRegistry } from "../_bootstrap.ts";
+import {
+  generateOperatorKey,
+  type OperatorKeyFile,
+  registerOperatorKey,
+} from "../_operator-key.ts";
+import { DEFAULT_KEY_PATH } from "../_operator.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
 
-/** Where the key is written when the caller names no file. */
-export const DEFAULT_KEY_PATH: string = "scafo-operator.json";
-
-/**
- * The key file, as written and as `scafo deploy` reads it back.
- *
- * Both halves live in one file: the public half so `--register` can be re-run
- * from it, the private half because it is what signs. The file is created
- * readable by its owner alone and must never be committed or copied to a node.
- */
-export interface OperatorKeyFile {
-  /** Id the key is registered under, and the `kid` its tokens carry. */
-  id: string;
-  privateKey: JWK_OKP_Private<"EdDSA">;
-  publicKey: JWK_OKP_Public<"EdDSA">;
-}
+export type { OperatorKeyFile };
+export { DEFAULT_KEY_PATH };
 
 const keygenArgs: ArgsDef = {
   "out": { type: "string", description: `File to write the key pair to (${DEFAULT_KEY_PATH})` },
@@ -42,7 +40,12 @@ const keygenArgs: ArgsDef = {
 };
 
 export const keygen: CommandDef = defineCommand({
-  meta: { name: "keygen", description: "Generate an operator key for the agent API" },
+  meta: {
+    name: "keygen",
+    description:
+      `Write an operator key file for the agent API ` +
+      `(to set an operator up, use "scafo fleet add" instead)`,
+  },
   args: keygenArgs,
   async run({ args }): Promise<void> {
     try {
@@ -55,11 +58,10 @@ export const keygen: CommandDef = defineCommand({
 
 async function runKeygen(flags: Record<string, unknown>): Promise<void> {
   const out = text(flags.out) ?? DEFAULT_KEY_PATH;
-  const id = text(flags.id) ?? randomOperatorId();
-  assertNodeId(id);
+  const id = text(flags.id);
+  if (id !== undefined) assertNodeId(id);
 
-  const { privateKey, publicKey } = await generateJWK("EdDSA", { kid: id });
-  const file: OperatorKeyFile = { id, privateKey, publicKey };
+  const file = await generateOperatorKey(id);
 
   /* The mode is given at CREATION, because it only applies there: a key that
      briefly existed world-readable is a key that has to be assumed read. The
@@ -67,25 +69,19 @@ async function runKeygen(flags: Record<string, unknown>): Promise<void> {
      `writeFile` would otherwise leave at whatever mode it had. */
   await writeFile(out, `${JSON.stringify(file, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   await chmod(out, 0o600);
-  console.log(`scafo: wrote operator key "${id}" to ${out}`);
+  console.log(`scafo: wrote operator key "${file.id}" to ${out}`);
 
   if (flags.register !== true) {
-    console.log(`scafo: register it with "scafo keygen --id ${id} --register" once configured`);
+    console.log(
+      `scafo: register it with "scafo keygen --id ${file.id} --register" once configured`,
+    );
     return;
   }
 
   await register(flags, file);
-  console.log(`scafo: registered "${id}"; tokens it signs are now accepted by every node`);
+  console.log(`scafo: registered "${file.id}"; tokens it signs are now accepted by every node`);
 }
 
-/**
- * Records the public half in the registry.
- *
- * Operators reuse the node record: an agent verifies a bearer token against the
- * key filed under the token's `kid`, and does not care whether that id belongs
- * to a machine or a person. The address fields are a placeholder, because
- * nothing ever connects to an operator.
- */
 async function register(flags: Record<string, unknown>, file: OperatorKeyFile): Promise<void> {
   const config = await loadAgentConfig({
     configPath: text(flags.config),
@@ -93,22 +89,7 @@ async function register(flags: Record<string, unknown>, file: OperatorKeyFile): 
     env: process.env,
     readFile: readTextFile,
   });
-
-  const record: NodeRecord = {
-    v: 1,
-    id: file.id,
-    publicKey: { kty: "OKP", crv: "Ed25519", x: file.publicKey.x },
-    addresses: { internal: "operator", agentPort: 0 },
-  };
-  await registerNode(createRegistry(config), record);
-}
-
-function randomOperatorId(): string {
-  let hex = "";
-  for (const byte of crypto.getRandomValues(new Uint8Array(4))) {
-    hex += byte.toString(16).padStart(2, "0");
-  }
-  return `op-${hex}`;
+  await registerOperatorKey(createRegistry(config), file);
 }
 
 function text(value: unknown): string | undefined {
