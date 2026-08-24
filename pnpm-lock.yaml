@@ -224,13 +224,13 @@ importers:
         version: 7.5.22
       tavolato:
         specifier: https://pkg.pr.new/sandros94/tavolato@dba2283
-        version: https://pkg.pr.new/sandros94/tavolato@dba2283(uns3@0.0.7)
+        version: https://pkg.pr.new/sandros94/tavolato@dba2283(uns3@0.0.8)
       unjwt:
         specifier: ^0.7.3
         version: 0.7.3(h3@2.0.1-rc.26(crossws@0.4.10(srvx@0.12.5)))
       uns3:
-        specifier: ^0.0.7
-        version: 0.0.7
+        specifier: ^0.0.8
+        version: 0.0.8
     devDependencies:
       '@types/node':
         specifier: ^24
@@ -2258,8 +2258,8 @@ packages:
       rou3:
         optional: true
 
-  uns3@0.0.7:
-    resolution: {integrity: sha512-dpMEIdaaimFgvqd7JPP4y8U/1wChwl9WwjucSxHz7gpleJ4KRaulnqusPUIDf04LOhPgLyl7aznwJEaJc+6KDw==}
+  uns3@0.0.8:
+    resolution: {integrity: sha512-MMrWaNeRAVU+AdLnKtWllBhlJIBaLbKRLnAECrQsoK/Zug14/xaRsDAEqgRPJ4LuSXTFxd5sXUXslsEmV6vYUg==}
     engines: {node: ^22.12 || >=24}
 
   untyped@2.0.0:
@@ -3987,9 +3987,9 @@ snapshots:
       minizlib: 3.1.0
       yallist: 5.0.0
 
-  tavolato@https://pkg.pr.new/sandros94/tavolato@dba2283(uns3@0.0.7):
+  tavolato@https://pkg.pr.new/sandros94/tavolato@dba2283(uns3@0.0.8):
     optionalDependencies:
-      uns3: 0.0.7
+      uns3: 0.0.8
 
   teex@1.0.1:
     dependencies:
@@ -4079,7 +4079,7 @@ snapshots:
     optionalDependencies:
       h3: 2.0.1-rc.26(crossws@0.4.10(srvx@0.12.5))
 
-  uns3@0.0.7: {}
+  uns3@0.0.8: {}
 
   untyped@2.0.0:
     dependencies:
