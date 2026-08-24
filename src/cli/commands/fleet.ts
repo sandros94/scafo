@@ -35,7 +35,7 @@ const addArgs: ArgsDef = {
   name: { type: "positional", description: "Name to reach this fleet by", required: false },
   endpoint: {
     type: "string",
-    description: "Base URL of one of its node agents; repeat for several",
+    description: "Base URL of one of its node agents; comma-separated for several",
   },
   key: {
     type: "string",
@@ -261,10 +261,21 @@ async function runKeys(flags: Record<string, unknown>): Promise<void> {
   console.log(formatFleetKeys(keys));
 }
 
-/** A flag given once or several times, as the list it always is here. */
-function urls(value: unknown): string[] {
+/*
+ * The list a `--endpoint` value carries, COMMA-SEPARATED in one flag. A
+ * repeated flag would read more naturally, but the argument parser keeps only
+ * the last occurrence — repeats were silently dropping every endpoint but one.
+ * A URL cannot contain a comma, so the split is unambiguous; the same shape the
+ * storage token list uses.
+ *
+ * @internal exported for its tests.
+ */
+export function urls(value: unknown): string[] {
   const values = Array.isArray(value) ? value : [value];
-  return values.map(text).filter((entry): entry is string => entry !== undefined);
+  return values
+    .flatMap((entry) => (typeof entry === "string" ? entry.split(",") : [entry]))
+    .map(text)
+    .filter((entry): entry is string => entry !== undefined);
 }
 
 function required(flags: Record<string, unknown>, name: string): string {

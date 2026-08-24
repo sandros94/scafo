@@ -329,3 +329,20 @@ async function portable(fleet: string | undefined): Promise<PortableOperator> {
 function inline(file: PortableOperator): string {
   return INLINE_PREFIX + toBase64(new TextEncoder().encode(JSON.stringify(file)));
 }
+
+describe("the endpoints one --endpoint value may carry", () => {
+  it("splits a comma-separated value into every endpoint it names", async () => {
+    const { urls } = await import("../src/cli/commands/fleet.ts");
+    expect(urls("http://a:7400,http://b:7400")).toEqual(["http://a:7400", "http://b:7400"]);
+  });
+
+  it("trims around the commas and drops empty entries", async () => {
+    const { urls } = await import("../src/cli/commands/fleet.ts");
+    expect(urls(" http://a:7400 , ,http://b:7400,")).toEqual(["http://a:7400", "http://b:7400"]);
+  });
+
+  it("keeps a single plain value as the one-entry list it is", async () => {
+    const { urls } = await import("../src/cli/commands/fleet.ts");
+    expect(urls("http://a:7400")).toEqual(["http://a:7400"]);
+  });
+});
