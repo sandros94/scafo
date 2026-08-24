@@ -6,7 +6,7 @@ Self-hosted serverless deployment platform for JS apps.
 
 Its state is a registry of JSON objects in an S3-compatible bucket, mutated only
 through conditional writes. There is no database and no consensus protocol, and
-a single binary is both the node agent and the CLI.
+a single binary is both the node daemon and the CLI.
 
 ## Quickstart
 
@@ -26,7 +26,7 @@ export SCAFO_S3_ENDPOINT=http://127.0.0.1:8333 SCAFO_S3_BUCKET=scafo \
        SCAFO_S3_ACCESS_KEY=scafo SCAFO_S3_SECRET_KEY=scafo-secret
 
 node dist/cli/index.mjs operator keygen --register
-node dist/cli/index.mjs deploy ./my-app --agent http://127.0.0.1:7400 \
+node dist/cli/index.mjs deploy ./my-app --node http://127.0.0.1:7400 \
   --project shop --env production --flip
 
 curl -H 'Host: shop.scafo.test' http://127.0.0.1
@@ -106,7 +106,7 @@ those names for you — send the `Host` header, or add them to `/etc/hosts`.
   runs, producing `build/scafo-linux-amd64` and `build/scafo-linux-arm64` with a
   `.sha256` beside each. celld, an ingress and wireguard-tools stay separate
   prerequisites; the binary carries none of them.
-- **The node image:** `docker build -t scafo .` — the agent, celld and esbuild in
+- **The node image:** `docker build -t scafo .` — the daemon, celld and esbuild in
   one image. `ENTRYPOINT` is the CLI, so `docker run scafo sail --listen 0.0.0.0:7400`
   is the whole invocation. **Give it a stop grace of at least 35 seconds**
   (`stop_grace_period: 35s`, `terminationGracePeriodSeconds: 35`): a node drains
@@ -128,7 +128,7 @@ of notes to something running — the Deno team built the runtime every
 application here runs on. [Caddy](https://caddyserver.com) and
 [Traefik](https://traefik.io) terminate TLS and route for the fleet, and
 [WireGuard](https://www.wireguard.com) is the tunnel its nodes trust each other
-through. The agent and CLI lean on [h3](https://h3.dev), citty and confbox from
+through. The daemon and CLI lean on [h3](https://h3.dev), citty and confbox from
 the [UnJS](https://unjs.io) ecosystem, beside unjwt, uns3, esbuild and tar; the
 tests stand on vitest and testcontainers, with SeaweedFS and MinIO playing the
 bucket. A particular mention goes to

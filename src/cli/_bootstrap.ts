@@ -8,8 +8,8 @@
  */
 
 import { S3Client } from "uns3";
-import type { AgentConfig } from "../agent/config.ts";
-import { advertisedAddress, parseHostPort } from "../agent/config.ts";
+import type { DaemonConfig } from "../daemon/config.ts";
+import { advertisedAddress, parseHostPort } from "../daemon/config.ts";
 import type { CapacityPlan } from "../core/capacity/compute.ts";
 import { isScafoError, ScafoError } from "../core/error.ts";
 import { readJson, updateJson } from "../core/registry/cas.ts";
@@ -33,7 +33,7 @@ import {
 } from "./_wireguard.ts";
 
 /** The registry this node reads and writes, as configured. */
-export function createRegistry(config: AgentConfig): RegistryContext {
+export function createRegistry(config: DaemonConfig): RegistryContext {
   return {
     store: createUns3Store(
       new S3Client({
@@ -57,7 +57,7 @@ export function createRegistry(config: AgentConfig): RegistryContext {
  * Refuses to boot a node that would put node-to-node or operator traffic on a
  * network nobody has classified.
  *
- * Every address a node exposes — the agent API, the internal listener, the
+ * Every address a node exposes — the node API, the internal listener, the
  * address it tells its peers to use, the address its runtime processes bind —
  * carries traffic that commands this node. As soon as one of them reaches past
  * loopback, that traffic crosses a network, and only the operator knows what
@@ -76,7 +76,7 @@ export function createRegistry(config: AgentConfig): RegistryContext {
  * Throws `ScafoError("invalid-input")` naming the addresses that made it
  * necessary.
  */
-export function assertTransportConfigured(config: AgentConfig): void {
+export function assertTransportConfigured(config: DaemonConfig): void {
   if (config.transport !== undefined) return;
 
   const addresses: [string, string | undefined][] = [
@@ -114,7 +114,7 @@ export function assertTransportConfigured(config: AgentConfig): void {
  * `--transport wireguard` was asked to prevent.
  */
 export async function loadWireguardRecord(
-  config: AgentConfig,
+  config: DaemonConfig,
   opts?: WireguardOptions,
 ): Promise<NodeWireguard | undefined> {
   const settings = resolveWireguardSettings(config, opts);
@@ -128,7 +128,7 @@ export async function loadWireguardRecord(
         `this node's transport is "wireguard" but "${stateDir}" holds no tunnel keypair: ` +
         `run "scafo wg init" on this node to set one up, register it with its peers and ` +
         `render "${stateDir}/${WG_CONF_FILE}", then bring the interface up before starting ` +
-        `the agent`,
+        `the daemon`,
     });
   }
 
@@ -143,7 +143,7 @@ export interface NodeIdentityOptions {
 
 /** Reads this node's persisted identity, generating one on first boot. */
 export async function loadNodeIdentity(
-  config: AgentConfig,
+  config: DaemonConfig,
   opts?: NodeIdentityOptions,
 ): Promise<NodeState> {
   return loadOrCreateNodeState(nodeStateDir(config, opts), {
@@ -166,7 +166,7 @@ export async function loadNodeIdentity(
  * rotating one costs, is on the `storage.token` setting itself.
  */
 export async function loadStorageTokens(
-  config: AgentConfig,
+  config: DaemonConfig,
   opts?: NodeIdentityOptions,
 ): Promise<string[]> {
   const stateDir = nodeStateDir(config, opts);
@@ -180,12 +180,12 @@ export async function loadStorageTokens(
 }
 
 /** Where this node keeps everything it must remember between boots. */
-export function nodeStateDir(config: AgentConfig, opts?: NodeIdentityOptions): string {
+export function nodeStateDir(config: DaemonConfig, opts?: NodeIdentityOptions): string {
   return config.node.stateDir ?? opts?.defaultStateDir ?? resolveDefaultStateDir();
 }
 
 export interface RegisterNodeOptions {
-  config: AgentConfig;
+  config: DaemonConfig;
   state: NodeState;
   capacity?: CapacityPlan;
   /**
@@ -226,7 +226,7 @@ export async function registerThisNode(
     v: 1,
     id: opts.state.id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: opts.state.publicKey.x },
-    addresses: { internal: reachable.host, agentPort: reachable.port },
+    addresses: { internal: reachable.host, apiPort: reachable.port },
     heartbeatAt: nowIso(registry),
     ...(opts.capacity === undefined
       ? {}
@@ -261,7 +261,7 @@ export const DRAIN_ATTEMPTS: number = 3;
  * Says this node is on its way out, as the first step of a graceful shutdown.
  *
  * It is worth doing first, and worth doing at all, because of what the
- * alternative costs: an agent that simply stops is indistinguishable from one
+ * alternative costs: a daemon that simply stops is indistinguishable from one
  * that crashed, and a crash is only noticed once the node's heartbeat has aged
  * past the liveness window — ninety seconds during which the coordinator still
  * counts it among the nodes it hands work to, and its single-replica
@@ -311,8 +311,8 @@ export async function drainThisNode(
  * A narrow update rather than a re-registration, because this is what a command
  * about the tunnel alone is entitled to change. `registerNode` replaces a record
  * wholesale from the configuration it is handed, and `scafo wg init` is run from
- * an operator's shell rather than from the agent's own environment — one run
- * with a config the agent does not use would otherwise move the node's
+ * an operator's shell rather than from the daemon's own environment — one run
+ * with a config the daemon does not use would otherwise move the node's
  * advertised address and capacity along with its tunnel details, and nothing
  * would report it until a peer failed to reach it.
  *
@@ -340,7 +340,7 @@ export async function publishWireguard(
  * key file is configured. A node without one may only serve environments that
  * point at no varset.
  */
-export async function loadVarsetKey(config: AgentConfig): Promise<CryptoKey | undefined> {
+export async function loadVarsetKey(config: DaemonConfig): Promise<CryptoKey | undefined> {
   const keyFile = config.varsets?.keyFile;
   return keyFile === undefined ? undefined : readVarsetKeyFile(keyFile);
 }

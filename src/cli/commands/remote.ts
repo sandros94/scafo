@@ -14,7 +14,7 @@
  */
 
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
-import { loadAgentConfig } from "../../agent/config.ts";
+import { loadDaemonConfig } from "../../daemon/config.ts";
 import { ScafoError } from "../../core/error.ts";
 import { createRegistry } from "../_bootstrap.ts";
 import { resolveOperatorHome } from "../_home.ts";
@@ -30,7 +30,7 @@ import {
 import { readTextFile, reportFailure } from "../_utils.ts";
 
 /*
- * `--endpoint` here is the NODE AGENT's URL, which is the only address this
+ * `--endpoint` here is the NODE DAEMON's URL, which is the only address this
  * command is about. The bucket `--register` takes flags for is therefore
  * configured the other two ways `scafo sail` accepts — the config file and the
  * environment — rather than by a second `--endpoint` meaning something else on
@@ -40,7 +40,7 @@ const addArgs: ArgsDef = {
   name: { type: "positional", description: "Name to reach this remote by", required: false },
   endpoint: {
     type: "string",
-    description: "Base URL of one of its node agents; comma-separated for several",
+    description: "Base URL of one of its nodes; comma-separated for several",
   },
   key: {
     type: "string",
@@ -149,7 +149,7 @@ async function runAdd(flags: Record<string, unknown>): Promise<void> {
     return;
   }
 
-  const config = await loadAgentConfig({
+  const config = await loadDaemonConfig({
     configPath: text(flags.config),
     env: process.env,
     readFile: readTextFile,

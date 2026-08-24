@@ -15,18 +15,18 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { AgentContext } from "../src/agent/app.ts";
-import type { AgentConfig } from "../src/agent/config.ts";
+import type { DaemonContext } from "../src/daemon/app.ts";
+import type { DaemonConfig } from "../src/daemon/config.ts";
 import {
   createDeployService,
   type DeployService,
   type DeployStatus,
-} from "../src/agent/deploys.ts";
+} from "../src/daemon/deploys.ts";
 import {
   createReconciler,
   type PointerLockOptions,
   type Reconciler,
-} from "../src/agent/reconcile.ts";
+} from "../src/daemon/reconcile.ts";
 import { createBuild } from "../src/core/registry/builds.ts";
 import { putJson, readJson } from "../src/core/registry/cas.ts";
 import type { RegistryContext } from "../src/core/registry/context.ts";
@@ -232,7 +232,7 @@ interface WorldOptions {
 
 interface World {
   registry: RegistryContext;
-  agent: AgentContext;
+  daemon: DaemonContext;
   supervisor: FakeSupervisor;
   reconciler: Reconciler;
   deploys: DeployService;
@@ -266,24 +266,24 @@ async function seededWorld(opts?: WorldOptions): Promise<World> {
   let bundling: Deferred<void> | null = null;
   const supervisor = fakeSupervisor(ctx, events);
 
-  const agent: AgentContext = {
-    config: agentConfig(),
+  const daemon: DaemonContext = {
+    config: daemonConfig(),
     nodeId: NODE,
     registry: ctx,
     supervisor,
     version: "0.0.0-test",
   };
-  const reconciler = createReconciler(agent, createCelldDriver({ store }), {
+  const reconciler = createReconciler(daemon, createCelldDriver({ store }), {
     baseEnv: { PATH: "/usr/bin:/bin" },
     /* Nothing listens on a port here: the gate is answered rather than dialled,
        because what these cases are about happens before it. */
     probe: { attempts: 1, fetchFn: readyFetch },
     ...(opts?.pointerLock === undefined ? {} : { pointerLock: opts.pointerLock }),
   });
-  agent.reconciler = reconciler;
+  daemon.reconciler = reconciler;
 
   const runner = fakeRunner(ctx, events, () => bundling?.promise);
-  const deploys = createDeployService(agent, runner, {
+  const deploys = createDeployService(daemon, runner, {
     routedTimeoutMs: 50,
     pollMs: 5,
     /* Twice the worst case a deploy here actually waits, so the budget is never
@@ -292,11 +292,11 @@ async function seededWorld(opts?: WorldOptions): Promise<World> {
        real one out. */
     lockTimeoutMs: PUBLISH_WAIT_MS * 2,
   });
-  agent.deploys = deploys;
+  daemon.deploys = deploys;
 
   return {
     registry: ctx,
-    agent,
+    daemon,
     supervisor,
     reconciler,
     deploys,
@@ -432,7 +432,7 @@ function fakeSupervisor(ctx: RegistryContext, events: string[]): FakeSupervisor 
   return supervisor;
 }
 
-function agentConfig(): AgentConfig {
+function daemonConfig(): DaemonConfig {
   return {
     bucket: {
       endpoint: "http://store.test:9000",

@@ -22,8 +22,8 @@ import { pointerLockKey } from "./paths.ts";
  * one read of the pointer.
  *
  * The read is a single bucket GET in the runtime's early boot — before it can
- * bind a listener, let alone serve — and nothing the agent can see reports it:
- * supervised processes inherit the agent's streams, so their output cannot be
+ * bind a listener, let alone serve — and nothing the daemon can see reports it:
+ * supervised processes inherit the daemon's streams, so their output cannot be
  * attributed to them, and the supervisor seam carries no other signal. A bounded
  * hold is therefore the whole of the guarantee, and the bound is sized to the
  * STALL CEILING of a real store rather than to its usual round-trip: a bucket

@@ -2,8 +2,8 @@
  * `scafo env retire|unretire|delete`, and the two ways it reaches an
  * installation.
  *
- * Both are driven against the same registry: the agent route runs the REAL
- * agent app over an injected `fetch`, so what these tests exercise is the whole
+ * Both are driven against the same registry: the node route runs the REAL node
+ * app over an injected `fetch`, so what these tests exercise is the whole
  * path an operator's command takes — token, route, registry — rather than a
  * stand-in for it. The direct route writes into the same bucket, which is what
  * makes the two comparable at all.
@@ -12,10 +12,10 @@
 import { generateJWK } from "unjwt/jwk";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { beforeEach, describe, expect, it } from "vitest";
-import { createAgentApp } from "../src/agent/app.ts";
-import type { AgentConfig } from "../src/agent/config.ts";
+import { createNodeApp } from "../src/daemon/app.ts";
+import type { DaemonConfig } from "../src/daemon/config.ts";
 import {
-  agentOps,
+  nodeOps,
   CLI_NODE_ID,
   describeParkChange,
   describeRetirement,
@@ -52,7 +52,7 @@ const PROJECT = "app";
 const BUILD = "b1b1b1b1";
 /** A second build, so a split has two legs to weigh against each other. */
 const OTHER_BUILD = "b2b2b2b2";
-const AGENT_URL = "http://10.0.0.4:7400";
+const NODE_URL = "http://10.0.0.4:7400";
 const HOUR_MS = 3_600_000;
 
 const PROD = { project: PROJECT, env: "prod" };
@@ -60,22 +60,22 @@ const PREVIEW = { project: PROJECT, env: "preview" };
 
 let clock: ManualClock;
 let keys: { privateKey: JWK_OKP_Private<"EdDSA">; publicKey: JWK_OKP_Public<"EdDSA"> };
-/** Every URL the agent transport asked for, in order. */
+/** Every URL the node transport asked for, in order. */
 let called: string[];
 /** ONE node for the whole test: a second app would be a second coordinator. */
-let agent: EnvironmentOps;
+let daemonOps: EnvironmentOps;
 
 beforeEach(async () => {
   clock = ctxWith(new MemoryCasStore());
   keys = await generateJWK("EdDSA", { kid: NODE_ID });
   called = [];
-  agent = buildAgentOps();
+  daemonOps = buildNodeOps();
 
   await registerNode(clock.ctx, {
     v: 1,
     id: NODE_ID,
     publicKey: { kty: "OKP", crv: "Ed25519", x: keys.publicKey.x },
-    addresses: { internal: "10.0.0.4", agentPort: 7400 },
+    addresses: { internal: "10.0.0.4", apiPort: 7400 },
   });
   await createProject(clock.ctx, { slug: PROJECT });
   for (const id of [BUILD, OTHER_BUILD]) {
@@ -89,7 +89,7 @@ beforeEach(async () => {
 /* Both transports must answer the same questions the same way, so the retire and
    unretire cases are written once and run against each. */
 describe.each([
-  ["through a node agent", (): EnvironmentOps => throughAgent()],
+  ["through a node daemon", (): EnvironmentOps => throughNode()],
   ["straight through the bucket", (): EnvironmentOps => throughBucket()],
 ])("retiring %s", (_name, build) => {
   it("retires the environment and answers with the record", async () => {
@@ -123,7 +123,7 @@ describe.each([
 /* Choosing which nodes may serve an environment is a plain record update, so it
    goes the same two ways retirement does and must answer identically on both. */
 describe.each([
-  ["through a node agent", (): EnvironmentOps => throughAgent()],
+  ["through a node daemon", (): EnvironmentOps => throughNode()],
   ["straight through the bucket", (): EnvironmentOps => throughBucket()],
 ])("setting a node selector %s", (_name, build) => {
   it("states the labels a node must carry, and answers with the record", async () => {
@@ -219,7 +219,7 @@ describe("what --set and --clear are read as", () => {
 /* Weighting an environment's traffic is a plain record update too, so it goes
    the same two ways and must answer identically on both. */
 describe.each([
-  ["through a node agent", (): EnvironmentOps => throughAgent()],
+  ["through a node daemon", (): EnvironmentOps => throughNode()],
   ["straight through the bucket", (): EnvironmentOps => throughBucket()],
 ])("splitting traffic %s", (_name, build) => {
   it("states the legs and their weights, in the order they were written", async () => {
@@ -391,7 +391,7 @@ describe("what --set and --clear are read as, for a split", () => {
 /* Saying how an environment scales to zero is a plain record update too, so it
    goes the same two ways and must answer identically on both. */
 describe.each([
-  ["through a node agent", (): EnvironmentOps => throughAgent()],
+  ["through a node daemon", (): EnvironmentOps => throughNode()],
   ["straight through the bucket", (): EnvironmentOps => throughBucket()],
 ])("stating a park policy %s", (_name, build) => {
   it("stores the fields it was given, and answers with the record", async () => {
@@ -523,14 +523,14 @@ describe("what the park flags are read as", () => {
   });
 });
 
-describe("deleting through a node agent", () => {
+describe("deleting through a node daemon", () => {
   it("refuses a long-lived environment, relaying the grace the node named", async () => {
-    const error = await rejectsWith(() => throughAgent().delete(PROD), "invalid-input");
+    const error = await rejectsWith(() => throughNode().delete(PROD), "invalid-input");
 
     /*
      * The refusal survives the wire intact, which is the point of relaying the
      * node's problem document rather than summarising it: what reaches the
-     * operator is the route forward, not "the agent said no".
+     * operator is the route forward, not "the node said no".
      */
     expect(error.status).toBe(409);
     expect(error.detail).toContain("scafo env retire");
@@ -538,40 +538,40 @@ describe("deleting through a node agent", () => {
   });
 
   it("says how long is left once it has been retired", async () => {
-    await throughAgent().retire(PROD);
+    await throughNode().retire(PROD);
     clock.tick(HOUR_MS * 6);
 
-    const error = await rejectsWith(() => throughAgent().delete(PROD), "invalid-input");
+    const error = await rejectsWith(() => throughNode().delete(PROD), "invalid-input");
 
     expect(error.detail).toContain("18h");
     expect(error.detail).toContain("scafo env unretire");
   });
 
   it("deletes it once the grace has run out", async () => {
-    await throughAgent().retire(PROD);
+    await throughNode().retire(PROD);
     clock.tick(DEFAULT_RETIREMENT_GRACE_MS);
 
-    const deleted = await throughAgent().delete(PROD);
+    const deleted = await throughNode().delete(PROD);
 
     expect(deleted).toContain(environmentKey(PROJECT, "prod"));
     await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, "prod"), "not-found");
   });
 
   it("asks for the force the operator asked for, and only then", async () => {
-    await throughAgent().delete(PREVIEW);
-    expect(called.at(-1)).toBe(`${AGENT_URL}/v1/environments/${PROJECT}/preview`);
+    await throughNode().delete(PREVIEW);
+    expect(called.at(-1)).toBe(`${NODE_URL}/v1/environments/${PROJECT}/preview`);
 
-    const deleted = await throughAgent().delete(PROD, { force: true });
+    const deleted = await throughNode().delete(PROD, { force: true });
 
     /* `--force` has to reach the node as a query the node reads; a flag the
        client swallowed would refuse a deletion the operator did state. */
-    expect(called.at(-1)).toBe(`${AGENT_URL}/v1/environments/${PROJECT}/prod?force=1`);
+    expect(called.at(-1)).toBe(`${NODE_URL}/v1/environments/${PROJECT}/prod?force=1`);
     expect(deleted).toContain(environmentKey(PROJECT, "prod"));
   });
 
   it("refuses a name that is not a slug before any node is troubled with it", async () => {
     await rejectsWith(
-      () => throughAgent().retire({ project: PROJECT, env: "../../etc" }),
+      () => throughNode().retire({ project: PROJECT, env: "../../etc" }),
       "invalid-slug",
     );
 
@@ -615,7 +615,7 @@ describe("deleting straight through the bucket", () => {
 
     /* A node holds the lease, so the request belongs to the node: it will reach
        the coordinator wherever it is, without disturbing the election. */
-    expect(error.detail).toContain("--agent");
+    expect(error.detail).toContain("--node");
     await expect(getEnvironment(clock.ctx, PROJECT, "preview")).resolves.toMatchObject({
       name: "preview",
     });
@@ -743,15 +743,15 @@ function parkFlags(given: Partial<ParkFlags>): ParkPolicy | null {
   });
 }
 
-/** The one node this test talks to, as the CLI's agent transport sees it. */
-function throughAgent(): EnvironmentOps {
-  return agent;
+/** The one node this test talks to, as the CLI's node transport sees it. */
+function throughNode(): EnvironmentOps {
+  return daemonOps;
 }
 
-/** The CLI talking to a REAL agent app over an injected `fetch`. */
-function buildAgentOps(): EnvironmentOps {
-  const app = createAgentApp({
-    config: agentConfig(),
+/** The CLI talking to a REAL node app over an injected `fetch`. */
+function buildNodeOps(): EnvironmentOps {
+  const app = createNodeApp({
+    config: daemonConfig(),
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: idleSupervisor(),
@@ -761,8 +761,8 @@ function buildAgentOps(): EnvironmentOps {
     coordinator: soleCoordinator(),
   });
 
-  return agentOps({
-    url: AGENT_URL,
+  return nodeOps({
+    url: NODE_URL,
     authorize: () => signNodeToken(keys.privateKey, NODE_ID),
     fetchFn: async (input, init) => {
       const url = String(input);
@@ -783,7 +783,7 @@ function throughBucket(): EnvironmentOps {
  * of one: it takes the lease on the first call and answers with the handle that
  * fences every write made under it.
  */
-function soleCoordinator(): NonNullable<Parameters<typeof createAgentApp>[0]["coordinator"]> {
+function soleCoordinator(): NonNullable<Parameters<typeof createNodeApp>[0]["coordinator"]> {
   let held: Awaited<ReturnType<typeof acquireLease>> = null;
 
   return {
@@ -805,7 +805,7 @@ function soleCoordinator(): NonNullable<Parameters<typeof createAgentApp>[0]["co
   };
 }
 
-function agentConfig(): AgentConfig {
+function daemonConfig(): DaemonConfig {
   return {
     bucket: {
       endpoint: "http://store.test:9000",

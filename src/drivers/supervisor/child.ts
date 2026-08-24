@@ -13,7 +13,7 @@ import type {
 export const DEFAULT_GRACE_MS: number = 30_000;
 
 /**
- * Runs supervised processes as children of the agent. Statuses of exited
+ * Runs supervised processes as children of the daemon. Statuses of exited
  * processes are kept until their id is started again, so a caller that polls
  * still learns how a process ended.
  *
@@ -36,11 +36,11 @@ export function createChildSupervisor(): Supervisor {
       const child = spawn(spec.command, spec.args, {
         cwd: spec.cwd,
         env: spec.env,
-        /* The child stays in the agent's process group, so a killed agent takes
-           its processes with it instead of orphaning them. */
+        /* The child stays in the daemon's process group, so a killed daemon
+           takes its processes with it instead of orphaning them. */
         detached: false,
         /* TODO: capture stdout/stderr per process instead of inheriting the
-           agent's streams — output cannot be attributed to a process today. */
+           daemon's streams — output cannot be attributed to a process today. */
         stdio: "inherit",
       });
 

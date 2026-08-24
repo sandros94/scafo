@@ -6,7 +6,7 @@ import { nowIso, type RegistryContext } from "./context.ts";
 import { type LeaseHandle, verifyLease } from "./lease.ts";
 import { nodeKey, nodesPrefix } from "./paths.ts";
 
-/** How often a running agent refreshes its own record's `heartbeatAt`. */
+/** How often a running daemon refreshes its own record's `heartbeatAt`. */
 export const NODE_HEARTBEAT_INTERVAL_MS: number = 30_000;
 
 /**
@@ -94,7 +94,7 @@ export async function heartbeatNode(ctx: RegistryContext, id: string): Promise<s
  * hands work to. Touches `drainingAt` and NOTHING else.
  *
  * The first step of a graceful shutdown, and the whole reason one is worth
- * taking: an agent that simply stopped would look exactly like a crash, and a
+ * taking: a daemon that simply stopped would look exactly like a crash, and a
  * crash is only noticed once the liveness window has run out — a minute and a
  * half in which its environments are served by a process that is already gone.
  * A node that says it is leaving is counted out on the coordinator's very next

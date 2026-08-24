@@ -10,13 +10,13 @@ the loop it teaches, and [`../README.md`](../README.md) for what it needs.
 
 ## 0. Ports
 
-| Port   | What               | Bound to        |
-| ------ | ------------------ | --------------- |
-| `8081` | node A's ingress   | every interface |
-| `8082` | node B's ingress   | every interface |
-| `7401` | node A's agent API | `127.0.0.1`     |
-| `7402` | node B's agent API | `127.0.0.1`     |
-| `8333` | the bucket         | `127.0.0.1`     |
+| Port   | What             | Bound to        |
+| ------ | ---------------- | --------------- |
+| `8081` | node A's ingress | every interface |
+| `8082` | node B's ingress | every interface |
+| `7401` | node A's API     | `127.0.0.1`     |
+| `7402` | node B's API     | `127.0.0.1`     |
+| `8333` | the bucket       | `127.0.0.1`     |
 
 **Neither ingress takes 80**, and that is what a fleet is before something is put
 in front of it: several equal addresses. Move any of the five in `.env`.
@@ -45,7 +45,7 @@ scafo remote add playground --endpoint http://127.0.0.1:7401 --register
 **You should see** a key minted into `.scafo/` here rather than into your real
 `~/.scafo`, and `registered "op-…" as admin-tier; tokens it signs are now accepted
 by every node`. **One key, and both nodes trust it**, because both read the same
-registry — so nothing below passes `--key` or `--agent`.
+registry — so nothing below passes `--key` or `--node`.
 
 > **No node toolchain?** Use `alias scafo='docker compose run --rm cli'` instead,
 > and register at `http://node-a:7400`.
@@ -61,7 +61,7 @@ curl -s "$SCAFO_S3_ENDPOINT/scafo/playground/_scafo/coordinator/lease.json"
 **You should see** the whole installation on one screen — a `meta.json`, a record
 under `nodes/` for each node and for the operator key you just registered, a
 `coordinator/lease.json` — then node A's record carrying
-`"addresses":{"internal":"node-a","agentPort":7400}`, then one node named
+`"addresses":{"internal":"node-a","apiPort":7400}`, then one node named
 coordinator with `"ttlMs":15000` and `"fence":1`.
 
 There is no membership API to ask, because there is no cluster.
@@ -80,7 +80,7 @@ curl -H 'Host: shop.scafo.test' http://127.0.0.1:8082/
 
 **You should see** `routed`, build `69981639ba366c2a` — the same build the other
 playground made, since build ids are derived from content — then the same answer
-from both ingresses. No `--agent`: the fleet's first endpoint is used, and that
+from both ingresses. No `--node`: the fleet's first endpoint is used, and that
 choice has no consequence, because **any node accepts any call** and work only the
 coordinator may do is forwarded to whichever node holds the lease.
 
@@ -120,7 +120,7 @@ Placement is rendezvous hashing over the node ids, so which node holds `solo` is
 decided by the fleet and not by the node you asked, and an environment has a
 natural home it returns to whenever that node is available. `--flip` waits for the
 readiness gate **on the node placement chose**, so the deploy routes just as fast
-whichever agent took it. The `fence` beside the decision is the lease number from
+whichever daemon took it. The `fence` beside the decision is the lease number from
 step 3: a decision from a coordinator since replaced can be recognised and
 ignored. And placement only decides where a process may **run**, never which door
 a request may **arrive** at — the node not running `solo` forwards to the one that

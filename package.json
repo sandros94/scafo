@@ -43,9 +43,9 @@
       "types": "./dist/core/placement/index.d.mts",
       "default": "./dist/core/placement/index.mjs"
     },
-    "./agent": {
-      "types": "./dist/agent/index.d.mts",
-      "default": "./dist/agent/index.mjs"
+    "./daemon": {
+      "types": "./dist/daemon/index.d.mts",
+      "default": "./dist/daemon/index.mjs"
     },
     "./drivers/host/node": {
       "types": "./dist/drivers/host/node.d.mts",

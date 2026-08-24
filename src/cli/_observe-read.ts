@@ -5,7 +5,7 @@
  * is one node's recent past; what is in the bucket is every node's, including the
  * ones that have since been replaced. So `scafo metrics` and `scafo traces` take
  * the same `SCAFO_S3_*` configuration every other registry-reading command does,
- * and no agent has to be running for them to answer.
+ * and no daemon has to be running for them to answer.
  *
  * ONE LISTING, THEN ONLY THE FILES THAT COULD MATTER. The keyspace is calendar
  * ordered under each node, so a key's own timestamp says whether the file can
@@ -30,7 +30,7 @@ import { observePrefix, parseObserveKey } from "../core/registry/paths.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
 import { ScafoError } from "../core/error.ts";
 import { DEFAULT_CONCURRENCY, mapConcurrent } from "../core/utils/concurrency.ts";
-import { type ObserveRecord, observeCodecFor } from "../agent/observe-records.ts";
+import { type ObserveRecord, observeCodecFor } from "../daemon/observe-records.ts";
 
 /**
  * How far before the window a file may have been written and still be read.
@@ -61,7 +61,7 @@ export interface ObserveReadResult {
   malformed: number;
   /**
    * Keys nothing here could read: an extension no codec claims, or bytes that
-   * were not the encoding the extension promised. A newer agent's file, or a
+   * were not the encoding the extension promised. A newer daemon's file, or a
    * truncated one — either way it is reported rather than failed over.
    */
   unreadable: string[];

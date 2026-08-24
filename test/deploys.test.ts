@@ -15,10 +15,10 @@ import type { JWK_RSA_Private, JWK_RSA_Public, JWKSet } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { sign as signJws } from "unjwt/jws";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { type AgentContext, type AliasResult, createAgentApp } from "../src/agent/app.ts";
-import type { AgentConfig } from "../src/agent/config.ts";
-import { createDeployService, type DeployStatus } from "../src/agent/deploys.ts";
-import type { Reconciler } from "../src/agent/reconcile.ts";
+import { type DaemonContext, type AliasResult, createNodeApp } from "../src/daemon/app.ts";
+import type { DaemonConfig } from "../src/daemon/config.ts";
+import { createDeployService, type DeployStatus } from "../src/daemon/deploys.ts";
+import type { Reconciler } from "../src/daemon/reconcile.ts";
 import { OIDC_AUDIENCE, signNodeToken } from "../src/core/auth/index.ts";
 import type { ProblemDetails } from "../src/core/error.ts";
 import {
@@ -42,7 +42,7 @@ import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock } from "./_helpers.ts";
 
 const OPERATOR = "op-1234abcd";
-/** A second node of the same installation, and where its agent answers. */
+/** A second node of the same installation, and where its daemon answers. */
 const NODE_B = "node-b1b1b1b1";
 const PEER_HOST = "node-b.test";
 const PEER_PORT = 7401;
@@ -70,7 +70,7 @@ let operatorKeys: Awaited<ReturnType<typeof generateJWK<"EdDSA">>>;
 let artifact: Uint8Array;
 
 let clock: ManualClock;
-let agent: AgentContext;
+let daemon: DaemonContext;
 let app: H3;
 let runs: DeployRunInput[];
 let publish: () => Promise<DeployRunResult>;
@@ -96,7 +96,7 @@ beforeEach(async () => {
     v: 1,
     id: OPERATOR,
     publicKey: { kty: "OKP", crv: "Ed25519", x: operatorKeys.publicKey.x },
-    addresses: { internal: "operator", agentPort: 0 },
+    addresses: { internal: "operator", apiPort: 0 },
   };
   await registerNode(clock.ctx, record);
 
@@ -108,19 +108,19 @@ beforeEach(async () => {
     issuers: [{ iss: ISS, aud: OIDC_AUDIENCE, subjects: ["repo:acme/*"] }],
   });
 
-  agent = {
-    config: agentConfig(),
+  daemon = {
+    config: daemonConfig(),
     nodeId: OPERATOR,
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
     version: "0.0.0-test",
     reconciler: fakeReconciler(),
   };
-  agent.deploys = createDeployService(agent, fakeRunner(), {
+  daemon.deploys = createDeployService(daemon, fakeRunner(), {
     routedTimeoutMs: 300,
     pollMs: 5,
   });
-  app = createAgentApp(agent);
+  app = createNodeApp(daemon);
 
   vi.stubGlobal("fetch", issuerFetch);
 });
@@ -517,7 +517,7 @@ describe("watching a build the coordinator placed somewhere else", () => {
   it("keeps looking rather than failing the deploy when the peer cannot be reached", async () => {
     await standUpPeer();
     await placeOn(NODE_B);
-    agent.fetchFn = () => Promise.reject(new Error("connect ECONNREFUSED"));
+    daemon.fetchFn = () => Promise.reject(new Error("connect ECONNREFUSED"));
 
     const id = (await responseId(
       await upload(await operatorToken(), { ...meta(), flip: true }),
@@ -597,7 +597,7 @@ describe("the wake a deploy is", () => {
      * happen and send a pipeline into a retry that changes nothing.
      */
     running = [readyProcess(VERSION_ID)];
-    agent.registry = { ...clock.ctx, store: refusingWakeStamps(clock.ctx.store) };
+    daemon.registry = { ...clock.ctx, store: refusingWakeStamps(clock.ctx.store) };
 
     const id = (await responseId(
       await upload(await operatorToken(), { ...meta(), flip: true }),
@@ -704,7 +704,7 @@ describe("moving an environment's alias", () => {
 
 /* ---- fixtures ---- */
 
-function agentConfig(): AgentConfig {
+function daemonConfig(): DaemonConfig {
   return {
     bucket: {
       endpoint: "http://store.test:9000",
@@ -762,16 +762,16 @@ function fakeReconciler(processes: () => RuntimeProcess[] = () => running): Reco
 
 /* ---- a second node of the same installation ---- */
 
-/** A second node, its own agent app, and what this one asked it. */
+/** A second node, its own daemon, and what this one asked it. */
 interface Peer {
   /** Processes it reports as running; push a ready one to make it serve. */
   processes: RuntimeProcess[];
-  /** Paths this node's agent has called on it, in order. */
+  /** Paths this node's daemon has called on it, in order. */
   asked: string[];
 }
 
 /**
- * Registers a second node, stands its agent up in this process, and points this
+ * Registers a second node, stands its daemon up in this process, and points this
  * node's peer hop at it.
  *
  * Live by default, because that is what the placement's answer is only useful
@@ -783,14 +783,14 @@ async function standUpPeer(opts: { heartbeatAgoMs?: number } = {}): Promise<Peer
     v: 1,
     id: NODE_B,
     publicKey: { kty: "OKP", crv: "Ed25519", x: keys.publicKey.x },
-    addresses: { internal: PEER_HOST, agentPort: PEER_PORT },
+    addresses: { internal: PEER_HOST, apiPort: PEER_PORT },
     heartbeatAt: new Date(clock.nowMs() - (opts.heartbeatAgoMs ?? 0)).toISOString(),
   });
 
   const processes: RuntimeProcess[] = [];
   const asked: string[] = [];
-  const peer = createAgentApp({
-    config: agentConfig(),
+  const peer = createNodeApp({
+    config: daemonConfig(),
     nodeId: NODE_B,
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
@@ -800,8 +800,8 @@ async function standUpPeer(opts: { heartbeatAgoMs?: number } = {}): Promise<Peer
 
   /* Node tokens are verified against the registry, so the hop is authenticated
      for real here rather than waved through. */
-  agent.signingKey = operatorKeys.privateKey;
-  agent.fetchFn = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  daemon.signingKey = operatorKeys.privateKey;
+  daemon.fetchFn = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const href = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
     const url = new URL(href);
     if (url.host !== `${PEER_HOST}:${String(PEER_PORT)}`) {
@@ -915,7 +915,7 @@ async function responseId(response: Response): Promise<string | undefined> {
 async function settled(id: string): Promise<DeployStatus> {
   return vi.waitFor(
     () => {
-      const status = agent.deploys?.get(id) ?? null;
+      const status = daemon.deploys?.get(id) ?? null;
       expect(status?.state).not.toBe("accepted");
       expect(status?.state).not.toBe("uploading");
       return status as DeployStatus;

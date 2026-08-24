@@ -12,7 +12,7 @@
  */
 
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
-import { loadAgentConfig } from "../../agent/config.ts";
+import { loadDaemonConfig } from "../../daemon/config.ts";
 import { createRegistry } from "../_bootstrap.ts";
 import { formatNodeTable, listFleetNodes } from "../_nodes.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
@@ -50,7 +50,7 @@ export const fleet: CommandDef = defineCommand({
 });
 
 async function runNodes(flags: Record<string, unknown>): Promise<void> {
-  const config = await loadAgentConfig({
+  const config = await loadDaemonConfig({
     configPath: typeof flags.config === "string" ? flags.config : undefined,
     flags: stringFlags(flags),
     env: process.env,

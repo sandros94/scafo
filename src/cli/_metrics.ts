@@ -22,8 +22,8 @@ import {
   DURATION_BANDS_MS,
   type StatusClassCounts,
   UNATTRIBUTED,
-} from "../agent/access-counters.ts";
-import { counterRecords, type ObserveRecord } from "../agent/observe-records.ts";
+} from "../daemon/access-counters.ts";
+import { counterRecords, type ObserveRecord } from "../daemon/observe-records.ts";
 import type { ObserveWindow } from "./_observe-read.ts";
 
 /** What one environment was served over the window. */

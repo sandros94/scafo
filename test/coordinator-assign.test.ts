@@ -8,9 +8,9 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import type { AgentContext } from "../src/agent/app.ts";
-import type { AgentConfig } from "../src/agent/config.ts";
-import { type Coordinator, createCoordinator } from "../src/agent/coordinator.ts";
+import type { DaemonContext } from "../src/daemon/app.ts";
+import type { DaemonConfig } from "../src/daemon/config.ts";
+import { type Coordinator, createCoordinator } from "../src/daemon/coordinator.ts";
 import {
   acquireLease,
   createBuild,
@@ -529,12 +529,12 @@ describe("placements of environments that are retired", () => {
 
 /** A coordinator for `nodeId`, assigning on every tick against the shared store. */
 function coordinatorFor(nodeId: string): Coordinator {
-  return createCoordinator(agentFor(nodeId), { ttlMs: TTL_MS, reapIntervalMs: 0 });
+  return createCoordinator(daemonFor(nodeId), { ttlMs: TTL_MS, reapIntervalMs: 0 });
 }
 
-function agentFor(nodeId: string): AgentContext {
+function daemonFor(nodeId: string): DaemonContext {
   return {
-    config: agentConfig(nodeId),
+    config: daemonConfig(nodeId),
     nodeId,
     registry: clock.ctx,
     supervisor: idleSupervisor(),
@@ -562,7 +562,7 @@ async function register(id: string, labels?: Record<string, string>): Promise<No
     v: 1,
     id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: `key-${id}` },
-    addresses: { internal: `10.0.0.${id === NODE_A ? "1" : "2"}`, agentPort: 7400 },
+    addresses: { internal: `10.0.0.${id === NODE_A ? "1" : "2"}`, apiPort: 7400 },
     heartbeatAt: new Date(clock.nowMs()).toISOString(),
     ...(labels === undefined ? {} : { labels }),
   });
@@ -583,7 +583,7 @@ function rival(): PlacementRecord {
   };
 }
 
-function agentConfig(nodeId: string): AgentConfig {
+function daemonConfig(nodeId: string): DaemonConfig {
   return {
     bucket: {
       endpoint: "http://store.test:9000",

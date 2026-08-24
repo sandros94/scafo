@@ -17,7 +17,7 @@
 
 import { chmod, writeFile } from "node:fs/promises";
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
-import { loadAgentConfig } from "../../agent/config.ts";
+import { loadDaemonConfig } from "../../daemon/config.ts";
 import { ScafoError } from "../../core/error.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
 import { assertNodeId } from "../../core/registry/paths.ts";
@@ -92,13 +92,13 @@ const enrollArgs: ArgsDef = {
   },
   remote: { type: "string", description: "Remote whose node admits the key, admin-authed" },
   role: { type: "string", description: "Tier to admit it at: admin|operator" },
-  agent: { type: "string", description: "Node to reach, instead of the remote's first endpoint" },
+  node: { type: "string", description: "Node to reach, instead of the remote's first endpoint" },
 };
 
 const remoteArgs: ArgsDef = {
   config: { type: "string", description: "Path to scafo.config.jsonc, read for its remote pin" },
   remote: { type: "string", description: "Remote to act on, out of this operator's home" },
-  agent: { type: "string", description: "Node to reach, instead of the remote's first endpoint" },
+  node: { type: "string", description: "Node to reach, instead of the remote's first endpoint" },
 };
 
 const rotateArgs: ArgsDef = {
@@ -119,7 +119,7 @@ const keygen: CommandDef = defineCommand({
   meta: {
     name: "keygen",
     description:
-      `Write an operator key file for the agent API ` +
+      `Write an operator key file for the node API ` +
       `(to set an operator up, use "scafo remote add" instead)`,
   },
   args: keygenArgs,
@@ -277,7 +277,7 @@ async function runEnroll(flags: Record<string, unknown>): Promise<void> {
     chosen === "wire"
       ? await enrollOnWire(resolveOperatorHome(), named as string, pub, {
           ...role,
-          ...(text(flags.agent) === undefined ? {} : { agentUrl: text(flags.agent) as string }),
+          ...(text(flags.node) === undefined ? {} : { nodeUrl: text(flags.node) as string }),
         })
       : await enrollInBucket(await bucketRegistry(flags), pub, role);
 
@@ -287,7 +287,7 @@ async function runEnroll(flags: Record<string, unknown>): Promise<void> {
 async function runRotate(flags: Record<string, unknown>): Promise<void> {
   const home = resolveOperatorHome();
   const rotated = await rotateRemoteKey(home, await remoteName(home, flags), {
-    ...(text(flags.agent) === undefined ? {} : { agentUrl: text(flags.agent) as string }),
+    ...(text(flags.node) === undefined ? {} : { nodeUrl: text(flags.node) as string }),
     keepOld: flags["keep-old"] === true,
     purgeOld: flags["purge-old"] === true,
   });
@@ -301,7 +301,7 @@ async function runRevoke(flags: Record<string, unknown>): Promise<void> {
     home,
     await remoteName(home, flags),
     required(flags, "id"),
-    text(flags.agent) === undefined ? {} : { agentUrl: text(flags.agent) as string },
+    text(flags.node) === undefined ? {} : { nodeUrl: text(flags.node) as string },
   );
 
   console.log(describeRevocation(revoked));
@@ -312,7 +312,7 @@ async function runList(flags: Record<string, unknown>): Promise<void> {
   const keys = await listRemoteKeys(
     home,
     await remoteName(home, flags),
-    text(flags.agent) === undefined ? {} : { agentUrl: text(flags.agent) as string },
+    text(flags.node) === undefined ? {} : { nodeUrl: text(flags.node) as string },
   );
 
   console.log(formatRemoteKeys(keys));
@@ -345,7 +345,7 @@ async function remoteName(home: string, flags: Record<string, unknown>): Promise
 
 /** The bucket named by the flags, the config file and the environment, in that order. */
 async function bucketRegistry(flags: Record<string, unknown>): Promise<RegistryContext> {
-  const config = await loadAgentConfig({
+  const config = await loadDaemonConfig({
     configPath: text(flags.config),
     flags: stringFlags(flags),
     env: process.env,

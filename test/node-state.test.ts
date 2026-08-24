@@ -79,7 +79,7 @@ describe("the first boot of a node", () => {
       v: 1,
       id: state.id,
       publicKey: { kty: "OKP", crv: "Ed25519", x: state.publicKey.x },
-      addresses: { internal: "10.0.0.4", agentPort: 7400 },
+      addresses: { internal: "10.0.0.4", apiPort: 7400 },
     });
 
     const token = await signNodeToken(state.privateKey, state.id);

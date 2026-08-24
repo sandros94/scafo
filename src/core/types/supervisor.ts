@@ -1,10 +1,10 @@
 /*
- * The seam between the agent and whatever actually runs processes on a node.
+ * The seam between the daemon and whatever actually runs processes on a node.
  * Core describes the contract; a driver (`scafo/drivers/supervisor/child`)
  * implements it, and the caller wires the two together.
  */
 
-/** A process the agent asked a supervisor to run. */
+/** A process the daemon asked a supervisor to run. */
 export interface ProcessSpec {
   /** Unique per supervised process; reusing an id while it runs is an error. */
   id: string;
@@ -30,7 +30,7 @@ export interface StopOptions {
   graceMs?: number;
 }
 
-/** Runs and stops processes on behalf of the agent. Restart policy is not its job. */
+/** Runs and stops processes on behalf of the daemon. Restart policy is not its job. */
 export interface Supervisor {
   start(spec: ProcessSpec): Promise<ProcessStatus>;
   /** Resolves once the process is gone; an unknown id is a no-op. */

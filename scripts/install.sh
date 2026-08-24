@@ -7,7 +7,7 @@
 # Installs the four executables one scafo node is made of, each verified by
 # sha256 before it is put anywhere:
 #
-#   scafo    the node agent and the CLI, one binary
+#   scafo    the node daemon and the CLI, one binary
 #   celld    the runtime every deployed application runs on
 #   caddy    the ingress that terminates TLS and routes to the runtime. By
 #            DEFAULT this is scafo-caddy — see the next section — and
@@ -179,7 +179,7 @@ STORAGE_TOKEN_NAME='storage-token'
 STORAGE_ENDPOINT='http://127.0.0.1:7400'
 
 # The stop grace is part of the product, not a tuning preference: on SIGTERM the
-# agent marks itself draining, releases the coordinator lease, stops
+# daemon marks itself draining, releases the coordinator lease, stops
 # reconciling, closes its listener and only THEN stops the runtime processes,
 # each of which drains its in-flight requests for 25s and is killed at 30s.
 # Anything under 35 cuts that off mid-drain.
@@ -607,7 +607,7 @@ SCAFO_S3_REGION=us-east-1
 # <project>--<env>.<domain>, <project>--<build>.<domain>. Comma-separated.
 SCAFO_PLATFORM_DOMAINS=
 
-# The agent API. Loopback needs no further statement about the network; widening
+# The node API. Loopback needs no further statement about the network; widening
 # it makes the node refuse to boot until SCAFO_TRANSPORT says what that network
 # is — "wireguard" to tunnel it, "none" to state that it is already private.
 SCAFO_LISTEN=127.0.0.1:7400
@@ -747,7 +747,7 @@ write_units() {
 render_node_unit() {
   cat <<EOF
 [Unit]
-Description=scafo node agent
+Description=scafo node daemon
 Documentation=https://github.com/sandros94/scafo
 Wants=network-online.target
 After=network-online.target
@@ -772,9 +772,9 @@ RestartSec=5s
 
 # KillMode=mixed, and it is load-bearing: systemd's default signals every
 # process in the cgroup at once, which would SIGTERM the runtime processes
-# beside the agent instead of letting the agent stop them in its own order —
+# beside the daemon instead of letting the daemon stop them in its own order —
 # mark draining, release the lease, stop reconciling, close the listener, and
-# only then drain each runtime. "mixed" signals the agent alone, exactly as a
+# only then drain each runtime. "mixed" signals the daemon alone, exactly as a
 # container runtime signals PID 1.
 KillMode=mixed
 KillSignal=SIGTERM
@@ -1000,7 +1000,7 @@ explain_manual_setup() {
     say ''
   fi
   say 'Whatever supervises them must give the node AT LEAST 35 SECONDS between'
-  say 'SIGTERM and SIGKILL, and must signal the agent alone rather than every'
+  say 'SIGTERM and SIGKILL, and must signal the daemon alone rather than every'
   say 'process beside it: it drains its runtimes itself, in an order that matters.'
 }
 
@@ -1043,14 +1043,14 @@ next_steps() {
     printf '   The key lands in ./scafo-operator.json, which is where "scafo deploy"\n'
     printf '   looks for it. Back it up: nothing can reissue it.\n\n'
     printf '4. Deploy something:\n\n'
-    printf '     scafo deploy ./my-app --agent http://127.0.0.1:7400 \\\n'
+    printf '     scafo deploy ./my-app --node http://127.0.0.1:7400 \\\n'
     printf '       --project shop --env production --flip\n\n'
   else
     printf '1. Run the node and the ingress as described above.\n'
     printf '2. Mint an operator key with the same bucket settings exported:\n\n'
     printf '     scafo operator keygen --register\n\n'
     printf '3. Deploy something:\n\n'
-    printf '     scafo deploy ./my-app --agent http://127.0.0.1:7400 \\\n'
+    printf '     scafo deploy ./my-app --node http://127.0.0.1:7400 \\\n'
     printf '       --project shop --env production --flip\n\n'
   fi
 

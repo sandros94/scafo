@@ -28,7 +28,7 @@ export const APEX_ENVIRONMENT: string = "production";
 export const FULL_WEIGHT: number = 100;
 
 /**
- * The parts of the agent's API that MUST NOT be reachable through a platform
+ * The parts of the node API that MUST NOT be reachable through a platform
  * apex, whatever else that apex serves. Every ingress driver is handed these in
  * {@link ApiRouting.denied} and enforces them itself.
  *
@@ -70,16 +70,16 @@ export interface RenderRoutesInput {
   processes: RuntimeProcess[];
   claims: RouteClaim[];
   /**
-   * The agent's own loopback port and the environments this node reads as
-   * parked, when there is an agent for a request to fall through to.
+   * The daemon's own loopback port and the environments this node reads as
+   * parked, when there is a daemon for a request to fall through to.
    *
    * Omitted, and the routing then carries no `wake` at all, by a caller that has
-   * no agent address to hand out — which is exactly the routing scafo rendered
+   * no daemon address to hand out — which is exactly the routing scafo rendered
    * before scale-to-zero existed.
    */
   wake?: { port: number; parked: Array<{ project: string; env: EnvironmentRecord }> };
   /**
-   * The agent's own loopback port again, by a node publishing the fleet's API at
+   * The daemon's own loopback port again, by a node publishing the fleet's API at
    * its platform domains' bare apexes (`api.public`).
    *
    * Omitted, and the routing then carries no `api` at all, by a node whose
@@ -106,9 +106,9 @@ export interface RenderRoutesInput {
  * 4. The hosts of every PARKED environment — its label under each domain, its
  *    apex when it is {@link APEX_ENVIRONMENT}, and every custom domain its
  *    record claims — which no process answers on and which therefore go to the
- *    node's own agent instead, to be woken by the request that asked for them.
- *    These are reported in `wake` rather than in `routes`, because they name an
- *    agent rather than a backend, and a host that already has a route in (1),
+ *    node's own daemon instead, to be woken by the request that asked for them.
+ *    These are reported in `wake` rather than in `routes`, because they name a
+ *    daemon rather than a backend, and a host that already has a route in (1),
  *    (2) or (3) is never among them: mid-transition, the ready process wins.
  * 5. The BARE APEX of every platform domain, when this node publishes the
  *    fleet's API there — reported in `api`, on the same precedence rule: an apex
@@ -200,7 +200,7 @@ export function renderRoutes(input: RenderRoutesInput): IngressDesired {
  * ready processes are considered, whatever order they arrive in.
  *
  * EXPORTED SO THAT WHAT ANSWERS AN ENVIRONMENT IS DECIDED IN ONE PLACE. The
- * agent's wake surface answers every host the ingress has no explicit route for,
+ * daemon's wake surface answers every host the ingress has no explicit route for,
  * which is more of the traffic than it looks: a parked or starting environment,
  * and every host of every environment while a router propagates. A second
  * reading of "what serves this environment" would be a second routing, and two
@@ -243,14 +243,14 @@ export function pickLeg(legs: WeightedBackend[], draw: number): WeightedBackend 
 }
 
 /**
- * What the node's own agent is given: the hosts of every parked environment,
+ * What the node's own daemon is given: the hosts of every parked environment,
  * and the platform domains it answers for whatever else is asked of them.
  *
  * A host `routes` already answers on is left out rather than listed in both. The
  * two overlap for a whole pass whenever an environment is waking — the record
  * still reads parked to a node that has not re-read it, while the process it
  * started is already ready — and the ready process is the better answer of the
- * two, since routing it to the agent would hold a request for something that is
+ * two, since routing it to the daemon would hold a request for something that is
  * already up.
  */
 function wakeRouting(

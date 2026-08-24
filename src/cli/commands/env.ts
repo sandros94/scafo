@@ -12,12 +12,12 @@
  */
 
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
-import { loadAgentConfig } from "../../agent/config.ts";
+import { loadDaemonConfig } from "../../daemon/config.ts";
 import { ScafoError } from "../../core/error.ts";
-import { agentBaseUrl, operatorSigner } from "../_agent.ts";
+import { nodeBaseUrl, operatorSigner } from "../_node.ts";
 import { createRegistry } from "../_bootstrap.ts";
 import {
-  agentOps,
+  nodeOps,
   describeParkChange,
   describeRetirement,
   describeSelectorChange,
@@ -34,7 +34,7 @@ import { OPERATOR_KEY_FORMS, operatorFlags, resolveOperator } from "../_operator
 import { readTextFile, reportFailure } from "../_utils.ts";
 
 /* The bucket the registry lives in, exactly as `scafo sail` takes it. Only read
-   when no --agent is given: with one, the node holds the bucket credentials and
+   when no --node is given: with one, the node holds the bucket credentials and
    the operator needs none of their own. */
 const bucketArgs: ArgsDef = {
   "config": { type: "string", description: "Path to scafo.config.jsonc" },
@@ -50,10 +50,10 @@ const targetArgs: ArgsDef = {
   ...bucketArgs,
   project: { type: "string", description: "Project the environment belongs to", required: true },
   env: { type: "string", description: "Environment to act on", required: true },
-  agent: {
+  node: {
     type: "string",
     description:
-      "Base URL of a node agent to ask; without it the chosen remote says where, and " +
+      "Base URL of a node daemon to ask; without it the chosen remote says where, and " +
       "without a remote the bucket is written directly",
   },
   remote: { type: "string", description: "Remote to act on, out of this operator's home" },
@@ -256,7 +256,7 @@ async function runDelete(flags: Record<string, unknown>): Promise<void> {
 
 /**
  * Which way this invocation reaches the installation. A node is asked whenever
- * one is named — by `--agent`, or by the remote this operator's home resolved —
+ * one is named — by `--node`, or by the remote this operator's home resolved —
  * and everything else falls back to the bucket, which is what an installation
  * with no node running has, and what `scafo trust` and `scafo varset` do too.
  */
@@ -268,14 +268,14 @@ async function opsFor(flags: Record<string, unknown>): Promise<EnvironmentOps> {
     readFile: readTextFile,
   });
 
-  if (resolved.agentUrl !== undefined) {
-    return agentOps({
-      url: agentBaseUrl(resolved.agentUrl),
+  if (resolved.nodeUrl !== undefined) {
+    return nodeOps({
+      url: nodeBaseUrl(resolved.nodeUrl),
       authorize: operatorSigner(await resolved.readKey()),
     });
   }
 
-  const config = await loadAgentConfig({
+  const config = await loadDaemonConfig({
     configPath: text(flags.config),
     flags: stringFlags(flags),
     env: process.env,

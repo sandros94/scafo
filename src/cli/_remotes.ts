@@ -146,7 +146,7 @@ export async function readRemoteKey(home: string, entry: RemoteEntry): Promise<O
 export interface AddRemoteOptions {
   /** Name to file it under. Optional only with {@link AddRemoteOptions.from}. */
   name?: string;
-  /** Agent URLs it is reached at. Required unless a portable file carries them. */
+  /** Node URLs it is reached at. Required unless a portable file carries them. */
   endpoints?: string[];
   /** An existing key in this home to reuse, instead of minting a fresh one. */
   keyName?: string;

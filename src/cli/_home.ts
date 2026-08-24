@@ -4,8 +4,8 @@
  *
  * This is the OPERATOR's home, not a node's state directory: a node is a machine
  * with an identity it must keep across boots, an operator is a person with
- * several installations they move between. Nothing in here is ever written by an
- * agent, and nothing in here belongs in a repository.
+ * several installations they move between. Nothing in here is ever written by a
+ * node daemon, and nothing in here belongs in a repository.
  */
 
 import { homedir } from "node:os";

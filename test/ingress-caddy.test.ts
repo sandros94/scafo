@@ -31,9 +31,9 @@ const DOMAIN = "apps.test";
 const OTHER_DOMAIN = "apps.example";
 const PARKED_HOST = "shop--preview.apps.test";
 
-/** Where the node's own agent answers, and how a route is told to dial it. */
-const AGENT_PORT = 7400;
-const AGENT_DIAL = `127.0.0.1:${String(AGENT_PORT)}`;
+/** Where the node's own daemon answers, and how a route is told to dial it. */
+const NODE_PORT = 7400;
+const NODE_DIAL = `127.0.0.1:${String(NODE_PORT)}`;
 
 /** One call the driver made, as the fake saw it. */
 interface AdminCall {
@@ -302,13 +302,13 @@ describe("a host divided between several backends", () => {
   });
 });
 
-describe("the routes that reach the node's own agent", () => {
+describe("the routes that reach the node's own daemon", () => {
   it("renders a parked host as an ordinary route, under the host's own id", async () => {
     await driver.apply(waking([], { hosts: [PARKED_HOST], domains: [] }));
 
     /* Same id a process-backed route for that host would carry, so waking is a
        change of upstream rather than a change of route. */
-    expect(routes).toEqual([agentRoute(routeId(PARKED_HOST), PARKED_HOST)]);
+    expect(routes).toEqual([nodeRoute(routeId(PARKED_HOST), PARKED_HOST)]);
   });
 
   it("renders one catch-all per platform domain, wildcarding exactly ONE label", async () => {
@@ -319,8 +319,8 @@ describe("the routes that reach the node's own agent", () => {
        never a subdomain of a subdomain either. */
     expect(methods()).toEqual(["GET", "POST", "POST"]);
     expect(routes).toEqual([
-      agentRoute(catchAllId(DOMAIN), `*.${DOMAIN}`),
-      agentRoute(catchAllId(OTHER_DOMAIN), `*.${OTHER_DOMAIN}`),
+      nodeRoute(catchAllId(DOMAIN), `*.${DOMAIN}`),
+      nodeRoute(catchAllId(OTHER_DOMAIN), `*.${OTHER_DOMAIN}`),
     ]);
     expect(catchAllId(DOMAIN)).toBe(`${CATCHALL_ID_PREFIX}${DOMAIN}`);
   });
@@ -346,7 +346,7 @@ describe("the catch-alls sit after every route the driver owns", () => {
    * THE INVARIANT THIS SUITE EXISTS FOR. Caddy matches routes in ARRAY ORDER and
    * each of these is terminal, so a catch-all reached first answers for a host an
    * explicit route was written for — which is not one misrouted name but a whole
-   * platform domain's live traffic going to the agent instead of to the processes
+   * platform domain's live traffic going to the daemon instead of to the processes
    * serving it. `POST` appends, so it is asserted after every kind of converge.
    */
   const WAKE = { hosts: [PARKED_HOST], domains: [DOMAIN] };
@@ -487,7 +487,7 @@ describe("a wake host is converged like any other host", () => {
 
     expect(methods()).toEqual(["GET", "PATCH"]);
     expect(routes[0]).toMatchObject({
-      handle: [{ handler: "reverse_proxy", upstreams: [{ dial: AGENT_DIAL }] }],
+      handle: [{ handler: "reverse_proxy", upstreams: [{ dial: NODE_DIAL }] }],
     });
   });
 
@@ -506,7 +506,7 @@ describe("a wake host is converged like any other host", () => {
     await driver.apply(waking([[HOST, 42_000]], { hosts: [PARKED_HOST], ...DOMAINS }));
     calls = [];
 
-    /* A node with no agent address to fall through to — the routing scafo
+    /* A node with no daemon address to fall through to — the routing scafo
        rendered before scale-to-zero existed. Only what a process answers is left. */
     await driver.apply(desired([[HOST, 42_000]]));
 
@@ -577,23 +577,23 @@ function split(host: string, legs: Array<[number, number]>): IngressDesired {
   };
 }
 
-/** The same routing, plus the hosts and domains that fall through to the agent. */
+/** The same routing, plus the hosts and domains that fall through to the daemon. */
 function waking(
   entries: Array<[string, number]>,
   wake: { hosts?: string[]; domains?: string[] },
 ): IngressDesired {
   return {
     ...desired(entries),
-    wake: { port: AGENT_PORT, hosts: wake.hosts ?? [], domains: wake.domains ?? [DOMAIN] },
+    wake: { port: NODE_PORT, hosts: wake.hosts ?? [], domains: wake.domains ?? [DOMAIN] },
   };
 }
 
-/** One route sending everything it matches to the node's own agent. */
-function agentRoute(id: string, match: string): Record<string, unknown> {
+/** One route sending everything it matches to the node's own daemon. */
+function nodeRoute(id: string, match: string): Record<string, unknown> {
   return {
     "@id": id,
     "match": [{ host: [match] }],
-    "handle": [{ handler: "reverse_proxy", upstreams: [{ dial: AGENT_DIAL }] }],
+    "handle": [{ handler: "reverse_proxy", upstreams: [{ dial: NODE_DIAL }] }],
     "terminal": true,
   };
 }

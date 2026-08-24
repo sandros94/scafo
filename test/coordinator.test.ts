@@ -8,9 +8,9 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import type { AgentContext } from "../src/agent/app.ts";
-import type { AgentConfig } from "../src/agent/config.ts";
-import { type Coordinator, createCoordinator } from "../src/agent/coordinator.ts";
+import type { DaemonContext } from "../src/daemon/app.ts";
+import type { DaemonConfig } from "../src/daemon/config.ts";
+import { type Coordinator, createCoordinator } from "../src/daemon/coordinator.ts";
 import {
   acquireLease,
   createBuild,
@@ -234,7 +234,7 @@ describe("createCoordinator", () => {
 
 /** A coordinator for `nodeId`, reaping on every tick against the shared store. */
 function coordinatorFor(nodeId: string, opts?: { buildRetentionMs?: number }): Coordinator {
-  return createCoordinator(agentFor(nodeId), {
+  return createCoordinator(daemonFor(nodeId), {
     ttlMs: TTL_MS,
     /* Every tick reaps, so nothing a test observes depends on an interval. */
     reapIntervalMs: 0,
@@ -242,9 +242,9 @@ function coordinatorFor(nodeId: string, opts?: { buildRetentionMs?: number }): C
   });
 }
 
-function agentFor(nodeId: string): AgentContext {
+function daemonFor(nodeId: string): DaemonContext {
   return {
-    config: agentConfig(nodeId),
+    config: daemonConfig(nodeId),
     nodeId,
     registry: clock.ctx,
     supervisor: idleSupervisor(),
@@ -258,7 +258,7 @@ async function storedLease(): Promise<CoordinatorLease> {
   return found.value;
 }
 
-function agentConfig(nodeId: string): AgentConfig {
+function daemonConfig(nodeId: string): DaemonConfig {
   return {
     bucket: {
       endpoint: "http://store.test:9000",

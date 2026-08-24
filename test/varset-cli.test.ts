@@ -11,7 +11,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { loadAgentConfig } from "../src/agent/config.ts";
+import { loadDaemonConfig } from "../src/daemon/config.ts";
 import { decodeVarsetKey, readVarsetKeyFile, VARSET_KEY_BYTES } from "../src/cli/_varset-key.ts";
 import {
   formatVarset,
@@ -206,17 +206,17 @@ describe("reading the key file", () => {
     const readConfig = (path: string): Promise<string | null> =>
       Promise.resolve(path === configPath ? JSON.stringify({ varsets: { keyFile: "/f" } }) : null);
 
-    const fromFlag = await loadAgentConfig({
+    const fromFlag = await loadDaemonConfig({
       env: { ...required, SCAFO_VARSET_KEY_FILE: "/e" },
       flags: { "varset-key-file": "/k" },
     });
-    const fromEnv = await loadAgentConfig({
+    const fromEnv = await loadDaemonConfig({
       configPath,
       readFile: readConfig,
       env: { ...required, SCAFO_VARSET_KEY_FILE: "/e" },
     });
-    const fromFile = await loadAgentConfig({ configPath, readFile: readConfig, env: required });
-    const absent = await loadAgentConfig({ env: required });
+    const fromFile = await loadDaemonConfig({ configPath, readFile: readConfig, env: required });
+    const absent = await loadDaemonConfig({ env: required });
 
     expect([
       fromFlag.varsets?.keyFile,

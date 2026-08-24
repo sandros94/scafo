@@ -8,7 +8,7 @@
  * pulls: its `http` provider polls a URL every few seconds and takes whatever it
  * finds there as the WHOLE of that provider's dynamic configuration. So `apply`
  * makes no network call at all — it renders the configuration and caches it, and
- * the agent's `GET /v1/ingress/traefik` hands that cache to Traefik when it asks.
+ * the daemon's `GET /v1/ingress/traefik` hands that cache to Traefik when it asks.
  *
  * Two consequences worth stating, because they are not symmetric with Caddy:
  *
@@ -22,7 +22,7 @@
  *    traffic when Traefik next asks for it.
  *
  * The operator runs Traefik, defines the entryPoint these routers attach to, and
- * points its http provider at the agent. Setting that up is documented with the
+ * points its http provider at the node API. Setting that up is documented with the
  * deployment instructions.
  */
 
@@ -179,7 +179,7 @@ export interface TraefikDriverOptions {
 
 /** An {@link IngressDriver} whose configuration is served rather than pushed. */
 export interface TraefikDriver extends IngressDriver {
-  /** The configuration as of the last `apply`; what the agent's route publishes. */
+  /** The configuration as of the last `apply`; what the daemon's route publishes. */
   snapshot(): TraefikDynamicConfig;
 }
 
@@ -189,7 +189,7 @@ export interface TraefikDriver extends IngressDriver {
  * `apply` never fails: rendering is pure and there is nothing to reach. What can
  * fail is Traefik's own poll, which Traefik reports on its own side — a provider
  * that cannot read its endpoint keeps the configuration it last read and retries,
- * so a node whose agent is briefly down keeps serving what it was serving.
+ * so a node whose daemon is briefly down keeps serving what it was serving.
  */
 export function createTraefikDriver(opts?: TraefikDriverOptions): TraefikDriver {
   const upstreamHost = opts?.upstreamHost ?? "127.0.0.1";
@@ -198,7 +198,7 @@ export function createTraefikDriver(opts?: TraefikDriverOptions): TraefikDriver 
   /*
    * Empty until the first reconcile pass, and deliberately not "nothing to say".
    * A node that has just started is running none of its processes yet — the
-   * supervisor's children went with the agent — so the honest answer to "what
+   * supervisor's children went with the daemon — so the honest answer to "what
    * does this node serve" is "nothing", and routing that follows readiness must
    * say so. Serving the previous configuration instead would point Traefik at
    * ports nothing listens on, which is a 502 per request where this is a 404.
@@ -230,16 +230,16 @@ export function createTraefikDriver(opts?: TraefikDriverOptions): TraefikDriver 
  * one child service per leg, which is the only place Traefik puts weights; a
  * host with one keeps the plain load balancer it has always had.
  *
- * WHAT REACHES THE AGENT is rendered the same way and ranked differently. A
+ * WHAT REACHES THE DAEMON is rendered the same way and ranked differently. A
  * host waiting to be woken is an ordinary router over an ordinary service — it
- * names one host and dials the agent instead of a runtime process — while a
+ * names one host and dials the daemon instead of a runtime process — while a
  * platform domain's catch-all is a `HostRegexp` carrying an explicit
  * {@link CATCHALL_PRIORITY}, because Traefik's default ranking is rule length
  * and a regexp for a domain outruns a `Host` for a name under it.
  *
  * THE FLEET'S API AT A PLATFORM APEX IS TWO ROUTERS, and the pair is the whole
  * of how `/v1/storage` is kept off a public name. The apex router dials the
- * agent for every path EXCEPT the denied prefixes, which its rule negates
+ * daemon for every path EXCEPT the denied prefixes, which its rule negates
  * outright; the denial above it matches exactly those prefixes and is sent to
  * {@link NOOP_SERVICE}, so nothing is dialled and no answer comes from behind
  * the ingress. Both ranks are stated — see {@link API_PRIORITY}.
@@ -251,7 +251,7 @@ export function createTraefikDriver(opts?: TraefikDriverOptions): TraefikDriver 
  * `cannot decode configuration data: routers cannot be a standalone element`,
  * treats the poll as failed, and KEEPS THE CONFIGURATION IT LAST READ. A node
  * that stopped serving an environment would go on serving it for as long as the
- * agent stayed up. `{"http":{}}` fails the same way one level up. Omitting the
+ * daemon stayed up. `{"http":{}}` fails the same way one level up. Omitting the
  * key entirely — an empty document — is what Traefik reads as "this provider
  * routes nothing", and it withdraws the routers within one poll.
  *
@@ -312,7 +312,7 @@ export function renderTraefikConfig(
 
   const wake = desired.wake;
   if (wake !== undefined) {
-    const agent = `http://127.0.0.1:${String(wake.port)}`;
+    const daemon = `http://127.0.0.1:${String(wake.port)}`;
 
     for (const host of [...wake.hosts].sort(compare)) {
       /* Asserted for the same reason every routed host is: a rule is a language
@@ -322,7 +322,7 @@ export function renderTraefikConfig(
 
       const key = traefikKey(host);
       routers[key] = { rule: `Host(\`${host}\`)`, service: key, entryPoints: [...entryPoints] };
-      services[key] = { loadBalancer: { servers: [{ url: agent }] } };
+      services[key] = { loadBalancer: { servers: [{ url: daemon }] } };
     }
 
     for (const domain of [...wake.domains].sort(compare)) {
@@ -335,13 +335,13 @@ export function renderTraefikConfig(
         entryPoints: [...entryPoints],
         priority: CATCHALL_PRIORITY,
       };
-      services[key] = { loadBalancer: { servers: [{ url: agent }] } };
+      services[key] = { loadBalancer: { servers: [{ url: daemon }] } };
     }
   }
 
   const api = desired.api;
   if (api !== undefined) {
-    const agent = `http://127.0.0.1:${String(api.port)}`;
+    const daemon = `http://127.0.0.1:${String(api.port)}`;
 
     for (const host of [...api.hosts].sort(compare)) {
       assertHost(host);
@@ -369,7 +369,7 @@ export function renderTraefikConfig(
         entryPoints: [...entryPoints],
         priority: API_PRIORITY,
       };
-      services[key] = { loadBalancer: { servers: [{ url: agent }] } };
+      services[key] = { loadBalancer: { servers: [{ url: daemon }] } };
     }
   }
 

@@ -12,9 +12,9 @@
  * gap between them is the pull model, and this suite measures it.
  *
  * The topology mirrors the Caddy suite exactly, which is what makes the
- * comparison mean anything: Traefik and the agent SHARE a network namespace, so
+ * comparison mean anything: Traefik and the daemon SHARE a network namespace, so
  * the runtime processes listen on 127.0.0.1, Traefik dials them there, and
- * Traefik reaches the agent on the same loopback. The store is a separate
+ * Traefik reaches the daemon on the same loopback. The store is a separate
  * container on the docker bridge.
  *
  * There is NO operator-coexistence step here, and its absence is a finding
@@ -35,7 +35,7 @@ import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { AgentState } from "../../src/agent/app.ts";
+import type { DaemonState } from "../../src/daemon/app.ts";
 import type { OperatorKeyFile } from "../../src/cli/_operator-key.ts";
 import { signNodeToken } from "../../src/core/auth/node-token.ts";
 import {
@@ -49,7 +49,7 @@ import {
 import type { NodeRecord } from "../../src/core/types/registry.ts";
 import type { TraefikDynamicConfig } from "../../src/drivers/ingress/traefik.ts";
 import {
-  AGENT_IMAGE,
+  NODE_IMAGE,
   BOOT_DEADLINE_MS,
   type BucketSettings,
   buildIdOf,
@@ -82,8 +82,8 @@ const TRAEFIK_IMAGE = "traefik:v3";
 const TRAEFIK_HTTP_PORT = 80;
 /** Carries Traefik's own API and its ping; the suite reads both from the host. */
 const TRAEFIK_API_PORT = 8080;
-/** Published on the Traefik container, because the agent shares its namespace. */
-const AGENT_PORT = 7400;
+/** Published on the Traefik container, because the daemon shares its namespace. */
+const NODE_PORT = 7400;
 
 const BUCKET: BucketSettings = {
   bucket: "scafo-e2e-traefik",
@@ -100,7 +100,7 @@ const NODE_ID = "node-e2e-traefik";
 
 /**
  * The routers this node publishes whatever it is serving: the catch-all that
- * hands unmatched names under the platform domain to the agent, and the pair
+ * hands unmatched names under the platform domain to the daemon, and the pair
  * that answers the fleet's API at the domain's own apex — the second of which
  * is what keeps `/v1/storage` off that public name.
  */
@@ -112,11 +112,11 @@ const STANDING_ROUTERS = [
 
 let store: StartedStore;
 let traefik: StartedTestContainer;
-let agent: StartedTestContainer;
+let daemon: StartedTestContainer;
 
 let httpPort: number;
+let traefikApiPort: number;
 let apiPort: number;
-let agentPort: number;
 
 let registry: RegistryContext;
 let keyPath: string;
@@ -125,14 +125,14 @@ let buildV1: string;
 let buildV2: string;
 
 const tmpDirs: string[] = [];
-/** Everything the agent container has written, kept for failure messages. */
-const agentLog: string[] = [];
+/** Everything the daemon container has written, kept for failure messages. */
+const daemonLog: string[] = [];
 /** Raw observations the report is written from; printed once at the end. */
 const observed: Record<string, unknown> = {};
 
 describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   beforeAll(async () => {
-    /* Built first: the agent container runs `dist/` off the bind-mounted
+    /* Built first: the daemon container runs `dist/` off the bind-mounted
        worktree, so a stale build would test the previous commit. */
     await buildRepo();
     store = await startStore(BUCKET);
@@ -141,13 +141,13 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       .withCopyFilesToContainer([
         { source: join(FIXTURES, "traefik.yml"), target: "/etc/traefik/traefik.yml" },
       ])
-      /* The agent's own port is published here: it has no network of its own. */
-      .withExposedPorts(TRAEFIK_HTTP_PORT, TRAEFIK_API_PORT, AGENT_PORT)
+      /* The daemon's own port is published here: it has no network of its own. */
+      .withExposedPorts(TRAEFIK_HTTP_PORT, TRAEFIK_API_PORT, NODE_PORT)
       /*
        * Waiting on `/ping` rather than on the routing, and the distinction
        * matters here in a way it did not for Caddy: Traefik is ready long before
        * it has any scafo routing at all, because the endpoint it polls belongs
-       * to an agent that has not started yet. Its provider will log a failed
+       * to a daemon that has not started yet. Its provider will log a failed
        * poll a second from now, and that is the correct state to start from.
        */
       .withWaitStrategy(Wait.forHttp("/ping", TRAEFIK_API_PORT).forStatusCode(200))
@@ -155,19 +155,19 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       .start();
 
     httpPort = traefik.getMappedPort(TRAEFIK_HTTP_PORT);
-    apiPort = traefik.getMappedPort(TRAEFIK_API_PORT);
-    agentPort = traefik.getMappedPort(AGENT_PORT);
+    traefikApiPort = traefik.getMappedPort(TRAEFIK_API_PORT);
+    apiPort = traefik.getMappedPort(NODE_PORT);
 
-    agent = await new GenericContainer(AGENT_IMAGE)
+    daemon = await new GenericContainer(NODE_IMAGE)
       /* The whole point of the topology: Traefik's `http://127.0.0.1:<port>`
-         servers reach the celld processes, and Traefik reaches the agent. */
+         servers reach the celld processes, and Traefik reaches the daemon. */
       .withNetworkMode(`container:${traefik.getId()}`)
       .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "rw" }])
       .withWorkingDir("/work")
       .withEnvironment({
         ...storeEnv(store.fromContainers, BUCKET),
         SCAFO_NODE_ID: NODE_ID,
-        /* The listener below binds every interface, which the agent refuses
+        /* The listener below binds every interface, which the daemon refuses
            without being told what network that is. Inside a container of its
            own, on a private docker network, it is the trusted-network case. */
         SCAFO_TRANSPORT: "none",
@@ -184,7 +184,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
         SCAFO_INGRESS_DRIVER: "traefik",
         /* Peers reach a single node on loopback; without this the advertised
            host would be the wildcard the listener binds. */
-        SCAFO_ADVERTISE: `127.0.0.1:${String(AGENT_PORT)}`,
+        SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
         /* Belt and braces: the image's own esbuild, rather than whichever one
            the bind-mounted node_modules resolves to. */
         ESBUILD_BINARY_PATH: "/usr/local/bin/esbuild",
@@ -194,13 +194,13 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
         "dist/cli/index.mjs",
         "sail",
         "--listen",
-        `0.0.0.0:${String(AGENT_PORT)}`,
+        `0.0.0.0:${String(NODE_PORT)}`,
       ])
       /* Consumed from the first byte, so the logs survive even a start that
          never satisfies the wait strategy. */
       .withLogConsumer((stream: Readable) => {
-        stream.on("data", (chunk) => agentLog.push(String(chunk)));
-        stream.on("err", (chunk) => agentLog.push(String(chunk)));
+        stream.on("data", (chunk) => daemonLog.push(String(chunk)));
+        stream.on("err", (chunk) => daemonLog.push(String(chunk)));
       })
       .withWaitStrategy(Wait.forLogMessage(/listening on/))
       .withStartupTimeout(BOOT_DEADLINE_MS)
@@ -210,8 +210,8 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   }, SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
-    /* Stopped before Traefik: the agent lives in Traefik's network namespace. */
-    await agent?.stop().catch(() => {});
+    /* Stopped before Traefik: the daemon lives in Traefik's network namespace. */
+    await daemon?.stop().catch(() => {});
     await traefik?.stop().catch(() => {});
     await store?.container.stop().catch(() => {});
     for (const dir of tmpDirs) await rm(dir, { recursive: true, force: true });
@@ -222,8 +222,8 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   it(
     "answers its health endpoint and has bootstrapped the registry in the bucket",
     async () => {
-      const health = await wait("the agent to answer /v1/health", BOOT_DEADLINE_MS, async () => {
-        const answer = await httpGet(agentPort, "/v1/health", {});
+      const health = await wait("the daemon to answer /v1/health", BOOT_DEADLINE_MS, async () => {
+        const answer = await httpGet(apiPort, "/v1/health", {});
         return answer.status === 200 ? answer : null;
       });
       expect(JSON.parse(health.body)).toMatchObject({ ok: true, node: NODE_ID });
@@ -232,7 +232,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       expect(meta, "the registry the first node bootstraps").not.toBeNull();
 
       const node = await readJson<NodeRecord>(registry, nodeKey(NODE_ID));
-      expect(node?.value.addresses).toMatchObject({ agentPort: AGENT_PORT });
+      expect(node?.value.addresses).toMatchObject({ apiPort: NODE_PORT });
       observed.health = JSON.parse(health.body);
     },
     STEP_TIMEOUT_MS,
@@ -241,7 +241,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   it(
     "publishes an empty configuration before it has anything to serve",
     async () => {
-      const answer = await httpGet(agentPort, "/v1/ingress/traefik", {});
+      const answer = await httpGet(apiPort, "/v1/ingress/traefik", {});
 
       expect(answer.status).toBe(200);
       /*
@@ -261,18 +261,18 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   );
 
   it(
-    "answers 404 from the agent for a host nothing owns — the same answer Caddy gives now",
+    "answers 404 from the daemon for a host nothing owns — the same answer Caddy gives now",
     async () => {
       /*
        * The divergence this test used to document is retired: an unmatched
        * platform host no longer stops at the ingress — the catch-all hands it
-       * to the agent, and the agent answers the same problem document behind
+       * to the daemon, and the daemon answers the same problem document behind
        * either driver. What is asserted here is therefore Traefik POLLING the
        * catch-all at all, waited out because the provider poll runs on its own
        * clock.
        */
       const answer = await wait(
-        "the catch-all to hand unknowns to the agent",
+        "the catch-all to hand unknowns to the daemon",
         DEADLINE_MS,
         async () => {
           const got = await httpGet(httpPort, "/", { host: "unrouted.scafo.test" });
@@ -320,7 +320,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
        * does NOT mean Traefik has read it yet — that is the next assertion, and
        * keeping them apart is the whole difference this suite exists to show.
        */
-      expect(result.output, agentLogTail()).toContain("routed");
+      expect(result.output, daemonLogTail()).toContain("routed");
 
       buildV1 = buildIdOf(result.output);
       expect(await listBuilds(registry, PROJECT)).toContain(buildV1);
@@ -382,7 +382,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
        * is that the denial is a router Traefik actually built and honours.
        */
       const health = await wait(
-        `${PLATFORM_DOMAIN} to answer the agent's health`,
+        `${PLATFORM_DOMAIN} to answer the daemon's health`,
         DEADLINE_MS,
         async () => {
           const answer = await httpGet(httpPort, "/v1/health", { host: PLATFORM_DOMAIN });
@@ -401,7 +401,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
         const blocked = await httpGet(httpPort, path, { host: PLATFORM_DOMAIN });
 
         /* Traefik's own answer for a router with nothing behind it, and the one
-           thing that matters about it: it is not the agent's. */
+           thing that matters about it: it is not the daemon's. */
         expect(blocked.status, `${path} through the apex`).toBe(418);
         expect(blocked.body, `${path} through the apex`).not.toContain("urn:scafo:");
       }
@@ -409,7 +409,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
 
       /* The pull-provider route itself is untouched on the node's own listener,
          which is where a colocated Traefik reaches it. */
-      const local = await httpGet(agentPort, "/v1/ingress/traefik", {});
+      const local = await httpGet(apiPort, "/v1/ingress/traefik", {});
       expect(local.status).toBe(200);
     },
     STEP_TIMEOUT_MS,
@@ -420,7 +420,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
     async () => {
       const result = await runCli(deployArgs(await staged("v2")), {});
       expectCleanExit(result);
-      expect(result.output, agentLogTail()).toContain("routed");
+      expect(result.output, daemonLogTail()).toContain("routed");
       buildV2 = buildIdOf(result.output);
       expect(buildV2).not.toBe(buildV1);
       observed.buildV2 = buildV2;
@@ -488,12 +488,12 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
         "the node to report a single running process",
         DEADLINE_MS,
         async () => {
-          const answer = await httpGet(agentPort, "/v1/state", {
+          const answer = await httpGet(apiPort, "/v1/state", {
             authorization: `Bearer ${await operatorToken()}`,
           });
           if (answer.status !== 200) return null;
 
-          const body = JSON.parse(answer.body) as AgentState;
+          const body = JSON.parse(answer.body) as DaemonState;
           const running = body.processes.filter((process) => process.state === "running");
           return running.length === 1 ? body : null;
         },
@@ -536,8 +536,8 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
           ENVIRONMENT,
           "--set",
           `${buildV1}=50,${buildV2}=50`,
-          "--agent",
-          `http://127.0.0.1:${String(agentPort)}`,
+          "--node",
+          `http://127.0.0.1:${String(apiPort)}`,
           "--key",
           keyPath,
         ],
@@ -623,7 +623,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
     "promotes one leg with a flip, which clears the split and withdraws the other",
     async () => {
       const answer = await httpPost(
-        agentPort,
+        apiPort,
         "/v1/aliases",
         { project: PROJECT, environment: ENVIRONMENT, build: buildV1 },
         await operatorToken(),
@@ -678,7 +678,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       /*
        * THE ONE DELIBERATE WAKE, and on this driver it is the catch-all's whole
        * journey under test: the host matches no router, the HostRegexp hands it
-       * to the agent, the agent starts the superseded build against its own
+       * to the daemon, the daemon starts the superseded build against its own
        * fleet and holds the request through the readiness gate. Run before the
        * retirement below on purpose — a retired environment refuses to wake,
        * and the recalled process this leaves behind is exactly what retirement
@@ -710,8 +710,8 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
           PROJECT,
           "--env",
           ENVIRONMENT,
-          "--agent",
-          `http://127.0.0.1:${String(agentPort)}`,
+          "--node",
+          `http://127.0.0.1:${String(apiPort)}`,
           "--key",
           keyPath,
         ],
@@ -734,7 +734,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
        */
       /*
        * The snapshot never empties any more: the catch-alls that hand unmatched
-       * platform hosts to the agent, and the routers that answer the fleet's API
+       * platform hosts to the daemon, and the routers that answer the fleet's API
        * at this domain's own apex, stay whatever is retired — so "nothing
        * served" reads as "nothing but the standing routers". The empty-document
        * spelling the driver keeps is for the node that has no platform domains
@@ -758,11 +758,11 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       });
       observed.retireToCatchAllSnapshotMs = settledAt - retiredAt;
       observed.retireToUnroutedMs = Date.now() - retiredAt;
-      /* From the agent, in the same problem document every refusal wears. */
+      /* From the daemon, in the same problem document every refusal wears. */
       expect(gone.body).toContain("urn:scafo:not-found");
 
       /* The apex and the build host go with it; every name of the retired
-         environment gets the agent's one answer. */
+         environment gets the daemon's one answer. */
       for (const host of [apexHost(), buildHost(buildV2)]) {
         const answer = await httpGet(httpPort, "/", { host });
         expect(answer.status, host).toBe(404);
@@ -803,8 +803,8 @@ function deployArgs(dir: string): string[] {
   return [
     "deploy",
     dir,
-    "--agent",
-    `http://127.0.0.1:${String(agentPort)}`,
+    "--node",
+    `http://127.0.0.1:${String(apiPort)}`,
     "--project",
     PROJECT,
     "--env",
@@ -827,7 +827,7 @@ function operatorToken(): Promise<string> {
 
 /** The configuration the node is publishing for Traefik right now. */
 async function snapshotNow(): Promise<TraefikDynamicConfig> {
-  const answer = await httpGet(agentPort, "/v1/ingress/traefik", {});
+  const answer = await httpGet(apiPort, "/v1/ingress/traefik", {});
   expect(answer.status, answer.body).toBe(200);
   return JSON.parse(answer.body) as TraefikDynamicConfig;
 }
@@ -841,7 +841,7 @@ async function snapshotNow(): Promise<TraefikDynamicConfig> {
  * the node writes.
  */
 async function scafoRouters(): Promise<string[]> {
-  const answer = await httpGet(apiPort, "/api/http/routers", {});
+  const answer = await httpGet(traefikApiPort, "/api/http/routers", {});
   if (answer.status === 404) return [];
   expect(answer.status, `Traefik's API answered ${answer.body}`).toBe(200);
 
@@ -858,9 +858,9 @@ function untilServes(host: string, version: string): Promise<HttpAnswer> {
   });
 }
 
-/** {@link until} with the agent's logs attached to whatever it fails to see. */
+/** {@link until} with the daemon's logs attached to whatever it fails to see. */
 function wait<T>(what: string, deadlineMs: number, probe: () => Promise<T | null>): Promise<T> {
-  return until(what, deadlineMs, probe, { context: agentLogTail });
+  return until(what, deadlineMs, probe, { context: daemonLogTail });
 }
 
 /**
@@ -869,12 +869,12 @@ function wait<T>(what: string, deadlineMs: number, probe: () => Promise<T | null
  * reason is almost always on the other side of the request it made.
  */
 function expectCleanExit(result: CommandResult): void {
-  expect(result.code, `${result.output}\n${agentLogTail()}`).toBe(0);
+  expect(result.code, `${result.output}\n${daemonLogTail()}`).toBe(0);
 }
 
-/** The tail of the agent container's output, as a failure message carries it. */
-function agentLogTail(limit: number = 12_000): string {
-  const text = agentLog.join("");
+/** The tail of the daemon container's output, as a failure message carries it. */
+function daemonLogTail(limit: number = 12_000): string {
+  const text = daemonLog.join("");
   const tail = text.length <= limit ? text : `…${text.slice(-limit)}`;
-  return `--- agent container logs ---\n${tail}\n--- end agent container logs ---`;
+  return `--- daemon container logs ---\n${tail}\n--- end daemon container logs ---`;
 }

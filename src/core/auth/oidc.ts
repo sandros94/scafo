@@ -66,7 +66,7 @@ export interface OidcVerifier {
 /**
  * Builds a verifier for deploy-intake tokens. Trust is checked before anything
  * is fetched: an issuer the project does not name is refused without a request,
- * so a token can never steer the agent at a URL of its choosing.
+ * so a token can never steer the daemon at a URL of its choosing.
  */
 export function createOidcVerifier(ctx: RegistryContext, opts?: OidcVerifierOptions): OidcVerifier {
   const aud = opts?.aud ?? OIDC_AUDIENCE;

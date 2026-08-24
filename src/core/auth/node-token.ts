@@ -14,8 +14,8 @@ import { asClaims, authInvalid, decodeCompactHeader, numberClaim, stringClaim } 
 /** The only algorithm a node token may carry. */
 const ALG = "EdDSA";
 
-/** Audience of every token addressed to a node agent. */
-export const NODE_TOKEN_AUDIENCE: string = "scafo-agent";
+/** Audience of every token addressed to a node daemon. */
+export const NODE_TOKEN_AUDIENCE: string = "scafo-node";
 
 /** Hard ceiling on a node token's lifetime; longer tokens are refused at both ends. */
 export const NODE_TOKEN_MAX_LIFETIME_S: number = 60;
@@ -97,7 +97,7 @@ export async function signNodeToken(
 }
 
 /**
- * Builds a verifier for node tokens presented to this agent. Keys come from the
+ * Builds a verifier for node tokens presented to this daemon. Keys come from the
  * registry (`_scafo/nodes/<id>.json`) and are cached, so a deregistered node is
  * rejected at most `keyTtlS` seconds later.
  *

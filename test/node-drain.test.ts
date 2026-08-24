@@ -9,7 +9,7 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { runAssignment } from "../src/agent/_assign.ts";
+import { runAssignment } from "../src/daemon/_assign.ts";
 import { drainThisNode } from "../src/cli/_bootstrap.ts";
 import {
   acquireLease,
@@ -239,7 +239,7 @@ async function register(id: string): Promise<NodeRecord> {
     v: 1,
     id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: `key-${id}` },
-    addresses: { internal: `10.0.0.${id === NODE_A ? "1" : "2"}`, agentPort: 7400 },
+    addresses: { internal: `10.0.0.${id === NODE_A ? "1" : "2"}`, apiPort: 7400 },
     heartbeatAt: new Date(clock.nowMs()).toISOString(),
   });
 }

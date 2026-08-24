@@ -11,8 +11,8 @@
 
 import { join } from "node:path";
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
-import type { AgentConfig } from "../../agent/config.ts";
-import { loadAgentConfig } from "../../agent/config.ts";
+import type { DaemonConfig } from "../../daemon/config.ts";
+import { loadDaemonConfig } from "../../daemon/config.ts";
 import { probeCapacity } from "../../core/capacity/reader.ts";
 import { ScafoError } from "../../core/error.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
@@ -49,7 +49,7 @@ const tunnelArgs: ArgsDef = {
   "node-id": { type: "string", description: "Id this node registers under" },
   "state-dir": { type: "string", description: "Directory this node keeps its identity in" },
   "transport": { type: "string", description: "What carries peer traffic (wireguard, none)" },
-  "listen": { type: "string", description: "host:port the agent API binds to" },
+  "listen": { type: "string", description: "host:port the node API binds to" },
   "internal-listen": { type: "string", description: "host:port for node-to-node traffic" },
   "advertise": { type: "string", description: "host:port other nodes reach this one at" },
   "wg-address": {
@@ -106,7 +106,7 @@ async function runInit(flags: Record<string, unknown>): Promise<void> {
 
   /*
    * Published before the file is rendered, and as a narrow update: everything
-   * else in the record is the running agent's to state. The capacity is probed
+   * else in the record is the running daemon's to state. The capacity is probed
    * only for the case where there is no record at all — a node set up before it
    * has ever been started.
    */
@@ -148,7 +148,7 @@ async function runPeers(flags: Record<string, unknown>): Promise<void> {
 
 /** Everything both subcommands work from: the bucket, the node, and its tunnel. */
 interface Tunnel {
-  config: AgentConfig;
+  config: DaemonConfig;
   registry: RegistryContext;
   state: NodeState;
   settings: WireguardSettings;
@@ -156,7 +156,7 @@ interface Tunnel {
 }
 
 async function resolveTunnel(flags: Record<string, unknown>): Promise<Tunnel> {
-  const config = await loadAgentConfig({
+  const config = await loadDaemonConfig({
     configPath: text(flags.config),
     flags: stringFlags(flags),
     env: process.env,

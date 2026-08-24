@@ -1,5 +1,5 @@
 /*
- * The seam the agent reports through: what it stamps an event with, what the
+ * The seam the daemon reports through: what it stamps an event with, what the
  * bounded ring keeps, what it admits to having dropped, and what a node that is
  * not observing pays for it.
  *
@@ -12,7 +12,7 @@ import {
   createObservability,
   OBSERVED_RING_SIZE,
   type ObservedEvent,
-} from "../src/agent/observe.ts";
+} from "../src/daemon/observe.ts";
 import { CLOCK_START_MS } from "./_helpers.ts";
 
 /** A clock that only moves when the case says so, as the registry's tests use. */

@@ -272,7 +272,7 @@ function nodeRecord(id: string, x: string): NodeRecord {
     v: 1,
     id,
     publicKey: { kty: "OKP", crv: "Ed25519", x },
-    addresses: { internal: "10.0.0.1", agentPort: 4600 },
+    addresses: { internal: "10.0.0.1", apiPort: 4600 },
   };
 }
 

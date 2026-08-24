@@ -1,5 +1,5 @@
 /*
- * `scafo sail`: register this machine as a node of the fleet and serve the agent
+ * `scafo sail`: register this machine as a node of the fleet and serve the node
  * API.
  *
  * The machine sets sail — it joins the fleet and starts carrying work. Every
@@ -9,27 +9,27 @@
 
 import { join } from "node:path";
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
-import { createIngressCounters } from "../../agent/access-counters.ts";
-import type { AgentContext } from "../../agent/app.ts";
-import { loadAgentConfig, runtimeDialHost } from "../../agent/config.ts";
-import { createCoordinator } from "../../agent/coordinator.ts";
-import { createHeartbeat } from "../../agent/heartbeat.ts";
-import { createObservability, OBSERVED_RING_SIZE } from "../../agent/observe.ts";
+import { createIngressCounters } from "../../daemon/access-counters.ts";
+import type { DaemonContext } from "../../daemon/app.ts";
+import { loadDaemonConfig, runtimeDialHost } from "../../daemon/config.ts";
+import { createCoordinator } from "../../daemon/coordinator.ts";
+import { createHeartbeat } from "../../daemon/heartbeat.ts";
+import { createObservability, OBSERVED_RING_SIZE } from "../../daemon/observe.ts";
 import {
   createObserveFlusher,
   OBSERVE_FLUSH_INTERVAL_MS,
   OBSERVE_RETENTION_DAYS,
   type ObserveFlusher,
-} from "../../agent/observe-flush.ts";
-import { parquetReadHint } from "../../agent/observe-parquet.ts";
+} from "../../daemon/observe-flush.ts";
+import { parquetReadHint } from "../../daemon/observe-parquet.ts";
 import { observeNodePrefix } from "../../core/registry/paths.ts";
-import { createReconciler, runtimeBaseEnv } from "../../agent/reconcile.ts";
-import { startAgent } from "../../agent/serve.ts";
-import { createStorageService } from "../../agent/storage.ts";
+import { createReconciler, runtimeBaseEnv } from "../../daemon/reconcile.ts";
+import { startDaemon } from "../../daemon/serve.ts";
+import { createStorageService } from "../../daemon/storage.ts";
 import { probeCapacity } from "../../core/capacity/reader.ts";
 import { initRegistry, readMeta } from "../../core/registry/meta.ts";
 import { wakeActivity } from "../../core/registry/wake.ts";
-import { createDeployService } from "../../agent/deploys.ts";
+import { createDeployService } from "../../daemon/deploys.ts";
 import { createCelldDeployRunner } from "../../drivers/deploy/celld.ts";
 import { createNodeHostReader } from "../../drivers/host/node.ts";
 import { type AccessLogTailer, createAccessLogTailer } from "../../drivers/observe/access-log.ts";
@@ -51,7 +51,7 @@ import {
 import { STORAGE_TOKEN_FILE, storageTokenNotice } from "../_storage-token.ts";
 import { deprecatedAlias, readPackageVersion, readTextFile, reportFailure } from "../_utils.ts";
 
-/* Flag names are kebab-case, matching the keys `loadAgentConfig` reads them under. */
+/* Flag names are kebab-case, matching the keys `loadDaemonConfig` reads them under. */
 const sailArgs: ArgsDef = {
   "config": { type: "string", description: "Path to scafo.config.jsonc" },
   "endpoint": { type: "string", description: "S3-compatible endpoint URL" },
@@ -66,7 +66,7 @@ const sailArgs: ArgsDef = {
     type: "string",
     description: "What this node is, for environments to select on (region=eu-west-1,tier=fast)",
   },
-  "listen": { type: "string", description: "host:port the agent API binds to" },
+  "listen": { type: "string", description: "host:port the node API binds to" },
   "internal-listen": { type: "string", description: "host:port for node-to-node traffic" },
   "advertise": { type: "string", description: "host:port other nodes reach this one at" },
   "transport": { type: "string", description: "What carries peer traffic (wireguard, none)" },
@@ -86,7 +86,7 @@ const sailArgs: ArgsDef = {
     description:
       "Token(s) admitted on /v1/storage, instead of one this node mints: new,old admits both " +
       "while a rotation is in flight, and the first is written to the state directory's " +
-      "storage-token file. Restart the agent before reloading what stores through it",
+      "storage-token file. Restart the daemon before reloading what stores through it",
   },
   "celld-bin": { type: "string", description: "Executable that runs an environment" },
   "celld-env": {
@@ -141,11 +141,11 @@ const sailArgs: ArgsDef = {
 };
 
 export const sail: CommandDef = defineCommand({
-  meta: { name: "sail", description: "Join this machine to the fleet and serve the node agent" },
+  meta: { name: "sail", description: "Join this machine to the fleet and serve the node API" },
   args: sailArgs,
   async run({ args }): Promise<void> {
     try {
-      await runAgent(args as Record<string, unknown>);
+      await runDaemon(args as Record<string, unknown>);
     } catch (error) {
       reportFailure(error);
     }
@@ -159,8 +159,8 @@ export const up: CommandDef = deprecatedAlias({
   command: sail,
 });
 
-async function runAgent(flags: Record<string, unknown>): Promise<void> {
-  const config = await loadAgentConfig({
+async function runDaemon(flags: Record<string, unknown>): Promise<void> {
+  const config = await loadDaemonConfig({
     configPath: typeof flags.config === "string" ? flags.config : undefined,
     flags: stringFlags(flags),
     env: process.env,
@@ -200,7 +200,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   });
 
   const version = await readPackageVersion();
-  const agent: AgentContext = {
+  const daemon: DaemonContext = {
     config,
     nodeId: state.id,
     registry,
@@ -210,7 +210,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
     /* Kept for the node tokens this node will sign for calls to its peers. */
     signingKey: state.privateKey,
   };
-  if (varsetKey !== undefined) agent.varsetKey = varsetKey;
+  if (varsetKey !== undefined) daemon.varsetKey = varsetKey;
 
   /*
    * ATTACHED ONLY WHILE IT IS ON, and that is the whole of what the switch costs
@@ -223,7 +223,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   let accessLog: AccessLogTailer | undefined;
   let flusher: ObserveFlusher | undefined;
   if (observability.enabled) {
-    agent.observability = observability;
+    daemon.observability = observability;
     /* Said once: the ring is a buffer rather than the record, and where the
        record actually ends up is the next line. */
     console.log(
@@ -231,13 +231,13 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
         `${String(OBSERVED_RING_SIZE)} and runs its processes with ${TELEMETRY_ENV}=1 unless ` +
         `"runtime.celldEnv" says otherwise`,
     );
-    accessLog = attachIngressCounters(agent, config.observability.ingressAccessLog);
+    accessLog = attachIngressCounters(daemon, config.observability.ingressAccessLog);
     /* Built AFTER the counters, because it flushes them alongside the events and
        an adapter attached later would never be read. */
     flusher = createObserveFlusher(registry, {
       nodeId: state.id,
       observability,
-      ...(agent.ingressCounters === undefined ? {} : { counters: agent.ingressCounters }),
+      ...(daemon.ingressCounters === undefined ? {} : { counters: daemon.ingressCounters }),
     });
     /* Said once, because it is the only thing here that costs the operator
        money: this is what the node writes, where, and for how long it keeps it. */
@@ -261,12 +261,12 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
        worth repeating on every reconcile pass. */
     console.log("scafo: no ingress configured, nothing on this node will be routed to");
   } else if (ingress.driver === "traefik") {
-    agent.ingress = createTraefikDriver({
+    daemon.ingress = createTraefikDriver({
       upstreamHost,
       ...(ingress.entryPoints === undefined ? {} : { entryPoints: ingress.entryPoints }),
     });
     /* Worth saying once, because nothing else on this node will: an ingress that
-       polls and was never pointed at the agent stays silent rather than failing,
+       polls and was never pointed at the node API stays silent rather than failing,
        and the node looks like it is routing when nothing is reading it. The
        entryPoints are said too, because a router attached to one the operator's
        Traefik does not define is a route that exists and matches nothing. */
@@ -277,7 +277,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
         `${(ingress.entryPoints ?? [DEFAULT_ENTRY_POINT]).join(", ")}`,
     );
   } else {
-    agent.ingress = createCaddyDriver({
+    daemon.ingress = createCaddyDriver({
       adminUrl: ingress.adminUrl,
       serverName: ingress.serverName,
       upstreamHost,
@@ -287,8 +287,8 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   /* What a colocated ingress keeps its certificates, its account key and its
      issuance locks in: this node's bucket, reached through this node, which is
      the only process on the machine holding a credential for it. */
-  const storage = createStorageService(agent, { tokens: storageTokens });
-  agent.storage = storage;
+  const storage = createStorageService(daemon, { tokens: storageTokens });
+  daemon.storage = storage;
   /* Said once, because the operator has to act on it — and what they have to do
      depends on where the token came from: a minted one is distributed by the
      file, a supplied one arrived through their own configuration and the file is
@@ -301,8 +301,8 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   }
 
   const baseEnv = runtimeBaseEnv(process.env);
-  agent.deploys = createDeployService(
-    agent,
+  daemon.deploys = createDeployService(
+    daemon,
     createCelldDeployRunner({ binPath: config.runtime.binPath, baseEnv }),
   );
 
@@ -320,27 +320,27 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   /* The hold is the operator's, because it is sized to THEIR store: it is how
      long a rollout keeps the environment's deployment pointer after the spawn,
      for the one read the new process makes of it. */
-  const reconciler = createReconciler(agent, driver, {
+  const reconciler = createReconciler(daemon, driver, {
     baseEnv,
     pointerLock: { holdMs: config.runtime.pointerHoldMs },
   });
-  agent.reconciler = reconciler;
+  daemon.reconciler = reconciler;
 
   /* Every node runs one and competes for the same lease; all but one of them
      stay candidates, and the loser takes over the moment the holder stops
      renewing. Its reaper reads idleness off the wake stamps, which is the same
      record parking is derived from: one notion of "last asked for", so an
      environment is never reaped as idle while something is still waking it. */
-  const coordinator = createCoordinator(agent, { activity: wakeActivity(registry) });
-  agent.coordinator = coordinator;
+  const coordinator = createCoordinator(daemon, { activity: wakeActivity(registry) });
+  daemon.coordinator = coordinator;
 
   /* What tells the coordinator this node is still there. Without it the node is
      counted out after three intervals and its environments go elsewhere. */
-  const heartbeat = createHeartbeat(agent);
+  const heartbeat = createHeartbeat(daemon);
 
-  const server = await startAgent(agent);
+  const server = await startDaemon(daemon);
   console.log(`scafo ${version} listening on ${server.url} as node "${state.id}"`);
-  /* Started AFTER the agent, and at the log's current end: whatever the ingress
+  /* Started AFTER the daemon, and at the log's current end: whatever the ingress
      served before this node came up was already served, and re-counting it on
      every restart would invent traffic. */
   await accessLog?.start();
@@ -408,7 +408,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
  * mystery; nothing is said again on any pass.
  */
 function attachIngressCounters(
-  agent: AgentContext,
+  daemon: DaemonContext,
   path: string | undefined,
 ): AccessLogTailer | undefined {
   if (path === undefined) {
@@ -419,8 +419,8 @@ function attachIngressCounters(
     return undefined;
   }
 
-  const counters = createIngressCounters({ platformDomains: agent.config.platformDomains });
-  agent.ingressCounters = counters;
+  const counters = createIngressCounters({ platformDomains: daemon.config.platformDomains });
+  daemon.ingressCounters = counters;
   console.log(
     `scafo: counting what the ingress serves from "${path}"; requests, bytes, statuses ` +
       `and latencies are kept per environment, in memory, since this boot`,

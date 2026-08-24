@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { loadAgentConfig } from "../src/agent/config.ts";
+import { loadDaemonConfig } from "../src/daemon/config.ts";
 import { assertTransportConfigured } from "../src/cli/_bootstrap.ts";
 import { isLoopbackHost } from "../src/core/utils/host.ts";
 import { rejectionOf, rejectsWith } from "./_helpers.ts";
@@ -43,7 +43,7 @@ const EXPOSED: Record<string, Record<string, string>> = {
 describe("a node that would reach past loopback", () => {
   it("refuses to boot when nothing says what network that is", async () => {
     for (const [what, env] of Object.entries(EXPOSED)) {
-      const config = await loadAgentConfig({ env: { ...REQUIRED_ENV, ...env } });
+      const config = await loadDaemonConfig({ env: { ...REQUIRED_ENV, ...env } });
 
       const error = await rejectsWith(
         () => Promise.resolve(assertTransportConfigured(config)),
@@ -56,7 +56,7 @@ describe("a node that would reach past loopback", () => {
   });
 
   it("names the addresses that made the refusal necessary, and only those", async () => {
-    const config = await loadAgentConfig({
+    const config = await loadDaemonConfig({
       env: {
         ...REQUIRED_ENV,
         SCAFO_LISTEN: "127.0.0.1:7400",
@@ -73,7 +73,7 @@ describe("a node that would reach past loopback", () => {
   });
 
   it("names the runtime's bind address when that is what exposed the node", async () => {
-    const config = await loadAgentConfig({
+    const config = await loadDaemonConfig({
       env: { ...REQUIRED_ENV, SCAFO_LISTEN: "127.0.0.1:7400", SCAFO_BIND_HOST: "0.0.0.0" },
     });
 
@@ -86,7 +86,7 @@ describe("a node that would reach past loopback", () => {
   it("boots once the operator classifies the network, either way", async () => {
     for (const [what, env] of Object.entries(EXPOSED)) {
       for (const driver of ["wireguard", "none"]) {
-        const config = await loadAgentConfig({
+        const config = await loadDaemonConfig({
           env: { ...REQUIRED_ENV, ...env, SCAFO_TRANSPORT: driver },
         });
 
@@ -111,7 +111,7 @@ describe("a node that stays on this machine", () => {
     ];
 
     for (const env of loopback) {
-      const config = await loadAgentConfig({ env: { ...REQUIRED_ENV, ...env } });
+      const config = await loadDaemonConfig({ env: { ...REQUIRED_ENV, ...env } });
 
       expect(config.transport).toBeUndefined();
       expect(() => assertTransportConfigured(config), JSON.stringify(env)).not.toThrow();
@@ -148,16 +148,16 @@ describe("the transport setting itself", () => {
         path === configPath ? JSON.stringify({ transport: { driver: "wireguard" } }) : null,
       );
 
-    const fromFlag = await loadAgentConfig({
+    const fromFlag = await loadDaemonConfig({
       env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "wireguard" },
       flags: { transport: "none" },
     });
-    const fromEnv = await loadAgentConfig({
+    const fromEnv = await loadDaemonConfig({
       configPath,
       readFile,
       env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "none" },
     });
-    const fromFile = await loadAgentConfig({ configPath, readFile, env: REQUIRED_ENV });
+    const fromFile = await loadDaemonConfig({ configPath, readFile, env: REQUIRED_ENV });
 
     expect([fromFlag.transport, fromEnv.transport, fromFile.transport]).toEqual([
       { driver: "none" },
@@ -168,7 +168,7 @@ describe("the transport setting itself", () => {
 
   it("refuses a transport it does not implement rather than falling back to one", async () => {
     const error = await rejectsWith(
-      () => loadAgentConfig({ env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "tailscale" } }),
+      () => loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "tailscale" } }),
       "invalid-input",
     );
 
@@ -178,8 +178,8 @@ describe("the transport setting itself", () => {
   });
 
   it("has no default: saying nothing is a distinct answer from saying none", async () => {
-    const silent = await loadAgentConfig({ env: REQUIRED_ENV });
-    const explicit = await loadAgentConfig({ env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "none" } });
+    const silent = await loadDaemonConfig({ env: REQUIRED_ENV });
+    const explicit = await loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "none" } });
 
     expect(silent.transport).toBeUndefined();
     expect(explicit.transport).toEqual({ driver: "none" });

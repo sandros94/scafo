@@ -36,13 +36,13 @@ export interface IngressRoute {
   backends: WeightedBackend[];
 }
 
-/** Traffic that must reach the node's own agent: hosts to wake, and whole domains to answer for. */
+/** Traffic that must reach the node's own daemon: hosts to wake, and whole domains to answer for. */
 export interface WakeRouting {
-  /** Loopback port the agent answers on. */
+  /** Loopback port the daemon answers on. */
   port: number;
-  /** Fully qualified hosts routed to the agent outright — parked environments' hosts and their custom domains. */
+  /** Fully qualified hosts routed to the daemon outright — parked environments' hosts and their custom domains. */
   hosts: string[];
-  /** Platform domains whose UNMATCHED subdomain hosts fall through to the agent, after every explicit route. */
+  /** Platform domains whose UNMATCHED subdomain hosts fall through to the daemon, after every explicit route. */
   domains: string[];
 }
 
@@ -56,16 +56,16 @@ export interface WakeRouting {
  * is also why the apex has no wildcard certificate and mints its own.
  *
  * {@link ApiRouting.denied} IS THE SECURITY RULE OF THIS SURFACE AND A DRIVER
- * MUST ENFORCE IT AT THE INGRESS, not by trusting the agent behind it: a request
+ * MUST ENFORCE IT AT THE INGRESS, not by trusting the daemon behind it: a request
  * for one of these prefixes on one of these hosts must be answered by the
  * ingress itself and must never be proxied. Both prefixes are matched at a path
  * SEGMENT boundary — the prefix exactly, or the prefix followed by `/` and
  * anything — which is what the two implemented drivers were pinned to.
  */
 export interface ApiRouting {
-  /** Loopback port the agent answers on. */
+  /** Loopback port the daemon answers on. */
   port: number;
-  /** Bare platform-domain apexes routed to the agent, sorted. */
+  /** Bare platform-domain apexes routed to the daemon, sorted. */
   hosts: string[];
   /** Path prefixes that must NEVER be proxied through {@link ApiRouting.hosts}. */
   denied: string[];
@@ -80,7 +80,7 @@ export interface IngressDesired {
   routes: IngressRoute[];
   /**
    * Where a request nothing above answers goes. Absent when the node has no
-   * agent address to send one to, which is the routing scafo rendered before
+   * daemon address to send one to, which is the routing scafo rendered before
    * scale-to-zero existed.
    *
    * PRECEDENCE IS THE WHOLE CONTRACT, AND IT IS ONE RULE: every explicit route
@@ -92,12 +92,12 @@ export interface IngressDesired {
    * are consulted last, whatever its format calls that — an array position for
    * an ingress that matches top-down, an explicit rank for one that scores
    * rules. Getting it wrong does not misroute one host: it sends a whole
-   * platform domain's live traffic to the agent.
+   * platform domain's live traffic to the daemon.
    *
    * The two kinds of entry are separate because they fail differently. A wake
    * host is a name scafo KNOWS about and is holding open, so a request to one
    * is answered by starting something; an unmatched host under a platform
-   * domain is a name scafo knows nothing about, and the agent answers it 404 —
+   * domain is a name scafo knows nothing about, and the daemon answers it 404 —
    * which is why the domains are routed at all rather than left to whatever the
    * ingress does with a host it has no route for.
    */
@@ -130,17 +130,17 @@ export interface IngressDriver {
 
 /**
  * An ingress that is READ rather than written to: `apply` renders its
- * configuration and caches it, and the ingress itself polls the agent for it.
+ * configuration and caches it, and the ingress itself polls the daemon for it.
  *
  * The distinction is the ingress's own, not scafo's. An ingress with an admin
  * API (Caddy) is converged by calling it, and `apply` is where the work happens.
  * An ingress configured by a provider it polls (Traefik's `http` provider) can
  * only be told anything by being asked, so the node has to publish what it would
  * otherwise have pushed — which is what {@link snapshot} is for, and why the
- * agent serves a route per such ingress.
+ * daemon serves a route per such ingress.
  *
  * `unknown` because the document's shape belongs to the ingress that reads it;
- * the agent only ever hands it back as JSON.
+ * the daemon only ever hands it back as JSON.
  */
 export interface PullingIngressDriver extends IngressDriver {
   /** The configuration as of the last {@link IngressDriver.apply}. */

@@ -9,26 +9,26 @@
 
 import { readParquet } from "tavolato";
 import { beforeEach, describe, expect, it } from "vitest";
-import { createIngressCounters, DURATION_BANDS_MS } from "../src/agent/access-counters.ts";
+import { createIngressCounters, DURATION_BANDS_MS } from "../src/daemon/access-counters.ts";
 import {
   createObserveFlusher,
   OBSERVE_FLUSH_INTERVAL_MS,
   type ObserveFlusher,
   OBSERVE_RETENTION_DAYS,
-} from "../src/agent/observe-flush.ts";
+} from "../src/daemon/observe-flush.ts";
 import {
   counterRecords,
   eventRecords,
   flushRecords,
   type ObserveRecord,
   OBSERVE_RECORD_VERSION,
-} from "../src/agent/observe-records.ts";
+} from "../src/daemon/observe-records.ts";
 import {
   OBSERVE_PARQUET_COMPRESSION,
   OBSERVE_PARQUET_EXTENSION,
   PARQUET_CODEC,
-} from "../src/agent/observe-parquet.ts";
-import { createObservability, type Observability } from "../src/agent/observe.ts";
+} from "../src/daemon/observe-parquet.ts";
+import { createObservability, type Observability } from "../src/daemon/observe.ts";
 import { parseObserveKey } from "../src/core/registry/paths.ts";
 import type { CasStore } from "../src/core/types/store.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";

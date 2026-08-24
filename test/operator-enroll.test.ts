@@ -20,8 +20,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { H3 } from "h3";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { createAgentApp } from "../src/agent/app.ts";
-import type { AgentConfig } from "../src/agent/config.ts";
+import { createNodeApp } from "../src/daemon/app.ts";
+import type { DaemonConfig } from "../src/daemon/config.ts";
 import {
   generateOperatorKey,
   INLINE_PREFIX,
@@ -46,7 +46,7 @@ import { toBase64 } from "../src/core/utils/base64.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
 
-const AGENT_URL = "http://10.0.0.4:7400";
+const NODE_URL = "http://10.0.0.4:7400";
 const REMOTE = "prod";
 const VERSION = "0.0.0-test";
 
@@ -61,7 +61,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   clock = ctxWith(new MemoryCasStore());
-  app = agentApp();
+  app = nodeApp();
 });
 
 describe("what an operator shows of themselves", () => {
@@ -303,7 +303,7 @@ async function registeredRemote(
     });
   }
 
-  const added = await addRemote(home, { name: REMOTE, endpoints: [AGENT_URL] });
+  const added = await addRemote(home, { name: REMOTE, endpoints: [NODE_URL] });
   await trustOperator(clock.ctx, {
     id: added.key.id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: added.key.publicKey.x },
@@ -328,9 +328,9 @@ function through(target: H3): typeof fetch {
   return async (input, init) => target.request(String(input), init);
 }
 
-function agentApp(): H3 {
-  return createAgentApp({
-    config: agentConfig(),
+function nodeApp(): H3 {
+  return createNodeApp({
+    config: daemonConfig(),
     nodeId: "node-a",
     registry: clock.ctx,
     supervisor: idleSupervisor(),
@@ -338,7 +338,7 @@ function agentApp(): H3 {
   });
 }
 
-function agentConfig(): AgentConfig {
+function daemonConfig(): DaemonConfig {
   return {
     bucket: {
       endpoint: "http://store.test:9000",

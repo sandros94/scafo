@@ -14,8 +14,8 @@ export interface CapacityInputs {
 export interface CapacityOverrides {
   /** Share of memory the runtime may hold resident. Default `0.7`. */
   rssFraction?: number;
-  /** Memory reserved for the agent itself, in MiB. Default `128`. */
-  agentOverheadMb?: number;
+  /** Memory reserved for the daemon itself, in MiB. Default `128`. */
+  daemonOverheadMb?: number;
   /** Runtime processes the budget is split across. Default `1`. */
   plannedProcesses?: number;
   /** Resident cells granted per 8 GiB of memory. Default `1000`. */
@@ -77,7 +77,7 @@ export function computeCapacity(
   const hostMemBytes = positive(inputs.host.memBytes, "host.memBytes");
 
   const rssFraction = fraction(opts?.rssFraction ?? 0.7, "rssFraction");
-  const agentOverheadMb = nonNegative(opts?.agentOverheadMb ?? 128, "agentOverheadMb");
+  const daemonOverheadMb = nonNegative(opts?.daemonOverheadMb ?? 128, "daemonOverheadMb");
   const plannedProcesses = positive(opts?.plannedProcesses ?? 1, "plannedProcesses");
   const residentCellsPer8Gb = positive(opts?.residentCellsPer8Gb ?? 1000, "residentCellsPer8Gb");
 
@@ -90,7 +90,7 @@ export function computeCapacity(
   const memMb = Math.floor((memLimited ? cgroupMemBytes : hostMemBytes) / MIB);
   const cores = cpuLimited ? Math.max(1, Math.ceil(cgroupCpus)) : hostCores;
 
-  const rssBudgetMb = Math.max(0, rssFraction * memMb - agentOverheadMb);
+  const rssBudgetMb = Math.max(0, rssFraction * memMb - daemonOverheadMb);
   const threads = cores;
 
   return {

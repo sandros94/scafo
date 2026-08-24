@@ -24,7 +24,7 @@ import { createUns3Store } from "../../src/drivers/store/uns3.ts";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 
-/** Root of the worktree the suites build and bind-mount into the agent image. */
+/** Root of the worktree the suites build and bind-mount into the node image. */
 export const REPO_ROOT: string = resolve(HERE, "../..");
 /** Fixtures every suite copies from: the application, and the ingress configs. */
 export const FIXTURES: string = join(HERE, "_e2e-fixtures");
@@ -33,7 +33,7 @@ export const CLI: string = join(REPO_ROOT, "dist/cli/index.mjs");
 
 export const STORE_IMAGE: string = "chrislusf/seaweedfs:4.42";
 /** node24 + celld + esbuild; built locally, see the AGENTS.md note on the suites. */
-export const AGENT_IMAGE: string = "scafo-probe";
+export const NODE_IMAGE: string = "scafo-probe";
 /** S3 port inside the store container. */
 export const STORE_PORT: number = 8333;
 
@@ -91,7 +91,7 @@ export async function startStore(settings: BucketSettings): Promise<StartedStore
     .start();
 
   const fromHost = `http://${container.getHost()}:${String(container.getMappedPort(STORE_PORT))}`;
-  /* By address rather than by name: an agent sharing the ingress container's
+  /* By address rather than by name: a daemon sharing the ingress container's
      namespace would resolve a name there, and an address needs no resolver. */
   const fromContainers = `http://${container.getIpAddress(BRIDGE_NETWORK)}:${String(STORE_PORT)}`;
 
@@ -115,7 +115,7 @@ export function registryAt(endpoint: string, settings: BucketSettings): Registry
   };
 }
 
-/** The bucket settings as the CLI and the agent read them from an environment. */
+/** The bucket settings as the CLI and the daemon read them from an environment. */
 export function storeEnv(endpoint: string, settings: BucketSettings): Record<string, string> {
   return {
     SCAFO_S3_ENDPOINT: endpoint,
@@ -301,7 +301,7 @@ function versionIn(body: string): string {
 
 export interface UntilOptions {
   /**
-   * What to attach to a deadline that ran out — the agent container's logs, in
+   * What to attach to a deadline that ran out — the daemon container's logs, in
    * every suite. A timeout says only that something did not happen; this is the
    * account of what the node was doing instead.
    */
@@ -376,7 +376,7 @@ export function run(
   });
 }
 
-/** Builds `dist/`, which the agent container runs off the bind-mounted worktree. */
+/** Builds `dist/`, which the daemon container runs off the bind-mounted worktree. */
 export async function buildRepo(): Promise<void> {
   const built = await run("pnpm", ["build"], REPO_ROOT, process.env as Record<string, string>);
   if (built.code !== 0) throw new Error(`"pnpm build" failed:\n${built.output}`);

@@ -4,7 +4,7 @@
  *
  * Read STRAIGHT OUT OF THE BUCKET, like `scafo trust` and `scafo varset` and for
  * the same reason: the numbers were flushed there by whichever nodes were
- * running at the time, and the nodes that wrote them may well be gone. No agent
+ * running at the time, and the nodes that wrote them may well be gone. No node
  * is asked and none has to be up.
  *
  * The snapshots are monotonic totals per node, so the window is a subtraction —
@@ -13,8 +13,8 @@
  */
 
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
-import { loadAgentConfig } from "../../agent/config.ts";
-import { counterRecords } from "../../agent/observe-records.ts";
+import { loadDaemonConfig } from "../../daemon/config.ts";
+import { counterRecords } from "../../daemon/observe-records.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
 import { createRegistry } from "../_bootstrap.ts";
 import { formatMetrics, noCounters, projectsCounted, summarizeMetrics } from "../_metrics.ts";
@@ -101,14 +101,14 @@ async function runMetrics(flags: Record<string, unknown>): Promise<void> {
   }
   if (found.unreadable.length > 0) {
     console.log(
-      `scafo: ${String(found.unreadable.length)} file(s) could not be read — a newer agent's ` +
+      `scafo: ${String(found.unreadable.length)} file(s) could not be read — a newer daemon's ` +
         `encoding, or an object that is not the one its name promises`,
     );
   }
 }
 
 async function registryFor(flags: Record<string, unknown>): Promise<RegistryContext> {
-  const config = await loadAgentConfig({
+  const config = await loadDaemonConfig({
     configPath: text(flags.config),
     flags: stringFlags(flags),
     env: process.env,

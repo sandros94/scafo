@@ -1,5 +1,5 @@
-# The scafo node image: the agent, the runtime it supervises, and the builder it
-# hands deploys to — everything one node needs and nothing it does not.
+# The scafo node image: the daemon, the runtime it supervises, and the builder
+# it hands deploys to — everything one node needs and nothing it does not.
 #
 #   docker build -t scafo .
 #   docker run --rm scafo --help
@@ -80,7 +80,7 @@ ENV ESBUILD_BINARY_PATH=/usr/local/bin/esbuild
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-# Read for its version alone, which the agent announces and registers with.
+# Read for its version alone, which the daemon announces and registers with.
 COPY package.json ./
 
 # A node's identity — its id and the Ed25519 pair that speaks for it — is the one
@@ -96,7 +96,7 @@ ENV SCAFO_STATE_DIR=/var/lib/scafo
 
 USER scafo
 
-# The agent API. NOT bound here: `node.listen` defaults to 127.0.0.1:7400, and
+# The node API. NOT bound here: `node.listen` defaults to 127.0.0.1:7400, and
 # widening it to 0.0.0.0 is what makes the node refuse to boot until
 # `transport` says whether that network is a tunnel or a trusted private one.
 # That acknowledgement is the operator's, so the examples pass both together and
@@ -105,7 +105,7 @@ EXPOSE 7400
 
 # STOP GRACE MUST BE AT LEAST 35 SECONDS. This is not a tuning preference.
 #
-# On SIGTERM the agent marks itself draining, releases the coordinator lease,
+# On SIGTERM the daemon marks itself draining, releases the coordinator lease,
 # stops reconciling, closes its listener, and only then stops the celld
 # processes it supervises — each of which is given 30s between SIGTERM and
 # SIGKILL and drains its in-flight requests for the first 25s of it. A container

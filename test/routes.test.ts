@@ -397,22 +397,22 @@ describe("labels that do not fit", () => {
 });
 
 describe("the hosts a parked environment holds open", () => {
-  const AGENT_PORT = 7400;
+  const NODE_PORT = 7400;
   const CUSTOM = "shop.example";
 
   it("claims its label under every platform domain, and the apex when it has one", () => {
     const desired = renderRoutes(
       input({
         platformDomains: [DOMAIN, OTHER_DOMAIN],
-        wake: { port: AGENT_PORT, parked: [environment(PROJECT, APEX_ENVIRONMENT, BUILD)] },
+        wake: { port: NODE_PORT, parked: [environment(PROJECT, APEX_ENVIRONMENT, BUILD)] },
       }),
     );
 
     /* Nothing is running for it, so it has no routes at all — its hosts name
-       the node's own agent, to be woken by the request that asked for them. */
+       the node's own daemon, to be woken by the request that asked for them. */
     expect(desired.routes).toEqual([]);
     expect(desired.wake).toEqual({
-      port: AGENT_PORT,
+      port: NODE_PORT,
       hosts: [
         `${PROJECT}--${APEX_ENVIRONMENT}.${OTHER_DOMAIN}`,
         `${PROJECT}--${APEX_ENVIRONMENT}.${DOMAIN}`,
@@ -425,7 +425,7 @@ describe("the hosts a parked environment holds open", () => {
 
   it("gives every other environment its label and no apex", () => {
     const desired = renderRoutes(
-      input({ wake: { port: AGENT_PORT, parked: [environment(PROJECT, "preview", BUILD)] } }),
+      input({ wake: { port: NODE_PORT, parked: [environment(PROJECT, "preview", BUILD)] } }),
     );
 
     expect(desired.wake?.hosts).toEqual([`${PROJECT}--preview.${DOMAIN}`]);
@@ -437,7 +437,7 @@ describe("the hosts a parked environment holds open", () => {
     const desired = renderRoutes(
       input({
         wake: {
-          port: AGENT_PORT,
+          port: NODE_PORT,
           parked: [environment(PROJECT, "preview", BUILD, [CUSTOM, `www.${CUSTOM}`])],
         },
       }),
@@ -455,7 +455,7 @@ describe("the hosts a parked environment holds open", () => {
       renderRoutes(
         input({
           platformDomains: [DOMAIN, OTHER_DOMAIN],
-          wake: { port: AGENT_PORT, parked: records },
+          wake: { port: NODE_PORT, parked: records },
         }),
       ).wake?.hosts ?? [];
 
@@ -472,14 +472,14 @@ describe("the hosts a parked environment holds open", () => {
      * Mid-wake, and the two overlap for a whole pass: the record still reads
      * parked to a node that has not re-read it, while the process it started is
      * already ready. The ready process is the better answer of the two — routing
-     * the host to the agent would hold a request for something that is up.
+     * the host to the daemon would hold a request for something that is up.
      */
     const parked = environment(PROJECT, APEX_ENVIRONMENT, BUILD, [CUSTOM]);
     const desired = renderRoutes(
       input({
         environments: [parked],
         processes: [process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000, true)],
-        wake: { port: AGENT_PORT, parked: [parked] },
+        wake: { port: NODE_PORT, parked: [parked] },
       }),
     );
 
@@ -497,9 +497,7 @@ describe("the hosts a parked environment holds open", () => {
   it("mirrors the platform domains it was given, in the order it was given them", () => {
     const platformDomains = [DOMAIN, OTHER_DOMAIN];
 
-    const desired = renderRoutes(
-      input({ platformDomains, wake: { port: AGENT_PORT, parked: [] } }),
-    );
+    const desired = renderRoutes(input({ platformDomains, wake: { port: NODE_PORT, parked: [] } }));
 
     expect(desired.wake?.domains).toEqual(platformDomains);
     /* A copy: a routing a caller is holding must not change when the node's own
@@ -508,12 +506,12 @@ describe("the hosts a parked environment holds open", () => {
   });
 
   it("holds the domains open with nothing parked at all", () => {
-    const desired = renderRoutes(input({ wake: { port: AGENT_PORT, parked: [] } }));
+    const desired = renderRoutes(input({ wake: { port: NODE_PORT, parked: [] } }));
 
     /* An unmatched host under a platform domain is a name scafo knows nothing
-       about, and the agent answers it 404 — which is why the domains are routed
+       about, and the daemon answers it 404 — which is why the domains are routed
        at all rather than left to whatever the ingress does with an unknown host. */
-    expect(desired.wake).toEqual({ port: AGENT_PORT, hosts: [], domains: [DOMAIN] });
+    expect(desired.wake).toEqual({ port: NODE_PORT, hosts: [], domains: [DOMAIN] });
   });
 });
 
@@ -527,7 +525,7 @@ describe("a routing rendered with no wake at all", () => {
       }),
     );
 
-    /* A caller with no agent address to hand out renders routes and nothing
+    /* A caller with no daemon address to hand out renders routes and nothing
        else — not an empty wake, which would claim the platform domains. */
     expect(Object.keys(desired)).toEqual(["routes"]);
     expect(hosts(desired)).toEqual([
@@ -540,7 +538,7 @@ describe("a routing rendered with no wake at all", () => {
 });
 
 describe("the fleet's API at a platform apex", () => {
-  const AGENT_PORT = 7400;
+  const NODE_PORT = 7400;
 
   it("names the BARE apex of every platform domain, which no other entry covers", () => {
     const desired = renderRoutes(
@@ -548,13 +546,13 @@ describe("the fleet's API at a platform apex", () => {
         platformDomains: [DOMAIN, OTHER_DOMAIN],
         environments: [environment(PROJECT, APEX_ENVIRONMENT, BUILD)],
         processes: [process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000, true)],
-        wake: { port: AGENT_PORT, parked: [] },
-        api: { port: AGENT_PORT },
+        wake: { port: NODE_PORT, parked: [] },
+        api: { port: NODE_PORT },
       }),
     );
 
     expect(desired.api).toEqual({
-      port: AGENT_PORT,
+      port: NODE_PORT,
       hosts: [OTHER_DOMAIN, DOMAIN].sort(),
       denied: API_DENIED_PREFIXES,
     });
@@ -567,7 +565,7 @@ describe("the fleet's API at a platform apex", () => {
   });
 
   it("carries the two prefixes an ingress must never proxy there", () => {
-    const desired = renderRoutes(input({ api: { port: AGENT_PORT } }));
+    const desired = renderRoutes(input({ api: { port: NODE_PORT } }));
 
     expect(desired.api?.denied).toEqual(["/v1/storage", "/v1/ingress/traefik"]);
   });
@@ -579,7 +577,7 @@ describe("the fleet's API at a platform apex", () => {
       input({
         environments: [environment(PROJECT, APEX_ENVIRONMENT, BUILD)],
         processes: [process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000, true)],
-        wake: { port: AGENT_PORT, parked: [] },
+        wake: { port: NODE_PORT, parked: [] },
       }),
     );
 
@@ -596,8 +594,8 @@ describe("the fleet's API at a platform apex", () => {
         environments: [environment(PROJECT, APEX_ENVIRONMENT, BUILD, [DOMAIN])],
         processes: [process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000, true)],
         claims: [{ host: DOMAIN, project: PROJECT, environment: APEX_ENVIRONMENT }],
-        wake: { port: AGENT_PORT, parked: [] },
-        api: { port: AGENT_PORT },
+        wake: { port: NODE_PORT, parked: [] },
+        api: { port: NODE_PORT },
       }),
     );
 
@@ -610,10 +608,10 @@ describe("the fleet's API at a platform apex", () => {
       input({
         platformDomains: [DOMAIN, OTHER_DOMAIN],
         wake: {
-          port: AGENT_PORT,
+          port: NODE_PORT,
           parked: [environment(PROJECT, APEX_ENVIRONMENT, BUILD, [DOMAIN])],
         },
-        api: { port: AGENT_PORT },
+        api: { port: NODE_PORT },
       }),
     );
 
@@ -622,7 +620,7 @@ describe("the fleet's API at a platform apex", () => {
   });
 
   it("is rendered without a wake surface just as well", () => {
-    const desired = renderRoutes(input({ api: { port: AGENT_PORT } }));
+    const desired = renderRoutes(input({ api: { port: NODE_PORT } }));
 
     expect(Object.keys(desired)).toEqual(["routes", "api"]);
     expect(desired.api?.hosts).toEqual([DOMAIN]);
@@ -661,7 +659,7 @@ describe("determinism", () => {
 });
 
 /*
- * The seam the agent's wake surface answers from, so that what serves an
+ * The seam the daemon's wake surface answers from, so that what serves an
  * environment is decided ONCE. A wake holds a single request and hands it to one
  * leg, where an ingress load-balances a stream of them across all of them, but
  * both read the same legs and the same weights — that is the whole point of the

@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { createWriter, defineSchema, readParquet } from "tavolato";
 import type { SyncParquetWriter } from "tavolato";
 import { afterAll, describe, expect, it } from "vitest";
-import { DURATION_BANDS_MS } from "../src/agent/access-counters.ts";
+import { DURATION_BANDS_MS } from "../src/daemon/access-counters.ts";
 import {
   durationBandColumn,
   OBSERVE_PARQUET_COMPRESSION,
@@ -31,14 +31,14 @@ import {
   observeParquetRow,
   PARQUET_CODEC,
   parquetReadHint,
-} from "../src/agent/observe-parquet.ts";
+} from "../src/daemon/observe-parquet.ts";
 import type {
   ObserveCountersRecord,
   ObserveEventRecord,
   ObserveFlushRecord,
   ObserveRecord,
-} from "../src/agent/observe-records.ts";
-import { OBSERVE_RECORD_VERSION } from "../src/agent/observe-records.ts";
+} from "../src/daemon/observe-records.ts";
+import { OBSERVE_RECORD_VERSION } from "../src/daemon/observe-records.ts";
 import { CLOCK_START_MS, rejectsWith } from "./_helpers.ts";
 
 const NODE = "node-a";
@@ -380,7 +380,7 @@ describe("what one record becomes", () => {
     expect(error.detail).toContain("ISO-8601");
   });
 
-  it("drops a field a newer agent added, because the schema is this build's", () => {
+  it("drops a field a newer daemon added, because the schema is this build's", () => {
     const record = { ...flush(), invented: "by a later version" } as unknown as ObserveRecord;
 
     expect(Object.hasOwn(observeParquetRow(record), "invented")).toBe(false);
@@ -485,9 +485,9 @@ describe("reading it back", () => {
     expect(decoded.malformed).toBe(2);
   });
 
-  it("skips a column a newer agent added rather than refusing the row", () => {
+  it("skips a column a newer daemon added rather than refusing the row", () => {
     /* The mirror of the write side dropping a field it has no column for: a
-       reader that rejected rows a later agent widened would be the one failure a
+       reader that rejected rows a later daemon widened would be the one failure a
        telemetry format cannot have. */
     const schema = defineSchema({
       v: { type: "i64" },

@@ -22,7 +22,7 @@
  * a resolver behind it. So the containers share one, and the first Caddy carries
  * the site name as a network alias — aliases may hold dots, and docker's
  * embedded DNS answers for them, which is the whole mechanism. The store stays
- * on the bridge where the harness puts it, and the agent — attached to both — is
+ * on the bridge where the harness puts it, and the daemon — attached to both — is
  * what bridges the two.
  *
  * Pebble is the CA. It is configured to run its validation ports on 80 and 443
@@ -58,7 +58,7 @@ import {
   tlsLocksPrefix,
 } from "../../src/core/registry/index.ts";
 import {
-  AGENT_IMAGE,
+  NODE_IMAGE,
   BOOT_DEADLINE_MS,
   type BucketSettings,
   buildRepo,
@@ -93,7 +93,7 @@ const CADDY_HTTPS_PORT = 443;
 const CADDY_ADMIN_PORT = 2019;
 /** Where the CA's other challenge would land; nothing here listens on it. */
 const HTTP_PORT = 80;
-const AGENT_PORT = 7400;
+const NODE_PORT = 7400;
 /** Pebble's ACME directory, and the management interface serving its roots. */
 const PEBBLE_PORT = 14000;
 const PEBBLE_MANAGEMENT_PORT = 15000;
@@ -106,12 +106,12 @@ const SITE = "site.scafo-e2e.internal";
 /** The second Caddy answers for the same name, but is not what resolves to it. */
 const SITE_ALIAS_B = "site-b.scafo-e2e.internal";
 /** Where Caddy sends every storage call; the node is the only side with a bucket. */
-const AGENT_ALIAS = "agent.scafo-e2e.internal";
+const NODE_ALIAS = "node.scafo-e2e.internal";
 /** Not a choice: Pebble's own TLS certificate names `pebble`, `localhost` and `127.0.0.1`. */
 const PEBBLE_ALIAS = "pebble";
 
 /** Where the node keeps its identity, and where it mints the storage token. */
-const AGENT_STATE_DIR = "/var/lib/scafo-tls";
+const NODE_STATE_DIR = "/var/lib/scafo-tls";
 /** The two files a Caddy is given, and the only two it needs. */
 const TOKEN_IN_CADDY = "/etc/scafo/storage-token";
 const DIRECTORY_ROOT_IN_CADDY = "/etc/scafo/acme-directory-root.pem";
@@ -140,10 +140,10 @@ const ACCOUNT_PREFIX = "acme/";
 let network: StartedNetwork;
 let store: StartedStore;
 let pebble: StartedTestContainer;
-let agent: StartedTestContainer;
+let daemon: StartedTestContainer;
 let registry: RegistryContext;
 
-let agentPort: number;
+let apiPort: number;
 /** The token the node minted, read back out of its state directory. */
 let storageToken: string;
 /**
@@ -162,7 +162,7 @@ let issuedSerial: string;
 
 const caddies: Caddy[] = [];
 const tmpDirs: string[] = [];
-const agentLog: string[] = [];
+const daemonLog: string[] = [];
 const pebbleLog: string[] = [];
 /** Raw observations the report is written from; printed once at the end. */
 const observed: Record<string, unknown> = {};
@@ -224,20 +224,20 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
       directoryRoot,
     );
 
-    agent = await new GenericContainer(AGENT_IMAGE)
+    daemon = await new GenericContainer(NODE_IMAGE)
       /* On the user-defined network for Caddy to reach it by name, and on the
          bridge — where an aliased container is attached anyway — for the store. */
       .withNetwork(network)
-      .withNetworkAliases(AGENT_ALIAS)
+      .withNetworkAliases(NODE_ALIAS)
       .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "rw" }])
       .withWorkingDir("/work")
       .withEnvironment({
         ...storeEnv(store.fromContainers, BUCKET),
         SCAFO_NODE_ID: NODE_ID,
         SCAFO_TRANSPORT: "none",
-        SCAFO_STATE_DIR: AGENT_STATE_DIR,
+        SCAFO_STATE_DIR: NODE_STATE_DIR,
         SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
-        SCAFO_ADVERTISE: `127.0.0.1:${String(AGENT_PORT)}`,
+        SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
         SCAFO_BIND_HOST: "0.0.0.0",
         ESBUILD_BINARY_PATH: "/usr/local/bin/esbuild",
         /* No ingress: this node routes nothing, it only holds the bucket. What
@@ -248,18 +248,18 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
         "dist/cli/index.mjs",
         "sail",
         "--listen",
-        `0.0.0.0:${String(AGENT_PORT)}`,
+        `0.0.0.0:${String(NODE_PORT)}`,
       ])
-      .withExposedPorts(AGENT_PORT)
+      .withExposedPorts(NODE_PORT)
       .withLogConsumer((stream: Readable) => {
-        stream.on("data", (chunk) => agentLog.push(String(chunk)));
-        stream.on("err", (chunk) => agentLog.push(String(chunk)));
+        stream.on("data", (chunk) => daemonLog.push(String(chunk)));
+        stream.on("err", (chunk) => daemonLog.push(String(chunk)));
       })
       .withWaitStrategy(Wait.forLogMessage(/listening on/))
       .withStartupTimeout(BOOT_DEADLINE_MS)
       .start();
 
-    agentPort = agent.getMappedPort(AGENT_PORT);
+    apiPort = daemon.getMappedPort(NODE_PORT);
     storageToken = await readStorageToken();
 
     caddies.push(await startCaddy("caddy-a", SITE));
@@ -267,7 +267,7 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
 
   afterAll(async () => {
     for (const caddy of caddies) await caddy.container.stop().catch(() => {});
-    await agent?.stop().catch(() => {});
+    await daemon?.stop().catch(() => {});
     await pebble?.stop().catch(() => {});
     await store?.container.stop().catch(() => {});
     await network?.stop().catch(() => {});
@@ -282,8 +282,8 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
       /* The operator's whole handoff, said once: where the file is. Everything
          below rests on it, because it is the only thing the ingress is given
          besides a URL — and the reason it needs no bucket credential. */
-      expect(agentLog.join(""), agentLogTail()).toContain(
-        `storage token at ${AGENT_STATE_DIR}/storage-token`,
+      expect(daemonLog.join(""), daemonLogTail()).toContain(
+        `storage token at ${NODE_STATE_DIR}/storage-token`,
       );
       expect(storageToken.length).toBeGreaterThan(0);
       observed.tokenLength = storageToken.length;
@@ -456,7 +456,7 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
           const held = await registry.store.list(tlsLocksPrefix());
           return held.length === 0 ? [] : null;
         },
-        { context: () => `${caddyLogTail(caddies[0])}\n${agentLogTail()}` },
+        { context: () => `${caddyLogTail(caddies[0])}\n${daemonLogTail()}` },
       );
       expect(left).toEqual([]);
     },
@@ -467,14 +467,14 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
     "answers a caller presenting the wrong token, or none, with 401",
     async () => {
       const wrong = await send(
-        agentPort,
+        apiPort,
         "/v1/storage/list?prefix=&recursive=true",
         "GET",
         { authorization: `Bearer ${storageToken}-not` },
         undefined,
       );
       const none = await send(
-        agentPort,
+        apiPort,
         "/v1/storage/list?prefix=&recursive=true",
         "GET",
         {},
@@ -538,7 +538,7 @@ function caddyConfig(name: string): string {
       },
       storage: {
         module: "scafo",
-        endpoint: `http://${AGENT_ALIAS}:${String(AGENT_PORT)}`,
+        endpoint: `http://${NODE_ALIAS}:${String(NODE_PORT)}`,
         token_file: TOKEN_IN_CADDY,
       },
       apps: {
@@ -658,15 +658,15 @@ async function pebbleIssuanceRoot(port: number, trustedRoot: string): Promise<st
 
 /** The node's storage token, read out of the state directory it was minted in. */
 async function readStorageToken(): Promise<string> {
-  const read = await agent.exec(["cat", `${AGENT_STATE_DIR}/storage-token`]);
-  expect(read.exitCode, `${read.output}\n${agentLogTail()}`).toBe(0);
+  const read = await daemon.exec(["cat", `${NODE_STATE_DIR}/storage-token`]);
+  expect(read.exitCode, `${read.output}\n${daemonLogTail()}`).toBe(0);
   return read.output.trim();
 }
 
 /** Every key the node is storing, as the surface answers it. */
 async function storageList(): Promise<string[]> {
   const answer = await send(
-    agentPort,
+    apiPort,
     "/v1/storage/list?prefix=&recursive=true",
     "GET",
     { authorization: `Bearer ${storageToken}` },
@@ -679,7 +679,7 @@ async function storageList(): Promise<string[]> {
 /** One stored value, as the surface answers it. */
 async function storageGet(key: string): Promise<string> {
   const answer = await send(
-    agentPort,
+    apiPort,
     `/v1/storage/objects/${key}`,
     "GET",
     { authorization: `Bearer ${storageToken}` },
@@ -795,8 +795,8 @@ function docker(args: string[]): Promise<CommandResult> {
   return run("docker", args, REPO_ROOT, process.env as Record<string, string>);
 }
 
-function agentLogTail(limit: number = 8000): string {
-  return tail("node container logs", agentLog.join(""), limit);
+function daemonLogTail(limit: number = 8000): string {
+  return tail("node container logs", daemonLog.join(""), limit);
 }
 
 function pebbleLogTail(limit: number = 8000): string {

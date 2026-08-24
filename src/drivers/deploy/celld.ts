@@ -111,7 +111,7 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
  * The runtime files a version under the name its config carries, and the fleet's
  * pointer is then addressed by that name for the lifetime of the environment. An
  * artifact that named itself something else would deploy into a second fleet
- * directory the agent never activates, so the recorded name wins.
+ * directory the daemon never activates, so the recorded name wins.
  */
 async function prepareConfig(dir: string, script: string): Promise<string> {
   for (const name of CONFIG_NAMES) {

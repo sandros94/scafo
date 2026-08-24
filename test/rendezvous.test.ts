@@ -4,7 +4,7 @@
  * The two properties the whole design rests on are asserted rather than
  * described: the same inputs always give the same answer, and a node leaving
  * only disturbs the environments that node was serving. Everything here is pure,
- * so no store, clock or agent is involved.
+ * so no store, clock or daemon is involved.
  */
 
 import { describe, expect, it } from "vitest";
@@ -403,7 +403,7 @@ function node(id: string, labels: Record<string, string>): NodeRecord {
     v: 1,
     id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: `key-${id}` },
-    addresses: { internal: "10.0.0.1", agentPort: 7400 },
+    addresses: { internal: "10.0.0.1", apiPort: 7400 },
     labels,
   };
 }

@@ -10,7 +10,7 @@ export default defineBuildConfig({
         "./src/core/auth/index",
         "./src/core/capacity/index",
         "./src/core/placement/index",
-        "./src/agent/index",
+        "./src/daemon/index",
         "./src/cli/index",
         "./src/drivers/store/uns3",
         "./src/drivers/store/memory",

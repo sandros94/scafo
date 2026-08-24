@@ -105,24 +105,24 @@ export interface NodeOperator {
   supersedes?: string;
 }
 
-/** A registered node running the agent. Key: `_scafo/nodes/<id>.json`. */
+/** A registered node running the daemon. Key: `_scafo/nodes/<id>.json`. */
 export interface NodeRecord {
   v: 1;
   id: string;
   /** Ed25519 public key used to verify the node's signatures. */
   publicKey: { kty: "OKP"; crv: "Ed25519"; x: string };
-  addresses: { internal: string; agentPort: number };
+  addresses: { internal: string; apiPort: number };
   /** Filled in by the node itself once it has probed its own hardware. */
   capacity?: { cores: number; memMb: number; cgroup: boolean; probedAt: string };
   /**
-   * Last time the node's agent said it is still there, refreshed on its own
+   * Last time the node's daemon said it is still there, refreshed on its own
    * timer. This is the liveness signal placement decides from; a record without
    * it was written by a node that never refreshed one, and liveness then falls
    * back to `capacity.probedAt`.
    */
   heartbeatAt?: string;
   /**
-   * When the node's agent said it is on its way out, written by the node itself
+   * When the node's daemon said it is on its way out, written by the node itself
    * as the first step of a graceful shutdown.
    *
    * A node carrying it is NOT live for placement however fresh its heartbeat is,

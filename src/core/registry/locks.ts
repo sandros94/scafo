@@ -237,7 +237,7 @@ export async function withLock<T>(
 
 /**
  * A holder id for one process: the node it runs on, plus enough entropy to tell
- * two agents sharing a node id apart in a record that outlived one of them.
+ * two daemons sharing a node id apart in a record that outlived one of them.
  */
 export function lockHolder(nodeId: string): string {
   let hex = "";

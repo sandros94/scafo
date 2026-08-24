@@ -1,14 +1,14 @@
 /*
  * The whole single-node product loop against real infrastructure: a SeaweedFS
- * bucket holding the registry, a Caddy the agent drives through its admin API,
+ * bucket holding the registry, a Caddy the daemon drives through its admin API,
  * celld running the builds, and the built `scafo` CLI driving all of it from the
  * host the way an operator would.
  *
- * The topology mirrors one real VPS. Caddy and the agent SHARE a network
+ * The topology mirrors one real VPS. Caddy and the daemon SHARE a network
  * namespace, which is what makes the loopback contract real: the runtime
- * processes only ever listen on 127.0.0.1, Caddy dials them there, and the agent
+ * processes only ever listen on 127.0.0.1, Caddy dials them there, and the daemon
  * reaches Caddy's admin API on the same loopback. The store is a separate
- * container, reached over a docker network by its address on it — so the agent
+ * container, reached over a docker network by its address on it — so the daemon
  * uses the container-internal endpoint while the test process, on the host, uses
  * the published one.
  *
@@ -23,7 +23,7 @@
  *   SCAFO_E2E=1 pnpm vitest run test/integration/e2e.test.ts
  *
  * Every HTTP assertion polls until a deadline, because a change only reaches
- * Caddy after the reconcile pass that observes it. Any timeout dumps the agent
+ * Caddy after the reconcile pass that observes it. Any timeout dumps the daemon
  * container's logs into the failure — they are the only account of what the node
  * was doing.
  *
@@ -40,7 +40,7 @@ import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { AgentState } from "../../src/agent/app.ts";
+import type { DaemonState } from "../../src/daemon/app.ts";
 import type { OperatorKeyFile } from "../../src/cli/_operator-key.ts";
 import { signNodeToken } from "../../src/core/auth/node-token.ts";
 import {
@@ -55,7 +55,7 @@ import {
 import type { NodeRecord, TrustPolicy } from "../../src/core/types/registry.ts";
 import type { ProcessStatus } from "../../src/core/types/supervisor.ts";
 import {
-  AGENT_IMAGE,
+  NODE_IMAGE,
   BOOT_DEADLINE_MS,
   BRIDGE_NETWORK,
   type BucketSettings,
@@ -89,8 +89,8 @@ const CADDY_IMAGE = "caddy:2";
 
 const CADDY_HTTP_PORT = 80;
 const CADDY_ADMIN_PORT = 2019;
-/** Published on the Caddy container, because the agent shares its namespace. */
-const AGENT_PORT = 7400;
+/** Published on the Caddy container, because the daemon shares its namespace. */
+const NODE_PORT = 7400;
 
 const BUCKET = "scafo-e2e";
 const KEY_PREFIX = "e2e";
@@ -124,8 +124,8 @@ const HOSTILE_SUBJECT = "repo:evil/other:ref:refs/heads/main";
 
 let store: StartedStore;
 let caddy: StartedTestContainer;
-let agent: StartedTestContainer;
-/** Stands in for a CI provider; the agent reaches it over the bridge by URL. */
+let daemon: StartedTestContainer;
+/** Stands in for a CI provider; the daemon reaches it over the bridge by URL. */
 let issuer: StubIssuer;
 
 /** Endpoints of the one bucket, as the host and as the containers reach it. */
@@ -134,7 +134,7 @@ let storeFromContainers: string;
 
 let caddyHttpPort: number;
 let caddyAdminPort: number;
-let agentPort: number;
+let apiPort: number;
 
 let registry: RegistryContext;
 let keyPath: string;
@@ -146,14 +146,14 @@ let buildCi: string;
 let buildCanary: string;
 
 const tmpDirs: string[] = [];
-/** Everything the agent container has written, kept for failure messages. */
-const agentLog: string[] = [];
+/** Everything the daemon container has written, kept for failure messages. */
+const daemonLog: string[] = [];
 /** Raw observations the report is written from; printed once at the end. */
 const observed: Record<string, unknown> = {};
 
 describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   beforeAll(async () => {
-    /* Built first: the agent container runs `dist/` off the bind-mounted
+    /* Built first: the daemon container runs `dist/` off the bind-mounted
        worktree, so a stale build would test the previous commit. */
     await buildRepo();
 
@@ -166,10 +166,10 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         { source: join(FIXTURES, "caddy.json"), target: "/etc/caddy/config.json" },
       ])
       .withCommand(["caddy", "run", "--config", "/etc/caddy/config.json"])
-      /* The agent's own port is published here: it has no network of its own. */
-      .withExposedPorts(CADDY_HTTP_PORT, CADDY_ADMIN_PORT, AGENT_PORT)
+      /* The daemon's own port is published here: it has no network of its own. */
+      .withExposedPorts(CADDY_HTTP_PORT, CADDY_ADMIN_PORT, NODE_PORT)
       /* Waiting on the admin API rather than on every published port: nothing
-         listens on the agent's until the agent itself starts. */
+         listens on the daemon's until the daemon itself starts. */
       .withWaitStrategy(
         Wait.forHttp(`/config/apps/http/servers/scafo/routes`, CADDY_ADMIN_PORT).forStatusCode(200),
       )
@@ -177,11 +177,11 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
 
     caddyHttpPort = caddy.getMappedPort(CADDY_HTTP_PORT);
     caddyAdminPort = caddy.getMappedPort(CADDY_ADMIN_PORT);
-    agentPort = caddy.getMappedPort(AGENT_PORT);
+    apiPort = caddy.getMappedPort(NODE_PORT);
 
-    agent = await new GenericContainer(AGENT_IMAGE)
+    daemon = await new GenericContainer(NODE_IMAGE)
       /* The whole point of the topology: Caddy's `127.0.0.1:<port>` upstream
-         dials reach the celld processes, and the agent reaches Caddy's admin. */
+         dials reach the celld processes, and the daemon reaches Caddy's admin. */
       .withNetworkMode(`container:${caddy.getId()}`)
       .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "rw" }])
       .withWorkingDir("/work")
@@ -193,7 +193,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         SCAFO_S3_SECRET_KEY: SECRET_KEY,
         SCAFO_S3_REGION: REGION,
         SCAFO_NODE_ID: NODE_ID,
-        /* The listener below binds every interface, which the agent refuses
+        /* The listener below binds every interface, which the daemon refuses
            without being told what network that is. Inside a container of its
            own, on a private docker network, it is the trusted-network case. */
         SCAFO_TRANSPORT: "none",
@@ -205,7 +205,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         SCAFO_CADDY_ADMIN: `http://127.0.0.1:${String(CADDY_ADMIN_PORT)}`,
         /* Peers reach a single node on loopback; without this the advertised
            host would be the wildcard the listener binds. */
-        SCAFO_ADVERTISE: `127.0.0.1:${String(AGENT_PORT)}`,
+        SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
         /* Belt and braces: the image's own esbuild, rather than whichever one
            the bind-mounted node_modules resolves to. */
         ESBUILD_BINARY_PATH: "/usr/local/bin/esbuild",
@@ -215,13 +215,13 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         "dist/cli/index.mjs",
         "sail",
         "--listen",
-        `0.0.0.0:${String(AGENT_PORT)}`,
+        `0.0.0.0:${String(NODE_PORT)}`,
       ])
       /* Consumed from the first byte, so the logs survive even a start that
          never satisfies the wait strategy. */
       .withLogConsumer((stream: Readable) => {
-        stream.on("data", (chunk) => agentLog.push(String(chunk)));
-        stream.on("err", (chunk) => agentLog.push(String(chunk)));
+        stream.on("data", (chunk) => daemonLog.push(String(chunk)));
+        stream.on("err", (chunk) => daemonLog.push(String(chunk)));
       })
       .withWaitStrategy(Wait.forLogMessage(/listening on/))
       .withStartupTimeout(BOOT_DEADLINE_MS)
@@ -229,7 +229,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
 
     registry = registryAt(storeFromHost, BUCKET_SETTINGS);
 
-    /* Its own container on the same bridge, so the agent runs the real discovery
+    /* Its own container on the same bridge, so the daemon runs the real discovery
        and key-set requests against a URL it was handed in a token. */
     issuer = await startStubIssuer({
       network: BRIDGE_NETWORK,
@@ -239,8 +239,8 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   }, SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
-    /* Stopped before Caddy: the agent lives in Caddy's network namespace. */
-    await agent?.stop().catch(() => {});
+    /* Stopped before Caddy: the daemon lives in Caddy's network namespace. */
+    await daemon?.stop().catch(() => {});
     await caddy?.stop().catch(() => {});
     await issuer?.stop();
     await store?.container.stop().catch(() => {});
@@ -252,8 +252,8 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   it(
     "answers its health endpoint and has bootstrapped the registry in the bucket",
     async () => {
-      const health = await until("the agent to answer /v1/health", BOOT_DEADLINE_MS, async () => {
-        const answer = await httpGet(agentPort, "/v1/health", {});
+      const health = await until("the daemon to answer /v1/health", BOOT_DEADLINE_MS, async () => {
+        const answer = await httpGet(apiPort, "/v1/health", {});
         return answer.status === 200 ? answer : null;
       });
       expect(JSON.parse(health.body)).toMatchObject({ ok: true, node: NODE_ID });
@@ -263,7 +263,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expect(meta?.platformDomains).toEqual([PLATFORM_DOMAIN]);
 
       const node = await readJson<NodeRecord>(registry, nodeKey(NODE_ID));
-      expect(node?.value.addresses).toMatchObject({ agentPort: AGENT_PORT });
+      expect(node?.value.addresses).toMatchObject({ apiPort: NODE_PORT });
       observed.health = JSON.parse(health.body);
     },
     STEP_TIMEOUT_MS,
@@ -299,7 +299,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       observed.deployV1Output = result.output;
 
       expectCleanExit(result);
-      expect(result.output, agentLogTail()).toContain("routed");
+      expect(result.output, daemonLogTail()).toContain("routed");
 
       buildV1 = buildIdOf(result.output);
       expect(await listBuilds(registry, PROJECT)).toContain(buildV1);
@@ -340,11 +340,11 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       /*
        * THE APEX IS THE FLEET'S FRONT DOOR. `*.scafo.test` is one label and
        * never `scafo.test` itself, so nothing served this name before: the node
-       * routes it to its own agent, and any node of the fleet answers any call
+       * routes it to its own daemon, and any node of the fleet answers any call
        * there because the registry is in the bucket.
        */
       const health = await until(
-        `${PLATFORM_DOMAIN} to answer the agent's health through Caddy`,
+        `${PLATFORM_DOMAIN} to answer the daemon's health through Caddy`,
         DEADLINE_MS,
         async () => {
           const answer = await httpGet(caddyHttpPort, "/v1/health", { host: PLATFORM_DOMAIN });
@@ -368,7 +368,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       /* THE CERTIFICATE PATH: the wildcard does not cover this name, so the
          on-demand ask is the only thing that can mint it one — and it says yes,
          with no environment, no claim and no process behind it. */
-      const ask = await httpGet(agentPort, `/v1/ingress/ask?domain=${PLATFORM_DOMAIN}`, {});
+      const ask = await httpGet(apiPort, `/v1/ingress/ask?domain=${PLATFORM_DOMAIN}`, {});
       expect(ask.status).toBe(200);
     },
     STEP_TIMEOUT_MS,
@@ -383,7 +383,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
        * and the issuance locks a colocated ingress persists through this node,
        * behind a shared token; `/v1/ingress/traefik` is the node's whole routing
        * map. Both are for a caller on this machine, and the exclusion is CADDY'S
-       * — the agent behind it is never asked.
+       * — the daemon behind it is never asked.
        */
       for (const path of [
         "/v1/storage",
@@ -394,7 +394,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         const blocked = await httpGet(caddyHttpPort, path, { host: PLATFORM_DOMAIN });
 
         expect(blocked.status, `${path} through the apex`).toBe(404);
-        /* The ingress's own denial: no problem document, no header the agent
+        /* The ingress's own denial: no problem document, no header the daemon
            puts on its answers, and therefore nothing that reached it. */
         expect(blocked.body, `${path} through the apex`).not.toContain("urn:scafo:");
         expect(blocked.body, `${path} through the apex`).toBe("");
@@ -403,7 +403,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
 
       /* The surface itself is untouched and still answers a local caller — on
          the node's own listener, which is where it is meant to be reached. */
-      const local = await httpGet(agentPort, "/v1/storage/list?prefix=", {});
+      const local = await httpGet(apiPort, "/v1/storage/list?prefix=", {});
       expect(local.status).toBe(401);
       expect(local.body).toContain("urn:scafo:");
     },
@@ -413,10 +413,10 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   it(
     "tells an ingress it serves a platform host and refuses one nothing claimed",
     async () => {
-      const served = await httpGet(agentPort, `/v1/ingress/ask?domain=${envHost()}`, {});
+      const served = await httpGet(apiPort, `/v1/ingress/ask?domain=${envHost()}`, {});
       expect(served.status).toBe(200);
 
-      const unknown = await httpGet(agentPort, "/v1/ingress/ask?domain=unclaimed.example.com", {});
+      const unknown = await httpGet(apiPort, "/v1/ingress/ask?domain=unclaimed.example.com", {});
       expect(unknown.status).toBe(404);
       observed.ask = { served: served.status, unknown: unknown.status };
     },
@@ -432,7 +432,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       observed.deployV2Output = result.output;
 
       expectCleanExit(result);
-      expect(result.output, agentLogTail()).toContain("routed");
+      expect(result.output, daemonLogTail()).toContain("routed");
       buildV2 = buildIdOf(result.output);
       expect(buildV2).not.toBe(buildV1);
       observed.buildV2 = buildV2;
@@ -458,7 +458,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       const routes = await caddyRoutes();
       expect(routes.map((route) => route["@id"])).toContain("operator_authored");
       /* Withdrawn from its own route, but not into nothing: the catch-all that
-         hands unmatched platform hosts to the agent is what answers for it now. */
+         hands unmatched platform hosts to the daemon is what answers for it now. */
       expect(routes.map((route) => route["@id"])).toContain(`scafo_catchall_${PLATFORM_DOMAIN}`);
     },
     STEP_TIMEOUT_MS,
@@ -468,7 +468,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
     "rolls the environment back to the first build, and serves it on the apex again",
     async () => {
       const answer = await httpPost(
-        agentPort,
+        apiPort,
         "/v1/aliases",
         { project: PROJECT, environment: ENVIRONMENT, rollback: true },
         await operatorToken(),
@@ -494,12 +494,12 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         "the node to report a single running process",
         DEADLINE_MS,
         async () => {
-          const answer = await httpGet(agentPort, "/v1/state", {
+          const answer = await httpGet(apiPort, "/v1/state", {
             authorization: `Bearer ${await operatorToken()}`,
           });
           if (answer.status !== 200) return null;
 
-          const body = JSON.parse(answer.body) as AgentState;
+          const body = JSON.parse(answer.body) as DaemonState;
           const running = body.processes.filter((process) => process.state === "running");
           return running.length === 1 ? body : null;
         },
@@ -585,7 +585,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       /* Accepted (202), then carried the whole way: build, flip, and a process
          through its readiness gate. Every poll re-presented the same token,
          which a workload token — unlike a node token — survives. */
-      expect(result.output, agentLogTail()).toContain("routed");
+      expect(result.output, daemonLogTail()).toContain("routed");
 
       buildCi = buildIdOf(result.output);
       expect(await listBuilds(registry, PROJECT)).toContain(buildCi);
@@ -652,7 +652,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expectCleanExit(result);
       /* Deployed WITHOUT a flip, then weighed against whatever the alias points
          at — which the node reads for itself, so the CLI never has to know. */
-      expect(result.output, agentLogTail()).toContain("splits its traffic");
+      expect(result.output, daemonLogTail()).toContain("splits its traffic");
       buildCanary = buildIdOf(result.output);
       expect(buildCanary).not.toBe(buildV1);
       observed.buildCanary = buildCanary;
@@ -714,7 +714,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
     "promotes the canary with a flip, which clears the split and retires the leg that lost",
     async () => {
       const answer = await httpPost(
-        agentPort,
+        apiPort,
         "/v1/aliases",
         { project: PROJECT, environment: ENVIRONMENT, build: buildCanary },
         await operatorToken(),
@@ -747,12 +747,12 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         "the node to report one process for production",
         DEADLINE_MS,
         async () => {
-          const got = await httpGet(agentPort, "/v1/state", {
+          const got = await httpGet(apiPort, "/v1/state", {
             authorization: `Bearer ${await operatorToken()}`,
           });
           if (got.status !== 200) return null;
 
-          const parsed = JSON.parse(got.body) as AgentState;
+          const parsed = JSON.parse(got.body) as DaemonState;
           return production(parsed).length === 1 ? parsed : null;
         },
       );
@@ -774,7 +774,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       /*
        * THE ONE DELIBERATE WAKE, run last because it is not free: the recalled
        * build runs for `buildIdleS` after this, and every earlier test counts
-       * processes. The request lands on the catch-all, the agent starts the
+       * processes. The request lands on the catch-all, the daemon starts the
        * superseded build against its own fleet, holds the request through the
        * readiness gate, and answers with the very version that was retired —
        * G2's "every build recallable at its own host", observed end to end.
@@ -791,13 +791,13 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       observed.wokenBuildAnswer = woken;
 
       /* And the node says so: the wake surface admitted at least this one. */
-      const state = await httpGet(agentPort, "/v1/state", {
+      const state = await httpGet(apiPort, "/v1/state", {
         authorization: `Bearer ${await operatorToken()}`,
       });
-      expect((JSON.parse(state.body) as AgentState).wakes?.admitted).toBeGreaterThanOrEqual(1);
+      expect((JSON.parse(state.body) as DaemonState).wakes?.admitted).toBeGreaterThanOrEqual(1);
 
       /*
-       * A name nothing owns is a 404 FROM THE AGENT, in the same problem
+       * A name nothing owns is a 404 FROM THE DAEMON, in the same problem
        * document every API refusal wears — which retires the old behaviour
        * where an unrouted host got Caddy's bare 200-empty. One answer, whether
        * the name never existed or its build was reaped: the bucket is the
@@ -847,8 +847,8 @@ function deployArgs(dir: string, environment: string = ENVIRONMENT): string[] {
   return [
     "deploy",
     dir,
-    "--agent",
-    `http://127.0.0.1:${String(agentPort)}`,
+    "--node",
+    `http://127.0.0.1:${String(apiPort)}`,
     "--project",
     PROJECT,
     "--env",
@@ -870,8 +870,8 @@ function canaryArgs(dir: string, weight: number): string[] {
   return [
     "deploy",
     dir,
-    "--agent",
-    `http://127.0.0.1:${String(agentPort)}`,
+    "--node",
+    `http://127.0.0.1:${String(apiPort)}`,
     "--project",
     PROJECT,
     "--env",
@@ -885,7 +885,7 @@ function canaryArgs(dir: string, weight: number): string[] {
 }
 
 /** The running processes of the production environment, the CI one aside. */
-function production(state: AgentState): ProcessStatus[] {
+function production(state: DaemonState): ProcessStatus[] {
   return state.processes.filter(
     (process) =>
       process.state === "running" && process.id.startsWith(`${PROJECT}--${ENVIRONMENT}--`),
@@ -927,10 +927,10 @@ async function caddyRoutes(): Promise<Array<Record<string, unknown>>> {
 
 /**
  * Polls until `probe` returns a value. A deadline that runs out fails with the
- * agent container's logs attached, because nothing else says what the node did.
+ * daemon container's logs attached, because nothing else says what the node did.
  */
 function until<T>(what: string, deadlineMs: number, probe: () => Promise<T | null>): Promise<T> {
-  return untilPolled(what, deadlineMs, probe, { context: agentLogTail });
+  return untilPolled(what, deadlineMs, probe, { context: daemonLogTail });
 }
 
 /**
@@ -939,7 +939,7 @@ function until<T>(what: string, deadlineMs: number, probe: () => Promise<T | nul
  * reason is almost always on the other side of the request it made.
  */
 function expectCleanExit(result: CommandResult): void {
-  expect(result.code, `${result.output}\n${agentLogTail()}`).toBe(0);
+  expect(result.code, `${result.output}\n${daemonLogTail()}`).toBe(0);
 }
 
 /** Fails with the answer's body, which is where a problem document explains itself. */
@@ -947,9 +947,9 @@ function expectStatus(answer: HttpAnswer, status: number): void {
   expect(answer.status, answer.body).toBe(status);
 }
 
-/** The tail of the agent container's output, as a failure message carries it. */
-function agentLogTail(limit: number = 12_000): string {
-  const text = agentLog.join("");
+/** The tail of the daemon container's output, as a failure message carries it. */
+function daemonLogTail(limit: number = 12_000): string {
+  const text = daemonLog.join("");
   const tail = text.length <= limit ? text : `…${text.slice(-limit)}`;
-  return `--- agent container logs ---\n${tail}\n--- end agent container logs ---`;
+  return `--- daemon container logs ---\n${tail}\n--- end daemon container logs ---`;
 }

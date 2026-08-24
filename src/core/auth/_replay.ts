@@ -23,7 +23,7 @@ export const REPLAY_CAPACITY: number = 100_000;
  * used twice.
  *
  * CAVEAT: the window is per process. Nodes are stateless and share no state, so
- * a token replayed against a different agent instance is caught only by its
+ * a token replayed against a different daemon instance is caught only by its
  * lifetime (≤60s), not by this cache.
  */
 export function createReplayCache(opts: ReplayCacheOptions): ReplayCache {

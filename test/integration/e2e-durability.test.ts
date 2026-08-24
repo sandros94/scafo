@@ -25,7 +25,7 @@ import type { Readable } from "node:stream";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  AGENT_IMAGE,
+  NODE_IMAGE,
   BOOT_DEADLINE_MS,
   BRIDGE_NETWORK,
   DEADLINE_MS,
@@ -49,7 +49,7 @@ const describeE2e = E2E ? describe : describe.skip;
 const CADDY_IMAGE = "caddy:2";
 const CADDY_HTTP_PORT = 80;
 const CADDY_ADMIN_PORT = 2019;
-const AGENT_PORT = 7400;
+const NODE_PORT = 7400;
 
 const SETTINGS: BucketSettings = {
   bucket: "scafo-e2e-durability",
@@ -67,9 +67,9 @@ const HOST = `${PROJECT}--${ENVIRONMENT}.${PLATFORM_DOMAIN}`;
 interface Node {
   id: string;
   caddy: StartedTestContainer;
-  agent: StartedTestContainer;
+  daemon: StartedTestContainer;
   httpPort: number;
-  agentPort: number;
+  apiPort: number;
   log: string[];
 }
 
@@ -100,8 +100,8 @@ describeE2e("durability, end to end", () => {
       [
         "deploy",
         await stageApp("v1", tmpDirs),
-        "--agent",
-        `http://127.0.0.1:${String(nodes[0].agentPort)}`,
+        "--node",
+        `http://127.0.0.1:${String(nodes[0].apiPort)}`,
         "--project",
         PROJECT,
         "--env",
@@ -124,7 +124,7 @@ describeE2e("durability, end to end", () => {
 
   afterAll(async () => {
     for (const node of nodes) {
-      await node.agent.stop().catch(() => {});
+      await node.daemon.stop().catch(() => {});
       await node.caddy.stop().catch(() => {});
     }
     await store.container.stop().catch(() => {});
@@ -144,9 +144,9 @@ describeE2e("durability, end to end", () => {
   it(
     "hands the configured durability to the runtime process itself",
     async () => {
-      /* The knob's whole journey — environment, agent config, driver, spawned
+      /* The knob's whole journey — environment, daemon config, driver, spawned
          process — read back off the one process that actually runs the cells.
-         Only runtime processes carry this variable; the agent itself does not. */
+         Only runtime processes carry this variable; the daemon itself does not. */
       const found = await until("a runtime process to carry the posture", DEADLINE_MS, () =>
         durabilityOf(nodes[1]),
       );
@@ -162,7 +162,7 @@ describeE2e("durability, end to end", () => {
 
       /* No drain, no goodbye: whatever of the log the bucket does not have yet
          is exactly what the surviving follower is for. */
-      await nodes[0].agent.stop({ timeout: 0 }).catch(() => {});
+      await nodes[0].daemon.stop({ timeout: 0 }).catch(() => {});
 
       await countExactlyOnceThrough(nodes[1], "the survivor");
     },
@@ -187,7 +187,7 @@ describeE2e("durability, end to end", () => {
 
       /* The takeover that crosses postures: a bucket-posture process must find
          a complete bucket behind a fleet-posture writer, or refuse to serve. */
-      await nodes[1].agent.stop({ timeout: 0 }).catch(() => {});
+      await nodes[1].daemon.stop({ timeout: 0 }).catch(() => {});
 
       await countExactlyOnceThrough(joined, "the bucket-posture joiner");
       await countThrough(joined);
@@ -225,7 +225,7 @@ describeE2e("durability, end to end", () => {
 
   /** The durability line of a node's runtime-process environment, or null. */
   async function durabilityOf(node: Node): Promise<string | null> {
-    const result = await node.agent.exec([
+    const result = await node.daemon.exec([
       "sh",
       "-c",
       "cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep ^CELLD_DURABILITY= | head -1",
@@ -240,7 +240,7 @@ describeE2e("durability, end to end", () => {
         { source: join(FIXTURES, "caddy.json"), target: "/etc/caddy/config.json" },
       ])
       .withCommand(["caddy", "run", "--config", "/etc/caddy/config.json"])
-      .withExposedPorts(CADDY_HTTP_PORT, CADDY_ADMIN_PORT, AGENT_PORT)
+      .withExposedPorts(CADDY_HTTP_PORT, CADDY_ADMIN_PORT, NODE_PORT)
       .withWaitStrategy(
         Wait.forHttp(`/config/apps/http/servers/scafo/routes`, CADDY_ADMIN_PORT).forStatusCode(200),
       )
@@ -249,7 +249,7 @@ describeE2e("durability, end to end", () => {
     const bridgeAddress = caddy.getIpAddress(BRIDGE_NETWORK);
     const log: string[] = [];
 
-    const agent = await new GenericContainer(AGENT_IMAGE)
+    const daemon = await new GenericContainer(NODE_IMAGE)
       .withNetworkMode(`container:${caddy.getId()}`)
       .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "rw" }])
       .withWorkingDir("/work")
@@ -260,7 +260,7 @@ describeE2e("durability, end to end", () => {
         SCAFO_STATE_DIR: `/var/lib/scafo-${id}`,
         SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
         SCAFO_CADDY_ADMIN: `http://127.0.0.1:${String(CADDY_ADMIN_PORT)}`,
-        SCAFO_ADVERTISE: `${bridgeAddress}:${String(AGENT_PORT)}`,
+        SCAFO_ADVERTISE: `${bridgeAddress}:${String(NODE_PORT)}`,
         SCAFO_BIND_HOST: "0.0.0.0",
         /* The setting under test, differing per node on purpose. */
         SCAFO_DURABILITY: durability,
@@ -271,7 +271,7 @@ describeE2e("durability, end to end", () => {
         "dist/cli/index.mjs",
         "sail",
         "--listen",
-        `0.0.0.0:${String(AGENT_PORT)}`,
+        `0.0.0.0:${String(NODE_PORT)}`,
       ])
       .withLogConsumer((stream: Readable) => {
         stream.on("data", (chunk) => log.push(String(chunk)));
@@ -284,9 +284,9 @@ describeE2e("durability, end to end", () => {
     return {
       id,
       caddy,
-      agent,
+      daemon,
       httpPort: caddy.getMappedPort(CADDY_HTTP_PORT),
-      agentPort: caddy.getMappedPort(AGENT_PORT),
+      apiPort: caddy.getMappedPort(NODE_PORT),
       log,
     };
   }

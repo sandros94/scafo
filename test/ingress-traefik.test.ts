@@ -1,5 +1,5 @@
 /*
- * The Traefik ingress driver, and the agent route that publishes what it renders.
+ * The Traefik ingress driver, and the node API route that publishes what it renders.
  *
  * There is no stand-in for Traefik here and there could not be one: this driver
  * makes no call at all. What it does is render a document and hold it, so the
@@ -14,8 +14,8 @@
 
 import type { H3 } from "h3";
 import { beforeEach, describe, expect, it } from "vitest";
-import { createAgentApp } from "../src/agent/app.ts";
-import type { AgentConfig } from "../src/agent/config.ts";
+import { createNodeApp } from "../src/daemon/app.ts";
+import type { DaemonConfig } from "../src/daemon/config.ts";
 import type { IngressDesired, IngressDriver } from "../src/core/types/ingress.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { createCaddyDriver } from "../src/drivers/ingress/caddy.ts";
@@ -46,9 +46,9 @@ const OTHER_DOMAIN = "apps.example";
 const PARKED_HOST = "shop--preview.apps.test";
 const PARKED_CUSTOM = "shop.example.com";
 
-/** Where the node's own agent answers, as a Traefik server url. */
-const AGENT_PORT = 7400;
-const AGENT_URL = `http://127.0.0.1:${String(AGENT_PORT)}`;
+/** Where the node's own daemon answers, as a Traefik server url. */
+const NODE_PORT = 7400;
+const NODE_URL = `http://127.0.0.1:${String(NODE_PORT)}`;
 
 let clock: ManualClock;
 let driver: TraefikDriver;
@@ -362,12 +362,12 @@ describe("a host divided between several backends", () => {
   });
 });
 
-describe("the hosts and domains that reach the agent", () => {
-  it("renders a parked host as a plain Host router over the agent", () => {
+describe("the hosts and domains that reach the daemon", () => {
+  it("renders a parked host as a plain Host router over the daemon", () => {
     const config = renderTraefikConfig(waking([], { hosts: [PARKED_HOST], domains: [] }));
 
     /* An ordinary router over an ordinary service: it names one host and dials
-       the agent instead of a runtime process. */
+       the daemon instead of a runtime process. */
     expect(config).toEqual({
       http: {
         routers: {
@@ -379,7 +379,7 @@ describe("the hosts and domains that reach the agent", () => {
         },
         services: {
           [`${TRAEFIK_KEY_PREFIX}${PARKED_HOST}`]: {
-            loadBalancer: { servers: [{ url: AGENT_URL }] },
+            loadBalancer: { servers: [{ url: NODE_URL }] },
           },
         },
       },
@@ -394,7 +394,7 @@ describe("the hosts and domains that reach the agent", () => {
      * longest rule wins: `^[^.]+\.apps\.test$` is easily longer than
      * `shop.apps.test`, so the default ranking would have the catch-all answer
      * for a host an explicit router was written for — a whole platform domain's
-     * live traffic going to the agent. `1` is the lowest a priority may be,
+     * live traffic going to the daemon. `1` is the lowest a priority may be,
      * which puts every explicit router ahead of it whatever its rule turns out
      * to be.
      */
@@ -426,7 +426,7 @@ describe("the hosts and domains that reach the agent", () => {
     expect(matcher.test(`shop.${DOMAIN}.evil.example`)).toBe(false);
   });
 
-  it("points every agent-bound service at the agent's own port", () => {
+  it("points every daemon-bound service at the daemon's own port", () => {
     const config = renderTraefikConfig(
       waking([[HOST, 42_000]], { hosts: [PARKED_HOST], domains: [DOMAIN, OTHER_DOMAIN] }),
     );
@@ -437,7 +437,7 @@ describe("the hosts and domains that reach the agent", () => {
       traefikCatchAllKey(OTHER_DOMAIN),
     ]) {
       expect(config.http?.services[key], key).toEqual({
-        loadBalancer: { servers: [{ url: AGENT_URL }] },
+        loadBalancer: { servers: [{ url: NODE_URL }] },
       });
     }
     /* And the host something is serving still reaches the process serving it. */
@@ -479,7 +479,7 @@ describe("the hosts and domains that reach the agent", () => {
   it("emits the catch-alls on a node running NO processes at all", () => {
     const config = renderTraefikConfig({
       routes: [],
-      wake: { port: AGENT_PORT, hosts: [], domains: [DOMAIN] },
+      wake: { port: NODE_PORT, hosts: [], domains: [DOMAIN] },
     });
 
     /* The empty document is for a node with nothing to say. This one has a
@@ -489,13 +489,13 @@ describe("the hosts and domains that reach the agent", () => {
     expect(config).not.toEqual({});
     expect(Object.keys(config.http?.routers ?? {})).toEqual([traefikCatchAllKey(DOMAIN)]);
     expect(config.http?.services[traefikCatchAllKey(DOMAIN)]).toEqual({
-      loadBalancer: { servers: [{ url: AGENT_URL }] },
+      loadBalancer: { servers: [{ url: NODE_URL }] },
     });
   });
 
   it("is an empty document again when there is nothing to catch either", () => {
     expect(
-      renderTraefikConfig({ routes: [], wake: { port: AGENT_PORT, hosts: [], domains: [] } }),
+      renderTraefikConfig({ routes: [], wake: { port: NODE_PORT, hosts: [], domains: [] } }),
     ).toEqual({});
   });
 
@@ -603,14 +603,14 @@ function split(host: string, legs: Array<[string, number, number]>): IngressDesi
   };
 }
 
-/** The same routing, plus the hosts and domains that fall through to the agent. */
+/** The same routing, plus the hosts and domains that fall through to the daemon. */
 function waking(
   entries: Array<[string, number]>,
   wake: { hosts?: string[]; domains?: string[] },
 ): IngressDesired {
   return {
     ...desired(entries),
-    wake: { port: AGENT_PORT, hosts: wake.hosts ?? [], domains: wake.domains ?? [DOMAIN] },
+    wake: { port: NODE_PORT, hosts: wake.hosts ?? [], domains: wake.domains ?? [DOMAIN] },
   };
 }
 
@@ -632,10 +632,10 @@ function backend(
   return { project: "shop", env: "production", build, port };
 }
 
-/** The agent app as a node with `ingress` configured — or not — would build it. */
+/** The node app, as a node with `ingress` configured — or not — would build it. */
 function appWith(ingress: IngressDriver | undefined): H3 {
-  return createAgentApp({
-    config: agentConfig(),
+  return createNodeApp({
+    config: daemonConfig(),
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
@@ -644,7 +644,7 @@ function appWith(ingress: IngressDriver | undefined): H3 {
   });
 }
 
-function agentConfig(): AgentConfig {
+function daemonConfig(): DaemonConfig {
   return {
     bucket: {
       endpoint: "http://store.test:9000",

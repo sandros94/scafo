@@ -1,7 +1,7 @@
 /*
- * The seam between the agent's deploy intake and whatever turns an uploaded
+ * The seam between the daemon's deploy intake and whatever turns an uploaded
  * artifact into a version the runtime can serve. Core describes the contract; a
- * driver (`scafo/drivers/deploy/celld`) implements it, and the agent wires the
+ * driver (`scafo/drivers/deploy/celld`) implements it, and the daemon wires the
  * two together.
  *
  * Everything impure about a deploy — unpacking the archive, running a builder,

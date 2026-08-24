@@ -326,7 +326,7 @@ interface EnvSettings {
 /** Environment of one runtime process, in the order the parts override each other. */
 function processEnv(input: RuntimeSpecInput, settings: EnvSettings): Record<string, string> {
   /*
-   * Precedence, weakest first: the environment the agent was started from, then
+   * Precedence, weakest first: the environment the daemon was started from, then
    * the variables the operator handed this node, then everything this driver
    * derives — credentials, drain, forwarded-header trust, durability, capacity
    * caps — then the environment's own varset, and idle eviction last of all.

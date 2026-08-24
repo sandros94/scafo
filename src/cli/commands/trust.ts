@@ -10,7 +10,7 @@
  */
 
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
-import { loadAgentConfig } from "../../agent/config.ts";
+import { loadDaemonConfig } from "../../daemon/config.ts";
 import { ScafoError } from "../../core/error.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
 import { createRegistry } from "../_bootstrap.ts";
@@ -144,7 +144,7 @@ async function runRemove(flags: Record<string, unknown>): Promise<void> {
 }
 
 async function registryFor(flags: Record<string, unknown>): Promise<RegistryContext> {
-  const config = await loadAgentConfig({
+  const config = await loadDaemonConfig({
     configPath: text(flags.config),
     flags: stringFlags(flags),
     env: process.env,

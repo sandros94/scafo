@@ -1,7 +1,7 @@
 /*
  * The set of operator keys a fleet trusts.
  *
- * An operator key is filed exactly where a node's is — an agent verifies a
+ * An operator key is filed exactly where a node's is — a daemon verifies a
  * bearer token against whatever the registry holds under the token's `kid` — so
  * what separates the two is the record itself: an operator names no address,
  * because nothing ever connects to one. That distinction is what the surface
@@ -58,7 +58,7 @@ describe("what counts as an operator key", () => {
     const record = await getNode(clock.ctx, "op-aaaa1111");
 
     expect(record.publicKey).toEqual(key.publicKey);
-    expect(record.addresses).toEqual({ internal: OPERATOR_ADDRESS, agentPort: 0 });
+    expect(record.addresses).toEqual({ internal: OPERATOR_ADDRESS, apiPort: 0 });
   });
 });
 
@@ -71,7 +71,7 @@ describe("what tier a key is", () => {
       v: 1,
       id: "op-aaaa1111",
       publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-op-aaaa1111" },
-      addresses: { internal: OPERATOR_ADDRESS, agentPort: 0 },
+      addresses: { internal: OPERATOR_ADDRESS, apiPort: 0 },
     });
 
     await expect(getOperator(clock.ctx, "op-aaaa1111")).resolves.toMatchObject({ role: "admin" });
@@ -292,6 +292,6 @@ function machine(): NodeRecord {
     v: 1,
     id: MACHINE,
     publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-node-a" },
-    addresses: { internal: "10.0.0.4", agentPort: 7400 },
+    addresses: { internal: "10.0.0.4", apiPort: 7400 },
   };
 }

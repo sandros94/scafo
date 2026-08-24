@@ -50,7 +50,7 @@ services:
     ports:
       # Caddy shares this container's namespace, so its port is published here.
       - "${SCAFO_A_HTTP_PORT:-8081}:80"
-      - "127.0.0.1:${SCAFO_A_AGENT_PORT:-7401}:7400"
+      - "127.0.0.1:${SCAFO_A_NODE_PORT:-7401}:7400"
     volumes:
       # ITS OWN VOLUME, AND THIS IS NOT OPTIONAL. A node IS its keypair. Two
       # nodes sharing one state volume would come up as the same node, register
@@ -117,7 +117,7 @@ services:
     stop_grace_period: 35s
     ports:
       - "${SCAFO_B_HTTP_PORT:-8082}:80"
-      - "127.0.0.1:${SCAFO_B_AGENT_PORT:-7402}:7400"
+      - "127.0.0.1:${SCAFO_B_NODE_PORT:-7402}:7400"
     volumes:
       - state-b:/var/lib/scafo
       - ingress-log-b:/var/log/scafo-ingress

@@ -14,8 +14,8 @@
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { AgentConfig } from "../agent/config.ts";
-import { DEFAULT_WIREGUARD_PORT, describeWireguardSetting } from "../agent/config.ts";
+import type { DaemonConfig } from "../daemon/config.ts";
+import { DEFAULT_WIREGUARD_PORT, describeWireguardSetting } from "../daemon/config.ts";
 import { ScafoError } from "../core/error.ts";
 import { parseInterfaceAddress } from "../core/utils/host.ts";
 import { resolveDefaultStateDir, writeSecretFile } from "./_utils.ts";
@@ -70,7 +70,7 @@ export interface WireguardOptions {
  * configured state directory, or the one the CLI resolves for the user it runs
  * as — the same directory the node's identity lives in.
  */
-export function wireguardStateDir(config: AgentConfig, opts?: WireguardOptions): string {
+export function wireguardStateDir(config: DaemonConfig, opts?: WireguardOptions): string {
   return config.node.stateDir ?? opts?.defaultStateDir ?? resolveDefaultStateDir();
 }
 
@@ -87,7 +87,7 @@ export function wireguardStateDir(config: AgentConfig, opts?: WireguardOptions):
  * it meant something by it, so it is reported and dropped.
  */
 export function resolveWireguardSettings(
-  config: AgentConfig,
+  config: DaemonConfig,
   opts?: WireguardOptions,
 ): WireguardSettings | undefined {
   const configured = config.wireguard;

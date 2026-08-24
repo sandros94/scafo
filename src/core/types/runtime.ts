@@ -1,7 +1,7 @@
 /*
  * The seam between placement and whatever actually serves an environment's
  * traffic on a node. Core describes the contract; a driver
- * (`scafo/drivers/runtime/celld`) implements it, and the agent wires the two
+ * (`scafo/drivers/runtime/celld`) implements it, and the daemon wires the two
  * together.
  */
 

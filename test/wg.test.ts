@@ -13,7 +13,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { type AgentConfig, loadAgentConfig } from "../src/agent/config.ts";
+import { type DaemonConfig, loadDaemonConfig } from "../src/daemon/config.ts";
 import { loadWireguardRecord, publishWireguard, registerThisNode } from "../src/cli/_bootstrap.ts";
 import type { NodeState } from "../src/cli/_node-state.ts";
 import { collectWireguardPeers, renderWireguardConf } from "../src/cli/_wg-conf.ts";
@@ -249,7 +249,7 @@ describe("what `scafo sail` reads back, and what it will not do", () => {
 
   it("leaves a node on another transport alone, and says the settings are ignored", async () => {
     const said: string[] = [];
-    const config = await loadAgentConfig({
+    const config = await loadDaemonConfig({
       env: {
         ...REQUIRED_ENV,
         SCAFO_TRANSPORT: "none",
@@ -277,7 +277,7 @@ describe("what `scafo sail` reads back, and what it will not do", () => {
     ];
 
     for (const [what, env, expected] of cases) {
-      const config = await loadAgentConfig({
+      const config = await loadDaemonConfig({
         env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "wireguard", ...env },
       });
 
@@ -295,7 +295,7 @@ describe("what `scafo sail` reads back, and what it will not do", () => {
   it("refuses an address that names no subnet and an endpoint that names no port", async () => {
     const address = await rejectsWith(
       () =>
-        loadAgentConfig({
+        loadDaemonConfig({
           env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "wireguard", SCAFO_WG_ADDRESS: "10.83.0.1" },
         }),
       "invalid-input",
@@ -304,7 +304,7 @@ describe("what `scafo sail` reads back, and what it will not do", () => {
 
     const endpoint = await rejectsWith(
       () =>
-        loadAgentConfig({
+        loadDaemonConfig({
           env: {
             ...REQUIRED_ENV,
             SCAFO_TRANSPORT: "wireguard",
@@ -322,7 +322,7 @@ describe("the addresses a tunnelled node uses", () => {
   it("binds its runtime processes to the tunnel and advertises itself there", async () => {
     /*
      * Inside a tunnel the only address that means anything is the tunnel's:
-     * loopback is unreachable from the other nodes, and the wildcard the agent
+     * loopback is unreachable from the other nodes, and the wildcard the daemon
      * listener binds names no interface a peer could dial.
      */
     const config = await tunnelConfig({ SCAFO_LISTEN: "0.0.0.0:7400" });
@@ -331,7 +331,7 @@ describe("the addresses a tunnelled node uses", () => {
     expect(config.node.advertise).toBe("10.83.0.1:7400");
   });
 
-  it("puts the agent listener on the tunnel too, so what it advertises is bound", async () => {
+  it("puts the daemon listener on the tunnel too, so what it advertises is bound", async () => {
     /* The three move together or not at all: a node advertising an address its
        listener never bound refuses every peer that dials it and says nothing. */
     const config = await tunnelConfig();
@@ -347,7 +347,7 @@ describe("the addresses a tunnelled node uses", () => {
     for (const address of ["0.0.0.0/0", "0.0.0.0/24", "::/0", "10.83.0.1/0"]) {
       const error = await rejectsWith(
         () =>
-          loadAgentConfig({
+          loadDaemonConfig({
             env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "wireguard", SCAFO_WG_ADDRESS: address },
           }),
         "invalid-input",
@@ -377,7 +377,7 @@ describe("the addresses a tunnelled node uses", () => {
   });
 
   it("changes nothing for a node that runs no tunnel", async () => {
-    const config = await loadAgentConfig({
+    const config = await loadDaemonConfig({
       env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "none", SCAFO_LISTEN: "0.0.0.0:7400" },
     });
 
@@ -408,29 +408,29 @@ describe("what a node publishes about its place on the tunnel", () => {
     });
     /* The advertised address follows the tunnel too, so a peer dials the node
        inside it rather than on whatever the listener happened to bind. */
-    expect(record.addresses).toEqual({ internal: "10.83.0.1", agentPort: 7400 });
+    expect(record.addresses).toEqual({ internal: "10.83.0.1", apiPort: 7400 });
     expect((await getNode(ctx, NODE_A)).wireguard?.publicKey).toBe(STORED_PUBLIC);
   });
 
   it("leaves the field off a node that runs no tunnel, so the record stays additive", async () => {
     const { ctx } = ctxWith(new MemoryCasStore());
-    const config = await loadAgentConfig({ env: REQUIRED_ENV });
+    const config = await loadDaemonConfig({ env: REQUIRED_ENV });
 
     const record = await registerThisNode(ctx, { config, state: nodeState(NODE_A) });
 
     expect("wireguard" in record).toBe(false);
   });
 
-  it("changes nothing but the tunnel field of a record the agent already wrote", async () => {
+  it("changes nothing but the tunnel field of a record the daemon already wrote", async () => {
     /*
-     * `scafo wg init` is run from an operator's shell, not from the agent's
+     * `scafo wg init` is run from an operator's shell, not from the daemon's
      * environment, so the configuration it resolves may not be the one the node
      * is running on. Rewriting the record from it would move the node's
      * advertised address and capacity along with its tunnel details, and nothing
      * would report it until a peer failed to reach it.
      */
     const { ctx } = ctxWith(new MemoryCasStore());
-    const running = await loadAgentConfig({
+    const running = await loadDaemonConfig({
       env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "none", SCAFO_ADVERTISE: "10.0.0.4:9000" },
     });
     const before = await registerThisNode(ctx, {
@@ -451,7 +451,7 @@ describe("what a node publishes about its place on the tunnel", () => {
     });
 
     /* A different shell entirely: no advertise, so the defaults would apply. */
-    const elsewhere = await loadAgentConfig({ env: REQUIRED_ENV });
+    const elsewhere = await loadDaemonConfig({ env: REQUIRED_ENV });
     const after = await publishWireguard(ctx, {
       config: elsewhere,
       state: nodeState(NODE_A),
@@ -486,7 +486,7 @@ describe("what a node publishes about its place on the tunnel", () => {
     expect(record.wireguard?.address).toBe("10.83.0.1/24");
     expect((await getNode(ctx, NODE_A)).addresses).toEqual({
       internal: "10.83.0.1",
-      agentPort: 7400,
+      apiPort: 7400,
     });
   });
 });
@@ -593,8 +593,8 @@ describe("the interface configuration a node renders", () => {
 /* ------------------------------------------------------------------ helpers */
 
 /** A configuration for a node whose transport is the tunnel, with the defaults applied. */
-async function tunnelConfig(env: Record<string, string> = {}): Promise<AgentConfig> {
-  return loadAgentConfig({
+async function tunnelConfig(env: Record<string, string> = {}): Promise<DaemonConfig> {
+  return loadDaemonConfig({
     env: {
       ...REQUIRED_ENV,
       SCAFO_TRANSPORT: "wireguard",
@@ -625,7 +625,7 @@ function plainRecord(id: string, internal: string): NodeRecord {
     v: 1,
     id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: "x" },
-    addresses: { internal, agentPort: 7400 },
+    addresses: { internal, apiPort: 7400 },
   };
 }
 

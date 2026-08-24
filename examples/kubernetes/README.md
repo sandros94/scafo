@@ -1,7 +1,7 @@
 # scafo on Kubernetes
 
 `node.yaml` runs a two-node scafo fleet: a Deployment whose every pod carries the
-node agent and the Traefik that fronts it, a headless Service that makes the
+node daemon and the Traefik that fronts it, a headless Service that makes the
 individual nodes addressable, and a LoadBalancer that puts one address in front
 of all of them.
 
@@ -45,7 +45,7 @@ curl -s localhost:7400/v1/health
 
 `/v1/health` and `/v1/ingress/traefik` are the two routes that answer without a
 key — the first is what the probes ask, the second is what the sidecar polls.
-Everything else on the agent, `/v1/state` included, wants an operator token and
+Everything else on the node API, `/v1/state` included, wants an operator token and
 answers `401` without one.
 
 ## How traffic gets in
@@ -187,7 +187,7 @@ answers `404` from the pods that do not serve it. Narrow an environment's
 replicas only when what reaches it knows which nodes hold it.
 
 The probes will not cover for you here, and it is worth knowing why before you
-read a graph. `/v1/health` reports on the AGENT, and the agent keeps answering
+read a graph. `/v1/health` reports on the DAEMON, and the daemon keeps answering
 `200` while the node restarts the runtime processes underneath it — a rollout, a
 crashed process coming back, one that fenced itself. There is no per-pod
 serving-readiness signal today, so a Service in front of every pod goes on
@@ -198,7 +198,7 @@ what you asked for".
 
 ## Deploying to it
 
-`scafo deploy` talks to one node's agent API, which is not published outside the
+`scafo deploy` talks to one node's API, which is not published outside the
 cluster by design — it accepts deploys and commands that node. Reach it with
 `kubectl port-forward svc/scafo-nodes 7400:7400`, or run CI's deploy step inside
 the cluster against `scafo-nodes:7400`. Any node accepts the call; work that only

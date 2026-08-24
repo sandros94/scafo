@@ -27,7 +27,7 @@ const NODE: NodeRecord = {
   v: 1,
   id: "node-a",
   publicKey: { kty: "OKP", crv: "Ed25519", x: "Zm9v" },
-  addresses: { internal: "10.0.0.1", agentPort: 7777 },
+  addresses: { internal: "10.0.0.1", apiPort: 7777 },
 };
 
 /** Acquires and unwraps the handle; a null return means the test premise broke. */

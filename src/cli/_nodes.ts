@@ -34,9 +34,9 @@ export interface NodeListing {
   state: NodeState;
   /** Last sign of life the record carries, when it carries one. */
   seenAt?: string;
-  /** Where its peers reach it, and the port its agent answers on. */
+  /** Where its peers reach it, and the port its daemon answers on. */
   internal: string;
-  agentPort: number;
+  apiPort: number;
   /** What the operator said this machine IS, as an environment's selector matches it. */
   labels: Record<string, string>;
   /** When it said it was leaving. Only ever set on a `draining` node. */
@@ -61,7 +61,7 @@ export function readNode(record: NodeRecord, now: Date): NodeListing {
     state: record.drainingAt !== undefined ? "draining" : isNodeLive(record, now) ? "live" : "lost",
     ...(seenAt === undefined ? {} : { seenAt }),
     internal: record.addresses.internal,
-    agentPort: record.addresses.agentPort,
+    apiPort: record.addresses.apiPort,
     labels: record.labels ?? {},
     ...(record.drainingAt === undefined ? {} : { drainingAt: record.drainingAt }),
   };
@@ -88,10 +88,10 @@ export function formatNodeTable(nodes: NodeListing[], now: Date = new Date()): s
     node.id,
     node.state,
     describeSeen(node.seenAt, now),
-    `${node.internal}:${String(node.agentPort)}`,
+    `${node.internal}:${String(node.apiPort)}`,
     formatLabels(node.labels),
   ]);
-  const head = ["NODE", "STATE", "SEEN", "AGENT", "LABELS"];
+  const head = ["NODE", "STATE", "SEEN", "API", "LABELS"];
   const width = head.map((_, column) =>
     Math.max(...[head, ...rows].map((row) => (row[column] as string).length)),
   );

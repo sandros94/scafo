@@ -33,7 +33,7 @@ describe("what the listing reads", () => {
     expect(listing.map((node) => node.id)).toEqual(["node-a", "node-b"]);
     expect(listing[1]).toMatchObject({
       internal: "10.0.0.2",
-      agentPort: 7400,
+      apiPort: 7400,
       labels: { region: "eu-west-1", tier: "fast" },
     });
   });
@@ -130,7 +130,7 @@ function register(clock: ManualClock, id: string, extra: Partial<NodeRecord>): P
     v: 1,
     id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: `x-${id}` },
-    addresses: { internal: id === "node-a" ? "10.0.0.1" : "10.0.0.2", agentPort: 7400 },
+    addresses: { internal: id === "node-a" ? "10.0.0.1" : "10.0.0.2", apiPort: 7400 },
     ...extra,
   });
 }

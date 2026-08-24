@@ -15,14 +15,14 @@ import {
   type ObserveEventRecord,
   type ObserveRecord,
   OBSERVE_RECORD_VERSION,
-} from "../src/agent/observe-records.ts";
+} from "../src/daemon/observe-records.ts";
 import {
   OBSERVE_PARQUET_EXTENSION,
   OBSERVE_PARQUET_SCHEMA,
   OBSERVE_PARQUET_WRITER_CODEC,
   observeParquetRow,
   PARQUET_CODEC,
-} from "../src/agent/observe-parquet.ts";
+} from "../src/daemon/observe-parquet.ts";
 import {
   bandAt,
   formatMetrics,

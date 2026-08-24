@@ -13,9 +13,9 @@ import {
   type IngressBucket,
   type IngressCounters,
   UNATTRIBUTED,
-} from "../src/agent/access-counters.ts";
-import { applyIngress } from "../src/agent/_ingress.ts";
-import type { AgentContext } from "../src/agent/app.ts";
+} from "../src/daemon/access-counters.ts";
+import { applyIngress } from "../src/daemon/_ingress.ts";
+import type { DaemonContext } from "../src/daemon/app.ts";
 import type { DesiredEnvironment } from "../src/core/placement/reconcile.ts";
 import { API_DENIED_PREFIXES } from "../src/core/placement/routes.ts";
 import type { IngressDesired, IngressRoute } from "../src/core/types/ingress.ts";
@@ -284,7 +284,7 @@ describe("what the reconcile pass hands over", () => {
        had already superseded. */
     const counters = counting();
     const applied: IngressDesired[] = [];
-    const agent = {
+    const daemon = {
       config: {
         platformDomains: DOMAINS,
         node: { listen: "127.0.0.1:7400" },
@@ -297,10 +297,10 @@ describe("what the reconcile pass hands over", () => {
         },
       },
       ingressCounters: counters,
-    } as unknown as AgentContext;
+    } as unknown as DaemonContext;
 
     const env = environment("production", ["shop.example.com"], "aaaa1111");
-    await applyIngress(agent, {
+    await applyIngress(daemon, {
       desired: [{ project: "shop", env, builds: [] }] as unknown as DesiredEnvironment[],
       processes: [process_("shop", "production", "aaaa1111", 9101)],
       parked: [],
@@ -325,11 +325,11 @@ describe("what the reconcile pass hands over", () => {
 
   it("publishes the platform apexes as the fleet's API, or not at all", async () => {
     /* The one thing `api.public` does to the routing, at the seam that reads it:
-       the apexes are named with the agent's own port, or the routing carries no
+       the apexes are named with the daemon's own port, or the routing carries no
        `api` at all and is what scafo rendered before the apex answered. */
     for (const isPublic of [true, false]) {
       const applied: IngressDesired[] = [];
-      const agent = {
+      const daemon = {
         config: {
           platformDomains: DOMAINS,
           node: { listen: "127.0.0.1:7400" },
@@ -341,16 +341,16 @@ describe("what the reconcile pass hands over", () => {
             return Promise.resolve();
           },
         },
-      } as unknown as AgentContext;
+      } as unknown as DaemonContext;
 
-      await applyIngress(agent, { desired: [], processes: [], parked: [] });
+      await applyIngress(daemon, { desired: [], processes: [], parked: [] });
 
       expect(applied[0].api, String(isPublic)).toEqual(
         isPublic
           ? { port: 7400, hosts: [...DOMAINS].sort(), denied: API_DENIED_PREFIXES }
           : undefined,
       );
-      /* The same agent, the same port: the API and the wake surface are one
+      /* The same daemon, the same port: the API and the wake surface are one
          listener reached under two contracts. */
       expect(applied[0].wake?.port, String(isPublic)).toBe(7400);
     }

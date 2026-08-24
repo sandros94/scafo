@@ -336,9 +336,9 @@ export async function loadPublicOperator(spec: string): Promise<PublicOperator> 
  * tokens this key signs.
  *
  * STRAIGHT TO THE BUCKET, which is what it is for: this is how an installation
- * is bootstrapped, before there is an agent whose trust could be asked for, and
- * how one whose operator keys have all been lost is recovered. An operator who
- * already holds a working key changes it through a node instead — `scafo
+ * is bootstrapped, before there is a node daemon whose trust could be asked for,
+ * and how one whose operator keys have all been lost is recovered. An operator
+ * who already holds a working key changes it through a node instead — `scafo
  * operator rotate` — and needs no bucket credential at all.
  *
  * `role` is what `--role` carries. The tier it actually lands at is
@@ -347,7 +347,7 @@ export async function loadPublicOperator(spec: string): Promise<PublicOperator> 
  * is always an admin, an explicit operator-tier first key is REFUSED, and every
  * key after it is least privilege unless an admin is asked for.
  *
- * Nothing is emitted about it. There is no agent in this path — that is the
+ * Nothing is emitted about it. There is no daemon in this path — that is the
  * point of it — so the observability seam a node reports its own trust changes
  * through does not exist here, and the record of the ceremony is the bucket's
  * own access log rather than the fleet's traces.
@@ -370,7 +370,7 @@ export async function registerOperatorKey(
 
 function readEndpoints(value: unknown, source: string): string[] {
   if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
-    throw notAnOperatorFile(source, `its "endpoints" is not a list of agent URLs`);
+    throw notAnOperatorFile(source, `its "endpoints" is not a list of node URLs`);
   }
   return value as string[];
 }

@@ -20,7 +20,7 @@ import {
   eventRecords,
   type ObserveEventRecord,
   type ObserveRecord,
-} from "../agent/observe-records.ts";
+} from "../daemon/observe-records.ts";
 import { parseProcessId } from "../core/placement/ids.ts";
 
 /** Events a listing shows when the caller states no limit. */

@@ -15,8 +15,8 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import type { ParkedEnvironment } from "../src/agent/_desired.ts";
-import { resolveWakeTarget, type WakeTarget } from "../src/agent/_wake-target.ts";
+import type { ParkedEnvironment } from "../src/daemon/_desired.ts";
+import { resolveWakeTarget, type WakeTarget } from "../src/daemon/_wake-target.ts";
 import { APEX_ENVIRONMENT } from "../src/core/placement/routes.ts";
 import {
   claimDomain,

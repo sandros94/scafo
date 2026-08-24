@@ -471,7 +471,7 @@ function node(id: string, opts: { heartbeatAt?: string; probedAt?: string }): No
     v: 1,
     id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: "key" },
-    addresses: { internal: "10.0.0.1", agentPort: 7400 },
+    addresses: { internal: "10.0.0.1", apiPort: 7400 },
     ...(opts.probedAt === undefined
       ? {}
       : { capacity: { cores: 4, memMb: 8192, cgroup: false, probedAt: opts.probedAt } }),

@@ -1,7 +1,7 @@
 /* `scafo varset`: seal an environment's variables into the registry, and list what it carries. */
 
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
-import { loadAgentConfig } from "../../agent/config.ts";
+import { loadDaemonConfig } from "../../daemon/config.ts";
 import { ScafoError } from "../../core/error.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
 import { createRegistry } from "../_bootstrap.ts";
@@ -135,7 +135,7 @@ interface Target {
 
 /** Everything both subcommands need: the bucket, the environment and the key. */
 async function resolveTarget(flags: Record<string, unknown>): Promise<Target> {
-  const config = await loadAgentConfig({
+  const config = await loadDaemonConfig({
     configPath: text(flags.config),
     flags: stringFlags(flags),
     env: process.env,

@@ -21,12 +21,12 @@ import type { RegistryContext } from "../core/registry/context.ts";
 import type { OperatorRole, TrustedOperator } from "../core/registry/operators.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
 import {
-  type AgentCallOptions,
-  type AgentOptions,
-  agentBaseUrl,
-  agentRequest,
+  type NodeCallOptions,
+  type NodeOptions,
+  nodeBaseUrl,
+  nodeRequest,
   operatorSigner,
-} from "./_agent.ts";
+} from "./_node.ts";
 import {
   formatPublicOperator,
   type PublicOperator,
@@ -57,7 +57,7 @@ export interface OperatorGrant {
 /** What every command about a remote's trusted keys needs beyond the remote itself. */
 export interface RemoteKeyOptions {
   /** Node to reach, when something names one other than the remote's first endpoint. */
-  agentUrl?: string;
+  nodeUrl?: string;
   /** How the calls are made; defaults to the global `fetch`. */
   fetchFn?: typeof fetch;
 }
@@ -89,7 +89,7 @@ export interface RemoteKeys {
 }
 
 /** The trusted-key surface of one node, signed for by one key. */
-export function operatorApi(opts: AgentOptions): OperatorApi {
+export function operatorApi(opts: NodeOptions): OperatorApi {
   const at = (suffix: string = ""): string => `${opts.url}/v1/operators${suffix}`;
   const call = (method: string): { method: string; fetchFn?: typeof fetch } => ({
     method,
@@ -100,12 +100,12 @@ export function operatorApi(opts: AgentOptions): OperatorApi {
     via: opts.url,
 
     async list(): Promise<TrustedOperator[]> {
-      const answer = await agentRequestJson(at(), opts, call("GET"));
+      const answer = await nodeRequestJson(at(), opts, call("GET"));
       return (answer as { operators: TrustedOperator[] }).operators;
     },
 
     async trust(key): Promise<TrustedOperator> {
-      const answer = await agentRequestJson(at(), opts, {
+      const answer = await nodeRequestJson(at(), opts, {
         ...call("POST"),
         headers: { "content-type": "application/json" },
         /* The public half alone leaves here. A node has no use for the private
@@ -127,7 +127,7 @@ export function operatorApi(opts: AgentOptions): OperatorApi {
          does not is a mistake worth naming here, before a node answers 404 to a
          path the operator cannot see anything wrong with. */
       assertNodeId(id);
-      const answer = await agentRequestJson(at(`/${id}`), opts, call("DELETE"));
+      const answer = await nodeRequestJson(at(`/${id}`), opts, call("DELETE"));
       return (answer as { removed: string }).removed;
     },
   };
@@ -138,17 +138,17 @@ export function remoteConnection(
   entry: RemoteEntry,
   name: string,
   opts: RemoteKeyOptions,
-): Omit<AgentOptions, "authorize"> {
-  const url = opts.agentUrl ?? entry.endpoints[0];
+): Omit<NodeOptions, "authorize"> {
+  const url = opts.nodeUrl ?? entry.endpoints[0];
   if (url === undefined || url === "") {
     throw new ScafoError("invalid-input", "Remote has no endpoint", {
       detail:
-        `nothing could reach "${name}": its entry names no node agent, so give --agent <url> ` +
+        `nothing could reach "${name}": its entry names no node daemon, so give --node <url> ` +
         `of one of them`,
     });
   }
   return {
-    url: agentBaseUrl(url),
+    url: nodeBaseUrl(url),
     ...(opts.fetchFn === undefined ? {} : { fetchFn: opts.fetchFn }),
   };
 }
@@ -419,11 +419,11 @@ export function operatorRole(value: unknown): { role?: OperatorRole } {
 /* ---------------------------------------------------------------- internals */
 
 /** One call, one fresh token — a spent one is refused as a replay — read as JSON. */
-async function agentRequestJson(
+async function nodeRequestJson(
   url: string,
-  opts: AgentOptions,
-  init: AgentCallOptions,
+  opts: NodeOptions,
+  init: NodeCallOptions,
 ): Promise<unknown> {
-  const answer = await agentRequest(url, await opts.authorize(), init);
+  const answer = await nodeRequest(url, await opts.authorize(), init);
   return answer.json();
 }

@@ -10,7 +10,7 @@
  */
 
 import { type JSONCParseError, parseJSONC } from "confbox";
-import { DEFAULT_CONFIG_PATHS } from "../agent/config.ts";
+import { DEFAULT_CONFIG_PATHS } from "../daemon/config.ts";
 import { ScafoError } from "../core/error.ts";
 import { getRemote, readRemoteKey, readRemotes } from "./_remotes.ts";
 import {
@@ -42,14 +42,14 @@ export const OPERATOR_KEY_FORMS: string =
 export interface OperatorFlags {
   remote?: string;
   key?: string;
-  agent?: string;
+  node?: string;
   config?: string;
 }
 
 /** The four flags above, as a command's parsed arguments carry them. */
 export function operatorFlags(flags: Record<string, unknown>): OperatorFlags {
   const given: OperatorFlags = {};
-  for (const name of ["remote", "key", "agent", "config"] as const) {
+  for (const name of ["remote", "key", "node", "config"] as const) {
     const value = text(flags[name]);
     if (value !== undefined) given[name] = value;
   }
@@ -78,8 +78,8 @@ export interface ResolvedOperator {
    * one, and must not fail for the want of a key it was never going to use.
    */
   readKey: () => Promise<OperatorKeyFile>;
-  /** The agent to talk to, when anything named one. */
-  agentUrl?: string;
+  /** The node to talk to, when anything named one. */
+  nodeUrl?: string;
   /** The remote this resolved to, when a remote decided it. */
   remote?: string;
 }
@@ -89,7 +89,7 @@ export interface ResolvedOperator {
  *
  * The KEY comes from `--key`, then {@link SCAFO_OPERATOR_KEY_ENV}, then the
  * remote — a key given outright says WITH WHAT and never WHERE, so a remote still
- * supplies the endpoint beside it. The ENDPOINT comes from `--agent`, then
+ * supplies the endpoint beside it. The ENDPOINT comes from `--node`, then
  * whatever a portable key carried, then the remote.
  *
  * Throws `ScafoError("invalid-input")` when nothing decides the remote and there
@@ -114,11 +114,11 @@ export async function resolveOperator(opts: ResolveOperatorOptions): Promise<Res
     return reading;
   };
 
-  const agentUrl = text(opts.flags.agent) ?? given?.endpoints[0] ?? entry?.endpoints[0];
+  const nodeUrl = text(opts.flags.node) ?? given?.endpoints[0] ?? entry?.endpoints[0];
   const named = remote ?? given?.remote;
   return {
     readKey,
-    ...(agentUrl === undefined ? {} : { agentUrl }),
+    ...(nodeUrl === undefined ? {} : { nodeUrl }),
     ...(named === undefined ? {} : { remote: named }),
   };
 }

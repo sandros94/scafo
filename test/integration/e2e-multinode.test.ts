@@ -1,10 +1,10 @@
 /*
  * Two nodes of one installation against real infrastructure: one SeaweedFS
- * bucket holding the registry, and two Caddy+agent pairs that have never been
+ * bucket holding the registry, and two Caddy+daemon pairs that have never been
  * told about each other. Everything they agree on, they agree on through the
  * bucket.
  *
- * The topology mirrors two real VPSes. Each Caddy and its agent SHARE a network
+ * The topology mirrors two real VPSes. Each Caddy and its daemon SHARE a network
  * namespace, exactly as in the single-node suite, so a node's runtime processes
  * are reached by its own ingress over loopback. What is new here is that the two
  * PAIRS are separate containers with separate addresses on the docker bridge:
@@ -15,7 +15,7 @@
  *
  *   SCAFO_E2E=1 pnpm vitest run test/integration/e2e-multinode.test.ts
  *
- * Every assertion polls until a deadline, and any timeout dumps BOTH agents'
+ * Every assertion polls until a deadline, and any timeout dumps BOTH daemons'
  * container logs — with two nodes, the account of what went wrong is as often on
  * the other one.
  *
@@ -36,7 +36,7 @@ import type { Readable } from "node:stream";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { S3Client } from "uns3";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { AgentState } from "../../src/agent/app.ts";
+import type { DaemonState } from "../../src/daemon/app.ts";
 import type { OperatorKeyFile } from "../../src/cli/_operator-key.ts";
 import { signNodeToken } from "../../src/core/auth/node-token.ts";
 import {
@@ -67,13 +67,13 @@ const CLI = join(REPO_ROOT, "dist/cli/index.mjs");
 const STORE_IMAGE = "chrislusf/seaweedfs:4.42";
 const CADDY_IMAGE = "caddy:2";
 /** node24 + celld + esbuild; the same image the single-node suite needs. */
-const AGENT_IMAGE = "scafo-probe";
+const NODE_IMAGE = "scafo-probe";
 
 const STORE_PORT = 8333;
 const CADDY_HTTP_PORT = 80;
 const CADDY_ADMIN_PORT = 2019;
-/** Published on each Caddy container, because its agent has no network of its own. */
-const AGENT_PORT = 7400;
+/** Published on each Caddy container, because its daemon has no network of its own. */
+const NODE_PORT = 7400;
 
 const BUCKET = "scafo-e2e-multinode";
 const KEY_PREFIX = "e2e";
@@ -166,22 +166,22 @@ const REASSIGN_STEP_TIMEOUT_MS = 300_000;
  */
 const GRACEFUL_DRAIN_BUDGET_MS = 60_000;
 
-/** The lease TTL the agent runs with; failover is bounded by a few of these. */
+/** The lease TTL the daemon runs with; failover is bounded by a few of these. */
 const LEASE_TTL_MS = 15_000;
 
-/** One node: its ingress, its agent, and everything the host needs to reach both. */
+/** One node: its ingress, its daemon, and everything the host needs to reach both. */
 interface Node {
   id: string;
   caddy: StartedTestContainer;
-  agent: StartedTestContainer;
+  daemon: StartedTestContainer;
   /** Address the OTHER containers reach this pair at. */
   bridgeAddress: string;
   httpPort: number;
   adminPort: number;
-  agentPort: number;
-  /** Everything the agent container has written, kept for failure messages. */
+  apiPort: number;
+  /** Everything the daemon container has written, kept for failure messages. */
   log: string[];
-  /** False once this suite has deliberately stopped the agent. */
+  /** False once this suite has deliberately stopped the daemon. */
   running: boolean;
 }
 
@@ -206,7 +206,7 @@ const observed: Record<string, unknown> = {};
 
 describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   beforeAll(async () => {
-    /* Built first: the agent containers run `dist/` off the bind-mounted
+    /* Built first: the daemon containers run `dist/` off the bind-mounted
        worktree, so a stale build would test the previous commit. */
     const built = await run("pnpm", ["build"], REPO_ROOT, env as Record<string, string>);
     if (built.code !== 0) throw new Error(`"pnpm build" failed:\n${built.output}`);
@@ -254,8 +254,8 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
 
   afterAll(async () => {
     for (const node of nodes) {
-      /* Stopped before its Caddy: the agent lives in Caddy's namespace. */
-      await node.agent.stop().catch(() => {});
+      /* Stopped before its Caddy: the daemon lives in Caddy's namespace. */
+      await node.daemon.stop().catch(() => {});
       await node.caddy.stop().catch(() => {});
     }
     await store?.stop().catch(() => {});
@@ -272,7 +272,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
           `${node.id} to answer /v1/health`,
           BOOT_DEADLINE_MS,
           async () => {
-            const answer = await httpGet(node.agentPort, "/v1/health", {});
+            const answer = await httpGet(node.apiPort, "/v1/health", {});
             return answer.status === 200 ? answer : null;
           },
         );
@@ -290,7 +290,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
            coordinator hop is addressed to. */
         expect(record?.value.addresses, node.id).toEqual({
           internal: node.bridgeAddress,
-          agentPort: AGENT_PORT,
+          apiPort: NODE_PORT,
         });
       }
       /* What the operator said each node IS, written from its own configuration
@@ -320,7 +320,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       observed.deployV1Output = result.output;
 
       expectCleanExit(result);
-      expect(result.output, agentLogTail()).toContain("routed");
+      expect(result.output, daemonLogTail()).toContain("routed");
       buildV1 = buildIdOf(result.output);
       observed.buildV1 = buildV1;
 
@@ -369,7 +369,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
 
       observed.counts = counts;
       for (let i = 1; i < counts.length; i++) {
-        expect(counts[i].n, `${JSON.stringify(counts)}\n${agentLogTail()}`).toBeGreaterThan(
+        expect(counts[i].n, `${JSON.stringify(counts)}\n${daemonLogTail()}`).toBeGreaterThan(
           counts[i - 1].n,
         );
       }
@@ -440,7 +440,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
 
       const started = Date.now();
       const answer = await httpDelete(
-        asked.agentPort,
+        asked.apiPort,
         `/v1/environments/${PROJECT}/${PREVIEW}`,
         await operatorToken(),
       );
@@ -524,7 +524,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expect(JSON.parse(served.body).version).toBe("v1");
 
       /* And the unlabelled one runs no process for it — and still answers for
-         it: the host lands on its agent, which forwards the held request to the
+         it: the host lands on its daemon, which forwards the held request to the
          labelled node. A selector decides where a process may run, never which
          door reaches it. */
       await until(`${plain.id} to run nothing for ${TARGETED}`, DEADLINE_MS, async () => {
@@ -621,7 +621,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
 
       /* The deploy settles at `routed` rather than at `deployed` with a warning:
          the node it was sent to went and asked the node the placement named. */
-      expect(result.output, agentLogTail()).toContain("routed");
+      expect(result.output, daemonLogTail()).toContain("routed");
       expect(result.output).not.toContain("deploy-not-routed");
       /* Comfortably inside the 120s budget, which is what "watched the wrong
          node until it gave up" would have spent. */
@@ -684,7 +684,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expect(JSON.parse(served.body).version).toBe("v1");
 
       /* And the other one stops RUNNING it without stopping ANSWERING for it:
-         the host lands on its agent, which forwards the held request to the
+         the host lands on its daemon, which forwards the held request to the
          node the placement names. Scaling down decides where a process runs,
          never which door reaches it. */
       await until(`${unassigned.id} to run nothing for ${SOLO}`, DEADLINE_MS, async () => {
@@ -736,7 +736,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         "docker",
         /* Ample grace, so a slow shutdown is never SIGKILLed halfway through the
            drain write this test is about. */
-        ["stop", "-t", "30", leaving.agent.getId()],
+        ["stop", "-t", "30", leaving.daemon.getId()],
         REPO_ROOT,
         { PATH: env.PATH ?? "" },
       );
@@ -790,7 +790,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
          placement gives the node work once more — which is the other half of the
          feature, and is asserted here rather than assumed. */
       const restartedAt = Date.now();
-      const started = await run("docker", ["start", leaving.agent.getId()], REPO_ROOT, {
+      const started = await run("docker", ["start", leaving.daemon.getId()], REPO_ROOT, {
         PATH: env.PATH ?? "",
       });
       expect(started.code, started.output).toBe(0);
@@ -802,7 +802,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         async () => {
           const node = await readJson<NodeRecord>(registry, nodeKey(leaving.id));
           if (node === null || node.value.drainingAt !== undefined) return null;
-          const answer = await httpGet(leaving.agentPort, "/v1/health", {});
+          const answer = await httpGet(leaving.apiPort, "/v1/health", {});
           return answer.status === 200 ? node.value : null;
         },
       );
@@ -843,7 +843,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expect(retired.output).toContain("retired");
 
       /* It leaves by the same door a reassignment uses: no process, no route —
-         and its host falls through each Caddy's catch-all to the agent, which
+         and its host falls through each Caddy's catch-all to the daemon, which
          answers a retired name with the one 404 every refusal wears. Safe to
          poll: a retired environment refuses to wake and nothing is stamped. */
       for (const node of nodes) {
@@ -918,7 +918,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
        * by outwaiting the lease — which is the guarantee being measured.
        */
       const killedAt = Date.now();
-      const killed = await run("docker", ["kill", coordinator.agent.getId()], REPO_ROOT, {
+      const killed = await run("docker", ["kill", coordinator.daemon.getId()], REPO_ROOT, {
         PATH: env.PATH ?? "",
       });
       expect(killed.code, killed.output).toBe(0);
@@ -1039,10 +1039,10 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
 /* ------------------------------------------------------------------ helpers */
 
 /**
- * Starts one Caddy and the agent that shares its network namespace.
+ * Starts one Caddy and the daemon that shares its network namespace.
  *
  * `labels` is what the operator says this node IS, written `k=v,k2=v2`. It is
- * boot configuration: the agent writes it into the node's registry record on
+ * boot configuration: the daemon writes it into the node's registry record on
  * every registration, so it is set here and nowhere else.
  */
 async function startNode(id: string, labels?: string): Promise<Node> {
@@ -1051,7 +1051,7 @@ async function startNode(id: string, labels?: string): Promise<Node> {
       { source: join(FIXTURES, "caddy.json"), target: "/etc/caddy/config.json" },
     ])
     .withCommand(["caddy", "run", "--config", "/etc/caddy/config.json"])
-    .withExposedPorts(CADDY_HTTP_PORT, CADDY_ADMIN_PORT, AGENT_PORT)
+    .withExposedPorts(CADDY_HTTP_PORT, CADDY_ADMIN_PORT, NODE_PORT)
     .withWaitStrategy(
       Wait.forHttp(`/config/apps/http/servers/scafo/routes`, CADDY_ADMIN_PORT).forStatusCode(200),
     )
@@ -1060,7 +1060,7 @@ async function startNode(id: string, labels?: string): Promise<Node> {
   const bridgeAddress = caddy.getIpAddress(BRIDGE_NETWORK);
   const log: string[] = [];
 
-  const agent = await new GenericContainer(AGENT_IMAGE)
+  const daemon = await new GenericContainer(NODE_IMAGE)
     .withNetworkMode(`container:${caddy.getId()}`)
     .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "rw" }])
     .withWorkingDir("/work")
@@ -1072,7 +1072,7 @@ async function startNode(id: string, labels?: string): Promise<Node> {
       SCAFO_S3_SECRET_KEY: SECRET_KEY,
       SCAFO_S3_REGION: REGION,
       SCAFO_NODE_ID: id,
-      /* Both the agent listener and the runtime processes bind every interface
+      /* Both the daemon listener and the runtime processes bind every interface
          here, and the peer listener authenticates nobody: on a private docker
          network that is the trusted-network case, stated rather than assumed. */
       SCAFO_TRANSPORT: "none",
@@ -1083,8 +1083,8 @@ async function startNode(id: string, labels?: string): Promise<Node> {
       SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
       SCAFO_CADDY_ADMIN: `http://127.0.0.1:${String(CADDY_ADMIN_PORT)}`,
       /* The address on the bridge, which is what the other node dials — both for
-         the agent API and, with the internal port, for cell traffic. */
-      SCAFO_ADVERTISE: `${bridgeAddress}:${String(AGENT_PORT)}`,
+         the node API and, with the internal port, for cell traffic. */
+      SCAFO_ADVERTISE: `${bridgeAddress}:${String(NODE_PORT)}`,
       /* THE multi-node setting. Runtime processes bind loopback by default,
          which nothing on the other node can reach; the advertised address above
          is only useful if something is listening on it. */
@@ -1092,13 +1092,7 @@ async function startNode(id: string, labels?: string): Promise<Node> {
       ESBUILD_BINARY_PATH: "/usr/local/bin/esbuild",
       ...(labels === undefined ? {} : { SCAFO_NODE_LABELS: labels }),
     })
-    .withCommand([
-      "node",
-      "dist/cli/index.mjs",
-      "sail",
-      "--listen",
-      `0.0.0.0:${String(AGENT_PORT)}`,
-    ])
+    .withCommand(["node", "dist/cli/index.mjs", "sail", "--listen", `0.0.0.0:${String(NODE_PORT)}`])
     .withLogConsumer((stream: Readable) => {
       stream.on("data", (chunk) => log.push(String(chunk)));
       stream.on("err", (chunk) => log.push(String(chunk)));
@@ -1110,11 +1104,11 @@ async function startNode(id: string, labels?: string): Promise<Node> {
   return {
     id,
     caddy,
-    agent,
+    daemon,
     bridgeAddress,
     httpPort: caddy.getMappedPort(CADDY_HTTP_PORT),
     adminPort: caddy.getMappedPort(CADDY_ADMIN_PORT),
-    agentPort: caddy.getMappedPort(AGENT_PORT),
+    apiPort: caddy.getMappedPort(NODE_PORT),
     log,
     running: true,
   };
@@ -1159,7 +1153,7 @@ function runsSunset(process: ProcessStatus): boolean {
   return process.state === "running" && process.id.startsWith(`${PROJECT}--${SUNSET}--`);
 }
 
-/** One `scafo env <action>` run from the host against `node`'s agent API. */
+/** One `scafo env <action>` run from the host against `node`'s node API. */
 function envArgs(action: string, environment: string, node: Node, extra: string[] = []): string[] {
   return [
     "env",
@@ -1168,8 +1162,8 @@ function envArgs(action: string, environment: string, node: Node, extra: string[
     PROJECT,
     "--env",
     environment,
-    "--agent",
-    `http://127.0.0.1:${String(node.agentPort)}`,
+    "--node",
+    `http://127.0.0.1:${String(node.apiPort)}`,
     "--key",
     keyPath,
     ...extra,
@@ -1177,20 +1171,20 @@ function envArgs(action: string, environment: string, node: Node, extra: string[
 }
 
 /** The nodes a state says an environment was placed on, or null when it has no decision. */
-function placedNodes(state: AgentState, env: string): string[] | null {
+function placedNodes(state: DaemonState, env: string): string[] | null {
   const placed = state.placements.find((view) => view.project === PROJECT && view.env === env);
   return placed?.nodes ?? null;
 }
 
 /** What one node currently believes about itself, as an authenticated caller sees it. */
-async function stateOf(node: Node): Promise<AgentState> {
-  const answer = await httpGet(node.agentPort, "/v1/state", {
+async function stateOf(node: Node): Promise<DaemonState> {
+  const answer = await httpGet(node.apiPort, "/v1/state", {
     authorization: `Bearer ${await operatorToken()}`,
   });
   if (answer.status !== 200) {
     throw new Error(`${node.id} answered /v1/state with ${String(answer.status)}: ${answer.body}`);
   }
-  return JSON.parse(answer.body) as AgentState;
+  return JSON.parse(answer.body) as DaemonState;
 }
 
 /** The node currently holding the lease, waited for rather than assumed. */
@@ -1226,8 +1220,8 @@ function deployArgs(
   return [
     "deploy",
     dir,
-    "--agent",
-    `http://127.0.0.1:${String(via.agentPort)}`,
+    "--node",
+    `http://127.0.0.1:${String(via.apiPort)}`,
     "--project",
     PROJECT,
     "--env",
@@ -1306,7 +1300,7 @@ async function until<T>(
     if (Date.now() >= giveUp) {
       const reason = last === null ? "" : `\nlast failure: ${describeFailure(last)}`;
       throw new Error(
-        `timed out after ${String(deadlineMs)}ms waiting for ${what}${reason}\n${agentLogTail()}`,
+        `timed out after ${String(deadlineMs)}ms waiting for ${what}${reason}\n${daemonLogTail()}`,
       );
     }
     await delay(POLL_MS);
@@ -1314,19 +1308,19 @@ async function until<T>(
 }
 
 function expectCleanExit(result: CommandResult): void {
-  expect(result.code, `${result.output}\n${agentLogTail()}`).toBe(0);
+  expect(result.code, `${result.output}\n${daemonLogTail()}`).toBe(0);
 }
 
 function expectStatus(answer: HttpAnswer, status: number): void {
-  expect(answer.status, `${answer.body}\n${agentLogTail()}`).toBe(status);
+  expect(answer.status, `${answer.body}\n${daemonLogTail()}`).toBe(status);
 }
 
 function describeFailure(error: unknown): string {
   return error instanceof Error ? error.message : JSON.stringify(error);
 }
 
-/** The tail of BOTH agents' output: with two nodes, either may hold the reason. */
-function agentLogTail(limit: number = 8000): string {
+/** The tail of BOTH daemons' output: with two nodes, either may hold the reason. */
+function daemonLogTail(limit: number = 8000): string {
   return nodes
     .map((node) => {
       const text = node.log.join("");

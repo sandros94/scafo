@@ -14,7 +14,7 @@
 
 import { join } from "node:path";
 import { ScafoError } from "../core/error.ts";
-import { STORAGE_TOKEN_BYTES } from "../agent/storage.ts";
+import { STORAGE_TOKEN_BYTES } from "../daemon/storage.ts";
 import { toBase64Url } from "../core/utils/base64.ts";
 import { readTextFile, writeSecretFile } from "./_utils.ts";
 

@@ -318,7 +318,7 @@ describe("what a caller may not put in a process's environment", () => {
 });
 
 describe("the variables an operator hands every process on this node", () => {
-  it("carries them in, over whatever the agent itself was started with", () => {
+  it("carries them in, over whatever the daemon itself was started with", () => {
     const operating = createCelldDriver({
       store: new MemoryCasStore(),
       operatorEnv: { CELLD_OTEL: "1", RUST_LOG: "info" },
@@ -329,7 +329,7 @@ describe("the variables an operator hands every process on this node", () => {
     );
 
     /* What the hatch exists for: the runtime's telemetry switches reach a
-       process through nothing else, the environment the agent was started from
+       process through nothing else, the environment the daemon was started from
        being passed on as a narrow allowlist. */
     expect(spec.env.CELLD_OTEL).toBe("1");
     expect(spec.env.RUST_LOG).toBe("info");

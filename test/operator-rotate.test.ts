@@ -1,5 +1,5 @@
 /*
- * Rotating the key a remote signs with, expand-contract, against the real agent
+ * Rotating the key a remote signs with, expand-contract, against the real node
  * app over an injected `fetch`.
  *
  * THE ORDER IS THE DESIGN, and it is what these cases are about. The new key is
@@ -24,8 +24,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { H3 } from "h3";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { createAgentApp } from "../src/agent/app.ts";
-import type { AgentConfig } from "../src/agent/config.ts";
+import { createNodeApp } from "../src/daemon/app.ts";
+import type { DaemonConfig } from "../src/daemon/config.ts";
 import { addRemote, type RemoteEntry, readRemotes } from "../src/cli/_remotes.ts";
 import { homeKeysDir, resolveHomePath } from "../src/cli/_home.ts";
 import type { OperatorKeyFile } from "../src/cli/_operator-key.ts";
@@ -42,7 +42,7 @@ import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
 
-const AGENT_URL = "http://10.0.0.4:7400";
+const NODE_URL = "http://10.0.0.4:7400";
 const REMOTE = "prod";
 const VERSION = "0.0.0-test";
 
@@ -60,7 +60,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   clock = ctxWith(new MemoryCasStore());
-  app = agentApp();
+  app = nodeApp();
 });
 
 describe("the whole rotation", () => {
@@ -91,13 +91,13 @@ describe("the whole rotation", () => {
      * would go on accepting the old key for up to a minute, which is the
      * documented cost of revocation rather than a fact about this rotation.
      */
-    const later = agentApp();
-    const withNew = await later.request(`${AGENT_URL}/v1/operators`, {
+    const later = nodeApp();
+    const withNew = await later.request(`${NODE_URL}/v1/operators`, {
       headers: {
         authorization: `Bearer ${await signNodeToken(rotatedKey.privateKey, rotated.newKeyId)}`,
       },
     });
-    const withOld = await later.request(`${AGENT_URL}/v1/operators`, {
+    const withOld = await later.request(`${NODE_URL}/v1/operators`, {
       headers: { authorization: `Bearer ${await signNodeToken(key.privateKey, key.id)}` },
     });
 
@@ -296,7 +296,7 @@ describe("--purge-old", () => {
 
   it("KEEPS it when another remote in this home still signs with it", async () => {
     const { home } = await registeredRemote();
-    await addRemote(home, { name: "mirror", endpoints: [AGENT_URL], keyName: REMOTE });
+    await addRemote(home, { name: "mirror", endpoints: [NODE_URL], keyName: REMOTE });
 
     const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app), purgeOld: true });
 
@@ -309,7 +309,7 @@ describe("--purge-old", () => {
 describe("the other remotes in the home", () => {
   it("are left exactly as they were, key reference included", async () => {
     const { home, key } = await registeredRemote();
-    await addRemote(home, { name: "mirror", endpoints: [AGENT_URL], keyName: REMOTE });
+    await addRemote(home, { name: "mirror", endpoints: [NODE_URL], keyName: REMOTE });
     const before = await entryOf(home, "mirror");
 
     const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
@@ -387,7 +387,7 @@ describe("reading what a fleet trusts", () => {
 describe("what a rotation says it did", () => {
   it("names the remotes it deliberately did NOT repoint, and why they matter", async () => {
     const { home } = await registeredRemote();
-    await addRemote(home, { name: "mirror", endpoints: [AGENT_URL], keyName: REMOTE });
+    await addRemote(home, { name: "mirror", endpoints: [NODE_URL], keyName: REMOTE });
 
     const said = describeRotation(await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) }));
 
@@ -516,7 +516,7 @@ async function registeredRemote(
     });
   }
 
-  const added = await addRemote(home, { name: REMOTE, endpoints: [AGENT_URL] });
+  const added = await addRemote(home, { name: REMOTE, endpoints: [NODE_URL] });
   await trustOperator(clock.ctx, {
     id: added.key.id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: added.key.publicKey.x },
@@ -566,9 +566,9 @@ function crashOn(target: H3, method: string): typeof fetch {
   };
 }
 
-function agentApp(): H3 {
-  return createAgentApp({
-    config: agentConfig(),
+function nodeApp(): H3 {
+  return createNodeApp({
+    config: daemonConfig(),
     nodeId: "node-a",
     registry: clock.ctx,
     supervisor: idleSupervisor(),
@@ -576,7 +576,7 @@ function agentApp(): H3 {
   });
 }
 
-function agentConfig(): AgentConfig {
+function daemonConfig(): DaemonConfig {
   return {
     bucket: {
       endpoint: "http://store.test:9000",

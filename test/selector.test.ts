@@ -3,7 +3,7 @@
  * `k=v,k2=v2` text a flag carries them in, and the AND-matching that decides
  * which nodes an environment may run on at all.
  *
- * Everything here is pure, so no store, clock or agent is involved. How the
+ * Everything here is pure, so no store, clock or daemon is involved. How the
  * eligible set then composes with the replica count is asserted in
  * `rendezvous.test.ts`, where the properties it has to keep are already written
  * down.
@@ -288,7 +288,7 @@ function node(id: string, labels?: Record<string, string>): NodeRecord {
     v: 1,
     id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: `key-${id}` },
-    addresses: { internal: "10.0.0.1", agentPort: 7400 },
+    addresses: { internal: "10.0.0.1", apiPort: 7400 },
     ...(labels === undefined ? {} : { labels }),
   };
 }

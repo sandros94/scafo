@@ -1,4 +1,4 @@
-# A scafo fleet on Kubernetes: two nodes, each a pod carrying the agent and the
+# A scafo fleet on Kubernetes: two nodes, each a pod carrying the daemon and the
 # Traefik that fronts it.
 #
 # Read examples/kubernetes/README.md before applying this — it covers the apply
@@ -119,7 +119,7 @@ data:
         # SAME POD, SO LOOPBACK. Containers in a pod share a network namespace,
         # which is exactly the topology a single host gets by hand with
         # `network_mode: service:node` — the celld processes bind 127.0.0.1 and
-        # nothing else, Traefik dials them there, and it polls the agent on the
+        # nothing else, Traefik dials them there, and it polls the daemon on the
         # same loopback. No runtime port is ever exposed to the cluster.
         endpoint: "http://127.0.0.1:7400/v1/ingress/traefik"
         pollInterval: "5s"
@@ -229,7 +229,7 @@ spec:
             - name: SCAFO_NODE_LABELS
               value: "platform=kubernetes"
           ports:
-            - name: agent
+            - name: api
               containerPort: 7400
           volumeMounts:
             - name: state
@@ -241,12 +241,12 @@ spec:
           readinessProbe:
             httpGet:
               path: /v1/health
-              port: agent
+              port: api
             periodSeconds: 5
           livenessProbe:
             httpGet:
               path: /v1/health
-              port: agent
+              port: api
             periodSeconds: 20
             failureThreshold: 3
           resources:
@@ -325,9 +325,9 @@ spec:
   selector:
     app.kubernetes.io/name: scafo
   ports:
-    - name: agent
+    - name: api
       port: 7400
-      targetPort: agent
+      targetPort: api
 ---
 # How application traffic gets in: one address in front of every pod's Traefik
 # sidecar. Point the wildcard DNS for the platform domain at it — see the README

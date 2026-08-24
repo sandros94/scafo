@@ -7,11 +7,11 @@ should see. First: [`../README.md`](../README.md) for what this needs.
 
 ## 0. Ports
 
-| Port   | What                                       | Bound to        |
-| ------ | ------------------------------------------ | --------------- |
-| `80`   | the ingress — where applications answer    | every interface |
-| `7400` | the agent API — where deploys are accepted | `127.0.0.1`     |
-| `8333` | the bucket — where the registry lives      | `127.0.0.1`     |
+| Port   | What                                      | Bound to        |
+| ------ | ----------------------------------------- | --------------- |
+| `80`   | the ingress — where applications answer   | every interface |
+| `7400` | the node API — where deploys are accepted | `127.0.0.1`     |
+| `8333` | the bucket — where the registry lives     | `127.0.0.1`     |
 
 Port 80 is usually the taken one, and `docker compose up` fails on it naming the
 port and not the service. Move any of the three in `.env`.
@@ -33,7 +33,7 @@ curl -s http://127.0.0.1:7400/v1/health
 An exited `bucket` is success. Compose waits twice on purpose: a node proves the
 bucket honours conditional writes before it boots, and Caddy fills its
 certificate cache from the node's storage API when it starts. `/v1/health`
-answers without a key and reports on the **agent** — not on whether an
+answers without a key and reports on the **daemon** — not on whether an
 application is serving.
 
 ## 2. Point your shell at this playground
@@ -65,7 +65,7 @@ scafo remote list
 node`, then the one remote listed back. A remote entry holds what every other command would
 otherwise be told — **where** the installation is and **who** is speaking — and a
 single registered remote resolves automatically: nothing below passes `--key` or
-`--agent`.
+`--node`.
 
 ## 4. Deploy the application
 
@@ -139,8 +139,8 @@ curl -s -H "Authorization: Bearer $SCAFO_STORAGE_TOKEN" \
 
 **You should see** the health document, `404`, then `["last_clean.json"]`.
 `*.scafo.test` is one label and never the apex, so the node routes the bare apex
-to its own agent — but `/v1/storage` (private keys) and `/v1/ingress/traefik` (the
-routing map) are excluded by **Caddy**, and the agent behind it is never asked.
+to its own daemon — but `/v1/storage` (private keys) and `/v1/ingress/traefik` (the
+routing map) are excluded by **Caddy**, and the daemon behind it is never asked.
 That one key is Caddy's certificate bookkeeping, written through the node into
 the bucket against the `.env` token: the ingress holds no bucket credential.
 

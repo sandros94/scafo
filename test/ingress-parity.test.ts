@@ -59,8 +59,8 @@ const OTHER_BUILD = "bbbb2222";
 const THIRD_BUILD = "cccc3333";
 const CUSTOM_DOMAIN = "shop.example.com";
 
-/** Where the node's own agent answers, for the routing that falls through to it. */
-const AGENT_PORT = 7400;
+/** Where the node's own daemon answers, for the routing that falls through to it. */
+const NODE_PORT = 7400;
 
 /**
  * One host, one process it reaches, and the share of its traffic that goes
@@ -81,7 +81,7 @@ interface Upstream {
    * <prefixes>"` for the denial guarding it.
    *
    * PART OF THE ESSENCE, not an extra. Two ingresses that agreed on the SET of
-   * hosts reaching the agent but not on which paths reach it through them would
+   * hosts reaching the daemon but not on which paths reach it through them would
    * be one installation publishing `/v1/storage` — the surface that carries the
    * fleet's TLS private keys — on the internet through one of them and not the
    * other, which is exactly the disagreement no set comparison can see.
@@ -195,7 +195,7 @@ const FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
 ];
 
 /**
- * The same states, with an agent for the traffic nothing else answers: a node
+ * The same states, with a daemon for the traffic nothing else answers: a node
  * holding a parked environment's hosts open, and the platform domains whose
  * unmatched names fall through to it.
  */
@@ -207,7 +207,7 @@ const WAKE_FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
       environments: [],
       processes: [],
       claims: [],
-      wake: { port: AGENT_PORT, parked: [] },
+      wake: { port: NODE_PORT, parked: [] },
     }),
   },
   {
@@ -217,7 +217,7 @@ const WAKE_FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
       environments: [],
       processes: [],
       claims: [],
-      wake: { port: AGENT_PORT, parked: [environment(PROJECT, APEX_ENVIRONMENT, BUILD)] },
+      wake: { port: NODE_PORT, parked: [environment(PROJECT, APEX_ENVIRONMENT, BUILD)] },
     }),
   },
   {
@@ -228,7 +228,7 @@ const WAKE_FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
       processes: [process(OTHER_PROJECT, APEX_ENVIRONMENT, BUILD, 42_000)],
       claims: [],
       wake: {
-        port: AGENT_PORT,
+        port: NODE_PORT,
         parked: [environment(PROJECT, "preview", OTHER_BUILD, [CUSTOM_DOMAIN])],
       },
     }),
@@ -254,7 +254,7 @@ const WAKE_FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
         process(PROJECT, APEX_ENVIRONMENT, OTHER_BUILD, 42_002),
       ],
       claims: [{ host: CUSTOM_DOMAIN, project: PROJECT, environment: APEX_ENVIRONMENT }],
-      wake: { port: AGENT_PORT, parked: [environment(OTHER_PROJECT, "preview", THIRD_BUILD)] },
+      wake: { port: NODE_PORT, parked: [environment(OTHER_PROJECT, "preview", THIRD_BUILD)] },
     }),
   },
 ];
@@ -271,8 +271,8 @@ const API_FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
       environments: [],
       processes: [],
       claims: [],
-      wake: { port: AGENT_PORT, parked: [] },
-      api: { port: AGENT_PORT },
+      wake: { port: NODE_PORT, parked: [] },
+      api: { port: NODE_PORT },
     }),
   },
   {
@@ -282,8 +282,8 @@ const API_FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
       environments: [environment(PROJECT, APEX_ENVIRONMENT, BUILD)],
       processes: [process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000)],
       claims: [],
-      wake: { port: AGENT_PORT, parked: [] },
-      api: { port: AGENT_PORT },
+      wake: { port: NODE_PORT, parked: [] },
+      api: { port: NODE_PORT },
     }),
   },
   {
@@ -307,8 +307,8 @@ const API_FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
         process(PROJECT, APEX_ENVIRONMENT, OTHER_BUILD, 42_002),
       ],
       claims: [{ host: CUSTOM_DOMAIN, project: PROJECT, environment: APEX_ENVIRONMENT }],
-      wake: { port: AGENT_PORT, parked: [environment(OTHER_PROJECT, "preview", THIRD_BUILD)] },
-      api: { port: AGENT_PORT },
+      wake: { port: NODE_PORT, parked: [environment(OTHER_PROJECT, "preview", THIRD_BUILD)] },
+      api: { port: NODE_PORT },
     }),
   },
   {
@@ -318,7 +318,7 @@ const API_FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
       environments: [environment(PROJECT, "staging", BUILD)],
       processes: [process(PROJECT, "staging", BUILD, 42_010)],
       claims: [],
-      api: { port: AGENT_PORT },
+      api: { port: NODE_PORT },
     }),
   },
 ];
@@ -373,7 +373,7 @@ describe("the two drivers say the same thing about the same routing", () => {
   });
 });
 
-describe("the two drivers agree on what reaches the agent", () => {
+describe("the two drivers agree on what reaches the daemon", () => {
   for (const { name, desired } of WAKE_FIXTURES) {
     it(`agrees on ${name}`, () => {
       const caddy = caddyUpstreams(renderCaddyRoutes(desired));
@@ -387,16 +387,16 @@ describe("the two drivers agree on what reaches the agent", () => {
     });
   }
 
-  it("names the same wake hosts and the same catch-all domains, at the same agent", () => {
+  it("names the same wake hosts and the same catch-all domains, at the same daemon", () => {
     for (const { name, desired } of WAKE_FIXTURES) {
-      const caddy = agentSurface(caddyUpstreams(renderCaddyRoutes(desired)));
-      const traefik = agentSurface(traefikUpstreams(renderTraefikConfig(desired)));
+      const caddy = nodeSurface(caddyUpstreams(renderCaddyRoutes(desired)));
+      const traefik = nodeSurface(traefikUpstreams(renderTraefikConfig(desired)));
 
       /* The port is DERIVED from each document rather than assumed, so a driver
-         that dialled the wrong agent would fail here rather than agree. */
+         that dialled the wrong daemon would fail here rather than agree. */
       expect(traefik, name).toEqual(caddy);
       expect(caddy, name).toEqual({
-        agent: [`127.0.0.1:${String(AGENT_PORT)}`],
+        daemon: [`127.0.0.1:${String(NODE_PORT)}`],
         hosts: [...(desired.wake?.hosts ?? [])].sort(),
         domains: [...(desired.wake?.domains ?? [])].sort(),
       });
@@ -409,7 +409,7 @@ describe("the two drivers agree on what reaches the agent", () => {
      * ways: Caddy matches in array order, so the catch-alls are rendered last;
      * Traefik scores rules and would rank a domain regexp ABOVE a host under it,
      * so the rank is stated outright. Getting it wrong does not misroute one
-     * host — it sends a whole platform domain's live traffic to the agent.
+     * host — it sends a whole platform domain's live traffic to the daemon.
      */
     for (const { name, desired } of WAKE_FIXTURES) {
       const caddy = renderCaddyRoutes(desired);
@@ -446,7 +446,7 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
     });
   }
 
-  it("routes the BARE apex, which no catch-all covers, to the same agent", () => {
+  it("routes the BARE apex, which no catch-all covers, to the same daemon", () => {
     for (const { name, desired } of API_FIXTURES) {
       const apexes = desired.api?.hosts ?? [];
       expect(apexes, name).toEqual([...apexes].sort());
@@ -462,7 +462,7 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
           expect(
             served.map((leg) => leg.upstream),
             `${name}: ${apex}`,
-          ).toEqual([`127.0.0.1:${String(AGENT_PORT)}`]);
+          ).toEqual([`127.0.0.1:${String(NODE_PORT)}`]);
           /* And it is an entry of its own rather than the catch-all widening:
              `*.<domain>` is still there, matching one label and never the bare
              name. */
@@ -496,7 +496,7 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
           const at = driver.filter((leg) => leg.host === apex);
           const where = `${name}: ${format} at ${apex}`;
 
-          /* Everything that DIALS the agent there answers every path but these. */
+          /* Everything that DIALS the daemon there answers every path but these. */
           expect(
             at.filter((leg) => leg.upstream !== DENIED).map((leg) => leg.paths),
             where,
@@ -593,8 +593,8 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
       environments: [environment(PROJECT, APEX_ENVIRONMENT, BUILD, [DOMAIN])],
       processes: [process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000)],
       claims: [{ host: DOMAIN, project: PROJECT, environment: APEX_ENVIRONMENT }],
-      wake: { port: AGENT_PORT, parked: [] },
-      api: { port: AGENT_PORT },
+      wake: { port: NODE_PORT, parked: [] },
+      api: { port: NODE_PORT },
     });
 
     expect(desired.api?.hosts).toEqual([OTHER_DOMAIN]);
@@ -696,12 +696,12 @@ describe("neither namespace can collide with a host", () => {
  * each of them is then held to.
  *
  * A wake host and a catch-all are upstreams like any other: they name a host and
- * reach the node's own agent, and a whole platform domain is written the way
+ * reach the node's own daemon, and a whole platform domain is written the way
  * Caddy writes it, `*.<domain>`.
  */
 function essenceOf(desired: IngressDesired): Upstream[] {
   const wake = desired.wake;
-  const agent = wake === undefined ? "" : `127.0.0.1:${String(wake.port)}`;
+  const daemon = wake === undefined ? "" : `127.0.0.1:${String(wake.port)}`;
   const api = desired.api;
   const denied = [...(api?.denied ?? [])].sort().join(",");
 
@@ -716,13 +716,13 @@ function essenceOf(desired: IngressDesired): Upstream[] {
     ),
     ...(wake?.hosts ?? []).map((host) => ({
       host,
-      upstream: agent,
+      upstream: daemon,
       weight: FULL_WEIGHT,
       paths: "all",
     })),
     ...(wake?.domains ?? []).map((domain) => ({
       host: `*.${domain}`,
-      upstream: agent,
+      upstream: daemon,
       weight: FULL_WEIGHT,
       paths: "all",
     })),
@@ -742,21 +742,21 @@ function essenceOf(desired: IngressDesired): Upstream[] {
 
 /**
  * The wake surface of a rendered routing, read back without being told where the
- * agent is: the catch-alls say which upstream that is, and everything else
+ * daemon is: the catch-alls say which upstream that is, and everything else
  * dialling it is a host being held open.
  */
-function agentSurface(upstreams: Upstream[]): {
-  agent: string[];
+function nodeSurface(upstreams: Upstream[]): {
+  daemon: string[];
   hosts: string[];
   domains: string[];
 } {
   const caught = upstreams.filter((leg) => leg.host.startsWith("*."));
-  const agent = [...new Set(caught.map((leg) => leg.upstream))].sort();
+  const daemon = [...new Set(caught.map((leg) => leg.upstream))].sort();
 
   return {
-    agent,
+    daemon,
     hosts: upstreams
-      .filter((leg) => !leg.host.startsWith("*.") && agent.includes(leg.upstream))
+      .filter((leg) => !leg.host.startsWith("*.") && daemon.includes(leg.upstream))
       .map((leg) => leg.host)
       .sort(),
     domains: caught.map((leg) => leg.host.slice("*.".length)).sort(),

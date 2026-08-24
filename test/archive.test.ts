@@ -1,6 +1,6 @@
 /*
  * The artifact format, packed and unpacked by the same code the client and the
- * agent use. A round trip is the whole contract: what a client packs is what the
+ * daemon use. A round trip is the whole contract: what a client packs is what the
  * node that unpacks it must see, byte for byte.
  */
 

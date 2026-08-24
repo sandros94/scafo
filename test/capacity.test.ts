@@ -153,7 +153,7 @@ describe("the capacity formulas", () => {
     expect(planFor(4 * GIB).maxResidentCells).toBe(500);
   });
 
-  it("budgets 70% of memory minus the agent's own overhead", () => {
+  it("budgets 70% of memory minus the daemon's own overhead", () => {
     const plan = planFor(8 * GIB);
 
     expect(plan.rssBudgetMb).toBeCloseTo(0.7 * 8192 - 128, 6);
@@ -161,11 +161,11 @@ describe("the capacity formulas", () => {
   });
 
   it("takes the fraction and the overhead from the overrides", () => {
-    expect(planFor(8 * GIB, { rssFraction: 0.5, agentOverheadMb: 0 }).rssBudgetMb).toBeCloseTo(
+    expect(planFor(8 * GIB, { rssFraction: 0.5, daemonOverheadMb: 0 }).rssBudgetMb).toBeCloseTo(
       4096,
       6,
     );
-    expect(planFor(8 * GIB, { rssFraction: 1, agentOverheadMb: 512 }).rssBudgetMb).toBeCloseTo(
+    expect(planFor(8 * GIB, { rssFraction: 1, daemonOverheadMb: 512 }).rssBudgetMb).toBeCloseTo(
       7680,
       6,
     );
@@ -259,7 +259,7 @@ describe("computeCapacity refuses a degenerate probe", () => {
     const inputs: CapacityInputs = { cgroup: NO_CGROUP, host: HOST };
     const overrides: CapacityOverrides[] = [
       ...[0, -0.5, 1.5, Number.NaN].map((rssFraction) => ({ rssFraction })),
-      ...[-1, Number.NaN].map((agentOverheadMb) => ({ agentOverheadMb })),
+      ...[-1, Number.NaN].map((daemonOverheadMb) => ({ daemonOverheadMb })),
       ...[0, -2, Number.NaN].map((plannedProcesses) => ({ plannedProcesses })),
       ...[0, -1000].map((residentCellsPer8Gb) => ({ residentCellsPer8Gb })),
     ];

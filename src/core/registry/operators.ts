@@ -1,7 +1,7 @@
 /*
  * The operator keys a fleet trusts.
  *
- * They live among the nodes, because that is what makes them work: an agent
+ * They live among the nodes, because that is what makes them work: a node daemon
  * verifies a bearer token against whatever the registry holds under the token's
  * `kid`, and does not care whether that id belongs to a machine or to a person.
  * What tells the two apart is the ADDRESS — an operator names none, because
@@ -11,7 +11,7 @@
  * The two kinds are never administered through each other: a node is registered
  * by the machine it is, and removed by the coordinator that outlived it, while
  * an operator key is added and dropped by another operator. Crossing the two
- * would let a compromised agent write itself an operator, or let a key rotation
+ * would let a compromised daemon write itself an operator, or let a key rotation
  * take a serving node out of the fleet.
  *
  * THE TRUST MODEL, IN ONE PARAGRAPH. The BUCKET is the root anchor: whoever
@@ -80,11 +80,11 @@ export interface TrustedOperator {
  * Whether `record` is an operator key rather than a machine of the fleet.
  *
  * Both halves of the marker are required. A node always publishes the port its
- * agent answers on, and an operator answers on none, so a record that names
+ * daemon answers on, and an operator answers on none, so a record that names
  * neither a reachable address nor a port is the only shape this surface writes.
  */
 export function isOperatorRecord(record: NodeRecord): boolean {
-  return record.addresses.internal === OPERATOR_ADDRESS && record.addresses.agentPort === 0;
+  return record.addresses.internal === OPERATOR_ADDRESS && record.addresses.apiPort === 0;
 }
 
 /**
@@ -220,7 +220,7 @@ export async function trustOperator(
     v: 1,
     id: key.id,
     publicKey: key.publicKey,
-    addresses: { internal: OPERATOR_ADDRESS, agentPort: 0 },
+    addresses: { internal: OPERATOR_ADDRESS, apiPort: 0 },
     operator: {
       role: key.role,
       ...(key.supersedes === undefined ? {} : { supersedes: key.supersedes }),

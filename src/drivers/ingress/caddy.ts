@@ -2,7 +2,7 @@
  * Ingress driver for an operator-run Caddy, converged through its admin API.
  *
  * Caddy itself is not managed here: the operator runs it, defines the HTTP
- * server this driver writes into, and points it at the agent's on-demand-TLS ask
+ * server this driver writes into, and points it at the daemon's on-demand-TLS ask
  * endpoint. Setting that up is documented with the deployment instructions. This
  * driver only owns the routes inside that server, and only its own.
  */
@@ -56,7 +56,7 @@ export const API_DENY_ID_PREFIX: string = `${ROUTE_ID_PREFIX}apideny_`;
 
 /**
  * What a denied request on the API apex is answered with, by Caddy itself and
- * never by the agent behind it.
+ * never by the daemon behind it.
  *
  * A miss rather than a refusal: an unauthenticated caller learns that the name
  * serves nothing there, which is all it is owed. A `403` would confirm the
@@ -220,7 +220,7 @@ export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
        * sit AFTER every host route it owns and in exactly the rendered order, on
        * every pass. Caddy matches routes in ARRAY ORDER and each of these is
        * terminal, so getting it wrong is not one misrouted name: a catch-all
-       * reached first sends a whole platform domain's live traffic to the agent,
+       * reached first sends a whole platform domain's live traffic to the daemon,
        * and an API route reached before its denial would proxy `/v1/storage`.
        *
        * `POST` appends, so any route added on this pass would land behind the
@@ -354,7 +354,7 @@ export function apiDenyId(domain: string): string {
  * `*.<outer>` matches `<inner>` exactly.
  *
  * Each apex is TWO routes and the DENIAL COMES FIRST. The second matches the
- * apex and NOT the excluded prefixes and proxies everything else to the agent;
+ * apex and NOT the excluded prefixes and proxies everything else to the daemon;
  * the first matches those very prefixes and answers {@link API_DENY_STATUS} flat,
  * from Caddy, without ever dialling anything. Either alone would close the
  * surface — the negation makes the proxy unable to carry those paths at all —
@@ -378,7 +378,7 @@ export function renderCaddyRoutes(
   const wake = desired.wake;
   const wakeDial = wake === undefined ? "" : `127.0.0.1:${String(wake.port)}`;
   if (wake !== undefined) {
-    for (const host of wake.hosts) routes.push(agentRoute(routeId(host), host, wakeDial));
+    for (const host of wake.hosts) routes.push(nodeRoute(routeId(host), host, wakeDial));
   }
 
   const api = desired.api;
@@ -390,7 +390,7 @@ export function renderCaddyRoutes(
       routes.push({
         "@id": apiDenyId(host),
         "match": [{ host: [host], path: denied }],
-        /* Answered BY CADDY. Nothing on this path reaches the agent, so no
+        /* Answered BY CADDY. Nothing on this path reaches the daemon, so no
            misreading of a header, a token or a route behind it can open it. */
         "handle": [{ handler: "static_response", status_code: API_DENY_STATUS }],
         "terminal": true,
@@ -409,7 +409,7 @@ export function renderCaddyRoutes(
      never a subdomain of a subdomain either. */
   if (wake !== undefined) {
     for (const domain of wake.domains) {
-      routes.push(agentRoute(catchAllId(domain), `*.${domain}`, wakeDial));
+      routes.push(nodeRoute(catchAllId(domain), `*.${domain}`, wakeDial));
     }
   }
   return routes;
@@ -454,13 +454,13 @@ function routeFor(host: string, backends: WeightedBackend[], upstreamHost: strin
 }
 
 /**
- * One route sending everything it matches to the node's own agent — a parked
+ * One route sending everything it matches to the node's own daemon — a parked
  * environment's host, or a whole platform domain's unmatched subdomains.
  *
- * A single upstream and no load-balancing policy: there is one agent, and it is
+ * A single upstream and no load-balancing policy: there is one daemon, and it is
  * on the same loopback the runtime processes are.
  */
-function agentRoute(id: string, match: string, dial: string): CaddyRoute {
+function nodeRoute(id: string, match: string, dial: string): CaddyRoute {
   return {
     "@id": id,
     "match": [{ host: [match] }],

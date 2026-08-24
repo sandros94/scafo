@@ -46,7 +46,7 @@ import { rm } from "node:fs/promises";
 import { ScafoError } from "../core/error.ts";
 import { LEGACY_OPERATOR_ROLE, type OperatorRole } from "../core/registry/operators.ts";
 import { SLUG_MAX_LENGTH } from "../core/utils/slug.ts";
-import { operatorSigner } from "./_agent.ts";
+import { operatorSigner } from "./_node.ts";
 import {
   type RemoteEntry,
   type RemoteKeyRef,

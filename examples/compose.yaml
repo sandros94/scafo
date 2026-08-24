@@ -9,7 +9,7 @@
 #   export SCAFO_S3_ENDPOINT=http://127.0.0.1:8333 SCAFO_S3_BUCKET=scafo \
 #          SCAFO_S3_ACCESS_KEY=scafo SCAFO_S3_SECRET_KEY=scafo-secret
 #   node dist/cli/index.mjs keygen --register
-#   node dist/cli/index.mjs deploy ./my-app --agent http://127.0.0.1:7400 \
+#   node dist/cli/index.mjs deploy ./my-app --node http://127.0.0.1:7400 \
 #     --project shop --env production --flip
 #   curl -H 'Host: shop.scafo.test' http://127.0.0.1
 #
@@ -72,7 +72,7 @@ services:
         do sleep 1; done
         echo "bucket \"scafo\": HTTP $$code"
 
-  # The node: the agent, the celld processes it supervises, and the deploy
+  # The node: the daemon, the celld processes it supervises, and the deploy
   # intake. One of these per machine.
   node:
     build:
@@ -96,7 +96,7 @@ services:
       # published here — a container that joins another's namespace has no
       # network of its own to publish from.
       - "80:80"
-      # The agent API, on your loopback only: it accepts deploys and commands
+      # The node API, on your loopback only: it accepts deploys and commands
       # this node, so it belongs on a network you trust rather than on 0.0.0.0.
       - "127.0.0.1:7400:7400"
     volumes:

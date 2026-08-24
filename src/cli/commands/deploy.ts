@@ -1,13 +1,13 @@
 /* `scafo deploy`: pack a built project, hand it to a node, and watch it land. */
 
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
-import type { DeployStatus } from "../../agent/deploys.ts";
+import type { DeployStatus } from "../../daemon/deploys.ts";
 import { ScafoError } from "../../core/error.ts";
 import { parseReplicas } from "../../core/placement/replicas.ts";
 import { parseLabels } from "../../core/utils/labels.ts";
 import { packDirectory } from "../../drivers/archive/tar-zst.ts";
-import { agentBaseUrl, agentRequest, type Authorize, operatorSigner } from "../_agent.ts";
-import { agentOps, describeSplitChange } from "../_environments.ts";
+import { nodeBaseUrl, nodeRequest, type Authorize, operatorSigner } from "../_node.ts";
+import { nodeOps, describeSplitChange } from "../_environments.ts";
 import { resolveOperatorHome } from "../_home.ts";
 import { OPERATOR_KEY_FORMS, operatorFlags, resolveOperator } from "../_operator.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
@@ -20,9 +20,9 @@ const SETTLED: string[] = ["routed", "deployed", "failed"];
 
 const deployArgs: ArgsDef = {
   "dir": { type: "positional", description: "Directory holding the built project" },
-  "agent": {
+  "node": {
     type: "string",
-    description: "Base URL of the node agent; without it the chosen remote says where",
+    description: "Base URL of the node daemon; without it the chosen remote says where",
   },
   "remote": { type: "string", description: "Remote to deploy to, out of this operator's home" },
   "project": { type: "string", description: "Project slug to deploy into", required: true },
@@ -91,7 +91,7 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
           readFile: readTextFile,
         })
       : null;
-  const agent = agentBaseUrl(requiredAgent(text(flags.agent) ?? resolved?.agentUrl));
+  const nodeUrl = nodeBaseUrl(requiredNode(text(flags.node) ?? resolved?.nodeUrl));
   const signer = resolved === null ? null : operatorSigner(await resolved.readKey());
   const authorize = async (): Promise<string> => fixed ?? (await (signer as Authorize)());
 
@@ -125,7 +125,7 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
   body.set("meta", JSON.stringify(meta));
   body.set("artifact", new Blob([artifact as BlobPart]), "artifact.tar.zst");
 
-  const accepted = await agentRequest(`${agent}/v1/deploys`, await authorize(), {
+  const accepted = await nodeRequest(`${nodeUrl}/v1/deploys`, await authorize(), {
     method: "POST",
     body,
   });
@@ -133,7 +133,7 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
   const location = accepted.headers.get("location") ?? `/v1/deploys/${status.id}`;
 
   console.log(`scafo: deploy ${status.id} ${status.state}`);
-  const settled = await watch(new URL(location, `${agent}/`).href, authorize, status);
+  const settled = await watch(new URL(location, `${nodeUrl}/`).href, authorize, status);
   if (canary === undefined) return;
 
   const build = settled.build;
@@ -151,7 +151,7 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
    * such thing as easing traffic onto the only thing that serves it.
    */
   const target = { project, env: environment };
-  const record = await agentOps({ url: agent, authorize }).canary(target, {
+  const record = await nodeOps({ url: nodeUrl, authorize }).canary(target, {
     build,
     weight: canary,
   });
@@ -166,7 +166,7 @@ async function watch(url: string, authorize: Authorize, from: DeployStatus): Pro
     if (SETTLED.includes(last.state)) return last;
     await delay(DEFAULT_POLL_MS);
 
-    const status = (await (await agentRequest(url, await authorize())).json()) as DeployStatus;
+    const status = (await (await nodeRequest(url, await authorize())).json()) as DeployStatus;
     if (status.state !== last.state) console.log(`scafo: deploy ${status.id} ${status.state}`);
     last = status;
     if (!SETTLED.includes(status.state)) continue;
@@ -210,12 +210,12 @@ function readCanaryFlag(flags: Record<string, unknown>): number | undefined {
 }
 
 /** Where the deploy is sent, which nothing here can guess at. */
-function requiredAgent(url: string | undefined): string {
+function requiredNode(url: string | undefined): string {
   if (url !== undefined) return url;
 
   throw new ScafoError("invalid-input", "No node to deploy to", {
     detail:
-      `pass --agent <url>, or register the installation this belongs to with ` +
+      `pass --node <url>, or register the installation this belongs to with ` +
       `"scafo remote add <name> --endpoint <url>" so that it says where`,
   });
 }

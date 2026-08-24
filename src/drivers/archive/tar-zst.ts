@@ -1,7 +1,7 @@
 /*
  * The artifact format a deploy travels in: a tar of a built project, compressed
  * with zstd. Both ends of the upload — the client that packs a directory and the
- * agent that unpacks it — go through here, so there is one definition of what a
+ * daemon that unpacks it — go through here, so there is one definition of what a
  * `.tar.zst` is.
  */
 

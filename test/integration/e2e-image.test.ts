@@ -3,7 +3,7 @@
  *
  * THIS SUITE IS ABOUT PACKAGING, NOT ABOUT THE PRODUCT. The single-node loop is
  * already proven twice over — once through Caddy, once through Traefik — and
- * both run the agent off a bind-mounted worktree, which is exactly what an
+ * both run the daemon off a bind-mounted worktree, which is exactly what an
  * operator never does. What is unproven until here is the artifact: that the
  * repository's Dockerfile builds, that the image carries celld and esbuild where
  * the code looks for them, that its entrypoint takes `sail` and its arguments,
@@ -77,7 +77,7 @@ const IMAGE_TAG = "scafo-e2e-image";
 const CADDY_HTTP_PORT = 80;
 const CADDY_ADMIN_PORT = 2019;
 /** Published on the Caddy container, because the node shares its namespace. */
-const AGENT_PORT = 7400;
+const NODE_PORT = 7400;
 
 /** The uid the image's `scafo` user is created with; nothing may run as root. */
 const IMAGE_UID = "10001";
@@ -107,7 +107,7 @@ let caddy: StartedTestContainer;
 let node: StartedTestContainer;
 
 let caddyHttpPort: number;
-let agentPort: number;
+let apiPort: number;
 
 let registry: RegistryContext;
 let keyPath: string;
@@ -138,14 +138,14 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
         { source: join(FIXTURES, "caddy.json"), target: "/etc/caddy/config.json" },
       ])
       .withCommand(["caddy", "run", "--config", "/etc/caddy/config.json"])
-      .withExposedPorts(CADDY_HTTP_PORT, CADDY_ADMIN_PORT, AGENT_PORT)
+      .withExposedPorts(CADDY_HTTP_PORT, CADDY_ADMIN_PORT, NODE_PORT)
       .withWaitStrategy(
         Wait.forHttp("/config/apps/http/servers/scafo/routes", CADDY_ADMIN_PORT).forStatusCode(200),
       )
       .start();
 
     caddyHttpPort = caddy.getMappedPort(CADDY_HTTP_PORT);
-    agentPort = caddy.getMappedPort(AGENT_PORT);
+    apiPort = caddy.getMappedPort(NODE_PORT);
 
     node = await image
       .withNetworkMode(`container:${caddy.getId()}`)
@@ -160,14 +160,14 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
         SCAFO_TRANSPORT: "none",
         SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
         SCAFO_CADDY_ADMIN: `http://127.0.0.1:${String(CADDY_ADMIN_PORT)}`,
-        SCAFO_ADVERTISE: `127.0.0.1:${String(AGENT_PORT)}`,
+        SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
         /* Deliberately NOT set here, unlike every other suite: the image pins
            ESBUILD_BINARY_PATH and names its own state directory, and a node that
            needed either of them from outside would be a packaging failure. */
       })
       /* The image's ENTRYPOINT supplies `node /app/dist/cli/index.mjs`; this is
          the CMD an operator overrides, which is what makes it worth passing. */
-      .withCommand(["sail", "--listen", `0.0.0.0:${String(AGENT_PORT)}`])
+      .withCommand(["sail", "--listen", `0.0.0.0:${String(NODE_PORT)}`])
       .withLogConsumer((stream: Readable) => {
         stream.on("data", (chunk) => nodeLog.push(String(chunk)));
         stream.on("err", (chunk) => nodeLog.push(String(chunk)));
@@ -220,13 +220,13 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
     "answers its health endpoint and has registered itself out of the image alone",
     async () => {
       const health = await until("the node to answer /v1/health", BOOT_DEADLINE_MS, async () => {
-        const answer = await httpGet(agentPort, "/v1/health", {});
+        const answer = await httpGet(apiPort, "/v1/health", {});
         return answer.status === 200 ? answer : null;
       });
       expect(JSON.parse(health.body)).toMatchObject({ ok: true, node: NODE_ID });
 
       const record = await readJson<NodeRecord>(registry, nodeKey(NODE_ID));
-      expect(record?.value.addresses).toMatchObject({ agentPort: AGENT_PORT });
+      expect(record?.value.addresses).toMatchObject({ apiPort: NODE_PORT });
       observed.health = JSON.parse(health.body);
     },
     STEP_TIMEOUT_MS,
@@ -252,8 +252,8 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
         [
           "deploy",
           await stageApp("v1", tmpDirs),
-          "--agent",
-          `http://127.0.0.1:${String(agentPort)}`,
+          "--node",
+          `http://127.0.0.1:${String(apiPort)}`,
           "--project",
           PROJECT,
           "--env",

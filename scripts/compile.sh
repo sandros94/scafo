@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Compiles the `scafo` binary — one self-contained executable that is both the
-# node agent and the CLI — out of the BUILT output in dist/, never out of src/.
+# node daemon and the CLI — out of the BUILT output in dist/, never out of src/.
 #
 #   pnpm compile                      # every default target
 #   pnpm compile linux-amd64          # one of them
@@ -27,7 +27,7 @@
 # ingress, wireguard-tools, and esbuild. esbuild in particular is a per-platform
 # native executable that the deploy path hands to `celld deploy` by PATH —
 # `ESBUILD_BINARY_PATH` names it — so embedding it would put a second copy of a
-# toolchain inside an agent that only ever passes its path along. See
+# toolchain inside a daemon that only ever passes its path along. See
 # scripts/install.sh, which installs the prerequisites beside the binary.
 
 set -euo pipefail
@@ -43,7 +43,7 @@ out="${root}/build"
 readonly EXCLUDED_DEPS="esbuild"
 
 # Targets, as `<os>-<arch>:<deno target triple>`. Only Linux is built by default:
-# a node agent supervises cgroup-limited processes and drives an ingress, which
+# a node daemon supervises cgroup-limited processes and drives an ingress, which
 # is a Linux host. The binary is also the CLI, and `deno compile --target` can
 # produce macOS and Windows builds of it — add them here when an operator command
 # needs to run somewhere a node never will.
@@ -79,7 +79,7 @@ readonly TARGETS=(
 #                  Enumerable, and deliberately not enumerated: the list would
 #                  have to include whatever the h3/srvx/tar/uns3 dependency tree
 #                  reads for itself, and a name missing from it is not a denied
-#                  read but an uncatchable NotCapable that kills the agent at
+#                  read but an uncatchable NotCapable that kills the daemon at
 #                  runtime, on whichever host first sets it
 #   --allow-sys    cgroup and host totals for capacity planning, `os.homedir()`
 #                  for the default state directory, `process.getuid()`

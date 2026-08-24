@@ -7,7 +7,7 @@
  * interactive pick is driven through the same seam consola is wired into, so the
  * terminal path is pinned here without a terminal.
  *
- * The last case runs the resolution into the REAL agent app over an injected
+ * The last case runs the resolution into the REAL node app over an injected
  * `fetch`, so what it proves is that a remote-resolved key signs tokens a node
  * actually accepts.
  */
@@ -16,12 +16,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { createAgentApp } from "../src/agent/app.ts";
-import type { AgentConfig } from "../src/agent/config.ts";
-import { agentOps } from "../src/cli/_environments.ts";
+import { createNodeApp } from "../src/daemon/app.ts";
+import type { DaemonConfig } from "../src/daemon/config.ts";
+import { nodeOps } from "../src/cli/_environments.ts";
 import { addRemote, exportRemote } from "../src/cli/_remotes.ts";
 import { homeKeyPath } from "../src/cli/_home.ts";
-import { operatorSigner } from "../src/cli/_agent.ts";
+import { operatorSigner } from "../src/cli/_node.ts";
 import {
   INLINE_PREFIX,
   type OperatorKeyFile,
@@ -61,7 +61,7 @@ describe("which remote a command acts on", () => {
     });
 
     expect(resolved.remote).toBe("prod");
-    expect(resolved.agentUrl).toBe(PROD_URL);
+    expect(resolved.nodeUrl).toBe(PROD_URL);
   });
 
   it("takes the one SCAFO_REMOTE names when no flag does", async () => {
@@ -112,7 +112,7 @@ describe("which remote a command acts on", () => {
     const resolved = await resolveOperator({ home, env: {}, flags: {}, readFile: noConfig });
 
     expect(resolved.remote).toBe("prod");
-    expect(resolved.agentUrl).toBe(PROD_URL);
+    expect(resolved.nodeUrl).toBe(PROD_URL);
   });
 
   it("asks on a terminal, and acts on the answer", async () => {
@@ -177,7 +177,7 @@ describe("which remote a command acts on", () => {
        the bucket needs none, and must not fail for the want of one. */
     const error = await rejectsWith(() => resolved.readKey(), "invalid-input");
 
-    expect(resolved.agentUrl).toBeUndefined();
+    expect(resolved.nodeUrl).toBeUndefined();
     expect(error.detail).toContain("scafo remote add");
   });
 });
@@ -196,7 +196,7 @@ describe("which key a command signs with", () => {
 
     expect((await resolved.readKey()).id).toBe(loose.key.id);
     /* The remote still says WHERE, because --key only ever said WITH WHAT. */
-    expect(resolved.agentUrl).toBe(PROD_URL);
+    expect(resolved.nodeUrl).toBe(PROD_URL);
   });
 
   it("takes SCAFO_OPERATOR_KEY when no flag names one", async () => {
@@ -230,14 +230,14 @@ describe("which key a command signs with", () => {
     const resolved = await resolveOperator({
       home,
       env: {},
-      flags: { key: loose.path, agent: PROD_URL },
+      flags: { key: loose.path, node: PROD_URL },
       readFile: noConfig,
     });
 
     expect(await resolved.readKey()).toEqual(loose.key);
   });
 
-  it("reads a portable file, and takes the endpoint it carries as the agent", async () => {
+  it("reads a portable file, and takes the endpoint it carries as the node", async () => {
     const source = await oneFleet();
     const home = await scratch();
     const path = join(home, "portable.json");
@@ -252,7 +252,7 @@ describe("which key a command signs with", () => {
 
     /* A bare machine holding one file: it says where to go as well as who to
        be, which is what makes it portable at all. */
-    expect(resolved.agentUrl).toBe(PROD_URL);
+    expect(resolved.nodeUrl).toBe(PROD_URL);
     expect(resolved.remote).toBe("prod");
   });
 
@@ -266,7 +266,7 @@ describe("which key a command signs with", () => {
       readFile: noConfig,
     });
 
-    expect(resolved.agentUrl).toBe(PROD_URL);
+    expect(resolved.nodeUrl).toBe(PROD_URL);
   });
 
   it("reads anything without the prefix as a path, however much it looks like base64", async () => {
@@ -298,17 +298,17 @@ describe("which key a command signs with", () => {
     expect(error.detail).toContain(INLINE_PREFIX);
   });
 
-  it("lets --agent override the endpoint the remote carries", async () => {
+  it("lets --node override the endpoint the remote carries", async () => {
     const home = await oneFleet();
 
     const resolved = await resolveOperator({
       home,
       env: {},
-      flags: { agent: STAGING_URL },
+      flags: { node: STAGING_URL },
       readFile: noConfig,
     });
 
-    expect(resolved.agentUrl).toBe(STAGING_URL);
+    expect(resolved.nodeUrl).toBe(STAGING_URL);
     expect(resolved.remote).toBe("prod");
   });
 
@@ -319,7 +319,7 @@ describe("which key a command signs with", () => {
     const resolved = await resolveOperator({
       home,
       env: {},
-      flags: { agent: PROD_URL },
+      flags: { node: PROD_URL },
       readFile: noConfig,
       defaultKeyPath: loose.path,
     });
@@ -348,20 +348,20 @@ describe("the resolved remote against a real node", () => {
       v: 1,
       id: key.id,
       publicKey: { kty: "OKP", crv: "Ed25519", x: key.publicKey.x },
-      addresses: { internal: "operator", agentPort: 0 },
+      addresses: { internal: "operator", apiPort: 0 },
     });
     await createProject(clock.ctx, { slug: "app" });
     await createEnvironment(clock.ctx, "app", { name: "prod" });
 
-    const app = createAgentApp({
-      config: agentConfig(),
+    const app = createNodeApp({
+      config: daemonConfig(),
       nodeId: "node-a",
       registry: clock.ctx,
       supervisor: idleSupervisor(),
       version: "0.0.0-test",
     });
-    const ops = agentOps({
-      url: resolved.agentUrl as string,
+    const ops = nodeOps({
+      url: resolved.nodeUrl as string,
       authorize: operatorSigner(key),
       /* The app may answer synchronously; `fetch` never does. */
       fetchFn: async (input, init) => app.request(String(input), init),
@@ -430,7 +430,7 @@ function pinned(name: string): (path: string) => Promise<string | null> {
 
 const noConfig = async (): Promise<null> => null;
 
-function agentConfig(): AgentConfig {
+function daemonConfig(): DaemonConfig {
   return {
     bucket: {
       endpoint: "http://store.test:9000",

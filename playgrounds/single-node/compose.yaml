@@ -57,12 +57,12 @@ services:
       # published here: a container joining another's namespace has no network
       # of its own to publish from.
       - "${SCAFO_HTTP_PORT:-80}:80"
-      # The agent API, on your loopback only — it accepts deploys.
+      # The node API, on your loopback only — it accepts deploys.
       #
       # Caddy's admin API is deliberately NOT published: it can rewrite
       # everything Caddy serves, so caddy.json keeps it on 127.0.0.1:2019 where
       # the node reaches it across the shared namespace and nothing else can.
-      - "127.0.0.1:${SCAFO_AGENT_PORT:-7400}:7400"
+      - "127.0.0.1:${SCAFO_NODE_PORT:-7400}:7400"
 
     volumes:
       # A NODE IS ITS KEYPAIR, and this volume holds it.

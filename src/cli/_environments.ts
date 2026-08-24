@@ -2,12 +2,12 @@
  * Internal: what `scafo env retire|unretire|delete` does, and the two ways it
  * can reach the installation.
  *
- * Through a NODE (`--agent`) is the ordinary one: the node is already running,
+ * Through a NODE (`--node`) is the ordinary one: the node is already running,
  * already holds the coordinator lease or knows who does, and the operator needs
  * nothing but their own key. Through the BUCKET is the fallback for the
  * installation that has no node to ask — the same shape `scafo trust` and
  * `scafo varset` are written in, because a registry is often edited before or
- * after there is an agent to edit it through.
+ * after there is a node to edit it through.
  */
 
 import { ScafoError } from "../core/error.ts";
@@ -31,7 +31,7 @@ import type {
 } from "../core/types/registry.ts";
 import { parseLabels } from "../core/utils/labels.ts";
 import { assertSlug } from "../core/utils/slug.ts";
-import { type AgentCallOptions, type AgentOptions, agentRequest } from "./_agent.ts";
+import { type NodeCallOptions, type NodeOptions, nodeRequest } from "./_node.ts";
 
 /** Node id the CLI takes the coordinator lease under; see {@link directOps}. */
 export const CLI_NODE_ID: string = "scafo-cli";
@@ -65,17 +65,17 @@ export interface EnvironmentOps {
   delete(target: EnvironmentTarget, opts?: DeleteOptions): Promise<string[]>;
 }
 
-export type { AgentOptions };
+export type { NodeOptions };
 
 /**
- * The three commands as calls to a node's agent API.
+ * The three commands as calls to a node's API.
  *
  * The node answers for the whole installation: retirement is a plain record
  * update any node carries out, and a deletion is forwarded to whichever node
  * holds the coordinator lease. Its problem document is passed through unchanged,
  * so a refusal reaches the operator with the grace it named still in it.
  */
-export function agentOps(opts: AgentOptions): EnvironmentOps {
+export function nodeOps(opts: NodeOptions): EnvironmentOps {
   const at = (target: EnvironmentTarget, suffix: string = ""): string => {
     /* Validated rather than escaped: these are slugs, so a name that passes is a
        name that carries no separator, no query and no traversal to encode. One
@@ -86,7 +86,7 @@ export function agentOps(opts: AgentOptions): EnvironmentOps {
     return `${opts.url}/v1/environments/${target.project}/${target.env}${suffix}`;
   };
 
-  const call = (method: string): AgentCallOptions => ({
+  const call = (method: string): NodeCallOptions => ({
     method,
     ...(opts.fetchFn === undefined ? {} : { fetchFn: opts.fetchFn }),
   });
@@ -95,7 +95,7 @@ export function agentOps(opts: AgentOptions): EnvironmentOps {
     target: EnvironmentTarget,
     suffix: string,
   ): Promise<EnvironmentRecord> => {
-    const answer = await agentRequest(at(target, suffix), await opts.authorize(), call("POST"));
+    const answer = await nodeRequest(at(target, suffix), await opts.authorize(), call("POST"));
     return ((await answer.json()) as { environment: EnvironmentRecord }).environment;
   };
 
@@ -103,7 +103,7 @@ export function agentOps(opts: AgentOptions): EnvironmentOps {
     target: EnvironmentTarget,
     body: { split: SplitEntry[] | null } | { canary: CanaryInput },
   ): Promise<EnvironmentRecord> => {
-    const answer = await agentRequest(at(target, "/split"), await opts.authorize(), {
+    const answer = await nodeRequest(at(target, "/split"), await opts.authorize(), {
       ...call("POST"),
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -117,7 +117,7 @@ export function agentOps(opts: AgentOptions): EnvironmentOps {
     unretire: (target) => retirement(target, "/unretire"),
 
     async setSelector(target, selector): Promise<EnvironmentRecord> {
-      const answer = await agentRequest(at(target, "/selector"), await opts.authorize(), {
+      const answer = await nodeRequest(at(target, "/selector"), await opts.authorize(), {
         ...call("POST"),
         headers: { "content-type": "application/json" },
         /* `null` is spelled out rather than omitted: the node refuses a body
@@ -128,7 +128,7 @@ export function agentOps(opts: AgentOptions): EnvironmentOps {
     },
 
     async setPark(target, policy): Promise<EnvironmentRecord> {
-      const answer = await agentRequest(at(target, "/park"), await opts.authorize(), {
+      const answer = await nodeRequest(at(target, "/park"), await opts.authorize(), {
         ...call("POST"),
         headers: { "content-type": "application/json" },
         /* Spelled out for the same reason the selector is: the node refuses a
@@ -144,7 +144,7 @@ export function agentOps(opts: AgentOptions): EnvironmentOps {
 
     async delete(target, deleteOpts): Promise<string[]> {
       const query = deleteOpts?.force === true ? "?force=1" : "";
-      const answer = await agentRequest(at(target, query), await opts.authorize(), call("DELETE"));
+      const answer = await nodeRequest(at(target, query), await opts.authorize(), call("DELETE"));
       return ((await answer.json()) as { deleted: string[] }).deleted;
     },
   };
@@ -163,7 +163,7 @@ export interface DirectOptions {
  * is the only thing keeping two deleters apart — which means the CLI has to
  * become the coordinator for the length of the deletion.
  *
- * THAT IS NOT FREE, and it is why `--agent` is the better route whenever there
+ * THAT IS NOT FREE, and it is why `--node` is the better route whenever there
  * is a node to ask. Taking the lease raises its fence, and the node that held it
  * discovers on its next renewal that it no longer does: it drops to candidate
  * and stops assigning and reaping until it takes the lease back, which is a tick
@@ -513,7 +513,7 @@ async function takeLease(
   throw new ScafoError("lease-lost", "A node is coordinating this installation", {
     detail:
       `"${target.project}/${target.env}" cannot be deleted straight through the bucket while a ` +
-      `node holds the coordinator lease: ask that installation instead, with --agent <url> ` +
+      `node holds the coordinator lease: ask that installation instead, with --node <url> ` +
       `--key <file>, and the request reaches the coordinator wherever it is`,
   });
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* The `scafo` binary: one executable for the node agent and its operator commands. */
+/* The `scafo` binary: one executable for the node daemon and its operator commands. */
 
 import { defineCommand, runMain } from "citty";
 import { readPackageVersion } from "./_utils.ts";

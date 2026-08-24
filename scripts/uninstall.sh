@@ -40,7 +40,7 @@
 #   in no position to edit it: it holds no coordinator lease, deletion in that
 #   registry is lease-gated for exactly that reason, and another node may be
 #   serving these very environments right now. A departed node needs no cleanup
-#   anyway — stopping the agent makes it mark itself draining, which counts it
+#   anyway — stopping the daemon makes it mark itself draining, which counts it
 #   out of placement on the coordinator's next pass, and a node that never got to
 #   say so is counted out once the liveness window runs out. Its record is inert
 #   either way. Removing a project, an environment or a build is `scafo env` and
@@ -465,7 +465,7 @@ have_systemd() {
 # addresses that are draining out from under it.
 #
 # And the node is given its time. Its unit allows 40s between SIGTERM and
-# SIGKILL because the agent marks itself draining, releases the coordinator
+# SIGKILL because the daemon marks itself draining, releases the coordinator
 # lease, stops reconciling, closes its listener and only THEN drains each
 # runtime process for 25s. `systemctl stop` waits for all of it, which is the
 # point: a node that gets to finish tells the fleet it is leaving, and one that
@@ -670,7 +670,7 @@ report() {
   printf '  where they were. That is not an omission: the registry is the FLEET'\''s,\n'
   printf '  deletion in it is gated on the coordinator lease this script does not\n'
   printf '  hold, and another node may be serving those environments right now.\n'
-  printf '  THIS NODE DROPS OFF THE FLEET ON ITS OWN — stopping the agent marked it\n'
+  printf '  THIS NODE DROPS OFF THE FLEET ON ITS OWN — stopping the daemon marked it\n'
   printf '  draining, so placement counted it out on the coordinator'\''s next pass,\n'
   printf '  and a node that never got to say so is counted out once its liveness\n'
   printf '  window runs out. Retiring what it served is "scafo env", from anywhere.\n'

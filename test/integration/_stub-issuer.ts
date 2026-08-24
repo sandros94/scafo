@@ -1,7 +1,7 @@
 /*
  * A stand-in for a CI provider's OIDC issuer, for the end-to-end suites.
  *
- * It is a container so that the agent reaches it the way it reaches the real
+ * It is a container so that the node daemon reaches it the way it reaches the real
  * thing: over the network, by the URL the token names in `iss`, through its own
  * discovery document and key set. Nothing about the verification path is stubbed
  * — only the provider is.
@@ -16,7 +16,7 @@ import { generateJWK } from "unjwt/jwk";
 import { sign as signJws } from "unjwt/jws";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 
-/** Small, and already node 24: the same runtime the agent runs on. */
+/** Small, and already node 24: the same runtime the daemon runs on. */
 export const STUB_ISSUER_IMAGE: string = "node:24-slim";
 
 /** Port the stub listens on inside its container. */
@@ -30,8 +30,8 @@ const KID = "stub-issuer-1";
 export interface StubIssuer {
   container: StartedTestContainer;
   /**
-   * The `iss` every token carries, and the URL the agent runs discovery
-   * against. An address on the docker bridge, because the agent has no resolver
+   * The `iss` every token carries, and the URL the daemon runs discovery
+   * against. An address on the docker bridge, because the daemon has no resolver
    * that knows this container by name.
    */
   iss: string;
