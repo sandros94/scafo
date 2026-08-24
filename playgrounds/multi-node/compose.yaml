@@ -1,0 +1,207 @@
+# The multi-node playground: one bucket and TWO scafo nodes, each with its own
+# ingress, on one docker network.
+#
+#   cp .env.example .env      # and put a real token in it
+#   docker compose up -d
+#
+# README.md is the step sheet.
+#
+# WHAT MAKES THESE TWO NODES ONE FLEET is that they name the same bucket and the
+# same prefix in scafo.config.jsonc. Nothing else. They are never told about each
+# other: no seed list, no discovery, no gossip. Each writes its own record into
+# the registry and reads the others' out of it.
+#
+# NO WIREGUARD HERE, and that is honest rather than a shortcut. A tunnel exists
+# to make a network between hosts private; a docker network on one machine
+# already is. `transport: none` in scafo.config.jsonc is that statement, and the
+# step sheet shows what `scafo wg init` would render for real hosts without
+# bringing anything up.
+#
+# EVERYTHING IS THROWN AWAY BY `docker compose down -v`.
+
+name: scafo-multi-node
+
+services:
+  # ---------------------------------------------------------------------------
+  # The registry. One store, one bucket, one prefix, for both nodes.
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.42
+    command: ["server", "-s3"]
+    ports:
+      - "127.0.0.1:${SCAFO_STORE_PORT:-8333}:8333"
+    volumes:
+      - store:/data
+
+  # 409 COUNTS AS SUCCESS — every run after the first finds the bucket already
+  # there, and a loop that only accepts 2xx spins on it forever with both nodes
+  # stuck behind it and nothing in their logs.
+  bucket:
+    image: curlimages/curl:8.18.0
+    depends_on:
+      - seaweedfs
+    command:
+      - sh
+      - -c
+      - |
+        until code=$$(curl -sS -o /dev/null -w '%{http_code}' -X PUT http://seaweedfs:8333/scafo)
+              [ "$$code" = 200 ] || [ "$$code" = 409 ]
+        do sleep 1; done
+        echo "bucket \"scafo\": HTTP $$code"
+
+  # ---------------------------------------------------------------------------
+  # Node A, and its ingress.
+  #
+  # The two nodes are byte-identical apart from three lines: their id, the
+  # address they advertise, and which host ports they publish. Everything else is
+  # in scafo.config.jsonc, shared.
+  node-a:
+    image: scafo:local
+    depends_on:
+      bucket:
+        condition: service_completed_successfully
+    stop_grace_period: 35s
+    ports:
+      - "${SCAFO_A_HTTP_PORT:-8081}:80"
+      - "127.0.0.1:${SCAFO_A_AGENT_PORT:-7401}:7400"
+    volumes:
+      # ITS OWN VOLUME, AND THIS IS NOT OPTIONAL. A node IS its keypair. Two
+      # nodes sharing one state volume would come up as the same node, register
+      # over each other, and fight for one identity's work.
+      - state-a:/var/lib/scafo
+      - ingress-log-a:/var/log/scafo-ingress
+      - ./scafo.config.jsonc:/etc/scafo/scafo.config.jsonc:ro
+    environment:
+      SCAFO_S3_ACCESS_KEY: ${SCAFO_S3_ACCESS_KEY:?set SCAFO_S3_ACCESS_KEY in .env}
+      SCAFO_S3_SECRET_KEY: ${SCAFO_S3_SECRET_KEY:?set SCAFO_S3_SECRET_KEY in .env}
+      SCAFO_STORAGE_TOKEN: ${SCAFO_STORAGE_TOKEN:?set SCAFO_STORAGE_TOKEN in .env}
+      # Fixed rather than generated, so the step sheet can name it and so a
+      # restarted container comes back as the same node even with its volume
+      # gone. A real fleet lets each node generate one and keeps the volume.
+      SCAFO_NODE_ID: node-a
+      # WHERE THE OTHER NODE DIALS THIS ONE. The single-node playground can
+      # honestly say 127.0.0.1 here; this one cannot, and getting it wrong is
+      # invisible until a durable object is owned across the pair. On this
+      # network the answer is the compose service name.
+      SCAFO_ADVERTISE: node-a:7400
+    command: ["up", "--config", "/etc/scafo/scafo.config.jsonc"]
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:7400/v1/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  caddy-a:
+    # `:edge` and not `:latest` — caddy.json hands the module its token INLINE,
+    # and that spelling is newer than the v0.1.0 release `:latest` points at. An
+    # older module refuses the whole configuration with
+    # `json: unknown field "token"` and Caddy exits 1.
+    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:edge}
+    network_mode: "service:node-a"
+    depends_on:
+      node-a:
+        condition: service_healthy
+    command: ["caddy", "run", "--config", "/etc/caddy/config.json"]
+    environment:
+      SCAFO_STORAGE_TOKEN: ${SCAFO_STORAGE_TOKEN:?set SCAFO_STORAGE_TOKEN in .env}
+    volumes:
+      - ./caddy.json:/etc/caddy/config.json:ro
+      - ingress-log-a:/var/log/scafo-ingress
+      - caddy-data-a:/data
+      - caddy-config-a:/config
+    healthcheck:
+      test:
+        ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:2019/config/apps/http/servers/scafo/routes"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # Node B, and its ingress. Compare it to node A: three lines differ.
+  node-b:
+    image: scafo:local
+    depends_on:
+      bucket:
+        condition: service_completed_successfully
+    stop_grace_period: 35s
+    ports:
+      - "${SCAFO_B_HTTP_PORT:-8082}:80"
+      - "127.0.0.1:${SCAFO_B_AGENT_PORT:-7402}:7400"
+    volumes:
+      - state-b:/var/lib/scafo
+      - ingress-log-b:/var/log/scafo-ingress
+      - ./scafo.config.jsonc:/etc/scafo/scafo.config.jsonc:ro
+    environment:
+      SCAFO_S3_ACCESS_KEY: ${SCAFO_S3_ACCESS_KEY:?set SCAFO_S3_ACCESS_KEY in .env}
+      SCAFO_S3_SECRET_KEY: ${SCAFO_S3_SECRET_KEY:?set SCAFO_S3_SECRET_KEY in .env}
+      SCAFO_STORAGE_TOKEN: ${SCAFO_STORAGE_TOKEN:?set SCAFO_STORAGE_TOKEN in .env}
+      SCAFO_NODE_ID: node-b
+      SCAFO_ADVERTISE: node-b:7400
+    command: ["up", "--config", "/etc/scafo/scafo.config.jsonc"]
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:7400/v1/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  caddy-b:
+    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:edge}
+    network_mode: "service:node-b"
+    depends_on:
+      node-b:
+        condition: service_healthy
+    command: ["caddy", "run", "--config", "/etc/caddy/config.json"]
+    environment:
+      SCAFO_STORAGE_TOKEN: ${SCAFO_STORAGE_TOKEN:?set SCAFO_STORAGE_TOKEN in .env}
+    volumes:
+      - ./caddy.json:/etc/caddy/config.json:ro
+      - ingress-log-b:/var/log/scafo-ingress
+      - caddy-data-b:/data
+      - caddy-config-b:/config
+    healthcheck:
+      test:
+        ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:2019/config/apps/http/servers/scafo/routes"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # The `scafo` CLI as a one-shot container. `profiles` keeps it out of `up`.
+  #
+  #   docker compose run --rm cli keygen --config /work/scafo.config.jsonc --register
+  #
+  # It talks to whichever node you name with `--agent`. Any node accepts any
+  # call; work that only the coordinator may do is forwarded to whichever node
+  # holds the lease, and that is invisible from out here — which is the point.
+  cli:
+    image: scafo:local
+    profiles: ["cli"]
+    user: "${SCAFO_CLI_USER:-1000:1000}"
+    working_dir: /work
+    volumes:
+      - ./:/work
+    environment:
+      SCAFO_S3_ACCESS_KEY: ${SCAFO_S3_ACCESS_KEY:?set SCAFO_S3_ACCESS_KEY in .env}
+      SCAFO_S3_SECRET_KEY: ${SCAFO_S3_SECRET_KEY:?set SCAFO_S3_SECRET_KEY in .env}
+
+volumes:
+  store:
+  state-a:
+  state-b:
+  ingress-log-a:
+  ingress-log-b:
+  caddy-data-a:
+  caddy-data-b:
+  caddy-config-a:
+  caddy-config-b:

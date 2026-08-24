@@ -1,0 +1,84 @@
+{
+  /*
+   * ONE FILE, BOTH NODES. Everything here is true of every node in this fleet,
+   * which is most of a node's configuration; the three things that differ —
+   * a node's id, the address its peers dial it at, and the two bucket
+   * credentials it shares with the other — are set per service in compose.yaml
+   * and in .env, where a per-node value belongs.
+   *
+   * Read because compose.yaml passes `--config /etc/scafo/scafo.config.jsonc`.
+   * PRECEDENCE IS PER SETTING: a flag beats an environment variable, which beats
+   * this file.
+   */
+
+  "bucket": {
+    "endpoint": "http://seaweedfs:8333",
+    "bucket": "scafo",
+    /*
+     * ONE BUCKET AND PREFIX IS ONE FLEET, and this line is what makes the two
+     * nodes in this playground one installation rather than two that cannot see
+     * each other. They are never told about each other in any other way: no
+     * seed list, no discovery protocol, no gossip. Each writes its own record
+     * here and reads the others' — that is the whole of it.
+     */
+    "prefix": "playground",
+    "region": "us-east-1",
+    /* "accessKey" and "secretKey" come from .env. */
+  },
+
+  "node": {
+    /* Bound wide because the other node has to reach it. "node.advertise" —
+       the address it says to reach it AT — differs per node and is in
+       compose.yaml. */
+    "listen": "0.0.0.0:7400",
+  },
+
+  "platformDomains": ["scafo.test"],
+
+  /*
+   * REQUIRED THE MOMENT ANY ADDRESS LEAVES LOOPBACK, and there is no default.
+   * "none" says this network is already private and trusted. It is, here: a
+   * docker network on one machine.
+   *
+   * On real hosts this is the decision that matters most in the whole file.
+   * Two nodes on different machines are carrying traffic that COMMANDS them
+   * across whatever is between them, and "none" is only honest when that is a
+   * private network you control — a cloud vRack, a VLAN. Otherwise it is
+   * "wireguard", and `scafo wg init` sets the tunnel up. The step sheet shows
+   * what that would produce without bringing one up.
+   */
+  "transport": { "driver": "none" },
+
+  "runtime": {
+    /*
+     * THE ONE SETTING A SECOND NODE MAKES NECESSARY, and the one whose absence
+     * fails in a way nothing explains.
+     *
+     * Runtime processes bind loopback by default, which is everything a single
+     * node needs. As soon as there are two, one cell still has exactly one
+     * owner, and a request landing on the node that does NOT own it is
+     * forwarded to the node that does — at the address that node advertises,
+     * where a loopback listener answers nothing.
+     *
+     * The application does not degrade, it fails, and only in half its
+     * requests: `/` keeps working on both nodes because it holds no state,
+     * while `/count` answers "The Durable Object owner is currently
+     * unreachable" from whichever node is not the owner. Stateless paths hide
+     * it completely.
+     */
+    "bindHost": "0.0.0.0",
+  },
+
+  "ingress": {
+    "driver": "caddy",
+    /* Each node's own Caddy, in its own network namespace. Both nodes say
+       127.0.0.1 and mean two different containers. */
+    "adminUrl": "http://127.0.0.1:2019",
+    "serverName": "scafo",
+  },
+
+  "observability": {
+    "enabled": true,
+    "ingressAccessLog": "/var/log/scafo-ingress/access.log",
+  },
+}

@@ -1,0 +1,76 @@
+{
+  /*
+   * Everything about this node that is not a secret, in the file form of the
+   * same settings the environment can carry. Read because compose.yaml passes
+   * `--config /etc/scafo/scafo.config.jsonc`; without that flag a node looks for
+   * `./scafo.config.jsonc` in its working directory and finds none.
+   *
+   * PRECEDENCE IS PER SETTING: a command-line flag beats an environment
+   * variable, which beats this file. So the three values `.env` carries —
+   * the two bucket credentials and the storage token — are set there and left
+   * out here, and everything else is here where it can be read and edited.
+   */
+
+  "bucket": {
+    /* The compose service name. The CLI, which runs outside this network in the
+       step sheet, reaches the SAME bucket at http://127.0.0.1:8333. */
+    "endpoint": "http://seaweedfs:8333",
+    "bucket": "scafo",
+    /* ONE BUCKET AND PREFIX IS ONE FLEET. Nothing else makes two nodes one
+       installation, and nothing else keeps two installations apart. */
+    "prefix": "playground",
+    "region": "us-east-1",
+    /* "accessKey" and "secretKey" come from .env — see the note above. */
+  },
+
+  "node": {
+    /* Bound wide because compose publishes this port from outside the
+       container; the default, 127.0.0.1:7400, nothing outside could reach. */
+    "listen": "0.0.0.0:7400",
+    /* Where peers dial this node. A single node's only peer is itself, so
+       loopback is honest here. The multi-node playground cannot say this. */
+    "advertise": "127.0.0.1:7400",
+  },
+
+  /* Apex domains this installation serves subdomains under. Applications answer
+     at <project>--<env>.scafo.test, at <project>.scafo.test for the production
+     environment, and at <project>--<build>.scafo.test for every running build.
+     Nothing on your machine resolves those names: send a Host header. */
+  "platformDomains": ["scafo.test"],
+
+  /*
+   * REQUIRED THE MOMENT ANY ADDRESS LEAVES LOOPBACK, and there is no default.
+   * "node.listen" above is 0.0.0.0, so this node refuses to boot until the
+   * operator says what network that is. "none" states it is already private and
+   * trusted — a single host's own docker network is — and "wireguard" puts it
+   * in a tunnel scafo sets up. Answering this wrong is the one mistake this
+   * file cannot make for you.
+   */
+  "transport": { "driver": "none" },
+
+  "ingress": {
+    "driver": "caddy",
+    /* Caddy shares this node's network namespace, so its admin API really is on
+       this node's loopback. The node PUSHES its routing there after every
+       reconcile pass. */
+    "adminUrl": "http://127.0.0.1:2019",
+    /* The name of the server inside caddy.json the node writes routes into. It
+       does not create that server — an absent one is an ingress failure on every
+       pass and nothing routed. */
+    "serverName": "scafo",
+  },
+
+  /*
+   * BOTH LINES GO TOGETHER. The first turns this node's own reporting on; the
+   * second says where its ingress writes the access log it counts requests off,
+   * which is the only complete account of what this installation served — once a
+   * process is up, traffic goes ingress -> process and never touches the node.
+   *
+   * Naming the log with "enabled" off is REFUSED at boot rather than ignored,
+   * because nothing would read the file.
+   */
+  "observability": {
+    "enabled": true,
+    "ingressAccessLog": "/var/log/scafo-ingress/access.log",
+  },
+}
