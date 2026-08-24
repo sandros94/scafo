@@ -24,6 +24,7 @@
 
   "rules": {
     "oxc/only-used-in-recursion": "off",
-    "require-mock-type-parameters": "off"
+    "require-mock-type-parameters": "off",
+    "vitest/valid-expect": ["warn", { "maxArgs": 2 }]
   }
 }
