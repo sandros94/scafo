@@ -3,6 +3,11 @@
 import type { H3Event, HTTPError, Middleware } from "h3";
 import type { NodeIdentity, NodeVerifier } from "../core/auth/node-token.ts";
 import { isScafoError, type ProblemDetails, ScafoError } from "../core/error.ts";
+import { readJson } from "../core/registry/cas.ts";
+import type { RegistryContext } from "../core/registry/context.ts";
+import { isOperatorRecord } from "../core/registry/operators.ts";
+import { nodeKey } from "../core/registry/paths.ts";
+import type { NodeRecord } from "../core/types/registry.ts";
 
 /** Context key the verified caller is filed under for the rest of the request. */
 const IDENTITY_KEY = "scafoIdentity";
@@ -25,6 +30,43 @@ export function requireNodeToken(verifier: NodeVerifier): Middleware {
 /** The identity {@link requireNodeToken} verified, or undefined on open routes. */
 export function nodeIdentity(event: H3Event): NodeIdentity | undefined {
   return event.context[IDENTITY_KEY] as NodeIdentity | undefined;
+}
+
+/**
+ * Guards a route with an OPERATOR's token: the same verification
+ * {@link requireNodeToken} does, and then a question about WHO the verified id
+ * turned out to be.
+ *
+ * Every other authenticated route accepts any key the registry holds, because a
+ * node calling a peer and an operator calling a node are the same kind of caller
+ * there. Key administration is not: an agent that has been taken over must not
+ * be able to write its installation a new operator, so a machine's own token is
+ * authenticated here and then refused.
+ *
+ * That refusal is `ScafoError("auth-scope")` rather than the uniform
+ * authentication rejection, and deliberately so — the caller has already proved
+ * which key it holds, so there is nothing left to withhold, and telling it that
+ * this surface is an operator's is the difference between a fixable mistake and
+ * a mystery. A caller holding no node key at all never reaches the question.
+ */
+export function requireOperatorToken(
+  verifier: NodeVerifier,
+  registry: RegistryContext,
+): Middleware {
+  return async (event, next) => {
+    const identity = await verifier.verify(bearerToken(event));
+    event.context[IDENTITY_KEY] = identity;
+
+    const record = await readJson<NodeRecord>(registry, nodeKey(identity.nodeId));
+    if (record === null || !isOperatorRecord(record.value)) {
+      throw new ScafoError("auth-scope", "Not an operator of this fleet", {
+        detail:
+          `"${identity.nodeId}" is not an operator key of this installation, and the keys a ` +
+          `fleet trusts are an operator's to administer`,
+      });
+    }
+    return next();
+  };
 }
 
 /**

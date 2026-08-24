@@ -31,7 +31,7 @@ import type {
 } from "../core/types/registry.ts";
 import { parseLabels } from "../core/utils/labels.ts";
 import { assertSlug } from "../core/utils/slug.ts";
-import { type AgentCallOptions, agentRequest, type Authorize } from "./_agent.ts";
+import { type AgentCallOptions, type AgentOptions, agentRequest } from "./_agent.ts";
 
 /** Node id the CLI takes the coordinator lease under; see {@link directOps}. */
 export const CLI_NODE_ID: string = "scafo-cli";
@@ -65,14 +65,7 @@ export interface EnvironmentOps {
   delete(target: EnvironmentTarget, opts?: DeleteOptions): Promise<string[]>;
 }
 
-export interface AgentOptions {
-  /** Base URL of the node agent, without a trailing separator. */
-  url: string;
-  /** Mints one fresh token per call; node tokens are single-use. */
-  authorize: Authorize;
-  /** How the calls are made; defaults to the global `fetch`. */
-  fetchFn?: typeof fetch;
-}
+export type { AgentOptions };
 
 /**
  * The three commands as calls to a node's agent API.

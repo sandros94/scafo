@@ -44,7 +44,8 @@ import type { IngressCounters } from "./access-counters.ts";
 import type { AgentConfig } from "./config.ts";
 import type { Coordinator } from "./coordinator.ts";
 import type { DeployService, DeployStatus } from "./deploys.ts";
-import { renderProblem, requireNodeToken } from "./middleware.ts";
+import { renderProblem, requireNodeToken, requireOperatorToken } from "./middleware.ts";
+import { registerOperatorRoutes } from "./_operator-routes.ts";
 import type { Observability } from "./observe.ts";
 import type { ParkedView, PlacementView, Reconciler, ReconcileStatus } from "./reconcile.ts";
 import { registerStorageRoutes } from "./_storage-routes.ts";
@@ -491,6 +492,14 @@ export function createAgentApp(agent: AgentContext): H3 {
     }
     return flipAlias(agent.registry, request.project, request.environment, request.build as string);
   });
+
+  /*
+   * THE KEYS THIS FLEET TRUSTS, administered by the operators it already trusts.
+   * The only routes of the API a node's own token cannot reach: an agent that
+   * has been taken over must not be able to write its installation a new
+   * operator, so these ask WHO the verified id is as well as that it signed.
+   */
+  registerOperatorRoutes(app, agent, requireOperatorToken(nodeVerifier, agent.registry));
 
   /*
    * TLS STORAGE, AND IT MUST NEVER BE REACHABLE THROUGH A PUBLIC OR

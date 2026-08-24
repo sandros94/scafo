@@ -46,6 +46,18 @@ export interface FleetKeyRef {
 export interface FleetEntry {
   endpoints: string[];
   key: FleetKeyRef;
+  /**
+   * A key minted for this fleet that the fleet does not yet sign with — the
+   * half-finished state of a rotation, and the only state one has.
+   *
+   * It is written before the new key is registered and cleared by the flip that
+   * makes it {@link FleetEntry.key}, so an entry carrying one says exactly this:
+   * a rotation reached at least as far as minting, and did not reach its flip.
+   * Rerunning the rotation picks that key up instead of minting another, which
+   * is what keeps an interrupted run from leaving a key behind in the fleet that
+   * nothing here points at.
+   */
+  rotating?: FleetKeyRef;
 }
 
 /** The registry file itself. */
@@ -237,9 +249,32 @@ export interface RemovedFleet {
 }
 
 /**
+ * Every key file an entry points at: the one it signs with, and the one a
+ * rotation it has not finished would sign with next.
+ *
+ * As the home REFERS to them, so two entries naming the same file compare equal
+ * whatever either of them calls it.
+ */
+export function fleetKeyRefs(entry: FleetEntry): string[] {
+  return entry.rotating === undefined ? [entry.key.path] : [entry.key.path, entry.rotating.path];
+}
+
+/** The fleets, other than `name`, that point at any of `paths`. */
+export function fleetsReferencing(file: FleetsFile, name: string, paths: string[]): string[] {
+  return Object.entries(file.fleets)
+    .filter(
+      ([other, entry]) => other !== name && fleetKeyRefs(entry).some((p) => paths.includes(p)),
+    )
+    .map(([other]) => other);
+}
+
+/**
  * Unregisters a fleet, and deletes its key only when no other fleet still
  * references it — a shared key deleted with one of its fleets would take the
  * others down with it.
+ *
+ * A key an unfinished rotation left pending goes with the fleet unconditionally:
+ * nothing else can be pointing at it, because a rotation always mints its own.
  */
 export async function removeFleet(home: string, name: string): Promise<RemovedFleet> {
   const file = await readFleets(home);
@@ -254,14 +289,15 @@ export async function removeFleet(home: string, name: string): Promise<RemovedFl
 
   const remaining = { ...file.fleets };
   delete remaining[name];
-  const sharedWith = Object.entries(remaining)
-    .filter(([, other]) => other.key.path === entry.key.path)
-    .map(([other]) => other);
+  const sharedWith = fleetsReferencing(file, name, [entry.key.path]);
 
   await writeFleets(home, { ...file, fleets: remaining });
 
   const keyPath = resolveHomePath(home, entry.key.path);
   if (sharedWith.length === 0) await rm(keyPath, { force: true });
+  if (entry.rotating !== undefined) {
+    await rm(resolveHomePath(home, entry.rotating.path), { force: true });
+  }
   return { name, keyPath, keyRemoved: sharedWith.length === 0, sharedWith };
 }
 

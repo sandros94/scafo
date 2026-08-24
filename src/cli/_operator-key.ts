@@ -16,7 +16,7 @@ import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { ScafoError } from "../core/error.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
-import { registerNode } from "../core/registry/nodes.ts";
+import { trustOperator } from "../core/registry/operators.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
 import { fromBase64 } from "../core/utils/base64.ts";
 
@@ -184,20 +184,19 @@ export function formatPortable(portable: PortableOperator): string {
  * Records the public half in the registry, which is what makes a node accept the
  * tokens this key signs.
  *
- * Operators reuse the node record: an agent verifies a bearer token against the
- * key filed under the token's `kid`, and does not care whether that id belongs
- * to a machine or a person. The address fields are a placeholder, because
- * nothing ever connects to an operator.
+ * STRAIGHT TO THE BUCKET, which is what it is for: this is how an installation
+ * is bootstrapped, before there is an agent whose trust could be asked for, and
+ * how one whose operator keys have all been lost is recovered. An operator who
+ * already holds a working key changes it through a node instead — `scafo fleet
+ * rotate` — and needs no bucket credential at all.
  */
 export async function registerOperatorKey(
   registry: RegistryContext,
   key: OperatorKeyFile,
 ): Promise<void> {
-  await registerNode(registry, {
-    v: 1,
+  await trustOperator(registry, {
     id: key.id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: key.publicKey.x },
-    addresses: { internal: "operator", agentPort: 0 },
   });
 }
 

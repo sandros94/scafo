@@ -31,6 +31,16 @@ export interface AgentCallOptions extends RequestInit {
   fetchFn?: typeof fetch;
 }
 
+/** One node, and who is speaking to it: what every group of commands is built on. */
+export interface AgentOptions {
+  /** Base URL of the node agent, without a trailing separator. */
+  url: string;
+  /** Mints one fresh token per call; node tokens are single-use. */
+  authorize: Authorize;
+  /** How the calls are made; defaults to the global `fetch`. */
+  fetchFn?: typeof fetch;
+}
+
 /**
  * One call to the agent, with a failure answer turned back into the failure it
  * describes.

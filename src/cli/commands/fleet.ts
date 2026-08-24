@@ -15,6 +15,13 @@ import { addFleet, exportFleet, formatFleetList, readFleets, removeFleet } from 
 import { createRegistry } from "../_bootstrap.ts";
 import { resolveOperatorHome } from "../_home.ts";
 import { INLINE_PREFIX, registerOperatorKey } from "../_operator-key.ts";
+import {
+  describeRevocation,
+  formatFleetKeys,
+  listFleetKeys,
+  revokeFleetKey,
+} from "../_operators.ts";
+import { describeRotation, rotateFleetKey } from "../_rotate.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
 
 /*
@@ -49,6 +56,27 @@ const removeArgs: ArgsDef = {
 const exportArgs: ArgsDef = {
   name: { type: "positional", description: "Fleet to write out", required: true },
   out: { type: "string", description: "File to write it to, readable by its owner alone" },
+};
+
+const rotateArgs: ArgsDef = {
+  "name": { type: "positional", description: "Fleet whose key is to be replaced", required: true },
+  "keep-old": {
+    type: "boolean",
+    description: "Stop after the flip, leaving the old key trusted as well",
+  },
+  "purge-old": { type: "boolean", description: "Delete the old key file once it is untrusted" },
+  "agent": { type: "string", description: "Node to reach, instead of the fleet's first endpoint" },
+};
+
+const revokeArgs: ArgsDef = {
+  name: { type: "positional", description: "Fleet to remove a trusted key from", required: true },
+  id: { type: "string", description: "Key to stop trusting; not your own", required: true },
+  agent: { type: "string", description: "Node to reach, instead of the fleet's first endpoint" },
+};
+
+const keysArgs: ArgsDef = {
+  name: { type: "positional", description: "Fleet to read the trusted keys of", required: true },
+  agent: { type: "string", description: "Node to reach, instead of the fleet's first endpoint" },
 };
 
 const add: CommandDef = defineCommand({
@@ -98,9 +126,48 @@ const write: CommandDef = defineCommand({
   },
 });
 
+const rotate: CommandDef = defineCommand({
+  meta: {
+    name: "rotate",
+    description: "Replace the key a fleet signs with, proving the new one before dropping the old",
+  },
+  args: rotateArgs,
+  async run({ args }): Promise<void> {
+    try {
+      await runRotate(args as Record<string, unknown>);
+    } catch (error) {
+      reportFailure(error);
+    }
+  },
+});
+
+const revoke: CommandDef = defineCommand({
+  meta: { name: "revoke", description: "Stop a fleet trusting a key that is not your own" },
+  args: revokeArgs,
+  async run({ args }): Promise<void> {
+    try {
+      await runRevoke(args as Record<string, unknown>);
+    } catch (error) {
+      reportFailure(error);
+    }
+  },
+});
+
+const keys: CommandDef = defineCommand({
+  meta: { name: "keys", description: "Print the operator keys a fleet trusts" },
+  args: keysArgs,
+  async run({ args }): Promise<void> {
+    try {
+      await runKeys(args as Record<string, unknown>);
+    } catch (error) {
+      reportFailure(error);
+    }
+  },
+});
+
 export const fleet: CommandDef = defineCommand({
   meta: { name: "fleet", description: "Register, list, export and forget the fleets you operate" },
-  subCommands: { add, list, remove, export: write },
+  subCommands: { add, list, remove, export: write, rotate, revoke, keys },
 });
 
 async function runAdd(flags: Record<string, unknown>): Promise<void> {
@@ -161,6 +228,37 @@ async function runExport(flags: Record<string, unknown>): Promise<void> {
     ...(text(flags.out) === undefined ? {} : { out: text(flags.out) as string }),
     isTTY: process.stdout.isTTY === true,
   });
+}
+
+async function runRotate(flags: Record<string, unknown>): Promise<void> {
+  const rotated = await rotateFleetKey(resolveOperatorHome(), required(flags, "name"), {
+    ...(text(flags.agent) === undefined ? {} : { agentUrl: text(flags.agent) as string }),
+    keepOld: flags["keep-old"] === true,
+    purgeOld: flags["purge-old"] === true,
+  });
+
+  console.log(describeRotation(rotated));
+}
+
+async function runRevoke(flags: Record<string, unknown>): Promise<void> {
+  const revoked = await revokeFleetKey(
+    resolveOperatorHome(),
+    required(flags, "name"),
+    required(flags, "id"),
+    text(flags.agent) === undefined ? {} : { agentUrl: text(flags.agent) as string },
+  );
+
+  console.log(describeRevocation(revoked));
+}
+
+async function runKeys(flags: Record<string, unknown>): Promise<void> {
+  const keys = await listFleetKeys(
+    resolveOperatorHome(),
+    required(flags, "name"),
+    text(flags.agent) === undefined ? {} : { agentUrl: text(flags.agent) as string },
+  );
+
+  console.log(formatFleetKeys(keys));
 }
 
 /** A flag given once or several times, as the list it always is here. */
