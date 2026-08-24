@@ -1,5 +1,9 @@
 /* Internal: the one hop a node makes to another node's agent, and what marks it. */
 
+import { readJson } from "../core/registry/cas.ts";
+import { nowDate, type RegistryContext } from "../core/registry/context.ts";
+import { isNodeLive } from "../core/registry/nodes.ts";
+import { nodeKey } from "../core/registry/paths.ts";
 import type { NodeRecord } from "../core/types/registry.ts";
 
 /**
@@ -36,4 +40,39 @@ export function peerUrl(record: NodeRecord, target: string): string {
   /* An IPv6 literal is only a URL authority once it is bracketed. */
   const authority = host.includes(":") ? `[${host}]` : host;
   return `http://${authority}:${String(record.addresses.agentPort)}${target}`;
+}
+
+/**
+ * The nodes a placement names that are live and are not this one, IN THE
+ * RECORD'S OWN ORDER.
+ *
+ * That order is the coordinator's and is the same on every node, so two nodes
+ * asking about the same environment reach the same peer first — which is what a
+ * wake needs, because a wake is one boot and spreading the requests would make
+ * it several.
+ *
+ * LAZY, AND THAT IS WHY IT IS A GENERATOR: each name costs a read of that node's
+ * record, and the two callers want different amounts of the list. A wake takes
+ * the FIRST and stops, so a `replicas: all` environment on a twenty-node fleet
+ * costs it one read; a deploy watching for its build asks each in turn until one
+ * says it is serving, because the build is ready if ANY of them has it ready.
+ *
+ * A node named in the record but MISSING from the registry is skipped rather
+ * than raised: a decision outlives the deregistration of a node it names by up
+ * to one coordinator pass, and the next name in the record is the answer. So is
+ * a draining one — {@link isNodeLive} counts it out, and a node on its way out
+ * will not boot anything.
+ */
+export async function* liveAssignedNodes(
+  registry: RegistryContext,
+  nodes: readonly string[],
+  selfId: string,
+): AsyncGenerator<NodeRecord> {
+  const now = nowDate(registry);
+
+  for (const id of nodes) {
+    if (id === selfId) continue;
+    const found = await readJson<NodeRecord>(registry, nodeKey(id));
+    if (found !== null && isNodeLive(found.value, now)) yield found.value;
+  }
 }

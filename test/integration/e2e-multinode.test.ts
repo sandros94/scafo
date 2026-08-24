@@ -112,6 +112,15 @@ const TARGETED = "targeted";
 /** The label node-b boots with, and the one {@link TARGETED} selects on. */
 const FAST_LABEL = "tier=fast";
 
+/**
+ * Deployed THROUGH the node that cannot run it, under the same selector.
+ *
+ * The point is the deploy's own watch rather than the placement: a flipped
+ * deploy is held open until a process serving the build is ready, and the node
+ * holding it open is not the node that starts it.
+ */
+const AWAITED = "awaited";
+
 /** Deployed to both nodes, retired out of service, then force-deleted. */
 const SUNSET = "sunset";
 /** Claimed for {@link SUNSET}, so its deletion has a claim to release too. */
@@ -479,9 +488,10 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       const labelled = nodes.find((node) => node.id === NODE_B) as Node;
       const plain = nodes.find((node) => node.id === NODE_A) as Node;
 
-      /* Deployed THROUGH the labelled node, because a flipped deploy watches for
-         the build to be serving and only a node the selector admits will ever
-         run it. Intake is independent of placement; patience is not. */
+      /* Deployed through the labelled node, which is the shortest path to a
+         running build and no longer the constraint it once was: a flipped deploy
+         now watches the node its placement named, wherever the upload landed.
+         The case below is about exactly that; this one is about the selector. */
       const deployedAt = Date.now();
       const result = await runCli(
         deployArgs(
@@ -570,6 +580,64 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         clearedThrough: plain.id,
         spreadMs,
         clearedOutput: cleared.output.trim().slice(0, 300),
+      };
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "reports a deploy routed through the node that was never going to run it",
+    async () => {
+      /*
+       * THE ASYMMETRY THIS IS FOR. Intake is independent of placement — any node
+       * accepts an upload — but placement is the coordinator's decision, taken
+       * after the deploy has landed. So the node holding the deploy open is
+       * routinely not the node that starts the build, and a deploy that watched
+       * only its OWN processes reported `deploy-not-routed` after the full
+       * two-minute budget while the build had been serving on the other node for
+       * seconds. Same build, same fleet: 2s one way, 124s the other.
+       *
+       * The selector is what makes the placement certain rather than a hash's
+       * decision: only node-b carries the label, so node-a can never be the one
+       * running this, and it is node-a the deploy is sent to.
+       */
+      const plain = nodes.find((node) => node.id === NODE_A) as Node;
+      const labelled = nodes.find((node) => node.id === NODE_B) as Node;
+
+      const startedAt = Date.now();
+      const result = await runCli(
+        deployArgs(
+          await stageApp("v1"),
+          AWAITED,
+          ["--node-selector", FAST_LABEL, "--replicas", "all"],
+          plain,
+        ),
+        {},
+      );
+      const routedMs = Date.now() - startedAt;
+      expectCleanExit(result);
+
+      /* The deploy settles at `routed` rather than at `deployed` with a warning:
+         the node it was sent to went and asked the node the placement named. */
+      expect(result.output, agentLogTail()).toContain("routed");
+      expect(result.output).not.toContain("deploy-not-routed");
+      /* Comfortably inside the 120s budget, which is what "watched the wrong
+         node until it gave up" would have spent. */
+      expect(routedMs).toBeLessThan(90_000);
+
+      /* And the claim rests on the placement really being elsewhere. */
+      await until(`${AWAITED} to be placed on ${labelled.id} alone`, DEADLINE_MS, async () => {
+        const named = placedNodes(await stateOf(plain), AWAITED);
+        return named?.length === 1 && named[0] === labelled.id ? named : null;
+      });
+      expect((await stateOf(plain)).processes.some(runsAwaited)).toBe(false);
+
+      observed.deployThroughOtherNode = {
+        environment: AWAITED,
+        deployedThrough: plain.id,
+        placedOn: labelled.id,
+        routedMs,
+        output: result.output.trim().slice(-300),
       };
     },
     STEP_TIMEOUT_MS,
@@ -1067,6 +1135,10 @@ function targetedHost(): string {
 /** Whether a process on a node is one serving {@link TARGETED}. */
 function runsTargeted(process: ProcessStatus): boolean {
   return process.state === "running" && process.id.startsWith(`${PROJECT}--${TARGETED}--`);
+}
+
+function runsAwaited(process: ProcessStatus): boolean {
+  return process.state === "running" && process.id.startsWith(`${PROJECT}--${AWAITED}--`);
 }
 
 /** Whether a process on a node is one serving {@link SOLO}. */

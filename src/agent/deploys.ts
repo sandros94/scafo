@@ -28,6 +28,7 @@ import type {
   ScafoWarning,
 } from "../core/types/registry.ts";
 import { startBudget } from "../core/utils/budget.ts";
+import { createRoutedWatch } from "./_routed.ts";
 import type { AgentContext } from "./app.ts";
 
 /** How long a flipped deploy waits to be observed serving traffic. */
@@ -171,19 +172,16 @@ export function createDeployService(
     await stampEnvironmentWake(agent.registry, meta.project, meta.environment).catch(() => {});
   }
 
-  /** Whether the reconcile loop reports a ready process for this build. */
-  function isRouted(meta: DeployMeta, build: string): boolean {
-    return (agent.reconciler?.status().processes ?? []).some(
-      (process) =>
-        process.ready &&
-        process.project === meta.project &&
-        process.env === meta.environment &&
-        process.build === build,
-    );
-  }
-
   /**
-   * Waits for the reconcile loop to report the new build serving traffic.
+   * Waits for the new build to be reported serving traffic.
+   *
+   * WATCHED WHERE IT WAS PLACED, NOT WHERE IT WAS UPLOADED. A deploy is accepted
+   * by whichever node the caller reached, and which nodes serve the environment
+   * is the coordinator's decision, taken afterwards — so this asks THIS node's
+   * processes first and, when the placement names other nodes, asks those
+   * (`_routed.ts`). Without that, a deploy sent to any node but the one placement
+   * happened to choose spent its whole budget watching a node that was never
+   * going to start anything.
    *
    * Running out of time is a warning and never a failure: the build exists and
    * the alias points at it, so the loop will keep trying to start it long after
@@ -204,13 +202,19 @@ export function createDeployService(
       return;
     }
 
+    const watch = createRoutedWatch(agent, {
+      project: meta.project,
+      env: meta.environment,
+      build,
+    });
+
     /* A duration rather than a moment in time, so it is measured monotonically
        (`utils/budget.ts`): a wall clock stepping forward mid-wait would cut this
        short and warn that nothing was serving the build while the loop was still
        bringing it up. */
     const remaining = startBudget(routedTimeoutMs);
     for (;;) {
-      if (isRouted(meta, build)) {
+      if (await watch.routed()) {
         await stampAwake(meta);
         update(id, { state: "routed" });
         return;
@@ -218,7 +222,10 @@ export function createDeployService(
       if (remaining() <= 0) {
         await giveUp(
           `build "${build}" was deployed and the alias flipped, but no process serving it ` +
-            `had passed its readiness gate after ${String(routedTimeoutMs)}ms`,
+            `had passed its readiness gate after ${String(routedTimeoutMs)}ms` +
+            /* Named, because a deploy that was watching another node entirely is
+               the one case where "nothing was ready" is not about this node. */
+            `${watchedOn(watch.asked())}`,
         );
         return;
       }
@@ -387,6 +394,16 @@ async function ensureEnvironment(
   if (wanted.nodeSelector !== undefined) {
     await setNodeSelector(agent.registry, project, environment, wanted.nodeSelector);
   }
+}
+
+/**
+ * Where the watch had got to, for a warning to say so. Empty on the ordinary
+ * path — this node's own processes were the answer — and then the warning says
+ * nothing extra at all.
+ */
+function watchedOn(nodes: readonly string[]): string {
+  if (nodes.length === 0) return "";
+  return `, on the node${nodes.length === 1 ? "" : "s"} its placement names (${nodes.join(", ")})`;
 }
 
 /** Drops the oldest deploys once more than `keep` are remembered. */

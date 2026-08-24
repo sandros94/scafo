@@ -17,17 +17,14 @@
 
 import type { H3Event } from "h3";
 import { describeError, ScafoError } from "../core/error.ts";
-import { readJson } from "../core/registry/cas.ts";
-import { nowDate, type RegistryContext } from "../core/registry/context.ts";
+import type { RegistryContext } from "../core/registry/context.ts";
 import { countingRegistry, storeOpsOf } from "../core/registry/counting.ts";
-import { isNodeLive } from "../core/registry/nodes.ts";
-import { nodeKey } from "../core/registry/paths.ts";
 import { readPlacement } from "../core/registry/placement.ts";
 import { stampBuildWake, stampEnvironmentWake } from "../core/registry/wake.ts";
 import { pickLeg, servingLegs } from "../core/placement/routes.ts";
 import type { NodeRecord, PlacementRecord } from "../core/types/registry.ts";
 import { startBudget } from "../core/utils/budget.ts";
-import { isProxiedHop } from "./_peer.ts";
+import { isProxiedHop, liveAssignedNodes } from "./_peer.ts";
 import { forwardWake, proxyToProcess } from "./_wake-proxy.ts";
 import type { ParkedEnvironment } from "./_desired.ts";
 import { resolveWakeTarget, type WakeTarget } from "./_wake-target.ts";
@@ -263,35 +260,6 @@ export function createWakeService(agent: AgentContext): WakeService {
   }
 
   /**
-   * The first node the placement names that is live and is not this one, or null
-   * when there is none.
-   *
-   * FIRST rather than a choice among them: the record's order is the
-   * coordinator's own, which is stable and the same on every node, so every node
-   * forwarding the same environment sends it to the same peer. A wake is one
-   * boot, and spreading the requests would make it several.
-   *
-   * A node named in the record but MISSING from the registry is skipped rather
-   * than raised: a decision outlives the deregistration of a node it names by up
-   * to one coordinator pass, and the next name in the record is the answer. So
-   * is a draining one — {@link isNodeLive} counts it out, and a node on its way
-   * out will not boot anything.
-   */
-  async function liveAssignedNode(
-    registry: RegistryContext,
-    nodes: string[],
-  ): Promise<NodeRecord | null> {
-    const now = nowDate(registry);
-
-    for (const id of nodes) {
-      if (id === agent.nodeId) continue;
-      const found = await readJson<NodeRecord>(registry, nodeKey(id));
-      if (found !== null && isNodeLive(found.value, now)) return found.value;
-    }
-    return null;
-  }
-
-  /**
    * Where this wake runs, decided before anything is admitted, stamped or
    * started — the node that boots must be one the placement chose, and this is
    * the whole of what says whether that is this one.
@@ -328,11 +296,14 @@ export function createWakeService(agent: AgentContext): WakeService {
       return { kind: "unavailable", response: notAssignedHere(host, agent.nodeId, placement) };
     }
 
-    const node = await liveAssignedNode(registry, placement.nodes);
-    if (node === null) {
-      return { kind: "unavailable", response: noAssignedNodeLive(host, placement) };
+    /* The FIRST of them, and the iteration stops there — so every node
+       forwarding the same environment sends it to the same peer, and a wake
+       costs one node read rather than one per node the decision names. A wake is
+       one boot, and spreading the requests would make it several. */
+    for await (const node of liveAssignedNodes(registry, placement.nodes, agent.nodeId)) {
+      return { kind: "forward", node };
     }
-    return { kind: "forward", node };
+    return { kind: "unavailable", response: noAssignedNodeLive(host, placement) };
   }
 
   /**

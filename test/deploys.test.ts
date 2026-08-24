@@ -27,6 +27,7 @@ import {
   envWakeKey,
   getBuild,
   getEnvironment,
+  placementKey,
   readEnvironmentWake,
   registerNode,
   setTrustPolicy,
@@ -41,6 +42,10 @@ import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock } from "./_helpers.ts";
 
 const OPERATOR = "op-1234abcd";
+/** A second node of the same installation, and where its agent answers. */
+const NODE_B = "node-b1b1b1b1";
+const PEER_HOST = "node-b.test";
+const PEER_PORT = 7401;
 const PROJECT = "shop";
 const RIVAL = "rival";
 const ENVIRONMENT = "production";
@@ -457,6 +462,90 @@ describe("what happens to an accepted deploy", () => {
   });
 });
 
+describe("watching a build the coordinator placed somewhere else", () => {
+  /*
+   * A deploy is accepted by whichever node the caller reached, and WHICH nodes
+   * serve the environment is decided afterwards, by the coordinator. So the node
+   * holding the deploy open is routinely not the node that starts the build —
+   * and asking only its own processes made the answer depend on which door the
+   * deploy went through, which is exactly what a client cannot know.
+   */
+
+  it("reaches routed through a node that runs nothing for the build itself", async () => {
+    const peer = await standUpPeer();
+    peer.processes.push(readyProcess(VERSION_ID));
+    await placeOn(NODE_B);
+
+    const id = (await responseId(
+      await upload(await operatorToken(), { ...meta(), flip: true }),
+    )) as string;
+
+    /* This node's own reconcile loop reports nothing at all, and the deploy is
+       routed all the same, because the node the placement named does. */
+    expect(running).toEqual([]);
+    await expect(settled(id)).resolves.toMatchObject({ state: "routed", build: VERSION_ID });
+  });
+
+  it("names the node it was watching when the build never came up there", async () => {
+    await standUpPeer();
+    await placeOn(NODE_B);
+
+    const id = (await responseId(
+      await upload(await operatorToken(), { ...meta(), flip: true }),
+    )) as string;
+
+    const status = await settled(id);
+    expect(status.state).toBe("deployed");
+    /* The one case where "nothing was ready" is not about the node answering. */
+    expect(status.warnings[0].detail).toContain(NODE_B);
+  });
+
+  it("asks nobody while the placement names this node", async () => {
+    const peer = await standUpPeer();
+    running = [readyProcess(VERSION_ID)];
+    await placeOn(OPERATOR);
+
+    const id = (await responseId(
+      await upload(await operatorToken(), { ...meta(), flip: true }),
+    )) as string;
+
+    await expect(settled(id)).resolves.toMatchObject({ state: "routed" });
+    /* The local processes are the whole answer, so the hop is never made. */
+    expect(peer.asked).toEqual([]);
+  });
+
+  it("keeps looking rather than failing the deploy when the peer cannot be reached", async () => {
+    await standUpPeer();
+    await placeOn(NODE_B);
+    agent.fetchFn = () => Promise.reject(new Error("connect ECONNREFUSED"));
+
+    const id = (await responseId(
+      await upload(await operatorToken(), { ...meta(), flip: true }),
+    )) as string;
+
+    const status = await settled(id);
+    /* The build exists and the alias points at it; an unreachable peer says
+       nothing about either, and a deploy is never failed over one. */
+    expect(status.state).toBe("deployed");
+    expect(status.warnings.map((warning) => warning.code)).toEqual(["deploy-not-routed"]);
+  });
+
+  it("asks nobody about a node the placement names that is no longer live", async () => {
+    const peer = await standUpPeer({ heartbeatAgoMs: 10 * 60_000 });
+    peer.processes.push(readyProcess(VERSION_ID));
+    await placeOn(NODE_B);
+
+    const id = (await responseId(
+      await upload(await operatorToken(), { ...meta(), flip: true }),
+    )) as string;
+
+    /* A decision outlives the node it names; a node that stopped beating is
+       counted out here exactly as it is everywhere else. */
+    await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
+    expect(peer.asked).toEqual([]);
+  });
+});
+
 describe("the wake a deploy is", () => {
   it("stamps the environment awake once the new build is serving traffic", async () => {
     running = [readyProcess(VERSION_ID)];
@@ -652,7 +741,7 @@ function fakeSupervisor(): Supervisor {
 }
 
 /** Reports whatever the test has decided is running; nothing else. */
-function fakeReconciler(): Reconciler {
+function fakeReconciler(processes: () => RuntimeProcess[] = () => running): Reconciler {
   return {
     runOnce: () => Promise.resolve([]),
     kick: () => {},
@@ -664,11 +753,78 @@ function fakeReconciler(): Reconciler {
       running: false,
       lastActions: [],
       failures: [],
-      processes: running,
+      processes: processes(),
       placements: [],
       parked: [],
     }),
   };
+}
+
+/* ---- a second node of the same installation ---- */
+
+/** A second node, its own agent app, and what this one asked it. */
+interface Peer {
+  /** Processes it reports as running; push a ready one to make it serve. */
+  processes: RuntimeProcess[];
+  /** Paths this node's agent has called on it, in order. */
+  asked: string[];
+}
+
+/**
+ * Registers a second node, stands its agent up in this process, and points this
+ * node's peer hop at it.
+ *
+ * Live by default, because that is what the placement's answer is only useful
+ * for; `heartbeatAgoMs` is how one is made stale.
+ */
+async function standUpPeer(opts: { heartbeatAgoMs?: number } = {}): Promise<Peer> {
+  const keys = await generateJWK("EdDSA", { kid: NODE_B });
+  await registerNode(clock.ctx, {
+    v: 1,
+    id: NODE_B,
+    publicKey: { kty: "OKP", crv: "Ed25519", x: keys.publicKey.x },
+    addresses: { internal: PEER_HOST, agentPort: PEER_PORT },
+    heartbeatAt: new Date(clock.nowMs() - (opts.heartbeatAgoMs ?? 0)).toISOString(),
+  });
+
+  const processes: RuntimeProcess[] = [];
+  const asked: string[] = [];
+  const peer = createAgentApp({
+    config: agentConfig(),
+    nodeId: NODE_B,
+    registry: clock.ctx,
+    supervisor: fakeSupervisor(),
+    version: "0.0.0-test",
+    reconciler: fakeReconciler(() => processes),
+  });
+
+  /* Node tokens are verified against the registry, so the hop is authenticated
+     for real here rather than waved through. */
+  agent.signingKey = operatorKeys.privateKey;
+  agent.fetchFn = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const href = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
+    const url = new URL(href);
+    if (url.host !== `${PEER_HOST}:${String(PEER_PORT)}`) {
+      return Promise.reject(new Error(`nothing answers at ${href}`));
+    }
+    asked.push(url.pathname);
+    return Promise.resolve(peer.request(url.pathname, init));
+  }) as typeof fetch;
+
+  return { processes, asked };
+}
+
+/** Records the coordinator's decision for this environment, as it would stand. */
+async function placeOn(...nodes: string[]): Promise<void> {
+  await clock.ctx.store.put(
+    placementKey(PROJECT, ENVIRONMENT),
+    JSON.stringify({
+      v: 1,
+      nodes,
+      decidedAt: new Date(clock.nowMs()).toISOString(),
+      fence: 1,
+    }),
+  );
 }
 
 function fakeRunner(): DeployRunner {
