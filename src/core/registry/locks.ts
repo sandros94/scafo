@@ -15,6 +15,7 @@
  */
 
 import { ScafoError } from "../error.ts";
+import { startBudget } from "../utils/budget.ts";
 import { isCasConflict } from "./_shared.ts";
 import { createJson, deleteKey, putJson, readJson } from "./cas.ts";
 import { nowDate, nowIso, type RegistryContext } from "./context.ts";
@@ -249,7 +250,17 @@ export function lockHolder(nodeId: string): string {
 /** Takes the lock, asking again every `pollMs` until `timeoutMs` has run out. */
 async function take(ctx: RegistryContext, request: LockRequest): Promise<LockHandle> {
   const { space, name, holder, timeoutMs } = request;
-  const deadline = Date.now() + Math.max(0, timeoutMs);
+  /*
+   * TWO CLOCKS, ON PURPOSE, AND THE LINE BETWEEN THEM IS HERE. This budget is a
+   * DURATION — how long this caller goes on asking — so it is measured on the
+   * monotonic one, like the sleeps it is spent on; a wall clock that steps
+   * forward would otherwise spend it without any time having passed and give up
+   * on a lock this caller was still entitled to wait for. Everything the RECORD
+   * carries stays on `ctx`'s wall clock: `acquiredAt`, `refreshedAt` and the
+   * staleness read off them are INSTANTS another node compares against its own,
+   * and only a shared clock makes that comparison mean anything.
+   */
+  const remaining = startBudget(timeoutMs);
   let refusal: unknown = null;
 
   for (;;) {
@@ -260,7 +271,7 @@ async function take(ctx: RegistryContext, request: LockRequest): Promise<LockHan
       refusal = error;
     }
 
-    const left = deadline - Date.now();
+    const left = remaining();
     if (left <= 0) break;
     await sleep(Math.min(space.pollMs, left));
   }

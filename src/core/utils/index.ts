@@ -6,6 +6,7 @@ export * from "./json.ts";
 export * from "./base64.ts";
 export * from "./secret.ts";
 export * from "./backoff.ts";
+export * from "./budget.ts";
 export * from "./concurrency.ts";
 export * from "./labels.ts";
 export * from "./env.ts";

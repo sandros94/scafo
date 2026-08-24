@@ -8,7 +8,7 @@
  * is the mechanism rather than the numbers.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ScafoError } from "../src/core/error.ts";
 import { readJson } from "../src/core/registry/cas.ts";
 import {
@@ -143,6 +143,58 @@ describe("waiting for a lock somebody else has", () => {
     await rejectsWith(() => withLock(clock.ctx, request({ timeoutMs: 0 }), work), "cas-conflict");
 
     expect(Date.now() - started).toBeLessThan(SPACE.pollMs * 4);
+  });
+
+  it("keeps its whole wait when the machine's clock jumps forward under it", async () => {
+    const { clock } = world();
+    const first = await acquireLock(clock.ctx, SPACE, "one", FOREIGN);
+    const timeoutMs = SPACE.pollMs * 100;
+
+    steppableWallClock();
+    try {
+      const second = withLock(clock.ctx, request({ timeoutMs }), work);
+
+      /* A jump of ten times the budget, while barely any of it has been spent. */
+      await elapse(SPACE.pollMs * 2);
+      vi.setSystemTime(Date.now() + timeoutMs * 10);
+
+      /* And the lock comes back well inside the wait it was given. */
+      await elapse(SPACE.pollMs * 2);
+      await releaseLock(clock.ctx, SPACE, first);
+
+      /* A wait budgeted on the wall clock would have been spent by the jump —
+         and this caller refused a lock nobody was holding, told it had waited
+         the whole of a wait it never got. */
+      await expect(second).resolves.toBe("done");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives up on time when the machine's clock jumps backwards under it", async () => {
+    const { clock } = world();
+    await acquireLock(clock.ctx, SPACE, "one", FOREIGN);
+    const timeoutMs = SPACE.pollMs * 20;
+    const started = performance.now();
+
+    steppableWallClock();
+    try {
+      const waiting = rejectsWith(
+        () => withLock(clock.ctx, request({ timeoutMs }), work),
+        "cas-conflict",
+      );
+
+      await elapse(SPACE.pollMs * 2);
+      vi.setSystemTime(Date.now() - timeoutMs * 20);
+      await waiting;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    /* The other half of the same rule: a jump backwards must not buy the waiter
+       time either, or a rollout told to give up in five seconds holds its pass
+       up for as long as the clock went back. */
+    expect(performance.now() - started).toBeLessThan(timeoutMs * 5);
   });
 
   it("takes over one whose holder stopped restamping it", async () => {
@@ -293,7 +345,26 @@ function work(): Promise<string> {
 
 /** Long enough for a waiting caller to have polled several times over. */
 function settle(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, SPACE.pollMs * 4));
+  return elapse(SPACE.pollMs * 4);
+}
+
+/** Real elapsed time, whatever the wall clock a case is faking says. */
+function elapse(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * A wall clock a case can JUMP, which is a thing that happens to a running node:
+ * an NTP correction, a resumed virtual machine, an operator setting the date.
+ *
+ * `Date` alone is faked, so the polls and the sleeps a wait is spent on stay
+ * real elapsed time — that separation IS the case — and it is left tracking real
+ * time so a `setSystemTime` call is the only thing that ever moves it out of
+ * step. The registry's own clock is the manual one and is untouched by any of
+ * this, so staleness is still decided by hand as everywhere else in this file.
+ */
+function steppableWallClock(): void {
+  vi.useFakeTimers({ toFake: ["Date"], shouldAdvanceTime: true, advanceTimeDelta: 1 });
 }
 
 interface Deferred<T> {

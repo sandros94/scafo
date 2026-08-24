@@ -26,6 +26,7 @@ import { readPlacement } from "../core/registry/placement.ts";
 import { stampBuildWake, stampEnvironmentWake } from "../core/registry/wake.ts";
 import { pickLeg, servingLegs } from "../core/placement/routes.ts";
 import type { NodeRecord, PlacementRecord } from "../core/types/registry.ts";
+import { startBudget } from "../core/utils/budget.ts";
 import { isProxiedHop } from "./_peer.ts";
 import { forwardWake, proxyToProcess } from "./_wake-proxy.ts";
 import type { ParkedEnvironment } from "./_desired.ts";
@@ -233,11 +234,15 @@ export function createWakeService(agent: AgentContext): WakeService {
    * re-establishes on every pass, and there is nothing here to keep in sync.
    */
   async function awaitServing(target: WakeTarget): Promise<number | undefined> {
-    const deadline = Date.now() + target.policy.wakeDeadlineS * 1000;
+    /* How long the request is held is a duration, so it is measured
+       monotonically (`utils/budget.ts`) rather than against a wall clock a step
+       could take seconds off — the caller is on the other end of this one, and
+       what it would get is a 503 for a wake that was still inside its deadline. */
+    const remaining = startBudget(target.policy.wakeDeadlineS * 1000);
     for (;;) {
       const port = servingPort(target);
       if (port !== undefined) return port;
-      if (Date.now() >= deadline) return undefined;
+      if (remaining() <= 0) return undefined;
 
       await delay(WAKE_POLL_INTERVAL_MS);
     }

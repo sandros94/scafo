@@ -27,6 +27,7 @@ import type {
   ReplicaCount,
   ScafoWarning,
 } from "../core/types/registry.ts";
+import { startBudget } from "../core/utils/budget.ts";
 import type { AgentContext } from "./app.ts";
 
 /** How long a flipped deploy waits to be observed serving traffic. */
@@ -203,14 +204,18 @@ export function createDeployService(
       return;
     }
 
-    const deadline = Date.now() + routedTimeoutMs;
+    /* A duration rather than a moment in time, so it is measured monotonically
+       (`utils/budget.ts`): a wall clock stepping forward mid-wait would cut this
+       short and warn that nothing was serving the build while the loop was still
+       bringing it up. */
+    const remaining = startBudget(routedTimeoutMs);
     for (;;) {
       if (isRouted(meta, build)) {
         await stampAwake(meta);
         update(id, { state: "routed" });
         return;
       }
-      if (Date.now() >= deadline) {
+      if (remaining() <= 0) {
         await giveUp(
           `build "${build}" was deployed and the alias flipped, but no process serving it ` +
             `had passed its readiness gate after ${String(routedTimeoutMs)}ms`,

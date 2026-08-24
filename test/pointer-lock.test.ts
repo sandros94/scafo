@@ -31,7 +31,9 @@ import { createBuild } from "../src/core/registry/builds.ts";
 import { putJson, readJson } from "../src/core/registry/cas.ts";
 import type { RegistryContext } from "../src/core/registry/context.ts";
 import { createEnvironment, flipAlias } from "../src/core/registry/environments.ts";
+import { LOCK_POLL_MS } from "../src/core/registry/locks.ts";
 import { fleetPrefix, pointerLockKey } from "../src/core/registry/paths.ts";
+import { POINTER_READ_HOLD_MS } from "../src/core/registry/pointer-lock.ts";
 import { createProject } from "../src/core/registry/projects.ts";
 import type { DeployRunInput, DeployRunner } from "../src/core/types/deploy.ts";
 import type { ProcessSpec, ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
@@ -54,6 +56,18 @@ const BASE_VERSION = "version-0000";
 
 /** How long a spawning process is given to make its one read of the pointer. */
 const READ_WINDOW_MS = 50;
+
+/**
+ * Longest the deploy can be kept from the pointer, in the mechanism's own terms.
+ *
+ * A rollout holds it for {@link POINTER_READ_HOLD_MS} past the spawn and a
+ * waiter asks again every {@link LOCK_POLL_MS}, so the publish lands up to one
+ * whole poll interval after the hold ends — on a grid nothing here controls.
+ * Every budget below is sized off that rather than off vitest's implicit second,
+ * which this race finished inside of only when the two one-second grids happened
+ * to line up.
+ */
+const PUBLISH_WAIT_MS = POINTER_READ_HOLD_MS + LOCK_POLL_MS * 2;
 
 function versionOf(build: string): string {
   return `version-${build}`;
@@ -90,7 +104,12 @@ describe("a deploy landing while a rollout is spawning", () => {
     /* And the deploy was serialized rather than lost: it lands once the rollout
        has given the pointer back. */
     await expect(world.deploying).resolves.toMatchObject({ project: PROJECT });
-    await expect.poll(() => world.events.includes(`published ${ENVIRONMENT}`)).toBe(true);
+    await expect
+      .poll(() => world.events.includes(`published ${ENVIRONMENT}`), {
+        timeout: PUBLISH_WAIT_MS,
+        interval: 25,
+      })
+      .toBe(true);
     await expect(pointerVersion(world.registry, ENVIRONMENT)).resolves.toBe(versionOf(BUILD_Y));
   });
 
@@ -267,8 +286,11 @@ async function seededWorld(opts?: WorldOptions): Promise<World> {
   const deploys = createDeployService(agent, runner, {
     routedTimeoutMs: 50,
     pollMs: 5,
-    /* Short, so a case that wedges fails instead of waiting out the real one. */
-    lockTimeoutMs: 5_000,
+    /* Twice the worst case a deploy here actually waits, so the budget is never
+       what decides a case — and still far short of the shipped
+       `DEPLOY_LOCK_TIMEOUT_MS`, so one that wedges fails rather than waiting the
+       real one out. */
+    lockTimeoutMs: PUBLISH_WAIT_MS * 2,
   });
   agent.deploys = deploys;
 
