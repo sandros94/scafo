@@ -1,57 +1,30 @@
-# The single-node playground: a bucket, one scafo node, and the scafo-caddy that
-# routes to it — all on one machine, all disposable.
+# The single-node playground. README.md is the step sheet.
 #
-#   cp .env.example .env      # and put a real token in it
+#   cp .env.example .env
 #   docker compose up -d
 #
-# README.md is the step sheet. Read it rather than guessing from here: this file
-# says what the stack IS, and the sheet says what to do with it and what you
-# should see at each step.
-#
-# EVERYTHING HERE IS THROWN AWAY BY `docker compose down -v`. The four volumes
-# below hold the whole of it — the registry, this node's identity, Caddy's own
-# state and the ingress access log — and nothing is written outside them except
-# the operator key the step sheet mints into this directory.
+# `docker compose down -v` removes all of it.
 
 name: scafo-single-node
 
 services:
-  # ---------------------------------------------------------------------------
-  # The registry: every project, build, environment and node record scafo has,
-  # as JSON objects mutated only through conditional writes. SeaweedFS is here
-  # because it is small and honours those writes; any store that does works just
-  # as well. The first node to boot PROVES the bucket honours them before
-  # anything is written for real, so a store that does not fails the boot loudly
-  # rather than corrupting state later.
+  # The registry lives in this bucket. SeaweedFS because it honours conditional
+  # writes; the first node to boot proves that before writing anything for real.
   seaweedfs:
     image: chrislusf/seaweedfs:4.42
     command: ["server", "-s3"]
     ports:
-      # Published so the CLI can reach the same bucket the node does, from the
-      # host, at http://127.0.0.1:8333. Loopback only: it holds everything.
-      #
-      # Every published port in this file is written `${VAR:-default}` because a
-      # development machine is not an empty one. A port already taken fails the
-      # `up` with a message about the port and nothing about which service
-      # wanted it, so `.env` is where you move it — the container side never
-      # changes, and neither does anything inside the stack.
       - "127.0.0.1:${SCAFO_STORE_PORT:-8333}:8333"
     volumes:
       - store:/data
 
-  # Creates the one bucket this installation lives in, then exits. It retries
-  # because SeaweedFS answers on its S3 port a good while before it is willing to
-  # serve bucket operations on it — the open port is not readiness, and this loop
-  # is what stands in for a readiness probe the image does not offer.
+  # Creates the bucket, then exits.
   #
-  # 409 COUNTS AS SUCCESS, and leaving that out is a trap worth naming: every run
-  # after the first finds the bucket already there, SeaweedFS answers
-  # `409 BucketAlreadyOwnedByYou`, and a loop that only accepts 2xx spins on it
-  # forever — with the node stuck behind `service_completed_successfully` and
-  # nothing in its logs, because it never started. A bucket that exists is the
-  # outcome this service wants.
-  #
-  # A real installation makes its bucket once, by hand or in its own provisioning.
+  # 409 COUNTS AS SUCCESS. Every run after the first finds the bucket there and
+  # SeaweedFS answers `409 BucketAlreadyOwnedByYou`; a loop accepting only 2xx
+  # spins forever with the node stuck behind `service_completed_successfully`
+  # and nothing in its logs. It retries because SeaweedFS answers on its S3 port
+  # well before it will serve bucket operations on it.
   bucket:
     image: curlimages/curl:8.18.0
     depends_on:
@@ -65,87 +38,51 @@ services:
         do sleep 1; done
         echo "bucket \"scafo\": HTTP $$code"
 
-  # ---------------------------------------------------------------------------
-  # The node: the agent, the celld processes it supervises, and the deploy
-  # intake. One of these per machine.
   node:
     image: scafo:local
-    # No `build:` on purpose. The playground runs the image an operator would
-    # run, built once by hand (see ../README.md), so that a stack coming up
-    # slowly is never the image being rebuilt underneath you.
+    # No `build:` on purpose: the image is built by hand (see ../README.md) so a
+    # slow `up` is never a rebuild happening underneath you.
     depends_on:
       bucket:
         condition: service_completed_successfully
 
-    # THIRTY-FIVE SECONDS, AND NOT DOCKER'S DEFAULT TEN.
-    #
-    # On SIGTERM the node marks itself as draining so the fleet stops giving it
-    # work, releases the coordinator lease, stops reconciling, and only then
-    # stops the celld processes serving traffic — each of which drains its
-    # in-flight requests for 25s and is given 30s before it is killed. Ten
-    # seconds cuts that off in the middle: requests are dropped mid-flight and
-    # the fleet has to time the node out rather than being told it left.
+    # NOT DOCKER'S DEFAULT TEN. On SIGTERM the node marks itself draining,
+    # releases the coordinator lease, stops reconciling, and only then stops the
+    # processes serving traffic — each draining in-flight requests for 25s. Ten
+    # seconds cuts that off mid-drain.
     stop_grace_period: 35s
 
     ports:
-      # Caddy shares this container's network namespace, so ITS ports are
-      # published here — a container that joins another's namespace has no
-      # network of its own to publish from.
+      # Caddy shares this container's network namespace, so ITS port is
+      # published here: a container joining another's namespace has no network
+      # of its own to publish from.
       - "${SCAFO_HTTP_PORT:-80}:80"
-      # Caddy's admin API is NOT here, and that is deliberate. It can rewrite
-      # everything Caddy serves, so caddy.json keeps it on 127.0.0.1:2019 —
-      # exactly what examples/caddy.json does — where the node reaches it across
-      # the shared namespace and nothing else can. A published port would forward
-      # to the container's own address rather than to its loopback, so exposing
-      # it would mean binding it wide and naming trusted origins. The step sheet
-      # reads it with `docker compose exec caddy wget …` instead, which needs
-      # none of that.
+      # The agent API, on your loopback only — it accepts deploys.
       #
-      # The agent API, on your loopback only: it accepts deploys and commands
-      # this node, so it belongs on a network you trust rather than on 0.0.0.0.
+      # Caddy's admin API is deliberately NOT published: it can rewrite
+      # everything Caddy serves, so caddy.json keeps it on 127.0.0.1:2019 where
+      # the node reaches it across the shared namespace and nothing else can.
       - "127.0.0.1:${SCAFO_AGENT_PORT:-7400}:7400"
 
     volumes:
-      # A node IS its keypair. The id it registers under, the Ed25519 pair that
-      # signs for it, and the storage token below all live in this volume.
+      # A NODE IS ITS KEYPAIR, and this volume holds it.
       - state:/var/lib/scafo
-      # The file Caddy writes its access log to, shared with the ingress
-      # container so the node can read it and count what was served.
+      # Shared with the ingress: the access log the node counts requests off.
       - ingress-log:/var/log/scafo-ingress
-      # Everything about this node that is not a secret. Read because of the
-      # `--config` flag below; a node given no flag looks for
-      # ./scafo.config.jsonc in its working directory and finds none.
       - ./scafo.config.jsonc:/etc/scafo/scafo.config.jsonc:ro
 
     environment:
-      # The two bucket credentials, and the one token below. Everything else is
-      # in scafo.config.jsonc, where it can be read.
       SCAFO_S3_ACCESS_KEY: ${SCAFO_S3_ACCESS_KEY:?set SCAFO_S3_ACCESS_KEY in .env}
       SCAFO_S3_SECRET_KEY: ${SCAFO_S3_SECRET_KEY:?set SCAFO_S3_SECRET_KEY in .env}
-
-      # THE ONE VALUE TWO SERVICES SHARE, and the whole of what the ingress needs
-      # to store its TLS material through this node. The agent admits it on
-      # /v1/storage; Caddy presents it. Neither holds a bucket credential for the
-      # other, and rotating it never involves the store.
-      #
-      # Supplying it REPLACES the token this node would otherwise mint for
-      # itself, and the value is still written to /var/lib/scafo/storage-token so
-      # anything that reads that file goes on working.
-      #
-      # The `:?` is load-bearing. A node given this variable set to NOTHING
-      # refuses to boot — an empty token would admit a caller presenting nothing
-      # — so compose is told to refuse first, with a message that names the file
-      # to fix. Never write `${SCAFO_STORAGE_TOKEN:-}` here.
+      # THE `:?` IS LOAD-BEARING. A node given this set to NOTHING refuses to
+      # boot, so compose is told to refuse first, naming the file to fix. Never
+      # write `${SCAFO_STORAGE_TOKEN:-}` here.
       SCAFO_STORAGE_TOKEN: ${SCAFO_STORAGE_TOKEN:?set SCAFO_STORAGE_TOKEN in .env}
 
     command: ["up", "--config", "/etc/scafo/scafo.config.jsonc"]
 
-    # The agent's own account of whether it is up. `curl` and `wget` are not in
-    # this image — it is node:24-slim plus what a node needs — so the check is
-    # written in the runtime that IS: awkward to read, and the honest way to ask.
-    #
-    # /v1/health is one of the two routes that answer without a key. It reports
-    # on the AGENT: it says nothing about whether any application is serving.
+    # `curl` and `wget` are not in this image, so the check is written in the
+    # runtime that is.
     healthcheck:
       test:
         - CMD
@@ -157,34 +94,17 @@ services:
       retries: 30
       start_period: 10s
 
-  # ---------------------------------------------------------------------------
-  # The ingress. It SHARES THE NODE'S NETWORK NAMESPACE, which is the whole
-  # topology in one line: the celld processes bind 127.0.0.1 and nothing else,
-  # Caddy dials them there, the node converges Caddy's admin API on the same
-  # loopback, and Caddy reaches the node's storage API there too. Neither ever
-  # exposes a runtime port to the network.
+  # IT SHARES THE NODE'S NETWORK NAMESPACE, which is the whole topology: the
+  # runtime processes bind 127.0.0.1 and Caddy dials them there, the node
+  # converges Caddy's admin API on the same loopback, and Caddy reaches the
+  # node's storage API there too. Nothing exposes a runtime port.
   #
-  # THE START ORDER IS NOT A PREFERENCE. scafo-caddy fills its certificate cache
-  # from storage when it starts, and storage is this node — so a Caddy that
-  # starts before the agent has nothing to read and no way to serve TLS until it
-  # is restarted. `service_healthy` rather than `service_started` is what makes
-  # the dependency mean the agent is really answering. A RUNNING Caddy is
-  # unaffected by the agent going away: handshakes are served from its own
-  # memory, and only renewals fail and retry.
-  # `:edge` AND NOT `:latest`, AND THE DIFFERENCE IS THE POINT OF THIS
-  # PLAYGROUND. caddy.json below hands the module its token INLINE, as
-  # `"token": "{env.SCAFO_STORAGE_TOKEN}"`. That spelling is newer than the
-  # v0.1.0 release `:latest` points at, and an older module does not ignore the
-  # field — it refuses the whole configuration:
+  # `service_healthy` AND NOT `service_started`: scafo-caddy fills its
+  # certificate cache from storage at boot, and storage is this node.
   #
-  #   Error: loading initial config: ... caddy.storage.scafo:
-  #   json: unknown field "token"
-  #
-  # Caddy exits 1, the node stays healthy, and nothing routes. Until there is a
-  # release carrying it, `:edge` — the head of the scafo-certmagic repository —
-  # is the tag with the inline form in it. `token_file` works on both, and is
-  # what ../../scripts/install.sh writes on bare metal, where the file's
-  # permissions are the whole point.
+  # `:edge` AND NOT `:latest`: caddy.json passes the token inline, and the
+  # v0.1.0 module `:latest` points at refuses that field outright —
+  # `json: unknown field "token"`, Caddy exits 1, nothing routes.
   caddy:
     image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:edge}
     network_mode: "service:node"
@@ -193,18 +113,10 @@ services:
         condition: service_healthy
     command: ["caddy", "run", "--config", "/etc/caddy/config.json"]
     environment:
-      # The same value the node admits. Caddy resolves `{env.…}` in caddy.json
-      # when storage is provisioned and never writes it back, so neither the
-      # config file nor a config dump carries the token — only this process.
       SCAFO_STORAGE_TOKEN: ${SCAFO_STORAGE_TOKEN:?set SCAFO_STORAGE_TOKEN in .env}
     volumes:
       - ./caddy.json:/etc/caddy/config.json:ro
-      # The same volume the node mounts, which is the whole of how the access log
-      # gets from the ingress to the node.
       - ingress-log:/var/log/scafo-ingress
-      # Caddy's own directories. NOT where its certificates go — those live in
-      # the bucket, reached through the node — but Caddy writes an instance id
-      # and its last configuration here regardless.
       - caddy-data:/data
       - caddy-config:/config
     healthcheck:
@@ -215,18 +127,13 @@ services:
       retries: 30
       start_period: 5s
 
-  # ---------------------------------------------------------------------------
-  # The `scafo` CLI, as a container, so the playground needs nothing on your
-  # machine but docker. `profiles` keeps it out of `docker compose up`: it is a
-  # one-shot command, never a service.
+  # The CLI as a one-shot container, for anyone who would rather install no node
+  # toolchain: `docker compose run --rm cli <args>`. `profiles` keeps it out of
+  # `up`. It reaches the node at http://node:7400, on this stack's own network.
   #
-  #   docker compose run --rm cli keygen --config /work/scafo.config.jsonc --register
-  #
-  # THE `user:` LINE IS THE AWKWARD PART, and it is not glue. The image runs as
-  # uid 10001 so a node's identity is not written by root; this directory belongs
-  # to you; and the CLI writes the operator key into it. Something has to say
-  # which of those two wins, and compose has no way to ask the host. Set
-  # SCAFO_CLI_USER in .env to your own `id -u`:`id -g` if the default is wrong.
+  # `user:` is not glue: the image runs as uid 10001, this directory is yours,
+  # and the CLI writes the operator home into it. Set SCAFO_CLI_USER in .env to
+  # your own `id -u`:`id -g` if the default is wrong.
   cli:
     image: scafo:local
     profiles: ["cli"]
@@ -235,6 +142,7 @@ services:
     volumes:
       - ./:/work
     environment:
+      SCAFO_HOME: /work/.scafo
       SCAFO_S3_ACCESS_KEY: ${SCAFO_S3_ACCESS_KEY:?set SCAFO_S3_ACCESS_KEY in .env}
       SCAFO_S3_SECRET_KEY: ${SCAFO_S3_SECRET_KEY:?set SCAFO_S3_SECRET_KEY in .env}
 
