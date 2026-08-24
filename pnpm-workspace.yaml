@@ -16,7 +16,8 @@ ignoredBuiltDependencies:
   - uns3
 
 minimumReleaseAgeExclude:
-  - uns3@0.0.8
+  - uns3
+  - tavolato
 
 onlyBuiltDependencies:
   - simple-git-hooks
