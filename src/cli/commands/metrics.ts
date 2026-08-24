@@ -17,7 +17,8 @@ import { loadAgentConfig } from "../../agent/config.ts";
 import { counterRecords } from "../../agent/observe-records.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
 import { createRegistry } from "../_bootstrap.ts";
-import { formatMetrics, noCounters, summarizeMetrics } from "../_metrics.ts";
+import { formatMetrics, noCounters, projectsCounted, summarizeMetrics } from "../_metrics.ts";
+import { readMetricsNaming } from "../_metrics-names.ts";
 import { nothingRecorded, readObservations, windowFrom } from "../_observe-read.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
 
@@ -61,7 +62,12 @@ async function runMetrics(flags: Record<string, unknown>): Promise<void> {
   const registry = await registryFor(flags);
 
   const found = await readObservations(registry, { window });
+  /* What the counted names ARE, rather than what the counting node guessed they
+     were: a build's own host is that build's, and a label no project answers to
+     is nobody's. Only the projects this window named are looked up. */
+  const naming = await readMetricsNaming(registry, projectsCounted(found.records));
   const summary = summarizeMetrics(found.records, window, {
+    naming,
     ...(text(flags.project) === undefined ? {} : { project: text(flags.project) as string }),
     ...(text(flags.env) === undefined ? {} : { env: text(flags.env) as string }),
   });

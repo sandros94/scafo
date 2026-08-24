@@ -74,3 +74,45 @@ export async function writeStorageToken(stateDir: string, token: string): Promis
 
   await writeSecretFile(stateDir, path, `${token}\n`);
 }
+
+/**
+ * What the boot says about this token, said once because the operator has to act
+ * on it.
+ *
+ * WHICH HANDOFF IT IS DEPENDS ON WHERE THE TOKEN CAME FROM, and telling an
+ * operator the wrong one sends them to configure something they already have. A
+ * MINTED token exists nowhere but the file this node just wrote, so the file is
+ * the distribution channel and mounting it read-only into the process that
+ * terminates TLS is the instruction. A SUPPLIED one arrived through the
+ * operator's own configuration — their environment, their secret manager, their
+ * systemd credential — and that is already the channel; the file is written all
+ * the same, so that a consumer reading a path keeps working, and saying so is
+ * all this line owes them.
+ *
+ * `supplied` is how many tokens `storage.token` named, and `0` means the node
+ * minted its own. More than one is a rotation in progress, which gets a second
+ * line: this node admits them all, so the move is the operator's to make and to
+ * finish.
+ */
+export function storageTokenNotice(opts: { path: string; supplied: number }): string[] {
+  if (opts.supplied === 0) {
+    return [
+      `scafo: storage token at ${opts.path}; mount it read-only into the process that ` +
+        `terminates TLS`,
+    ];
+  }
+
+  if (opts.supplied === 1) {
+    return [
+      `scafo: storage token supplied by "storage.token"; ${opts.path} holds it, for whatever ` +
+        `reads the file rather than the setting`,
+    ];
+  }
+
+  return [
+    `scafo: storage token supplied by "storage.token", which names ${String(opts.supplied)}; ` +
+      `${opts.path} holds the primary, for whatever reads the file rather than the setting`,
+    `scafo: this node admits every one of them; move what stores through it onto the primary, ` +
+      `then contract the setting to that token alone and restart`,
+  ];
+}

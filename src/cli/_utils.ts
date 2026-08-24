@@ -86,8 +86,17 @@ export async function readPackageVersion(): Promise<string> {
 
 /**
  * Prints a failure the way the API would answer it — problem title, detail and
- * type — and marks the process as failed. Errors from elsewhere are printed
- * whole, stack included, because nothing else knows what they mean.
+ * type — and marks the process as failed.
+ *
+ * A FAILURE SCAFO NEVER WRAPPED IS PRINTED IN THE SAME SHAPE, never as a raw
+ * stack. An `EACCES` on a state directory, a refused connection, a full disk:
+ * these are ordinary ways for a command to end, and a Node stack trace in front
+ * of one tells an operator that scafo crashed rather than that a directory is
+ * not writable. So it becomes one line saying what was raised and what that says
+ * it was caused by — the message is where the useful specifics of a runtime
+ * failure are (`EACCES: permission denied, open '<path>'` names the syscall and
+ * the path), and the frames above it name only scafo's own call stack, which is
+ * the one thing the operator cannot act on.
  */
 export function reportFailure(error: unknown): void {
   if (isScafoError(error)) {
@@ -95,7 +104,41 @@ export function reportFailure(error: unknown): void {
     const detail = problem.detail === undefined ? "" : `: ${problem.detail}`;
     console.error(`scafo: ${problem.title}${detail} [${problem.type}]`);
   } else {
-    console.error(error);
+    console.error(`scafo: unexpected failure: ${describeUnexpected(error)}`);
   }
   process.exitCode = 1;
+}
+
+/** Causes followed past the error itself; deep enough for a wrapped fetch failure. */
+const MAX_CAUSE_DEPTH = 4;
+
+/**
+ * One line for a failure scafo never wrapped: what it says, then what each of
+ * its causes says.
+ *
+ * The chain is what carries the reason in the common case — `fetch` reports
+ * `TypeError: fetch failed` and puts the refused connection in its `cause`, so a
+ * renderer that stopped at the top would print nothing an operator could act on.
+ */
+function describeUnexpected(error: unknown): string {
+  const said: string[] = [];
+
+  let current: unknown = error;
+  while (current !== undefined && current !== null && said.length <= MAX_CAUSE_DEPTH) {
+    said.push(oneError(current));
+    current = current instanceof Error ? current.cause : undefined;
+  }
+  return said.join(", caused by ");
+}
+
+/**
+ * One error as a line. The class name is kept only when it says something — a
+ * `TypeError` is worth naming, and the bare `Error` every `fs` failure carries
+ * is not.
+ */
+function oneError(value: unknown): string {
+  if (!(value instanceof Error)) return String(value);
+  return value.name === "Error" || value.name === ""
+    ? value.message
+    : `${value.name}: ${value.message}`;
 }

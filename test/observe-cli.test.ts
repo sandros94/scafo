@@ -23,7 +23,15 @@ import {
   observeParquetRow,
   PARQUET_CODEC,
 } from "../src/agent/observe-parquet.ts";
-import { bandAt, formatMetrics, noCounters, summarizeMetrics } from "../src/cli/_metrics.ts";
+import {
+  bandAt,
+  formatMetrics,
+  type MetricsNaming,
+  noCounters,
+  projectsCounted,
+  summarizeMetrics,
+  UNMATCHED,
+} from "../src/cli/_metrics.ts";
 import {
   nothingRecorded,
   OBSERVE_READ_SLACK_MS,
@@ -32,6 +40,9 @@ import {
   windowFrom,
 } from "../src/cli/_observe-read.ts";
 import { formatTraces, formatWakeTimeline, selectTraces } from "../src/cli/_traces.ts";
+import { readMetricsNaming } from "../src/cli/_metrics-names.ts";
+import { traces } from "../src/cli/commands/traces.ts";
+import { createBuild, createEnvironment, createProject } from "../src/core/registry/index.ts";
 import type { RegistryContext } from "../src/core/registry/context.ts";
 import { observeKey } from "../src/core/registry/paths.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
@@ -39,6 +50,9 @@ import { CLOCK_START_MS, rejectsWith } from "./_helpers.ts";
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
+
+/** A build id as the runtime hands them out: lowercase hex, and not a name. */
+const BUILD = "b1b1b1b1c2c2c2c2";
 
 let store: MemoryCasStore;
 let registry: RegistryContext;
@@ -461,6 +475,129 @@ describe("what the metrics come to", () => {
   });
 });
 
+describe("whose traffic a counted host actually was", () => {
+  const window = { sinceMs: CLOCK_START_MS - HOUR_MS, untilMs: CLOCK_START_MS };
+
+  /** What the registry holds, for the cases below to be read against. */
+  const naming: MetricsNaming = {
+    projects: new Set(["shop"]),
+    environments: new Map([["shop", new Set(["production", "preview-7"])]]),
+    builds: new Map([["shop", new Set([BUILD])]]),
+  };
+
+  it("reads a build's own host as the project it belongs to, never as an environment of it", () => {
+    /* A node counts an UNROUTED `<project>--<ref>` host by the platform grammar,
+       which cannot tell a build id from an environment name — so a build's hash
+       host arrives here labelled as an environment called `<build id>`, which is
+       an environment nobody ever made. */
+    const records = run("shop", BUILD, 40, 140);
+
+    const summary = summarizeMetrics(records, window, { naming });
+
+    expect(summary.rows).toHaveLength(1);
+    expect(summary.rows[0].project).toBe("shop");
+    expect(summary.rows[0].env).toBe(`(build ${BUILD.slice(0, 12)})`);
+    expect(summary.rows[0].requests).toBe(100);
+  });
+
+  it("keeps an environment the registry really holds exactly as it was counted", () => {
+    const summary = summarizeMetrics(run("shop", "preview-7", 5, 25), window, { naming });
+
+    expect(summary.rows).toMatchObject([{ project: "shop", env: "preview-7", requests: 20 }]);
+  });
+
+  it("never invents a project out of a host nothing serves", () => {
+    /* `wat.apps.test` parses as a project label perfectly well, and a scanner
+       walking the platform domain produces a thousand of them. */
+    const summary = summarizeMetrics(run("wat", "production", 0, 9), window, { naming });
+
+    expect(summary.rows).toMatchObject([{ project: UNMATCHED, env: UNMATCHED, requests: 9 }]);
+  });
+
+  it("puts a real project's unknown ref under the same unmatched row", () => {
+    const summary = summarizeMetrics(run("shop", "typo", 0, 3), window, { naming });
+
+    expect(summary.rows).toMatchObject([{ project: UNMATCHED, env: UNMATCHED, requests: 3 }]);
+  });
+
+  it("gathers what the node could not attribute at all into that one row", () => {
+    const records = [...run("-", "-", 0, 11), ...run("wat", "production", 0, 4)];
+
+    const summary = summarizeMetrics(records, window, { naming });
+
+    /* One row, whichever way a host failed to name something: an address, a
+       domain this installation never minted, a label no project answers to. */
+    expect(summary.rows).toMatchObject([{ project: UNMATCHED, env: UNMATCHED, requests: 15 }]);
+  });
+
+  it("filters on what a row turned out to be, not on what the counter wrote", () => {
+    const records = [...run("shop", BUILD, 0, 60), ...run("wat", "production", 0, 4)];
+
+    const summary = summarizeMetrics(records, window, { naming, project: "shop" });
+
+    expect(summary.rows).toMatchObject([{ project: "shop", requests: 60 }]);
+  });
+
+  it("leaves every name alone when nothing was read back about them", () => {
+    /* Without a registry to check against there is nothing to correct, and
+       guessing would be exactly the failure this fixes. */
+    const summary = summarizeMetrics(run("shop", BUILD, 0, 8), window);
+
+    expect(summary.rows).toMatchObject([{ project: "shop", env: BUILD, requests: 8 }]);
+  });
+
+  it("reads back what the registry holds, for those projects and no others", async () => {
+    await createProject(registry, { slug: "shop" });
+    await createEnvironment(registry, "shop", { name: "production" });
+    await createBuild(registry, "shop", {
+      id: BUILD,
+      celldVersionId: BUILD,
+      runtimeConfigurable: false,
+      environment: "production",
+    });
+    await createProject(registry, { slug: "untouched" });
+
+    const read = await readMetricsNaming(registry, ["shop", "wat"]);
+
+    expect(read.projects.has("shop")).toBe(true);
+    /* A label under a platform domain that no project answers to. */
+    expect(read.projects.has("wat")).toBe(false);
+    expect([...(read.environments.get("shop") ?? [])]).toEqual(["production"]);
+    expect([...(read.builds.get("shop") ?? [])]).toEqual([BUILD]);
+    /* A project this window never counted costs no listing at all. */
+    expect(read.environments.has("untouched")).toBe(false);
+  });
+
+  it("names the projects a window counted, so only those have to be read back", () => {
+    const records = [
+      ...run("shop", BUILD, 0, 1),
+      ...run("-", "-", 0, 1),
+      ...run("blog", "production", 0, 1),
+    ];
+
+    /* The unattributed bucket is not a project and is never looked up. */
+    expect(projectsCounted(records)).toEqual(["blog", "shop"]);
+  });
+
+  /** One node's run of one `{project, env}`: a baseline in the window, and its end. */
+  function run(project: string, env: string, from: number, to: number): ObserveRecord[] {
+    return [
+      counters("node-a", CLOCK_START_MS - 50 * MINUTE_MS, {
+        project,
+        env,
+        requests: from,
+        bytes: from * 10,
+      }),
+      counters("node-a", CLOCK_START_MS - 5 * MINUTE_MS, {
+        project,
+        env,
+        requests: to,
+        bytes: to * 10,
+      }),
+    ];
+  }
+});
+
 describe("what the traces come to", () => {
   const window = { sinceMs: CLOCK_START_MS - HOUR_MS, untilMs: CLOCK_START_MS };
 
@@ -481,6 +618,20 @@ describe("what the traces come to", () => {
       event("node-a", startMs + 92, { type: "wake.kicked", id }),
       event("node-a", startMs + 812, { type: "wake.served", id, port: 41_001, status: 200 }),
     ];
+  }
+
+  /** What a node emits on its own timer while nothing at all is happening. */
+  function passes(count: number): ObserveEventRecord[] {
+    return Array.from({ length: count }, (_unused, index) =>
+      event("node-a", CLOCK_START_MS - (count - index) * 5_000, {
+        type: "reconcile.pass.end",
+        actions: 0,
+        failures: 0,
+        storeOps: 6,
+        listOps: 1,
+        durationMs: 12,
+      }),
+    );
   }
 
   it("shows the newest when there are more than the limit, and says how many it left out", () => {
@@ -555,18 +706,64 @@ describe("what the traces come to", () => {
     expect(rendered).toContain("observability.enabled");
   });
 
+  it("leaves the reconcile loop's own passes out of a listing nobody narrowed", () => {
+    /* A node reconciles every 5s whether or not anything is happening, so a
+       window of any length is mostly this — and it is the one thing in the
+       catalog nobody is ever debugging when they run `scafo traces` with no
+       arguments at all. */
+    const records = [...passes(40), ...wakeTimeline("8f3a", CLOCK_START_MS - MINUTE_MS)];
+
+    const selection = selectTraces(records);
+
+    expect(selection.events.every((record) => !record.type.startsWith("reconcile."))).toBe(true);
+    expect(selection.events).toHaveLength(5);
+    expect({ matched: selection.matched, hidden: selection.hidden }).toEqual({
+      matched: 5,
+      hidden: 40,
+    });
+  });
+
+  it("does not let the passes it hid take the window's room", () => {
+    /* The trap the default is for: 40 passes and 5 wake events under a limit of
+       10 used to show two of the wake events and thirty-eight passes. */
+    const records = [...passes(40), ...wakeTimeline("8f3a", CLOCK_START_MS - MINUTE_MS)];
+
+    const selection = selectTraces(records, { limit: 10 });
+
+    expect(selection.events).toHaveLength(5);
+    expect(selection.omitted).toBe(0);
+  });
+
+  it("shows them again when the caller asks for all of it", () => {
+    const records = [...passes(40), ...wakeTimeline("8f3a", CLOCK_START_MS - MINUTE_MS)];
+
+    const selection = selectTraces(records, { all: true });
+
+    expect(selection.matched).toBe(45);
+    expect(selection.hidden).toBe(0);
+  });
+
+  it("takes --all as the way to see them", () => {
+    /* The default hides events a node really did record, so the command has to
+       carry the way back to them. */
+    expect(traces.args).toHaveProperty("all");
+  });
+
   it("renders every field an event carried, whatever the event is", () => {
     const rendered = formatTraces(
-      selectTraces([
-        event("node-a", CLOCK_START_MS, {
-          type: "reconcile.pass.end",
-          actions: 2,
-          failures: 0,
-          storeOps: 17,
-          listOps: 3,
-          durationMs: 412,
-        }),
-      ]),
+      selectTraces(
+        [
+          event("node-a", CLOCK_START_MS, {
+            type: "reconcile.pass.end",
+            actions: 2,
+            failures: 0,
+            storeOps: 17,
+            listOps: 3,
+            durationMs: 412,
+          }),
+        ],
+        { all: true },
+      ),
     );
 
     /* Derived rather than per-type, so an event variant added later prints its

@@ -41,7 +41,7 @@ import {
   nodeStateDir,
   registerThisNode,
 } from "../_bootstrap.ts";
-import { STORAGE_TOKEN_FILE } from "../_storage-token.ts";
+import { STORAGE_TOKEN_FILE, storageTokenNotice } from "../_storage-token.ts";
 import { readPackageVersion, readTextFile, reportFailure } from "../_utils.ts";
 
 /* Flag names are kebab-case, matching the keys `loadAgentConfig` reads them under. */
@@ -275,21 +275,15 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
      the only process on the machine holding a credential for it. */
   const storage = createStorageService(agent, { tokens: storageTokens });
   agent.storage = storage;
-  /* Said once, because the operator has to go get it: the file is what a
-     colocated ingress presents to store its TLS material through this node. */
-  console.log(
-    `scafo: storage token at ${join(nodeStateDir(config), STORAGE_TOKEN_FILE)}; ` +
-      `mount it read-only into the process that terminates TLS`,
-  );
-  /* Said only mid-rotation, and it is the half the operator drives: this node is
-     already admitting both, so the callers can be moved over and the set brought
-     back down to the one in use. */
-  if (storageTokens.length > 1) {
-    console.log(
-      `scafo: "storage.token" names ${String(storageTokens.length)} tokens and this node admits ` +
-        `every one of them; the file above holds the first. Move what stores through this node ` +
-        `onto it, then contract the setting to that token alone and restart`,
-    );
+  /* Said once, because the operator has to act on it — and what they have to do
+     depends on where the token came from: a minted one is distributed by the
+     file, a supplied one arrived through their own configuration and the file is
+     only there for whatever reads a path. */
+  for (const line of storageTokenNotice({
+    path: join(nodeStateDir(config), STORAGE_TOKEN_FILE),
+    supplied: config.storage?.token?.length ?? 0,
+  })) {
+    console.log(line);
   }
 
   const baseEnv = runtimeBaseEnv(process.env);

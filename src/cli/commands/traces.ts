@@ -9,6 +9,12 @@
  * gives carries `x-scafo-wake`, so a caller with a slow or failed request has
  * the id already, and this lays out what the node did about that one request
  * with the gaps between the steps visible.
+ *
+ * THE RECONCILE LOOP'S OWN PASSES ARE LEFT OUT UNLESS `--all` ASKS FOR THEM.
+ * Every node emits two of them every 5s whether or not anything happened, so a
+ * default window is otherwise nothing but housekeeping and the deploys, wakes,
+ * rollouts and gates a reader came for are the ones pushed out of it. How many
+ * were held back is always said.
  */
 
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
@@ -43,6 +49,12 @@ const tracesArgs: ArgsDef = {
     description: "How far back to read: a duration (90s, 15m, 1h, 7d) or an ISO-8601 instant (1h)",
   },
   limit: { type: "string", description: "Events to show at most, newest kept (200)" },
+  all: {
+    type: "boolean",
+    description:
+      "Include the reconcile loop's own passes, which every node emits every 5s whether or " +
+      "not anything happened; left out by default so they cannot fill the window",
+  },
   json: { type: "boolean", description: "Print the events as JSON instead of lines" },
 };
 
@@ -71,6 +83,7 @@ async function runTraces(flags: Record<string, unknown>): Promise<void> {
   const selection = selectTraces(found.records, {
     ...(wake === undefined ? {} : { wake }),
     ...(text(flags.project) === undefined ? {} : { project: text(flags.project) as string }),
+    ...(flags.all === true ? { all: true } : {}),
     ...limit,
   });
 
@@ -83,6 +96,7 @@ async function runTraces(flags: Record<string, unknown>): Promise<void> {
           events: selection.events,
           matched: selection.matched,
           omitted: selection.omitted,
+          hidden: selection.hidden,
           files: found.files,
           malformed: found.malformed,
         },
@@ -99,7 +113,9 @@ async function runTraces(flags: Record<string, unknown>): Promise<void> {
   }
 
   if (selection.events.length === 0) {
-    console.log(nothingRecorded(found, window));
+    console.log(
+      selection.hidden > 0 ? onlyPasses(selection.hidden) : nothingRecorded(found, window),
+    );
     return;
   }
 
@@ -110,9 +126,31 @@ async function runTraces(flags: Record<string, unknown>): Promise<void> {
         `${String(selection.matched)}; raise --limit or narrow --since`,
     );
   }
+  /* Never silently: they are events the node really did record, and a reader who
+     came looking for one of them has to be told where it went. */
+  if (selection.hidden > 0) {
+    console.log(
+      `scafo: ${String(selection.hidden)} reconcile pass event(s) left out; --all shows them`,
+    );
+  }
   if (found.malformed > 0) {
     console.log(`scafo: ${String(found.malformed)} row(s) were not records and were skipped`);
   }
+}
+
+/**
+ * What a window holding nothing but reconcile passes says.
+ *
+ * Distinct from having found nothing at all, and the distinction is the useful
+ * one: the nodes ARE observing and ARE writing, and this window simply holds
+ * none of what a person debugs with.
+ */
+function onlyPasses(hidden: number): string {
+  return (
+    `scafo: nothing to show — the ${String(hidden)} event(s) in this window are all reconcile ` +
+    `passes, which every node emits every 5s whether or not anything happened. ` +
+    `--all shows them`
+  );
 }
 
 /** `--limit` as the selector takes it, or nothing when it was not given. */

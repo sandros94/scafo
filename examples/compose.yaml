@@ -42,20 +42,35 @@ services:
     volumes:
       - store:/data
 
-  # Creates the one bucket this installation lives in, then exits. A real
-  # installation makes the bucket once, by hand or in its own provisioning.
+  # Creates the one bucket this installation lives in, then exits. It retries
+  # because SeaweedFS answers on its S3 port a good while before it is willing to
+  # serve bucket operations on it — the open port is not readiness, and this loop
+  # is what stands in for a readiness probe the image does not offer.
+  #
+  # 409 COUNTS AS SUCCESS, and leaving that out is a trap worth naming: every run
+  # after the first finds the bucket already there, SeaweedFS answers
+  # `409 BucketAlreadyOwnedByYou`, and a loop that only accepts 2xx spins on it
+  # forever — with the node stuck behind `service_completed_successfully` and
+  # nothing in its logs, because it never started. A bucket that exists is the
+  # outcome this service wants.
+  #
+  # A real installation makes its bucket once, by hand or in its own provisioning.
   #
   # ONE BUCKET AND PREFIX IS ONE FLEET. Two installations sharing them share
   # every record and will fight over the coordinator lease; two that differ in
   # either share nothing at all.
   bucket:
-    image: curlimages/curl:latest
+    image: curlimages/curl:8.18.0
     depends_on:
       - seaweedfs
     command:
       - sh
       - -c
-      - "until curl -fsS -X PUT http://seaweedfs:8333/scafo; do sleep 1; done"
+      - |
+        until code=$$(curl -sS -o /dev/null -w '%{http_code}' -X PUT http://seaweedfs:8333/scafo)
+              [ "$$code" = 200 ] || [ "$$code" = 409 ]
+        do sleep 1; done
+        echo "bucket \"scafo\": HTTP $$code"
 
   # The node: the agent, the celld processes it supervises, and the deploy
   # intake. One of these per machine.
