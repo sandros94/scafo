@@ -7,13 +7,13 @@
  * what makes a lock going stale a matter of one line rather than of ten seconds.
  */
 
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { H3 } from "h3";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { type AgentContext, createAgentApp } from "../src/agent/app.ts";
-import type { AgentConfig } from "../src/agent/config.ts";
+import { type AgentConfig, loadAgentConfig } from "../src/agent/config.ts";
 import {
   createStorageService,
   STORAGE_TOKEN_BYTES,
@@ -21,7 +21,12 @@ import {
   STORAGE_VERSION_HEADER,
   type StorageService,
 } from "../src/agent/storage.ts";
-import { loadOrCreateStorageToken, STORAGE_TOKEN_FILE } from "../src/cli/_storage-token.ts";
+import { loadStorageTokens } from "../src/cli/_bootstrap.ts";
+import {
+  loadOrCreateStorageToken,
+  STORAGE_TOKEN_FILE,
+  writeStorageToken,
+} from "../src/cli/_storage-token.ts";
 import {
   acquireTlsLock,
   type TlsLock,
@@ -38,6 +43,17 @@ const NODE_ID = "node-a";
 const VERSION = "0.0.0-test";
 const TOKEN = "SdUvvcE1nlEQm4iJ4Nx6BdxUjHZ2Uzt4vPXH0cQnJKk";
 const FOREIGN = "someone-else";
+
+/** A set an operator supplied, primary first, as one reads mid-rotation. */
+const SUPPLIED: string[] = ["new-token", "old-token", "older-token"];
+
+/** What a configuration needs before it can name anything else. */
+const BUCKET_ENV: Record<string, string> = {
+  SCAFO_S3_ENDPOINT: "http://store.test:9000",
+  SCAFO_S3_BUCKET: "registry",
+  SCAFO_S3_ACCESS_KEY: "key",
+  SCAFO_S3_SECRET_KEY: "secret",
+};
 
 /** Every byte value there is: the payload a text-shaped surface would corrupt. */
 const EVERY_BYTE = new Uint8Array(256).map((_, index) => index);
@@ -79,7 +95,7 @@ beforeEach(() => {
     version: VERSION,
   };
   storage = createStorageService(agent, {
-    token: TOKEN,
+    tokens: [TOKEN],
     log: (message) => logs.push(message),
   });
   agent.storage = storage;
@@ -150,6 +166,57 @@ describe("the token every request must present", () => {
       expect((await response.json()) as Record<string, unknown>).not.toMatchObject({
         type: "urn:scafo:auth-invalid",
       });
+    }
+  });
+});
+
+describe("the several tokens an operator may supply instead", () => {
+  let admitting: H3;
+
+  beforeEach(() => {
+    const agent: AgentContext = {
+      config: agentConfig(),
+      nodeId: NODE_ID,
+      registry: clock.ctx,
+      supervisor: fakeSupervisor(),
+      version: VERSION,
+    };
+    agent.storage = createStorageService(agent, {
+      tokens: SUPPLIED,
+      log: (message) => logs.push(message),
+    });
+    admitting = createAgentApp(agent);
+  });
+
+  it.each(SUPPLIED)("admits %s, whichever entry of the set it is", async (token) => {
+    const written = await callOn(admitting, "PUT", "/v1/storage/objects/certs/one.crt", token, {
+      body: EVERY_BYTE,
+    });
+    const read = await callOn(admitting, "GET", "/v1/storage/objects/certs/one.crt", token);
+
+    expect(written.status).toBe(204);
+    expect(read.status).toBe(200);
+    expect(new Uint8Array(await read.arrayBuffer())).toEqual(EVERY_BYTE);
+  });
+
+  it("admits every one of them on every route of the group", async () => {
+    for (const token of SUPPLIED) {
+      for (const [method, path] of EVERY_ROUTE) {
+        const response = await callOn(admitting, method, path, token, { body: EVERY_BYTE });
+
+        expect(response.status, `${method} ${path} with "${token}"`).not.toBe(401);
+      }
+    }
+  });
+
+  it("refuses one that is not among them, with the same problem document as ever", async () => {
+    const rejected = [TOKEN, `${SUPPLIED[0]}X`, SUPPLIED[0].slice(0, -1), SUPPLIED.join(","), ""];
+
+    for (const token of rejected) {
+      const response = await callOn(admitting, "GET", "/v1/storage/list", token);
+
+      expect(response.status, `for "${token}"`).toBe(401);
+      await expect(response.json()).resolves.toEqual(AUTH_INVALID_PROBLEM);
     }
   });
 });
@@ -551,6 +618,89 @@ describe("the token file guarding the surface", () => {
   });
 });
 
+describe("the token set a node boots with", () => {
+  it("mints its own when the operator supplied none, and keeps it across boots", async () => {
+    const dir = await stateDir();
+
+    const first = await loadStorageTokens(await bootConfig(dir));
+    const again = await loadStorageTokens(await bootConfig(dir));
+
+    expect(first).toHaveLength(1);
+    expect(fromBase64Url(first[0])).toHaveLength(STORAGE_TOKEN_BYTES);
+    expect(again).toEqual(first);
+    await expect(readFile(join(dir, STORAGE_TOKEN_FILE), "utf8")).resolves.toBe(`${first[0]}\n`);
+  });
+
+  it("writes the primary an operator supplied where every file-reading consumer looks", async () => {
+    const dir = await stateDir();
+
+    const tokens = await loadStorageTokens(await bootConfig(dir, " chosen-token "));
+
+    /* Supplied REPLACES minting: nothing random is generated, and the file holds
+       what the operator chose, at the permissions a minted one gets. */
+    expect(tokens).toEqual(["chosen-token"]);
+    await expect(readFile(join(dir, STORAGE_TOKEN_FILE), "utf8")).resolves.toBe("chosen-token\n");
+    expect((await stat(join(dir, STORAGE_TOKEN_FILE))).mode & 0o777).toBe(0o600);
+    expect((await stat(dir)).mode & 0o777).toBe(0o700);
+  });
+
+  it("takes over a token this node had minted, primary first", async () => {
+    const dir = await stateDir();
+    const minted = await loadStorageTokens(await bootConfig(dir));
+
+    const tokens = await loadStorageTokens(await bootConfig(dir, "new-token, old-token"));
+
+    expect(minted[0]).not.toBe("new-token");
+    expect(tokens).toEqual(["new-token", "old-token"]);
+    await expect(readFile(join(dir, STORAGE_TOKEN_FILE), "utf8")).resolves.toBe("new-token\n");
+  });
+
+  it("leaves the file untouched on a boot the primary did not change", async () => {
+    const dir = await stateDir();
+    const path = join(dir, STORAGE_TOKEN_FILE);
+    await writeStorageToken(dir, "chosen-token");
+
+    /* Dated back rather than compared to "now", so nothing here rests on the
+       clock's resolution. */
+    const past = new Date(CLOCK_START_MS);
+    await utimes(path, past, past);
+    await writeStorageToken(dir, "chosen-token");
+
+    expect((await stat(path)).mtimeMs).toBe(past.getTime());
+
+    await writeStorageToken(dir, "rotated-token");
+
+    expect((await stat(path)).mtimeMs).not.toBe(past.getTime());
+    await expect(readFile(path, "utf8")).resolves.toBe("rotated-token\n");
+  });
+});
+
+describe("rotating a supplied token, as an operator expands and contracts the set", () => {
+  it("takes both while the set holds both, and only the new one once it does not", async () => {
+    const dir = await stateDir();
+    const path = join(dir, STORAGE_TOKEN_FILE);
+
+    /* Before: one token, and it is the file's. */
+    const before = await boot(dir, "old-token");
+    expect((await stored(before, "old-token")).status).toBe(204);
+    expect((await stored(before, "new-token")).status).toBe(401);
+    await expect(readFile(path, "utf8")).resolves.toBe("old-token\n");
+
+    /* Expanded: the operator restarts the agent with both, and the file follows
+       the primary — which is what an ingress reloaded now picks up. */
+    const expanded = await boot(dir, "new-token,old-token");
+    expect((await stored(expanded, "new-token")).status).toBe(204);
+    expect((await stored(expanded, "old-token")).status).toBe(204);
+    await expect(readFile(path, "utf8")).resolves.toBe("new-token\n");
+
+    /* Contracted: the old one is refused from this boot on. */
+    const contracted = await boot(dir, "new-token");
+    expect((await stored(contracted, "new-token")).status).toBe(204);
+    expect((await stored(contracted, "old-token")).status).toBe(401);
+    await expect(readFile(path, "utf8")).resolves.toBe("new-token\n");
+  });
+});
+
 interface CallOptions {
   /** Bearer token to present; null presents none, and undefined presents the right one. */
   token?: string | null;
@@ -572,6 +722,57 @@ async function call(method: string, path: string, opts?: CallOptions): Promise<R
     headers,
     ...(sendsBody && opts?.body !== undefined ? { body: opts.body } : {}),
   });
+}
+
+/** One call to an app a boot built rather than to the suite's own. */
+async function callOn(
+  target: H3,
+  method: string,
+  path: string,
+  token: string,
+  opts?: { body?: BodyInit },
+): Promise<Response> {
+  const sendsBody = method === "PUT" || method === "POST";
+  return target.request(path, {
+    method,
+    headers: { authorization: `Bearer ${token}` },
+    ...(sendsBody && opts?.body !== undefined ? { body: opts.body } : {}),
+  });
+}
+
+/** One write through a booted node, which is the whole of what a token buys. */
+async function stored(target: H3, token: string): Promise<Response> {
+  return callOn(target, "PUT", "/v1/storage/objects/rotation", token, {
+    body: new Uint8Array([1]),
+  });
+}
+
+/** The configuration a node boots from, as an operator's environment carries it. */
+async function bootConfig(dir: string, token?: string): Promise<AgentConfig> {
+  return loadAgentConfig({
+    env: {
+      ...BUCKET_ENV,
+      SCAFO_STATE_DIR: dir,
+      ...(token === undefined ? {} : { SCAFO_STORAGE_TOKEN: token }),
+    },
+  });
+}
+
+/** One boot of a node, serving whatever token set its configuration resolved to. */
+async function boot(dir: string, token?: string): Promise<H3> {
+  const config = await bootConfig(dir, token);
+  const agent: AgentContext = {
+    config,
+    nodeId: NODE_ID,
+    registry: clock.ctx,
+    supervisor: fakeSupervisor(),
+    version: VERSION,
+  };
+  agent.storage = createStorageService(agent, {
+    tokens: await loadStorageTokens(config),
+    log: (message) => logs.push(message),
+  });
+  return createAgentApp(agent);
 }
 
 /** The keys the list route answers for one prefix. */

@@ -15,6 +15,7 @@ import {
   DEFAULT_LISTEN,
   DEFAULT_REGION,
   loadAgentConfig,
+  type LoadConfigOptions,
   parseHostPort,
   runtimeDialHost,
 } from "../src/agent/config.ts";
@@ -1341,6 +1342,123 @@ describe("the Traefik entryPoints the routers attach to", () => {
       expect(error.code).toBe("invalid-input");
       expect(error.detail).toContain("caddy");
       expect(error.detail).toContain("websecure");
+    }
+  });
+});
+
+describe("the tokens guarding the storage surface", () => {
+  it("reads the comma-separated list an operator shares with their ingress", async () => {
+    const config = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCAFO_STORAGE_TOKEN: " new-token , old-token " },
+    });
+
+    /* Trimmed, and in the order they were written: the first is the one the node
+       materializes for every consumer that reads the file. */
+    expect(config.storage).toEqual({ token: ["new-token", "old-token"] });
+  });
+
+  it("lets a flag override what the environment names", async () => {
+    const config = await loadAgentConfig({
+      env: { ...REQUIRED_ENV, SCAFO_STORAGE_TOKEN: "from-env" },
+      flags: { "storage-token": "from-flag" },
+    });
+
+    expect(config.storage).toEqual({ token: ["from-flag"] });
+  });
+
+  it("takes a plain string or an array from the file, the array carrying entries whole", async () => {
+    const asString = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ storage: { token: "new,old" } })),
+      env: REQUIRED_ENV,
+    });
+    const asArray = await loadAgentConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(
+        CONFIG_PATH,
+        JSON.stringify({ storage: { token: [" new ", "with,comma"] } }),
+      ),
+      env: REQUIRED_ENV,
+    });
+
+    expect(asString.storage).toEqual({ token: ["new", "old"] });
+    /* The escape hatch for a value the separator would otherwise split. */
+    expect(asArray.storage).toEqual({ token: ["new", "with,comma"] });
+  });
+
+  it("leaves the node minting its own when nothing names any", async () => {
+    const config = await loadAgentConfig({ env: REQUIRED_ENV });
+
+    expect(config.storage).toBeUndefined();
+  });
+
+  it("refuses a value that is there and holds nothing, rather than quietly minting", async () => {
+    /* An unset variable in a compose file expands to this. Read as "unset" it
+       would mint a token nothing else on the host knows, and every call the
+       operator's ingress makes would be refused for reasons neither says. */
+    const written: Array<[string, LoadConfigOptions]> = [
+      ["an empty variable", { env: { ...REQUIRED_ENV, SCAFO_STORAGE_TOKEN: "" } }],
+      ["an empty flag", { env: REQUIRED_ENV, flags: { "storage-token": "" } }],
+      [
+        "an empty string in the file",
+        {
+          configPath: CONFIG_PATH,
+          readFile: fileAt(CONFIG_PATH, JSON.stringify({ storage: { token: "" } })),
+          env: REQUIRED_ENV,
+        },
+      ],
+      [
+        "an empty array in the file",
+        {
+          configPath: CONFIG_PATH,
+          readFile: fileAt(CONFIG_PATH, JSON.stringify({ storage: { token: [] } })),
+          env: REQUIRED_ENV,
+        },
+      ],
+    ];
+
+    for (const [label, opts] of written) {
+      const error = await rejectionOf(() => loadAgentConfig(opts));
+
+      expect(error.code, label).toBe("invalid-input");
+      expect(error.detail, label).toContain("storage.token");
+    }
+  });
+
+  it("refuses an entry holding nothing, whichever spelling carried it", async () => {
+    for (const written of ["a,,b", " , ", "a,  "]) {
+      const error = await rejectionOf(() =>
+        loadAgentConfig({ env: { ...REQUIRED_ENV, SCAFO_STORAGE_TOKEN: written } }),
+      );
+
+      expect(error.code, written).toBe("invalid-input");
+      expect(error.detail, written).toContain("storage.token");
+    }
+
+    const inFile = await rejectionOf(() =>
+      loadAgentConfig({
+        configPath: CONFIG_PATH,
+        readFile: fileAt(CONFIG_PATH, JSON.stringify({ storage: { token: ["a", "  "] } })),
+        env: REQUIRED_ENV,
+      }),
+    );
+
+    expect(inFile.code).toBe("invalid-input");
+    expect(inFile.detail).toContain("storage.token");
+  });
+
+  it("refuses a value that is neither a token nor a list of them", async () => {
+    for (const token of [[1, 2], { primary: "a" }, 7, true]) {
+      const error = await rejectionOf(() =>
+        loadAgentConfig({
+          configPath: CONFIG_PATH,
+          readFile: fileAt(CONFIG_PATH, JSON.stringify({ storage: { token } })),
+          env: REQUIRED_ENV,
+        }),
+      );
+
+      expect(error.code, JSON.stringify(token)).toBe("invalid-input");
+      expect(error.detail, JSON.stringify(token)).toContain("storage.token");
     }
   });
 });

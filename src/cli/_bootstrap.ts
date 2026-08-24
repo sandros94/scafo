@@ -21,7 +21,7 @@ import { withRetry } from "../core/utils/backoff.ts";
 import { isLoopbackHost } from "../core/utils/host.ts";
 import { createUns3Store } from "../drivers/store/uns3.ts";
 import { loadOrCreateNodeState, type NodeState } from "./_node-state.ts";
-import { loadOrCreateStorageToken } from "./_storage-token.ts";
+import { loadOrCreateStorageToken, writeStorageToken } from "./_storage-token.ts";
 import { resolveDefaultStateDir } from "./_utils.ts";
 import { readVarsetKeyFile } from "./_varset-key.ts";
 import {
@@ -153,16 +153,30 @@ export async function loadNodeIdentity(
 }
 
 /**
- * Reads the token guarding this node's storage surface, writing one on the first
- * boot that has none. It sits beside the node's identity, and is what a
- * colocated process presents to keep its TLS material in the installation's
- * bucket without holding a credential for it.
+ * The tokens guarding this node's storage surface, primary first, with that
+ * primary left in the state directory for whatever stores through this node to
+ * read — a colocated process presents it to keep its TLS material in the
+ * installation's bucket without holding a credential for it.
+ *
+ * WHAT THE OPERATOR SUPPLIED REPLACES MINTING. A configured set is admitted
+ * whole and its first token is written to the file, taking over from one this
+ * node had minted earlier; a configuration that names none leaves the node
+ * reading the file and generating one on the first boot that finds none, which
+ * is the only behaviour there was before this. Why it is a set, and what
+ * rotating one costs, is on the `storage.token` setting itself.
  */
-export async function loadStorageToken(
+export async function loadStorageTokens(
   config: AgentConfig,
   opts?: NodeIdentityOptions,
-): Promise<string> {
-  return loadOrCreateStorageToken(nodeStateDir(config, opts));
+): Promise<string[]> {
+  const stateDir = nodeStateDir(config, opts);
+
+  const supplied = config.storage?.token;
+  if (supplied === undefined) return [await loadOrCreateStorageToken(stateDir)];
+
+  const [primary] = supplied;
+  await writeStorageToken(stateDir, primary);
+  return supplied;
 }
 
 /** Where this node keeps everything it must remember between boots. */

@@ -35,7 +35,7 @@ import {
   createRegistry,
   drainThisNode,
   loadNodeIdentity,
-  loadStorageToken,
+  loadStorageTokens,
   loadVarsetKey,
   loadWireguardRecord,
   nodeStateDir,
@@ -74,6 +74,13 @@ const upArgs: ArgsDef = {
   "wg-port": { type: "string", description: "UDP port the tunnel interface listens on (51820)" },
   "platform-domains": { type: "string", description: "Comma-separated apex domains to serve" },
   "varset-key-file": { type: "string", description: "File holding the varset encryption key" },
+  "storage-token": {
+    type: "string",
+    description:
+      "Token(s) admitted on /v1/storage, instead of one this node mints: new,old admits both " +
+      "while a rotation is in flight, and the first is written to the state directory's " +
+      "storage-token file. Restart the agent before reloading what stores through it",
+  },
   "celld-bin": { type: "string", description: "Executable that runs an environment" },
   "celld-env": {
     type: "string",
@@ -154,7 +161,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   const wireguard = await loadWireguardRecord(config);
 
   const state = await loadNodeIdentity(config);
-  const storageToken = await loadStorageToken(config);
+  const storageTokens = await loadStorageTokens(config);
   const varsetKey = await loadVarsetKey(config);
   const registry = createRegistry(config);
 
@@ -266,7 +273,7 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
   /* What a colocated ingress keeps its certificates, its account key and its
      issuance locks in: this node's bucket, reached through this node, which is
      the only process on the machine holding a credential for it. */
-  const storage = createStorageService(agent, { token: storageToken });
+  const storage = createStorageService(agent, { tokens: storageTokens });
   agent.storage = storage;
   /* Said once, because the operator has to go get it: the file is what a
      colocated ingress presents to store its TLS material through this node. */
@@ -274,6 +281,16 @@ async function runAgent(flags: Record<string, unknown>): Promise<void> {
     `scafo: storage token at ${join(nodeStateDir(config), STORAGE_TOKEN_FILE)}; ` +
       `mount it read-only into the process that terminates TLS`,
   );
+  /* Said only mid-rotation, and it is the half the operator drives: this node is
+     already admitting both, so the callers can be moved over and the set brought
+     back down to the one in use. */
+  if (storageTokens.length > 1) {
+    console.log(
+      `scafo: "storage.token" names ${String(storageTokens.length)} tokens and this node admits ` +
+        `every one of them; the file above holds the first. Move what stores through this node ` +
+        `onto it, then contract the setting to that token alone and restart`,
+    );
+  }
 
   const baseEnv = runtimeBaseEnv(process.env);
   agent.deploys = createDeployService(

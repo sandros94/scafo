@@ -2,9 +2,10 @@
  * Internal: the token guarding this node's storage surface.
  *
  * It lives beside the node's identity, in the state directory, readable by its
- * owner alone, and is generated on the first boot that finds none. Handing it to
- * the colocated process that stores through this node is the operator's step —
- * mount the file, or read it out of the state directory.
+ * owner alone, and is generated on the first boot that finds none — or written
+ * from what the operator supplied, when they chose the token themselves. Handing
+ * it to the colocated process that stores through this node is the operator's
+ * step — mount the file, or read it out of the state directory.
  *
  * Unlike the node's identity it is REPLACEABLE: deleting the file mints a new
  * token on the next boot and costs nothing but reconfiguring whoever presents
@@ -50,4 +51,26 @@ export async function loadOrCreateStorageToken(stateDir: string): Promise<string
   const token = toBase64Url(crypto.getRandomValues(new Uint8Array(STORAGE_TOKEN_BYTES)));
   await writeSecretFile(stateDir, path, `${token}\n`);
   return token;
+}
+
+/**
+ * Puts the token an operator supplied where every consumer that reads the file
+ * looks for it, at the permissions a minted one gets.
+ *
+ * The file is the handoff and nothing else: a node admits what its configuration
+ * lists, so this is what keeps a mounted file, a systemd credential and a `cat`
+ * of the state directory all telling the truth about the token in use. Rotating
+ * moves it, because the value written is whichever token the operator put first.
+ *
+ * A file that already holds this token is LEFT ALONE, down to its timestamp —
+ * the boot that changed nothing must not be the boot that fails on a file
+ * somebody mounted read-only.
+ */
+export async function writeStorageToken(stateDir: string, token: string): Promise<void> {
+  const path = join(stateDir, STORAGE_TOKEN_FILE);
+
+  const text = await readTextFile(path);
+  if (text?.trim() === token) return;
+
+  await writeSecretFile(stateDir, path, `${token}\n`);
 }

@@ -82,6 +82,12 @@ export interface AgentConfig {
    */
   varsets?: VarsetsConfig;
   /**
+   * The tokens this node admits on its storage surface, when the operator chose
+   * them. Absent leaves the node minting one and keeping it in its state
+   * directory, which is what every installation did before this existed.
+   */
+  storage?: StorageConfig;
+  /**
    * What carries traffic between this node and its peers. Absent is only legal
    * for a node that stays on loopback: see {@link TransportConfig}.
    */
@@ -180,6 +186,41 @@ export interface ApiConfig {
 export interface VarsetsConfig {
   /** File holding the 32-byte AES-256 key, raw or as base64url or hex text. */
   keyFile: string;
+}
+
+/**
+ * The tokens an operator chose for this node's `/v1/storage` surface, in place
+ * of the one the node would mint for itself.
+ *
+ * SUPPLYING ANY REPLACES MINTING ENTIRELY: nothing random is generated, every
+ * listed value is admitted, and the FIRST is written to the state directory's
+ * token file at the permissions a minted one gets — so every consumer that reads
+ * that file goes on working unchanged, and one value an operator holds can
+ * configure both the node and whatever stores through it.
+ *
+ * IT IS A LIST BECAUSE ROTATION IS EXPAND-CONTRACT, driven by the operator in
+ * two deliberate steps: set `[new, old]` and restart the agent, which admits
+ * both; move the callers onto the new one at whatever pace suits them; then
+ * contract to `[new]` and restart again, which is the moment the old one stops
+ * working. Nothing is remembered between boots and no grace period runs down —
+ * the set in the configuration is the set that is admitted, and the file holds
+ * whichever token is first in it.
+ *
+ * THE AGENT MOVES FIRST AND THE CALLERS FOLLOW, in both phases. An ingress
+ * reloaded onto a token this node does not admit yet cannot refill its
+ * certificate cache from storage, which is exactly what a reload makes it do;
+ * the other order costs nothing, because a token that is still listed still
+ * works.
+ *
+ * A SOLO INSTALLATION MAY SIMPLY SWAP ONE VALUE. This surface is off the TLS
+ * handshake path — a running ingress serves from the certificate cache in its
+ * own memory — so the gap between restarting the node and reloading what stores
+ * through it costs background renewals, OCSP refreshes and the issuance of names
+ * being seen for the first time, all of which are retried.
+ */
+export interface StorageConfig {
+  /** Every token admitted, primary first. Never empty. */
+  token: [string, ...string[]];
 }
 
 /**
@@ -398,6 +439,7 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
      meet it where the variables are resolved and lose to it if it is there. */
   const celldEnv = withTelemetry(resolveCelldEnv(sources), observing);
   const keyFile = resolve("varsetKeyFile", sources);
+  const storageTokens = resolveStorageTokens(sources);
   const transport = resolveTransport(sources);
   const wireguard = resolveWireguard(sources);
 
@@ -464,6 +506,7 @@ export async function loadAgentConfig(opts?: LoadConfigOptions): Promise<AgentCo
     api: { public: resolveBoolean("apiPublic", sources, DEFAULT_API_PUBLIC) },
     ...(ingress === undefined ? {} : { ingress }),
     ...(keyFile === undefined ? {} : { varsets: { keyFile } }),
+    ...(storageTokens === undefined ? {} : { storage: { token: storageTokens } }),
     ...(transport === undefined ? {} : { transport }),
     ...(wireguard === undefined ? {} : { wireguard }),
   };
@@ -629,6 +672,7 @@ const ORIGINS = {
     env: ["SCAFO_VARSET_KEY_FILE"],
     file: "varsets.keyFile",
   },
+  storageToken: { flag: "storage-token", env: ["SCAFO_STORAGE_TOKEN"], file: "storage.token" },
   transport: { flag: "transport", env: ["SCAFO_TRANSPORT"], file: "transport.driver" },
   wgAddress: { flag: "wg-address", env: ["SCAFO_WG_ADDRESS"], file: "wireguard.address" },
   wgEndpoint: { flag: "wg-endpoint", env: ["SCAFO_WG_ENDPOINT"], file: "wireguard.endpoint" },
@@ -918,6 +962,73 @@ function resolveCelldEnv(sources: Sources): Record<string, string> | undefined {
     });
   }
   return Object.keys(vars).length === 0 ? undefined : vars;
+}
+
+/**
+ * The tokens an operator supplied for the storage surface, or undefined when
+ * they supplied none and this node is to mint its own.
+ *
+ * Two spellings, as the Traefik entryPoints have: a flag and an environment
+ * variable can only carry text, written `new,old`, while the config file carries
+ * that same text or the array it parses into. AN ARRAY ENTRY IS TAKEN WHOLE,
+ * which is how a value carrying the separator is written; anywhere a string
+ * appears, a comma separates one token from the next.
+ *
+ * A VALUE THAT IS THERE AND HOLDS NOTHING IS REFUSED rather than read as unset.
+ * An empty spelling is what an unnamed variable expands to, and minting over it
+ * would leave the node admitting a token nothing else on the host has ever seen
+ * — every call the operator's own caller makes refused, for a reason neither of
+ * them states anywhere.
+ */
+function resolveStorageTokens(sources: Sources): [string, ...string[]] | undefined {
+  const origin: Origin = ORIGINS.storageToken;
+  const written = suppliedFlagOrEnv(origin, sources) ?? fileValue(sources.file, origin.file);
+  if (written === undefined || written === null) return undefined;
+
+  const spellings: unknown = typeof written === "string" ? written.split(",") : written;
+  if (!Array.isArray(spellings) || spellings.some((entry) => typeof entry !== "string")) {
+    throw refuseStorageTokens(written, "must be a token, or a list of them");
+  }
+
+  const tokens = (spellings as string[]).map((entry) => entry.trim());
+  const [primary, ...rest] = tokens;
+  if (tokens.length === 0 || tokens.some((token) => token === "")) {
+    throw refuseStorageTokens(
+      written,
+      "names no token, and an entry holding nothing would admit a caller presenting nothing",
+    );
+  }
+  return [primary, ...rest];
+}
+
+/** The one refusal the storage tokens get, whichever source carried the value. */
+function refuseStorageTokens(written: unknown, why: string): ScafoError {
+  const origin: Origin = ORIGINS.storageToken;
+  return new ScafoError("invalid-input", "Invalid configuration value", {
+    detail:
+      `"${origin.file}" (--${origin.flag}, or ${origin.env.join(" or ")}) ${why}, got ` +
+      `${JSON.stringify(written)}. Write one token, several separated by commas, or an array of ` +
+      `them with the one in use first; leave the setting out altogether to have this node mint ` +
+      `its own instead`,
+  });
+}
+
+/**
+ * The first flag or variable that CARRIES a setting at all, blank or not.
+ *
+ * {@link flagOrEnv} reads a blank value as unset, which is right for a setting
+ * that has a default and wrong for one whose absence changes what the node does:
+ * that difference has to reach the resolver rather than being flattened here.
+ */
+function suppliedFlagOrEnv(origin: Origin, sources: Sources): string | undefined {
+  const flag = sources.flags[origin.flag];
+  if (flag !== undefined) return flag;
+
+  for (const variable of origin.env) {
+    const value = sources.env[variable];
+    if (value !== undefined) return value;
+  }
+  return undefined;
 }
 
 function resolvePlatformDomains(sources: Sources): string[] {

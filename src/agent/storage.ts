@@ -54,8 +54,13 @@ export interface StorageService {
 }
 
 export interface StorageServiceOptions {
-  /** Token every request must present, as read from the node's state directory. */
-  token: string;
+  /**
+   * Every token this node admits, primary first and never empty. One value on a
+   * node that minted its own, which is the ordinary case; several only while an
+   * operator rotates a set they supplied, and the first of those is the one in
+   * the node's state directory. A service given none admits nobody.
+   */
+  tokens: string[];
   /** Time between refreshes. Defaults to {@link TLS_LOCK_REFRESH_MS}. */
   intervalMs?: number;
   /** Where a lost lock is reported. Defaults to `console.error`. */
@@ -118,9 +123,9 @@ export function createStorageService(
       /* Shaped like every other authentication failure — no message, no detail,
          the reason only in `cause`, where it reaches the logs and not the
          client — so a caller cannot tell a wrong token from a missing one. */
-      if (!timingSafeEqualText(bearerToken(event), opts.token)) {
+      if (!admits(opts.tokens, bearerToken(event))) {
         throw new ScafoError("auth-invalid", "Authentication failed", {
-          cause: new Error("the presented token is not this node's storage token"),
+          cause: new Error("the presented token is not one of this node's storage tokens"),
         });
       }
 
@@ -176,6 +181,21 @@ export function createStorageService(
       timer = null;
     },
   };
+}
+
+/**
+ * Whether what a caller presented is one of this node's tokens.
+ *
+ * EVERY TOKEN IS COMPARED, however early one of them matches: returning at the
+ * first hit would take a length of time that depends on WHICH token was
+ * presented, which is the one thing a constant-time compare exists not to say.
+ * The comparison itself is the left operand throughout, so nothing short-circuits
+ * it away.
+ */
+function admits(tokens: string[], presented: string): boolean {
+  let matched = false;
+  for (const token of tokens) matched = timingSafeEqualText(presented, token) || matched;
+  return matched;
 }
 
 /** The specifics a scafo failure carries are the useful half; keep both. */
