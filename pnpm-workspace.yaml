@@ -15,5 +15,8 @@ ignoredBuiltDependencies:
   - ssh2
   - uns3
 
+minimumReleaseAgeExclude:
+  - uns3@0.0.8
+
 onlyBuiltDependencies:
   - simple-git-hooks
