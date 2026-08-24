@@ -91,7 +91,6 @@
   "scripts": {
     "build": "obuild",
     "compile": "./scripts/compile.sh",
-    "dev": "bun --watch ./playground/main.ts",
     "dev:prepare": "obuild --stub && pnpm simple-git-hooks",
     "lint": "oxlint . && oxfmt --check .",
     "fmt": "automd && oxlint --fix . && oxfmt .",
