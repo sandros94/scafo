@@ -3,7 +3,9 @@
 import type { H3Event, HTTPError, Middleware } from "h3";
 import type { NodeIdentity, NodeVerifier } from "../core/auth/node-token.ts";
 import { isScafoError, type ProblemDetails, ScafoError } from "../core/error.ts";
-import type { TrustedOperator } from "../core/registry/operators.ts";
+import type { RegistryContext } from "../core/registry/context.ts";
+import { getOperator, type TrustedOperator } from "../core/registry/operators.ts";
+import { stableStringify } from "../core/utils/json.ts";
 
 /** Context key the verified caller is filed under for the rest of the request. */
 const IDENTITY_KEY = "scafoIdentity";
@@ -45,14 +47,18 @@ export function nodeIdentity(event: H3Event): NodeIdentity | undefined {
  * this surface is an operator's is the difference between a fixable mistake and
  * a mystery. A caller holding no node key at all never reaches the question.
  *
- * The authorization the verifier read with the public key is KEPT on the event,
- * where {@link operatorIdentity} reads it back. A later registry lookup could
- * describe a replacement or no identity at all, rather than this caller.
+ * Key and project administration additionally read the current operator record
+ * and require it to equal the authorization resolved with the signing key. The
+ * verifier's public-key cache remains the revocation bound for ordinary work,
+ * but a revoked cached key cannot use that window to mint durable authority.
+ * A replacement record cannot lend its role or scope to the old signing key.
  */
-export function requireOperatorToken(verifier: NodeVerifier): Middleware {
+export function requireOperatorToken(
+  verifier: NodeVerifier,
+  registry: RegistryContext,
+): Middleware {
   return async (event, next) => {
     const identity = await verifier.verify(bearerToken(event));
-    event.context[IDENTITY_KEY] = identity;
 
     if (identity.kind !== "operator") {
       throw new ScafoError("auth-scope", "Not an operator of this fleet", {
@@ -61,6 +67,15 @@ export function requireOperatorToken(verifier: NodeVerifier): Middleware {
           `fleet trusts are an operator's to administer`,
       });
     }
+
+    const current = await getOperator(registry, identity.nodeId);
+    if (current === null || stableStringify(current) !== stableStringify(identity.operator)) {
+      throw new ScafoError("auth-invalid", "Authentication failed", {
+        cause: new Error(`Operator authority for "${identity.nodeId}" is no longer current`),
+      });
+    }
+
+    event.context[IDENTITY_KEY] = identity;
     return next();
   };
 }

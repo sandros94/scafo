@@ -562,7 +562,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
    * that has been taken over must not be able to write its installation a new
    * operator, so these ask WHO the verified id is as well as that it signed.
    */
-  const operatorGuard = requireOperatorToken(nodeVerifier);
+  const operatorGuard = requireOperatorToken(nodeVerifier, daemon.registry);
   registerOperatorRoutes(app, daemon, operatorGuard);
 
   /*

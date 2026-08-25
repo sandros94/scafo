@@ -153,6 +153,18 @@ describe("an operator scoped to one project cannot touch another", () => {
     await expect(mutation.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
   });
 
+  it("does not let revoked cached authority enroll a durable replacement", async () => {
+    expect((await call("/v1/state", TENANT_ID, tenant, { method: "GET" })).status).toBe(200);
+    await deleteKey(clock.ctx, operatorKey(TENANT_ID));
+    const replacement = await generateJWK("EdDSA", { kid: "op-replace11" });
+
+    const response = await enroll(TENANT_ID, tenant, publicHalf("op-replace11", replacement));
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:auth-invalid" });
+    await expect(getOperator(clock.ctx, "op-replace11")).resolves.toBeNull();
+  });
+
   it("does not let a warm old key inherit a same-id replacement's admin scope", async () => {
     expect((await call("/v1/state", TENANT_ID, tenant, { method: "GET" })).status).toBe(200);
 
