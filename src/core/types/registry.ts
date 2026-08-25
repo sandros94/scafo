@@ -104,16 +104,20 @@ export interface NodeOperator {
    */
   supersedes?: string;
   /**
-   * Projects this key may name on a node's API, by slug.
+   * Projects this key may name on a node's API, by slug — or `["*"]` for every
+   * project of the fleet, which is a grant an ADMIN made rather than a default.
    *
-   * ABSENT IS EVERY PROJECT, which is what makes scoping opt-in: every key of
-   * every installation older than this carries no list, and a fleet nobody has
-   * scoped behaves exactly as it did. Present means these projects and no
-   * others — the shape a multi-tenant platform hands a tenant.
+   * REQUIRED ON AN OPERATOR-TIER KEY. Every path that grants one refuses to
+   * write a record without it, so absent here means the record was written to
+   * the bucket by hand — and it is read as NO project rather than as every one,
+   * because reading it the other way is the silent widening scoping exists to
+   * prevent. Such a key stays trusted and simply reaches nothing until an admin
+   * repairs it.
    *
-   * Never present on an ADMIN: an admin administers every key the fleet trusts,
-   * so a scope on one could enforce nothing. `registry/operators.ts` refuses the
-   * combination at write time.
+   * ABSENT IS EVERY PROJECT ON AN ADMIN, and never anything else: an admin
+   * administers every key the fleet trusts, so it can grant itself a key for
+   * anything at any time and a scope on one could enforce nothing.
+   * `registry/operators.ts` refuses both combinations at write time.
    */
   projects?: string[];
 }

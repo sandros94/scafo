@@ -36,13 +36,19 @@ administers every key the fleet trusts, an `operator` may add keys no higher tha
 itself and revoke only the key it was registered to replace — so a stolen deploy key
 cannot lock the admins out.
 
-An operator-tier key can also be scoped to projects (`scafo operator enroll <pubkey>
---remote <name> --projects acme,globex`), and a node then refuses it every project it
-does not name; a key that names none reaches all of them, which is what a solo
-installation and every fleet older than this carries. That binds the KEY on the wire
-and nothing else — the bucket plane is out of it entirely, because bucket credentials
-are root: a multi-tenant platform hands tenants operator keys, never bucket
-credentials.
+An operator-tier key is scoped to projects (`scafo operator enroll <pubkey> --remote
+<name> --projects acme,globex`), and a node then refuses it every project it does not
+name. Naming them is required, not optional: `--projects "*"` is how a key says it
+reaches every project of the fleet, and only an admin may hand that out fresh. An
+admin needs no scope — it administers every key the fleet trusts, so a boundary on
+one would state nothing it could enforce. That binds the KEY on the wire and nothing
+else — the bucket plane is out of it entirely, because bucket credentials are root: a
+multi-tenant platform hands tenants operator keys, never bucket credentials.
+
+A scoped key is also told less. `scafo operator list` shows it only its own key
+lineage — its key, the one it replaced, the one replacing it — rather than every key
+the fleet trusts, and `/v1/state` reports only the projects it can reach. A tenant on
+a shared fleet cannot enumerate the fleet it is on.
 
 ## Prerequisites
 

@@ -50,10 +50,15 @@ const addArgs: ArgsDef = {
     type: "string",
     description: `Import a portable file: a path, or an inline "${INLINE_PREFIX}" value`,
   },
-  register: { type: "boolean", description: "Record the key's public half in the registry" },
+  register: {
+    type: "boolean",
+    description: "Record the key's public half in the registry, bucket-side (admins only)",
+  },
   role: {
     type: "string",
-    description: "Tier to register at: admin|operator (the first key is always admin)",
+    description:
+      `Tier to register at: admin (the first key is always one, and this path admits no other ` +
+      `— an operator-tier key needs a project scope, which only the wire path can give it)`,
   },
   config: { type: "string", description: "Path to scafo.config.jsonc, for --register" },
 };

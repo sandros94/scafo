@@ -28,14 +28,30 @@
  * compromised deploy key could revoke every other operator and own the
  * installation — and the fix is verb separation rather than a second credential.
  *
- * AND ACROSS THE SET THERE IS A SECOND AXIS: an operator-tier key may be SCOPED
- * to a list of projects ({@link TrustedOperator.projects}), which is what a
- * multi-tenant installation hands a tenant. It is opt-in and absent means every
- * project, so a solo installation and every fleet older than this wave carry no
- * list and notice nothing. The scope binds the KEY on the wire — the node API
- * refuses a scoped key that names a project outside its list — and it is
- * deliberately NOT a bucket-plane control: bucket credentials are root, and a
- * multi-tenant platform hands tenants operator keys, never bucket credentials.
+ * AND ACROSS THE SET THERE IS A SECOND AXIS: an operator-tier key is SCOPED to a
+ * list of projects ({@link TrustedOperator.projects}), which is what a
+ * multi-tenant installation hands a tenant. The scope binds the KEY on the wire
+ * — the node API refuses a scoped key that names a project outside its list —
+ * and it is deliberately NOT a bucket-plane control: bucket credentials are
+ * root, and a multi-tenant platform hands tenants operator keys, never bucket
+ * credentials.
+ *
+ * THE SCOPE IS NOT OPTIONAL, AND THAT IS THE WHOLE POSTURE. An operator-tier key
+ * that names no projects is refused at every grant ({@link assertGrantableScope})
+ * and reaches NOTHING if one was written by hand anyway
+ * ({@link canReachProject}). The wave that introduced scoping made it opt-in,
+ * with absent meaning every project — which meant an enrollment that simply left
+ * the flag off handed out the run of the fleet, silently, and read in a listing
+ * exactly like a key somebody had thought about. Least privilege cannot be the
+ * thing you have to remember. So the ceiling is stated out loud instead:
+ * {@link WILDCARD_PROJECT} as the sole entry is "every project", it is an
+ * ADMIN's to grant fresh, and a key that carries it says so in every listing.
+ *
+ * ABSENT STILL MEANS EVERY PROJECT FOR AN ADMIN, because an admin is not a
+ * tenant: it administers every key the fleet trusts, so it can grant itself a
+ * key for anything at any time, and a scope on one would state a boundary it
+ * does not have. A MACHINE of the fleet is not governed here at all — a node
+ * token carries no operator record — and neither is a workload's OIDC token.
  */
 
 import { ScafoError } from "../error.ts";
@@ -69,6 +85,25 @@ export const LEGACY_OPERATOR_ROLE: OperatorRole = "admin";
 /** The tier a key lands at when nobody says otherwise: the least privilege there is. */
 export const DEFAULT_OPERATOR_ROLE: OperatorRole = "operator";
 
+/**
+ * The one entry a scope may hold that is not a project: EVERY project, said out
+ * loud.
+ *
+ * It exists because "every project" has to be sayable. Once an absent scope
+ * means nothing, a key that legitimately serves the whole fleet — a platform's
+ * own CI, an operator who is not quite an admin — would otherwise have to be
+ * enrolled with every slug listed and re-enrolled on each new project. The
+ * difference from the absent scope it replaces is that this one is a STATED
+ * grant: it is in the record, it is in every listing, and an admin had to write
+ * it.
+ *
+ * IT MUST BE THE SOLE ENTRY. Mixed with slugs it would either mean "every
+ * project" — making the slugs decoration — or "these projects", making the
+ * wildcard decoration, and there is no reading of the pair that is not somebody
+ * being surprised later. See {@link assertOperatorScope}.
+ */
+export const WILDCARD_PROJECT: string = "*";
+
 /** The public half of an Ed25519 operator key, as the registry files it. */
 export interface OperatorPublicKey {
   kty: "OKP";
@@ -85,11 +120,16 @@ export interface TrustedOperator {
   /** Key it was registered to replace, when a rotation registered it. */
   supersedes?: string;
   /**
-   * Projects this key may name on a node's API.
+   * Projects this key may name on a node's API, or `[{@link WILDCARD_PROJECT}]`
+   * for every one of them.
    *
-   * ABSENT IS EVERY PROJECT and is the ordinary shape; see
-   * {@link canReachProject}. Never set on an admin — {@link assertOperatorScope}
-   * refuses that combination at write time.
+   * REQUIRED ON AN OPERATOR-TIER KEY and never set on an ADMIN, which is the
+   * same rule read from both ends: an admin reaches every project because it
+   * could grant itself any key it liked, and an operator reaches exactly what
+   * somebody named. Absent therefore means opposite things at the two tiers —
+   * every project above, nothing below — and both are refused at write time by
+   * {@link assertOperatorScope} and {@link assertGrantableScope}. See
+   * {@link canReachProject} for what a hand-written record without one reads as.
    */
   projects?: string[];
 }
@@ -180,50 +220,95 @@ export function canRevoke(caller: TrustedOperator, targetId: string): boolean {
 }
 
 /**
+ * Whether `projects` is the stated grant of EVERY project rather than a list of
+ * them: {@link WILDCARD_PROJECT}, alone.
+ *
+ * Alone is part of the question rather than a validation of it, so that a record
+ * somebody wrote by hand as `["*", "acme"]` — which {@link assertOperatorScope}
+ * would have refused — reads as the two literal names it holds and reaches
+ * neither, instead of reading as the whole fleet.
+ */
+export function isWildcardScope(projects: string[] | undefined): boolean {
+  return projects?.length === 1 && projects[0] === WILDCARD_PROJECT;
+}
+
+/**
  * Whether `operator` may name `project` at all.
  *
- * A key carrying no scope reaches every project, which is what every key of
- * every installation older than this wave carries and what a solo operator will
- * always carry. A scoped key reaches the projects it names and no others.
+ * THE ANSWER FOR AN ABSENT SCOPE DEPENDS ON THE TIER, and this is the surface
+ * that decision lives on. An ADMIN naming no projects reaches every one, because
+ * an admin is not a tenant and never carries a scope. An OPERATOR-tier key
+ * naming none reaches NOTHING: every path that grants one refuses to write that
+ * record, so a key carrying it was written straight to the bucket by hand, and
+ * reading it as "every project" is precisely the silent widening this whole
+ * axis exists to prevent. It stays a trusted key — it authenticates, it can
+ * rotate itself, an admin can revoke it — and it is worth nothing here until
+ * somebody says what it is for.
+ *
+ * A key carrying {@link WILDCARD_PROJECT} alone reaches every project, as a
+ * grant an admin made rather than as a default nobody chose.
  *
  * Pure, so the node API and the tests ask the same question of the same
  * function. It says nothing about the BUCKET: whoever holds the bucket's
  * credentials holds the fleet, and this is a control on operator keys.
  */
 export function canReachProject(operator: TrustedOperator, project: string): boolean {
-  return operator.projects === undefined || operator.projects.includes(project);
+  if (operator.projects === undefined) return operator.role === "admin";
+  if (isWildcardScope(operator.projects)) return true;
+  return operator.projects.includes(project);
 }
 
 /**
- * Whether a caller may register a key scoped to `wanted` — `undefined` being a
- * request for every project.
+ * Whether a caller may register a key scoped to `wanted`.
  *
  * NO WIDER THAN ONE'S OWN, which is {@link canGrantRole} one axis over and the
- * reason a scoped key cannot rotate or enrol its way out of its scope. An
- * unscoped caller may hand out anything, including another unscoped key, which
- * is exactly what an admin does today.
+ * reason a scoped key cannot rotate or enrol its way out of its scope. Read as
+ * sets it is one subset test and no special cases: an admin's reach is every
+ * project, a wildcard key's is every project, a scoped key's is its list, and a
+ * scope-LESS operator-tier key's is the empty set — so that last one may grant
+ * only what it holds, which is nothing.
+ *
+ * `undefined` for `wanted` is the caller's own scope carried over rather than a
+ * request for every project: the routes reach here with `request.projects ??
+ * caller.projects`, so an absent `wanted` means the caller carried none either.
+ * Whether that carry-over may be WRITTEN at all is
+ * {@link assertGrantableScope}'s question, not this one — this one only ever
+ * says whether it would be a widening, and carrying nothing over is not.
  */
 export function canGrantScope(caller: TrustedOperator, wanted: string[] | undefined): boolean {
-  const own = caller.projects;
-  if (own === undefined) return true;
-  if (wanted === undefined) return false;
+  if (wanted === undefined) return true;
+  if (caller.role === "admin" || isWildcardScope(caller.projects)) return true;
+
+  const own = caller.projects ?? [];
+  /* A wildcard is every project, so nothing but the two universes above grants
+     one — and `every` over a one-entry list would otherwise ask whether the
+     caller's list happens to contain the literal "*". */
+  if (isWildcardScope(wanted)) return false;
   return wanted.every((project) => own.includes(project));
 }
 
 /**
- * Checks the scope a key is about to be written with.
+ * Checks the scope a key is about to be written WITH — what the record may say,
+ * whoever is writing it and whichever way they got here.
  *
  * AN ADMIN IS NEVER SCOPED, and the refusal is the point rather than a
  * formality: an admin administers every key the fleet trusts, so it can hand
  * itself a key for any project it likes — a scope on one would read like a
  * boundary while enforcing nothing, which is worse than no boundary at all.
  *
- * A scope naming NO project is refused too. It is a key that can do nothing, and
- * the way to say "every project" is to name none at all rather than an empty
- * list — the two spellings would otherwise mean opposite things.
+ * A scope naming NO project is refused too, because a list is how a key says
+ * what it reaches and an empty one says nothing: an operator-tier key meant to
+ * reach every project says {@link WILDCARD_PROJECT}, and one meant to reach some
+ * of them names those.
  *
- * Throws `ScafoError("invalid-input")` for both, and `ScafoError("invalid-slug")`
- * for a name that is not a project slug.
+ * AND THE WILDCARD MUST STAND ALONE. `["*", "acme"]` either means every project,
+ * which makes the slug decoration, or means acme, which makes the wildcard
+ * decoration — so it is refused rather than read as one of the two. That is also
+ * why the wildcard is exempt from slug validation only in that position.
+ *
+ * Throws `ScafoError("invalid-input")` for all three, and
+ * `ScafoError("invalid-slug")` for a name that is neither a project slug nor the
+ * lone wildcard.
  */
 export function assertOperatorScope(key: Pick<TrustedOperator, "role" | "projects">): void {
   const projects = key.projects;
@@ -240,11 +325,57 @@ export function assertOperatorScope(key: Pick<TrustedOperator, "role" | "project
   if (projects.length === 0) {
     throw new ScafoError("invalid-input", "A scope must name a project", {
       detail:
-        `an empty list is a key that may reach nothing at all; a key meant to reach EVERY ` +
-        `project names no projects rather than an empty list of them`,
+        `an empty list is a key that may reach nothing at all; name the projects this key is ` +
+        `for, or "${WILDCARD_PROJECT}" alone for every project of this fleet`,
+    });
+  }
+  if (isWildcardScope(projects)) return;
+  if (projects.includes(WILDCARD_PROJECT)) {
+    throw new ScafoError("invalid-input", "A wildcard scope stands alone", {
+      detail:
+        `"${WILDCARD_PROJECT}" means every project of this fleet, so listing it beside named ` +
+        `projects says two different things at once; use "${WILDCARD_PROJECT}" on its own, or ` +
+        `name the projects and leave it out`,
     });
   }
   for (const project of projects) assertSlug(project);
+}
+
+/**
+ * Checks the scope a key is about to be GRANTED with — which is the same
+ * question one step earlier, and the one an absent scope is answered by.
+ *
+ * AN OPERATOR-TIER KEY MUST NAME WHAT IT REACHES. Both ways a key enters a fleet
+ * come through here — `POST /v1/operators` and the bucket-side ceremony — so an
+ * enrollment that left the scope off is refused identically whether it was asked
+ * for over the wire or with the bucket's own credentials, and no path is the
+ * quiet one. The refusal exists because the alternative is a default: absent
+ * once meant every project, which made the most permissive key in the fleet the
+ * one nobody had thought about.
+ *
+ * SEPARATE FROM {@link assertOperatorScope} BECAUSE GRANTING AND CARRYING OVER
+ * ARE DIFFERENT ACTS. A rotation registers a replacement for a key that already
+ * exists and copies its scope across unchanged; it hands out no reach that was
+ * not already out there, so it is not a grant and does not come through here.
+ * That is what keeps a hand-written scope-less record repairable — its holder
+ * can still rotate it, and what they end up with is worth exactly what they
+ * started with — while nothing can create one.
+ *
+ * Bootstrap is untouched: the first key of an installation is always an admin
+ * ({@link bootstrapRole}), and an admin carries no scope by rule.
+ *
+ * Throws `ScafoError("invalid-input")`.
+ */
+export function assertGrantableScope(key: Pick<TrustedOperator, "role" | "projects">): void {
+  assertOperatorScope(key);
+  if (key.role === "admin" || key.projects !== undefined) return;
+
+  throw new ScafoError("invalid-input", "An operator-tier key must name its projects", {
+    detail:
+      `a key that names no projects would reach nothing at all, and a key meant to reach the ` +
+      `whole fleet has to say so: name the projects this one is for, or "${WILDCARD_PROJECT}" ` +
+      `alone for every project — which an admin of this fleet grants`,
+  });
 }
 
 /**

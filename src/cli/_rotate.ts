@@ -91,9 +91,10 @@ export interface RotatedKey {
   /** Tier both keys are at: a rotation replaces a key, it never re-tiers one. */
   role: OperatorRole;
   /**
-   * Projects both keys reach, absent meaning every one. Read back off the fleet
-   * for the same reason the tier is: a rotation replaces a key, and it never
-   * widens or narrows what that key could name.
+   * Projects both keys reach — `["*"]` for every one, and absent for an ADMIN,
+   * which carries no scope. Read back off the fleet for the same reason the
+   * tier is: a rotation replaces a key, and it never widens or narrows what
+   * that key could name.
    */
   projects?: string[];
   /** Whether the new key was taken over from an interrupted run rather than minted. */
@@ -158,8 +159,18 @@ export async function rotateRemoteKey(
     supersedes: oldKey.id,
   });
 
-  /* 3. CONFIRM, under the NEW key: the fleet accepts what it signs. */
-  const trusted = await asNew.list();
+  /*
+   * 3. CONFIRM, under the NEW key: the fleet accepts what it signs.
+   *
+   * Below the admin tier a node answers this with the caller's own LINEAGE —
+   * the new key, and the old key it supersedes — rather than with every key the
+   * fleet trusts. That is exactly the pair this step reads: the new key's tier
+   * and scope come out of the first, and the second is what step 5 revokes. So
+   * the confirm is unchanged in substance, and `alsoTrusted` below simply has
+   * nothing to report for an operator-tier rotation, which is the truth about
+   * what that key was shown.
+   */
+  const trusted = (await asNew.list()).operators;
   /* What the fleet says the new key is, rather than what this end assumed. It is
      always there — the call above was made with that very key — and a fleet that
      somehow does not name it is reported at the tier a role-less record reads

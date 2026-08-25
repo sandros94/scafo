@@ -393,10 +393,13 @@ describe("reading what a fleet trusts", () => {
 
     expect(printed).toContain("2 operator keys");
     expect(printed).toMatch(new RegExp(`${key.id}.*this home signs with it`));
-    expect(printed).toMatch(/op-cccc3333\s+operator\s+all\s*$/m);
+    /* `none` rather than `all`: an operator-tier record naming no projects
+       reaches nothing, and a column reading `all` there would say the opposite
+       of what the key does. */
+    expect(printed).toMatch(/op-cccc3333\s+operator\s+none\s*$/m);
   });
 
-  it("names the PROJECTS each key may reach, and `all` for one that names none", async () => {
+  it("names the PROJECTS each key may reach, and `all` for an ADMIN that names none", async () => {
     const { home, key } = await registeredRemote("admin");
     await trustOperator(clock.ctx, {
       id: "op-cccc3333",
@@ -435,6 +438,43 @@ describe("reading what a fleet trusts", () => {
 
     expect(printed).toContain(`replaces ${key.id}`);
     expect(printed).toContain(rotated.newKeyId);
+  });
+
+  it("SAYS SO when the node showed only this key's own lineage", async () => {
+    /*
+     * A node answers an operator-tier caller with its own lineage rather than
+     * with every key the fleet trusts. An incomplete listing that did not say it
+     * was incomplete would be worse than none: the operator would read it as the
+     * whole trusted set — "this fleet has one operator on it" — and act on that.
+     */
+    const printed = formatRemoteKeys({
+      remote: REMOTE,
+      own: "op-tenant11",
+      trusted: [
+        {
+          id: "op-tenant11",
+          publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-a-tenant" },
+          role: "operator",
+          projects: ["acme"],
+        },
+      ],
+      scoped: true,
+    });
+
+    /* The HEADING is what a reader takes the count from, so that is the line
+       that must not claim to be the fleet's — the footer says the word "trusts"
+       precisely to contrast the two. */
+    expect(printed.split("\n")[0]).toBe(`scafo: "${REMOTE}" shows "op-tenant11" 1 operator key`);
+    expect(printed).toContain("own lineage");
+  });
+
+  it("says the fleet's whole count when the node was not filtering", async () => {
+    const { home } = await registeredRemote("admin");
+
+    const printed = formatRemoteKeys(await listRemoteKeys(home, REMOTE, { fetchFn: through(app) }));
+
+    expect(printed).toContain(`"${REMOTE}" trusts`);
+    expect(printed).not.toContain("own lineage");
   });
 });
 

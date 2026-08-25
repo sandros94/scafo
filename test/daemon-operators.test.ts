@@ -40,6 +40,8 @@ const SECOND_ID = "op-bbbb2222";
 const THIRD_ID = "op-cccc3333";
 const FOURTH_ID = "op-dddd4444";
 const VERSION = "0.0.0-test";
+/** The project every operator-tier key in this file is scoped to; see {@link scopedHalf}. */
+const PROJECT = "acme";
 
 /** Every problem body a caller that did not authenticate may see. */
 const AUTH_INVALID_PROBLEM = {
@@ -138,7 +140,10 @@ describe("what tier a POST may grant", () => {
     const response = await app.request("/v1/operators", {
       method: "POST",
       headers: { ...(await asKey(SECOND_ID, callerKeys)), "content-type": "application/json" },
-      body: JSON.stringify({ ...publicHalf(THIRD_ID, minted), role: wanted }),
+      body: JSON.stringify({
+        ...(wanted === "operator" ? scopedHalf(THIRD_ID, minted) : publicHalf(THIRD_ID, minted)),
+        role: wanted,
+      }),
     });
 
     expect(response.status).toBe(status);
@@ -157,7 +162,7 @@ describe("what tier a POST may grant", () => {
     await app.request("/v1/operators", {
       method: "POST",
       headers: { ...(await asOperator()), "content-type": "application/json" },
-      body: JSON.stringify(publicHalf(SECOND_ID, await generateJWK("EdDSA", { kid: SECOND_ID }))),
+      body: JSON.stringify(scopedHalf(SECOND_ID, await generateJWK("EdDSA", { kid: SECOND_ID }))),
     });
 
     /* Even from an admin: a key is added at the lowest tier unless the caller
@@ -404,7 +409,7 @@ describe("POST /v1/operators", () => {
     const added = await app.request("/v1/operators", {
       method: "POST",
       headers: { ...(await asOperator()), "content-type": "application/json" },
-      body: JSON.stringify(publicHalf(SECOND_ID, minted)),
+      body: JSON.stringify(scopedHalf(SECOND_ID, minted)),
     });
 
     expect(added.status).toBe(200);
@@ -417,7 +422,7 @@ describe("POST /v1/operators", () => {
 
   it("is idempotent, so a rerun of an interrupted rotation costs nothing", async () => {
     const minted = await generateJWK("EdDSA", { kid: SECOND_ID });
-    const body = JSON.stringify(publicHalf(SECOND_ID, minted));
+    const body = JSON.stringify(scopedHalf(SECOND_ID, minted));
 
     for (const _ of [0, 1]) {
       const response = await app.request("/v1/operators", {
@@ -435,7 +440,7 @@ describe("POST /v1/operators", () => {
     const response = await app.request("/v1/operators", {
       method: "POST",
       headers: { ...(await asOperator()), "content-type": "application/json" },
-      body: JSON.stringify(publicHalf(NODE_ID, await generateJWK("EdDSA", { kid: NODE_ID }))),
+      body: JSON.stringify(scopedHalf(NODE_ID, await generateJWK("EdDSA", { kid: NODE_ID }))),
     });
 
     expect(response.status).toBe(409);
@@ -579,6 +584,18 @@ function publicHalf(id: string, keys: Keypair): Omit<TrustedOperator, "role"> {
 }
 
 /**
+ * The same, naming a SCOPE — which an operator-tier registration must, since a
+ * key that names no projects reaches none of them.
+ *
+ * Used wherever the tier a body lands at is `operator`, and left off wherever it
+ * is `admin`, which is never scoped. What that refusal looks like on its own is
+ * `test/operator-tenancy.test.ts`; these cases are about the TIERS.
+ */
+function scopedHalf(id: string, keys: Keypair): Omit<TrustedOperator, "role"> {
+  return { ...publicHalf(id, keys), projects: [PROJECT] };
+}
+
+/**
  * Files a key as an operator's, straight into the registry and WITHOUT a role —
  * which is the record every installation older than this wave holds, and which
  * reads as an admin.
@@ -592,7 +609,14 @@ async function trust(id: string, keys: Keypair): Promise<void> {
   });
 }
 
-/** The same, at a stated tier and with the lineage a rotation would have left. */
+/**
+ * The same, at a stated tier and with the lineage a rotation would have left.
+ *
+ * An operator-tier key is given a SCOPE, because one that names no projects is
+ * a shape nothing grants: it reaches nothing, and a fixture carrying it would be
+ * testing the broken record rather than the tier rules these cases are about.
+ * `test/operator-tenancy.test.ts` is where the scope-less record is exercised.
+ */
 async function trustAs(
   id: string,
   keys: Keypair,
@@ -604,7 +628,11 @@ async function trustAs(
     id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: keys.publicKey.x },
     addresses: { internal: "operator", apiPort: 0 },
-    operator: { role, ...(supersedes === undefined ? {} : { supersedes }) },
+    operator: {
+      role,
+      ...(supersedes === undefined ? {} : { supersedes }),
+      ...(role === "operator" ? { projects: [PROJECT] } : {}),
+    },
   });
 }
 

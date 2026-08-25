@@ -17,6 +17,7 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  assertGrantableScope,
   bootstrapRole,
   canGrantRole,
   canGrantScope,
@@ -30,6 +31,7 @@ import {
   revokeOperator,
   type TrustedOperator,
   trustOperator,
+  WILDCARD_PROJECT,
 } from "../src/core/registry/operators.ts";
 import { getNode, registerNode } from "../src/core/registry/nodes.ts";
 import type { NodeRecord } from "../src/core/types/registry.ts";
@@ -290,16 +292,66 @@ describe("the projects a key is scoped to", () => {
     });
   });
 
-  it("reads a key that names none as reaching EVERY project", async () => {
-    /* Absent is the compat shape and the ordinary one: a solo installation and
-       every fleet older than this wave carries it, and both must go on working
-       exactly as they did. */
+  it("reads an operator-tier key that names none as reaching NOTHING", async () => {
+    /* The direction this wave turned round. Nothing GRANTS a record in this
+       shape any more, so one that exists was written to the bucket by hand —
+       and reading it as every project would be the silent widening the whole
+       axis is against. It stays trusted and is worth nothing here. */
     await trustOperator(clock.ctx, operator("op-aaaa1111", "operator"));
 
     const key = (await getOperator(clock.ctx, "op-aaaa1111")) as TrustedOperator;
 
     expect("projects" in key).toBe(false);
+    expect(canReachProject(key, "anything-at-all")).toBe(false);
+  });
+
+  it("reads an ADMIN that names none as reaching every project, because an admin is not a tenant", async () => {
+    await trustOperator(clock.ctx, operator("op-aaaa1111", "admin"));
+
+    const key = (await getOperator(clock.ctx, "op-aaaa1111")) as TrustedOperator;
+
     expect(canReachProject(key, "anything-at-all")).toBe(true);
+  });
+
+  it('reads ["*"] as every project, which is how one says so out loud', async () => {
+    await trustOperator(clock.ctx, {
+      ...operator("op-aaaa1111", "operator"),
+      projects: [WILDCARD_PROJECT],
+    });
+
+    const key = (await getOperator(clock.ctx, "op-aaaa1111")) as TrustedOperator;
+
+    expect(canReachProject(key, "acme")).toBe(true);
+    expect(canReachProject(key, "one-nobody-has-created-yet")).toBe(true);
+  });
+
+  it("REFUSES a wildcard listed beside named projects, rather than picking a reading", async () => {
+    await rejectsWith(
+      () =>
+        trustOperator(clock.ctx, {
+          ...operator("op-aaaa1111", "operator"),
+          projects: [WILDCARD_PROJECT, "acme"],
+        }),
+      "invalid-input",
+    );
+  });
+
+  it("reads a hand-written mixed wildcard as the two literal names it holds", async () => {
+    /* Refused above, so only a bucket-side write produces one — and the narrow
+       reading is the safe direction: it reaches a project called "*", which is
+       not a project, rather than reaching the fleet. */
+    await registerNode(clock.ctx, {
+      v: 1,
+      id: "op-aaaa1111",
+      publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-op-aaaa1111" },
+      addresses: { internal: OPERATOR_ADDRESS, apiPort: 0 },
+      operator: { role: "operator", projects: [WILDCARD_PROJECT, "acme"] },
+    });
+
+    const key = (await getOperator(clock.ctx, "op-aaaa1111")) as TrustedOperator;
+
+    expect(canReachProject(key, "acme")).toBe(true);
+    expect(canReachProject(key, "globex")).toBe(false);
   });
 
   it("reads a record written before scopes existed as reaching every project", async () => {
@@ -365,22 +417,63 @@ describe("the projects a key is scoped to", () => {
 });
 
 describe("which scope a caller may hand out", () => {
-  const unscoped: TrustedOperator = operator("op-aaaa1111", "operator");
+  /* Read as sets, this is one subset test: an admin's reach is every project, a
+     wildcard key's is every project, a scoped key's is its list, and a
+     scope-LESS operator-tier key's is the empty set. */
+  const admin: TrustedOperator = operator("op-aaaa1111", "admin");
+  const scopeless: TrustedOperator = operator("op-cccc3333", "operator");
   const scoped: TrustedOperator = { ...operator("op-bbbb2222", "operator"), projects: ["acme"] };
+  const wildcard: TrustedOperator = {
+    ...operator("op-dddd4444", "operator"),
+    projects: [WILDCARD_PROJECT],
+  };
 
-  it("lets a key that names no projects hand out anything, which is today's behaviour", () => {
-    expect(canGrantScope(unscoped, undefined)).toBe(true);
-    expect(canGrantScope(unscoped, ["acme", "globex"])).toBe(true);
+  it("lets an ADMIN hand out anything, including every project", () => {
+    expect(canGrantScope(admin, ["acme", "globex"])).toBe(true);
+    expect(canGrantScope(admin, [WILDCARD_PROJECT])).toBe(true);
   });
 
-  it("refuses a scoped key handing out EVERY project", () => {
-    expect(canGrantScope(scoped, undefined)).toBe(false);
+  it("lets a WILDCARD key hand out any project, because it reaches every one", () => {
+    /* Whether it may hand out another WILDCARD is a separate question, and the
+       route's rather than this one's: that grant is an admin's to make. */
+    expect(canGrantScope(wildcard, ["globex"])).toBe(true);
+  });
+
+  it("lets a scope-LESS operator-tier key hand out NOTHING but the nothing it holds", () => {
+    /* Which is what makes its own rotation work and nothing else: the carried
+       -over `undefined` is its own scope, and every named project is a widening
+       from the empty set. */
+    expect(canGrantScope(scopeless, undefined)).toBe(true);
+    expect(canGrantScope(scopeless, ["acme"])).toBe(false);
+    expect(canGrantScope(scopeless, [WILDCARD_PROJECT])).toBe(false);
   });
 
   it("lets a scoped key hand out its own projects and no others", () => {
     expect(canGrantScope(scoped, ["acme"])).toBe(true);
     expect(canGrantScope(scoped, ["acme", "globex"])).toBe(false);
     expect(canGrantScope(scoped, ["globex"])).toBe(false);
+  });
+
+  it("REFUSES a scoped key handing out every project, which is the escalation to close", () => {
+    expect(canGrantScope(scoped, [WILDCARD_PROJECT])).toBe(false);
+  });
+});
+
+describe("which scope may be GRANTED at all, as against merely carried over", () => {
+  it("refuses an operator-tier key that names no projects", () => {
+    /* The default-deny, at the one surface both ways into a fleet meet. */
+    expect(() => assertGrantableScope({ role: "operator" })).toThrow(/name its projects|projects/);
+  });
+
+  it("allows an ADMIN, which never carries a scope and reaches everything by tier", () => {
+    expect(() => assertGrantableScope({ role: "admin" })).not.toThrow();
+  });
+
+  it("allows an operator-tier key that names projects, or the wildcard", () => {
+    expect(() => assertGrantableScope({ role: "operator", projects: ["acme"] })).not.toThrow();
+    expect(() =>
+      assertGrantableScope({ role: "operator", projects: [WILDCARD_PROJECT] }),
+    ).not.toThrow();
   });
 });
 

@@ -23,15 +23,18 @@
 import type { H3, H3Event, Middleware } from "h3";
 import { ScafoError } from "../core/error.ts";
 import {
+  assertGrantableScope,
   canGrantRole,
   canGrantScope,
   canRevoke,
   DEFAULT_OPERATOR_ROLE,
+  isWildcardScope,
   listOperators,
   type OperatorRole,
   revokeOperator,
   type TrustedOperator,
   trustOperator,
+  WILDCARD_PROJECT,
 } from "../core/registry/operators.ts";
 import type { DaemonContext } from "./app.ts";
 import { nodeIdentity, operatorIdentity } from "./middleware.ts";
@@ -46,14 +49,25 @@ interface TrustRequest {
   role?: OperatorRole;
   /**
    * Projects the caller asked to scope the key to, or undefined to take the
-   * caller's own scope — which for an unscoped caller is every project.
+   * caller's own scope — which an admin has none of, so an admin enrolling an
+   * operator-tier key has to name one.
    */
   projects?: string[];
 }
 
-/** Body of `GET /v1/operators`: every key the fleet trusts, in id order. */
+/** Body of `GET /v1/operators`: the keys the fleet trusts that the caller may see, in id order. */
 export interface OperatorsResult {
   operators: TrustedOperator[];
+  /**
+   * Present, and always `true`, exactly when the listing was FILTERED to the
+   * caller's own lineage rather than being the whole trusted set.
+   *
+   * A marker rather than a silence, because the two answers are the same shape
+   * and mean very different things: a client that read a lineage listing as the
+   * fleet's would conclude a fleet of five tenants trusts one key. Absent for an
+   * admin, which is the only caller handed everything.
+   */
+  scoped?: true;
 }
 
 /** Body of `POST /v1/operators`: the key as the fleet now holds it. */
@@ -77,13 +91,40 @@ export function registerOperatorRoutes(app: H3, daemon: DaemonContext, guard: Mi
    * repointed at it.
    *
    * BOTH TIERS MAY READ IT, and they have to: that confirm step is the middle of
-   * an operator-tier rotation, and a listing is what says which keys a fleet
-   * trusts and at what tier — nothing in it is a secret, since the private
-   * halves live nowhere near the registry.
+   * an operator-tier rotation. What they read is not the same, though.
+   *
+   * AN OPERATOR-TIER CALLER SEES ITS OWN LINEAGE AND NOTHING ELSE — its record,
+   * the key it was registered to replace, and any successor registered to
+   * replace IT. That is exactly the set rotation needs and exactly the set the
+   * tier rules let it act on: it may revoke only what it supersedes, so every
+   * other key in the fleet is a name it can do nothing with. What the full
+   * listing gave it instead was a directory of the installation: every other
+   * tenant's key id, and every one of their PROJECTS, to anyone holding any
+   * trusted key. On a multi-tenant fleet that is the tenant list, and handing it
+   * over undoes the reason a tenant is given an operator key rather than a
+   * bucket credential.
+   *
+   * THE ADMINS ARE HIDDEN TOO, which is the part that looks like an omission and
+   * is not. An admin is the one key worth stealing on a fleet, and a listing
+   * that pointed at them turns "I have a deploy key" into "I know which three
+   * people to phish". Nothing is lost that the caller could have used: it may
+   * not grant an admin tier or revoke an admin key either way. The refusals that
+   * used to send callers here say "ask an admin of this fleet" instead, because
+   * whoever enrolled the key is who knows.
+   *
+   * NOTHING IN EITHER ANSWER IS A SECRET IN ITSELF — the private halves live
+   * nowhere near the registry — so this is about ENUMERATION rather than about
+   * key material.
    */
   app.get(
     OPERATORS_PATH,
-    async (): Promise<OperatorsResult> => ({ operators: await listOperators(daemon.registry) }),
+    async (event): Promise<OperatorsResult> => {
+      const caller = requireCaller(event);
+      const operators = await listOperators(daemon.registry);
+      if (caller.role === "admin") return { operators };
+
+      return { operators: operators.filter((key) => inLineageOf(caller, key)), scoped: true };
+    },
     guarded,
   );
 
@@ -125,7 +166,7 @@ export function registerOperatorRoutes(app: H3, daemon: DaemonContext, guard: Mi
         throw new ScafoError("auth-scope", "Beyond this operator's tier", {
           detail:
             `"${caller.id}" is an ${caller.role}-tier key and cannot register an ${role}-tier ` +
-            `one; an admin of this fleet can, and "scafo operator list" says which keys those are`,
+            `one; an admin of this fleet can — ask whoever enrolled your key`,
         });
       }
 
@@ -134,9 +175,7 @@ export function registerOperatorRoutes(app: H3, daemon: DaemonContext, guard: Mi
        * over and covers both registrations an operator-tier key can make. A
        * rotation inherits the scope exactly as it inherits the tier, so a
        * rotation is never a widening; and a key registered BESIDE the caller
-       * inherits it too, so an omitted `projects` is not the way out of a scope
-       * either. An unscoped caller inherits nothing, which is every project —
-       * so an admin enrolling a colleague behaves exactly as it did.
+       * inherits it too, so an omitted `projects` is not the way out of a scope.
        */
       const projects = request.projects ?? caller.projects;
       if (!canGrantScope(caller, projects)) {
@@ -146,6 +185,21 @@ export function registerOperatorRoutes(app: H3, daemon: DaemonContext, guard: Mi
             `a key that reaches past them; an admin of this fleet can`,
         });
       }
+
+      /*
+       * A ROTATION CARRIES A SCOPE OVER; ANYTHING ELSE GRANTS ONE. The two are
+       * held to different rules because they are different acts: a replacement
+       * for the caller's own key puts no reach into the fleet that was not
+       * already there, while a key registered beside the caller adds one.
+       *
+       * So the grant rules below apply to the second and not the first. That is
+       * what lets the holder of a scope-less operator-tier record — which
+       * nothing grants any more, and which reaches nothing — still rotate it,
+       * ending up with a key worth exactly what they started with; and it is
+       * what lets a wildcard key rotate itself without being able to mint a
+       * second wildcard key beside itself.
+       */
+      if (supersedes !== caller.id) assertFreshGrant(caller, { role, projects });
 
       const operator = await trustOperator(daemon.registry, {
         ...request.key,
@@ -198,8 +252,8 @@ export function registerOperatorRoutes(app: H3, daemon: DaemonContext, guard: Mi
         throw new ScafoError("auth-scope", "Beyond this operator's tier", {
           detail:
             `"${caller.id}" is an ${caller.role}-tier key: it may revoke only the key it was ` +
-            `registered to replace, which "${id}" is not; an admin of this fleet can revoke it, ` +
-            `and "scafo operator list" says which keys those are`,
+            `registered to replace, which "${id}" is not; an admin of this fleet can revoke it ` +
+            `— ask whoever enrolled your key`,
         });
       }
 
@@ -217,6 +271,57 @@ export function registerOperatorRoutes(app: H3, daemon: DaemonContext, guard: Mi
 }
 
 /* ---------------------------------------------------------------- internals */
+
+/**
+ * Whether `key` is part of `caller`'s own rotation chain: the caller's record,
+ * the key it was registered to replace, or a key registered to replace it.
+ *
+ * ONE STEP IN EITHER DIRECTION AND NO FURTHER. A rotation only ever needs the
+ * three — the new key confirms itself, and reads the old one it is about to
+ * revoke — and walking the chain further would put keys the caller can do
+ * nothing about back into the answer, which is the enumeration this exists to
+ * stop.
+ */
+function inLineageOf(caller: TrustedOperator, key: TrustedOperator): boolean {
+  return key.id === caller.id || key.id === caller.supersedes || key.supersedes === caller.id;
+}
+
+/**
+ * Checks a registration that ADDS reach to the fleet, rather than one that
+ * carries a key's own reach onto its replacement.
+ *
+ * Two rules, and both are about a scope being STATED rather than inherited by
+ * accident:
+ *
+ * An operator-tier key must name what it reaches, which now bites the ordinary
+ * admin enrollment — an admin carries no scope, so there is nothing for the new
+ * key to inherit, and what used to quietly mean "every project" has to be said.
+ *
+ * And a fresh wildcard takes an ADMIN. A key that reaches every project is the
+ * widest operator-tier grant there is, and letting one mint another beside
+ * itself would make the grant self-propagating: the admin who approved one
+ * wildcard key would have approved every wildcard key. Rotation is the exception
+ * and does not come through here, so a wildcard key still replaces itself.
+ *
+ * Throws `ScafoError("invalid-input")` for the first and
+ * `ScafoError("auth-scope")` for the second, which is the split those two codes
+ * always carry: what was asked for cannot exist, versus this caller cannot ask.
+ */
+function assertFreshGrant(
+  caller: TrustedOperator,
+  granted: Pick<TrustedOperator, "role" | "projects">,
+): void {
+  assertGrantableScope(granted);
+
+  if (isWildcardScope(granted.projects) && caller.role !== "admin") {
+    throw new ScafoError("auth-scope", "Only an admin grants every project", {
+      detail:
+        `"${WILDCARD_PROJECT}" reaches every project of this fleet, and "${caller.id}" is an ` +
+        `${caller.role}-tier key: it may replace itself with one, and may not hand one out ` +
+        `beside itself; name the projects this key is for, or ask an admin of this fleet`,
+    });
+  }
+}
 
 /**
  * The caller as the guard read it. Every route here stands behind
@@ -266,14 +371,14 @@ async function readTrustRequest(event: H3Event): Promise<TrustRequest> {
   if (body.supersedes !== undefined && typeof body.supersedes !== "string") {
     throw malformed(`"supersedes" must be the id of the key this one replaces`);
   }
-  /* SHAPE only. What a scope may hold — a slug, and at least one of them, and
-     never on an admin — belongs to the registry, so an operator reads the same
-     refusal whichever way they reached the installation. */
+  /* SHAPE only. What a scope may hold — a slug or the lone wildcard, at least
+     one of them, and never on an admin — belongs to the registry, so an operator
+     reads the same refusal whichever way they reached the installation. */
   if (
     body.projects !== undefined &&
     (!Array.isArray(body.projects) || body.projects.some((entry) => typeof entry !== "string"))
   ) {
-    throw malformed(`"projects" must be a list of project slugs, or absent for every project`);
+    throw malformed(`"projects" must be a list of project slugs, or ["${WILDCARD_PROJECT}"]`);
   }
 
   /*

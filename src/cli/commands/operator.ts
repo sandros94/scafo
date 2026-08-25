@@ -75,7 +75,9 @@ const keygenArgs: ArgsDef = {
   register: { type: "boolean", description: "Record the public half in the registry" },
   role: {
     type: "string",
-    description: "Tier to register at: admin|operator (the first key is always admin)",
+    description:
+      `Tier to register at: admin (the first key is always one, and this path admits no other ` +
+      `— an operator-tier key needs a project scope, which only the wire path can give it)`,
   },
 };
 
@@ -97,7 +99,8 @@ const enrollArgs: ArgsDef = {
   projects: {
     type: "string",
     description:
-      "Projects the key may name, comma-separated (default: every project; wire path only)",
+      `Projects the key may name, comma-separated, or "*" for every project; ` +
+      `required for an operator-tier key (wire path only)`,
   },
   node: { type: "string", description: "Node to reach, instead of the remote's first endpoint" },
 };
@@ -280,8 +283,9 @@ async function runEnroll(flags: Record<string, unknown>): Promise<void> {
     ...(named === undefined ? {} : { remote: named }),
     bucket: BUCKET_FLAGS.some((name) => text(flags[name]) !== undefined),
   });
-  /* The ceremony seeds and recovers ADMINS, and an admin is never scoped. */
-  assertScopedEnrollment(chosen, scope.projects);
+  /* The ceremony seeds and recovers ADMINS: never scoped, and never at the
+     operator tier, which would be a key that can reach nothing. */
+  assertScopedEnrollment(chosen, scope.projects, role.role);
 
   const enrolled =
     chosen === "wire"

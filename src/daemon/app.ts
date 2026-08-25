@@ -45,12 +45,13 @@ import type { DaemonConfig } from "./config.ts";
 import type { Coordinator } from "./coordinator.ts";
 import type { DeployService, DeployStatus } from "./deploys.ts";
 import {
+  callerOperator,
   nodeIdentity,
   renderProblem,
   requireNodeToken,
   requireOperatorToken,
 } from "./middleware.ts";
-import { assertProjectScope } from "./_scope.ts";
+import { assertProjectScope, scopedState } from "./_scope.ts";
 import { registerOperatorRoutes } from "./_operator-routes.ts";
 import type { Observability } from "./observe.ts";
 import type { ParkedView, PlacementView, Reconciler, ReconcileStatus } from "./reconcile.ts";
@@ -196,6 +197,16 @@ export interface DaemonState {
   wakes: WakeCounters;
   /** Last pass of the reconcile loop; absent on a node that runs no loop. */
   reconcile?: ReconcileStatus;
+  /**
+   * Present, and always `true`, when this document was FILTERED to the projects
+   * the caller reaches — set for any operator-tier caller, including one scoped
+   * to every project and therefore shown everything.
+   *
+   * Absent for the two callers the whole document belongs to: a machine of the
+   * fleet, and an admin. See `scopedState`, which is where both the filtering
+   * and the reason for that exact rule live.
+   */
+  scoped?: true;
 }
 
 /** Body of `DELETE /v1/environments/:project/:env`: the store keys it removed. */
@@ -320,15 +331,29 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     return ingress.snapshot();
   });
 
+  /*
+   * WHAT THIS NODE BELIEVES, NARROWED TO WHAT THE CALLER MAY KNOW. Almost every
+   * section here names projects — placements, parked environments, processes,
+   * the environments the last pass could not place — so on a multi-tenant fleet
+   * the unfiltered document is the tenant list, handed to anyone holding any
+   * trusted key. `scopedState` is where that is decided, beside the refusal an
+   * operator meets when it NAMES another tenant's project, because the two are
+   * halves of one boundary and splitting them across files is how they drift.
+   *
+   * The caller is resolved once and cached on the event, so this costs the same
+   * single record read a scoped route already makes. A node-signed PEER resolves
+   * to no operator record and is handed the document untouched — the deploy-await
+   * hop polls exactly this route for the process it is waiting on.
+   */
   app.get(
     "/v1/state",
-    async (): Promise<DaemonState> => {
+    async (event): Promise<DaemonState> => {
       const [node, lease] = await Promise.all([
         readJson<NodeRecord>(daemon.registry, nodeKey(daemon.nodeId)),
         readJson<CoordinatorLease>(daemon.registry, coordinatorKey()),
       ]);
       const reconcile = daemon.reconciler?.status();
-      return {
+      const state: DaemonState = {
         node: node?.value ?? null,
         lease: lease?.value ?? null,
         coordinator: coordinatorView(daemon, lease?.value ?? null),
@@ -340,6 +365,11 @@ export function createNodeApp(daemon: DaemonContext): H3 {
         wakes: wake.counters(),
         ...(reconcile === undefined ? {} : { reconcile }),
       };
+
+      const callerId = nodeIdentity(event)?.nodeId;
+      const caller =
+        callerId === undefined ? null : await callerOperator(event, daemon.registry, callerId);
+      return scopedState(caller, state);
     },
     { middleware: [authenticated] },
   );

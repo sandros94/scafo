@@ -19,6 +19,7 @@
 import { ScafoError } from "../core/error.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
 import type { OperatorRole, TrustedOperator } from "../core/registry/operators.ts";
+import { WILDCARD_PROJECT } from "../core/registry/operators.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
 import { assertSlug } from "../core/utils/slug.ts";
 import {
@@ -54,9 +55,14 @@ export interface OperatorGrant {
   /** Key this one replaces; a node accepts only the CALLER's own id here. */
   supersedes?: string;
   /**
-   * Projects to scope the key to. Optional for the same reason the two above
-   * are: absent lets the node take the CALLER's own scope, which is every
-   * project for an unscoped caller and the caller's list for a scoped one.
+   * Projects to scope the key to, or `["*"]` for every project.
+   *
+   * Optional for the same reason the two above are, and NOT optional in
+   * practice for an operator-tier key: absent lets the node take the CALLER's
+   * own scope, which is what a rotation and a scoped caller's enrollment want —
+   * but an admin carries none to hand down, so a node refuses an operator-tier
+   * registration that comes out with no projects at all. The rule is the node's
+   * to state, so this stays a plain pass-through.
    */
   projects?: string[];
 }
@@ -69,12 +75,27 @@ export interface RemoteKeyOptions {
   fetchFn?: typeof fetch;
 }
 
+/** A trusted-key listing as a node answered it. */
+export interface OperatorListing {
+  /** The keys the node was willing to show this caller, in id order. */
+  operators: TrustedOperator[];
+  /**
+   * Set when the node FILTERED the answer to the caller's own key lineage,
+   * rather than answering with every key the fleet trusts.
+   *
+   * Carried rather than inferred from the length: one key is a plausible answer
+   * for a solo installation and for a tenant on a fleet of fifty, and only the
+   * node knows which it just gave.
+   */
+  scoped?: true;
+}
+
 /** What an operator can do to the set of keys a fleet trusts. */
 export interface OperatorApi {
   /** How the operator is acting, as a command's own output names it. */
   readonly via: string;
-  /** Every key the fleet trusts, in id order. */
-  list(): Promise<TrustedOperator[]>;
+  /** The keys the fleet trusts that this caller may see, in id order. */
+  list(): Promise<OperatorListing>;
   /** Records a public half. Repeating it is a no-op, not a failure. */
   trust(key: OperatorGrant): Promise<TrustedOperator>;
   /** Stops the fleet trusting `id`; answers the id that went. */
@@ -93,6 +114,8 @@ export interface RemoteKeys {
   /** Id this home signs for that remote with. */
   own: string;
   trusted: TrustedOperator[];
+  /** Set when the node showed only this key's own lineage; see {@link OperatorListing}. */
+  scoped?: true;
 }
 
 /** The trusted-key surface of one node, signed for by one key. */
@@ -106,9 +129,12 @@ export function operatorApi(opts: NodeOptions): OperatorApi {
   return {
     via: opts.url,
 
-    async list(): Promise<TrustedOperator[]> {
-      const answer = await nodeRequestJson(at(), opts, call("GET"));
-      return (answer as { operators: TrustedOperator[] }).operators;
+    async list(): Promise<OperatorListing> {
+      const answer = (await nodeRequestJson(at(), opts, call("GET"))) as OperatorListing;
+      return {
+        operators: answer.operators,
+        ...(answer.scoped === true ? { scoped: true as const } : {}),
+      };
     },
 
     async trust(key): Promise<TrustedOperator> {
@@ -204,8 +230,14 @@ export async function listRemoteKeys(
     ...remoteConnection(entry, name, opts),
     authorize: operatorSigner(key),
   });
+  const listing = await api.list();
 
-  return { remote: name, own: key.id, trusted: await api.list() };
+  return {
+    remote: name,
+    own: key.id,
+    trusted: listing.operators,
+    ...(listing.scoped === true ? { scoped: true as const } : {}),
+  };
 }
 
 /** How a revocation reads on the terminal, revocation bound included. */
@@ -225,15 +257,19 @@ export function describeRevocation(revoked: RevokedKey): string {
  * The tier is a column of its own because it is what decides who may administer
  * whom: an operator looking at a refusal needs to see, in the same listing, that
  * their key is operator-tier and which keys are not. The scope is a column for
- * the same reason one line down, and it reads `all` where a key names no
- * projects — which is what every key of an installation nobody has scoped
- * carries, so the column says "nothing here is narrowed" rather than being
- * blank.
+ * the same reason one line down.
+ *
+ * AND THE HEADING SAYS WHOSE LISTING IT IS. A node shows an operator-tier caller
+ * its own key lineage and nothing else, so the count is a count of what this key
+ * may see rather than of what the fleet trusts — printing the second when it
+ * answered the first would tell a tenant their fleet has one operator on it.
  */
 export function formatRemoteKeys(keys: RemoteKeys): string {
+  const count = `${String(keys.trusted.length)} operator key${keys.trusted.length === 1 ? "" : "s"}`;
   const lines = [
-    `scafo: "${keys.remote}" trusts ${String(keys.trusted.length)} operator ` +
-      `key${keys.trusted.length === 1 ? "" : "s"}`,
+    keys.scoped === true
+      ? `scafo: "${keys.remote}" shows "${keys.own}" ${count}`
+      : `scafo: "${keys.remote}" trusts ${count}`,
   ];
   const width = Math.max(...keys.trusted.map((key) => key.id.length), 0);
   const roleWidth = Math.max(...keys.trusted.map((key) => key.role.length), 0);
@@ -245,15 +281,35 @@ export function formatRemoteKeys(keys: RemoteKeys): string {
     ];
     const suffix = notes.length === 0 ? "" : `  (${notes.join(", ")})`;
     lines.push(
-      `  ${key.id.padEnd(width)}  ${key.role.padEnd(roleWidth)}  ${formatScope(key.projects)}${suffix}`,
+      `  ${key.id.padEnd(width)}  ${key.role.padEnd(roleWidth)}  ${formatScope(key)}${suffix}`,
+    );
+  }
+
+  if (keys.scoped === true) {
+    /* Said out loud, because an incomplete listing that does not say it is
+       incomplete is worse than no listing: an operator would read it as the
+       fleet's whole trusted set and act on that. */
+    lines.push(
+      `scafo: that is this key's own lineage — the key it replaced and the one replacing it — ` +
+        `rather than every key "${keys.remote}" trusts; an admin of that fleet sees them all`,
     );
   }
   return lines.join("\n");
 }
 
-/** What a key's scope reads as in a listing: the projects, or `all` for none. */
-export function formatScope(projects?: string[]): string {
-  return projects === undefined ? "all" : projects.join(",");
+/**
+ * What a key's scope reads as in a listing.
+ *
+ * IT DEPENDS ON THE TIER, because an absent scope does. An ADMIN reaches every
+ * project and never carries a list, so it reads `all`. An operator-tier key
+ * reaches what it names — `*` for the whole fleet, said out loud — and one
+ * carrying no list at all reaches NOTHING, which reads `none` rather than
+ * blank: a column that went empty there would look like missing information
+ * instead of like the answer.
+ */
+export function formatScope(key: Pick<TrustedOperator, "role" | "projects">): string {
+  if (key.projects !== undefined) return key.projects.join(",");
+  return key.role === "admin" ? "all" : "none";
 }
 
 /* ------------------------------------------------------------ who I am */
@@ -348,45 +404,75 @@ export interface EnrolledOperator {
   id: string;
   role: OperatorRole;
   path: EnrollPath;
-  /** Projects the key may reach, as the FLEET filed them; absent means every one. */
+  /**
+   * Projects the key may reach, as the FLEET filed them — `["*"]` for every
+   * one. Absent means the key is an ADMIN, which carries no scope and reaches
+   * everything; an operator-tier key never comes back without one.
+   */
   projects?: string[];
   /** How it was done, as the command's own output names it. */
   via: string;
 }
 
 /**
- * Refuses a scope asked for through the BUCKET ceremony.
+ * Refuses an enrollment the BUCKET ceremony cannot express.
  *
  * The two ceremony cases — seeding an installation and recovering one that has
- * locked every operator out — both produce an ADMIN, and an admin is never
- * scoped, so the pair asks for something that cannot exist. Said here rather
- * than after the bucket has been reached: the credential that path needs is the
- * one worth not making an operator produce for a request that cannot succeed.
+ * locked every operator out — both produce an ADMIN. So a scope asked for there
+ * is a contradiction, an admin being never scoped; and an operator TIER asked
+ * for there is the same contradiction from the other end, because that path
+ * names no projects and an operator-tier key that names none reaches nothing.
+ * The ceremony admits admins, and every other key goes over the wire.
+ *
+ * Said here rather than after the bucket has been reached: the credential that
+ * path needs is the one worth not making an operator produce for a request that
+ * cannot succeed. This is about what the PATH can carry — the rule about what a
+ * record may say belongs to the registry, which refuses the same key again on
+ * the way in.
  *
  * Throws `ScafoError("invalid-input")`.
  */
-export function assertScopedEnrollment(path: EnrollPath, projects?: string[]): void {
-  if (path !== "bucket" || projects === undefined) return;
+export function assertScopedEnrollment(
+  path: EnrollPath,
+  projects?: string[],
+  role?: OperatorRole,
+): void {
+  if (path !== "bucket") return;
 
-  throw new ScafoError("invalid-input", "The ceremony cannot scope a key", {
-    detail:
-      `the bucket path is how an installation is seeded and how one that has locked every ` +
-      `operator out is recovered, and both of those produce an ADMIN — which administers every ` +
-      `key this fleet trusts and is therefore never scoped to projects; enrol the key over the ` +
-      `wire with --remote <name> to scope it`,
-  });
+  if (projects !== undefined) {
+    throw new ScafoError("invalid-input", "The ceremony cannot scope a key", {
+      detail:
+        `the bucket path is how an installation is seeded and how one that has locked every ` +
+        `operator out is recovered, and both of those produce an ADMIN — which administers ` +
+        `every key this fleet trusts and is therefore never scoped to projects; enrol the key ` +
+        `over the wire with --remote <name> to scope it`,
+    });
+  }
+  if (role === "operator") {
+    throw new ScafoError("invalid-input", "The ceremony admits admins", {
+      detail:
+        `the bucket path names no projects, and an operator-tier key that names none may reach ` +
+        `nothing at all — so this would file a key that authenticates and can do nothing; ` +
+        `enrol it over the wire with --remote <name> --projects <a,b>, which is where an ` +
+        `operator-tier key gets the scope it needs`,
+    });
+  }
 }
 
 /**
  * The projects `--projects` names, as a comma-separated list — the same shape
- * `--endpoint` and `--node-labels` take.
+ * `--endpoint` and `--node-labels` take, since citty has no array argument.
  *
- * Refused here rather than at the node, for the reason {@link operatorRole} is:
- * a mistyped slug would otherwise be filed as a project that will never exist,
- * and the operator finds out from a refusal months later. Absent stays absent,
- * which is what the registration surface reads as every project.
+ * Slugs are refused here rather than at the node, for the reason
+ * {@link operatorRole} is: a mistyped one would otherwise be filed as a project
+ * that will never exist, and the operator finds out from a refusal months later.
  *
- * Throws `ScafoError("invalid-slug")` for a name that is not a project slug.
+ * {@link WILDCARD_PROJECT} passes through UNCHECKED, and whether it is allowed
+ * where it was used is the node's to say. It is not a slug, so validating it
+ * here would mean either teaching this function the rule that it must stand
+ * alone — policy, duplicated, in the one place it cannot be enforced — or
+ * refusing `--projects "*"` outright with a message about lowercase letters.
+ * Absent stays absent, and the node refuses that for an operator-tier key.
  */
 export function operatorProjects(value: unknown): { projects?: string[] } {
   const given = typeof value === "string" ? value.trim() : "";
@@ -396,7 +482,9 @@ export function operatorProjects(value: unknown): { projects?: string[] } {
     .split(",")
     .map((entry) => entry.trim())
     .filter((entry) => entry !== "");
-  for (const project of projects) assertSlug(project);
+  for (const project of projects) {
+    if (project !== WILDCARD_PROJECT) assertSlug(project);
+  }
 
   return projects.length === 0 ? {} : { projects };
 }
@@ -469,11 +557,16 @@ export function describeEnrollment(enrolled: EnrolledOperator): string {
 
   if (enrolled.projects !== undefined) {
     /* Said out loud, because the whole point of a scoped key is that it does
-       LESS than the reader may expect a trusted key to do. */
+       LESS than the reader may expect a trusted key to do — and the wildcard is
+       said out loud for the opposite reason. */
     lines.push(
-      `scafo: it may only name ${enrolled.projects.join(", ")} — every other project of this ` +
-        `fleet answers it with a refusal. That binds the KEY on the wire and nothing else: ` +
-        `whoever holds the bucket's credentials still holds the whole fleet`,
+      enrolled.projects.includes(WILDCARD_PROJECT)
+        ? `scafo: it may name EVERY project of this fleet, including ones nobody has created ` +
+            `yet. That binds the KEY on the wire and nothing else: whoever holds the bucket's ` +
+            `credentials still holds the whole fleet`
+        : `scafo: it may only name ${enrolled.projects.join(", ")} — every other project of ` +
+            `this fleet answers it with a refusal. That binds the KEY on the wire and nothing ` +
+            `else: whoever holds the bucket's credentials still holds the whole fleet`,
     );
   }
 

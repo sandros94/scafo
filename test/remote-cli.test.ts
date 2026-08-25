@@ -376,17 +376,33 @@ describe("the tier a bucket-side registration files a key at", () => {
     await expect(getOperator(clock.ctx, key.id)).resolves.toBeNull();
   });
 
-  it("files every later key at the operator tier unless an admin is asked for", async () => {
+  it("files a later key at the ADMIN tier when one is asked for", async () => {
     const clock = ctxWith(new MemoryCasStore());
     await registerOperatorKey(clock.ctx, await generateOperatorKey());
     const second = await generateOperatorKey();
-    const third = await generateOperatorKey();
 
-    await registerOperatorKey(clock.ctx, second);
-    await registerOperatorKey(clock.ctx, third, { role: "admin" });
+    await registerOperatorKey(clock.ctx, second, { role: "admin" });
 
-    await expect(getOperator(clock.ctx, second.id)).resolves.toMatchObject({ role: "operator" });
-    await expect(getOperator(clock.ctx, third.id)).resolves.toMatchObject({ role: "admin" });
+    await expect(getOperator(clock.ctx, second.id)).resolves.toMatchObject({ role: "admin" });
+  });
+
+  it("REFUSES a later key at the operator tier, because the ceremony grants no scope", async () => {
+    const clock = ctxWith(new MemoryCasStore());
+    await registerOperatorKey(clock.ctx, await generateOperatorKey());
+    const second = await generateOperatorKey();
+
+    /*
+     * The ceremony admits a key with no projects named, and an operator-tier
+     * key that names none reaches nothing — so what it would produce here is a
+     * key that authenticates and can do nothing, filed by the one path with no
+     * node in it to say so. It bypasses the TIER rules on purpose, because
+     * there may be no admin to ask; it bypasses nothing about what a record may
+     * say. Operator-tier keys are enrolled over the wire, with a scope.
+     */
+    const error = await rejectsWith(() => registerOperatorKey(clock.ctx, second), "invalid-input");
+
+    expect(error.detail).toContain("projects");
+    await expect(getOperator(clock.ctx, second.id)).resolves.toBeNull();
   });
 
   it("is asked for by --role on both commands that register a key", async () => {

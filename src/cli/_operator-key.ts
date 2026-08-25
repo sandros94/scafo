@@ -16,7 +16,12 @@ import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { ScafoError } from "../core/error.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
-import { bootstrapRole, type OperatorRole, trustOperator } from "../core/registry/operators.ts";
+import {
+  assertGrantableScope,
+  bootstrapRole,
+  type OperatorRole,
+  trustOperator,
+} from "../core/registry/operators.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
 import { fromBase64 } from "../core/utils/base64.ts";
 
@@ -347,6 +352,14 @@ export async function loadPublicOperator(spec: string): Promise<PublicOperator> 
  * is always an admin, an explicit operator-tier first key is REFUSED, and every
  * key after it is least privilege unless an admin is asked for.
  *
+ * AND IT GRANTS NO SCOPE, which is why an operator-tier key cannot come out of
+ * it at all: this path admits a key with no projects named, and an operator-tier
+ * key that names none reaches nothing. Refused rather than written, by the same
+ * check the wire route meets — the ceremony bypasses the TIER rules on purpose,
+ * because there may be no admin to ask, and it bypasses nothing about what a
+ * record may say. Seeding is unaffected: the first key of an installation is
+ * always an admin, and an admin is never scoped.
+ *
  * Nothing is emitted about it. There is no daemon in this path — that is the
  * point of it — so the observability seam a node reports its own trust changes
  * through does not exist here, and the record of the ceremony is the bucket's
@@ -358,6 +371,7 @@ export async function registerOperatorKey(
   opts: { role?: OperatorRole } = {},
 ): Promise<OperatorRole> {
   const role = await bootstrapRole(registry, opts.role);
+  assertGrantableScope({ role });
   await trustOperator(registry, {
     id: key.id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: key.publicKey.x },

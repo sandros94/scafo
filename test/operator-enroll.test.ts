@@ -170,14 +170,31 @@ describe("admitting a key over the wire", () => {
 
     const enrolled = await enrollOnWire(home, REMOTE, joiner, {
       role: "operator",
+      /* Named because an operator-tier key must name what it reaches, and the
+         admin doing the enrolling carries no scope for it to inherit. */
+      projects: ["acme"],
       fetchFn: through(app),
     });
 
     expect(enrolled).toMatchObject({ id: joiner.id, role: "operator", path: "wire" });
     await expect(getOperator(clock.ctx, joiner.id)).resolves.toMatchObject({
       role: "operator",
+      projects: ["acme"],
       publicKey: { kty: "OKP", crv: "Ed25519", x: joiner.publicKey.x },
     });
+  });
+
+  it("REFUSES an operator-tier key that names no projects, whoever is enrolling it", async () => {
+    const { home } = await registeredRemote();
+    const joiner = publicOperator(await generateOperatorKey());
+
+    /* The default-deny, read from this end: an admin has no scope to hand down,
+       so an enrollment that leaves the flag off used to mean every project. */
+    await rejectsWith(
+      () => enrollOnWire(home, REMOTE, joiner, { role: "operator", fetchFn: through(app) }),
+      "invalid-input",
+    );
+    await expect(getOperator(clock.ctx, joiner.id)).resolves.toBeNull();
   });
 
   it("reports the tier the NODE decided, rather than the one that was asked for", async () => {
@@ -197,7 +214,10 @@ describe("admitting a key over the wire", () => {
     const { home } = await registeredRemote();
     const joiner = publicOperator(await generateOperatorKey());
 
-    const enrolled = await enrollOnWire(home, REMOTE, joiner, { fetchFn: through(app) });
+    const enrolled = await enrollOnWire(home, REMOTE, joiner, {
+      projects: ["acme"],
+      fetchFn: through(app),
+    });
 
     expect(enrolled.role).toBe("operator");
   });
@@ -209,12 +229,20 @@ describe("the projects an enrollment scopes a key to", () => {
     expect(operatorProjects(" acme , globex ")).toEqual({ projects: ["acme", "globex"] });
   });
 
-  it("leaves an absent list absent, which is every project", () => {
-    /* Absent must stay absent all the way down: it is what the registration
-       surface reads as "say nothing", and a `[]` here would be a key that can
-       reach nothing at all. */
+  it("leaves an absent list absent, for the NODE to decide what that means", () => {
+    /* Absent must stay absent all the way down rather than becoming a `[]`:
+       what it means depends on the tier the key lands at, which is the node's
+       to settle — every project for an admin, and a refusal below that. */
     expect(operatorProjects(undefined)).toEqual({});
     expect(operatorProjects("")).toEqual({});
+  });
+
+  it('passes "*" through unchecked, because whether it is allowed is the node\'s to say', () => {
+    /* It is not a slug, so validating it here would mean either teaching this
+       the rule that it stands alone — policy in the one place that cannot
+       enforce it — or refusing it with a message about lowercase letters. */
+    expect(operatorProjects("*")).toEqual({ projects: ["*"] });
+    expect(operatorProjects("*,acme")).toEqual({ projects: ["*", "acme"] });
   });
 
   it("refuses a name that is not a project slug, here rather than at the node", async () => {
@@ -260,9 +288,21 @@ describe("the projects an enrollment scopes a key to", () => {
     expect(error.detail).toContain("admin");
   });
 
-  it("lets the ceremony run when no scope is asked for", () => {
+  it("REFUSES the ceremony flags together with an operator TIER", async () => {
+    /* The same contradiction from the other end: that path names no projects,
+       and an operator-tier key naming none may reach nothing at all. */
+    const error = await rejectsWith(
+      async () => assertScopedEnrollment("bucket", undefined, "operator"),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("--remote");
+  });
+
+  it("lets the ceremony run when it is admitting an admin, which is all it admits", () => {
     expect(() => assertScopedEnrollment("bucket", undefined)).not.toThrow();
-    expect(() => assertScopedEnrollment("wire", ["acme"])).not.toThrow();
+    expect(() => assertScopedEnrollment("bucket", undefined, "admin")).not.toThrow();
+    expect(() => assertScopedEnrollment("wire", ["acme"], "operator")).not.toThrow();
   });
 });
 
