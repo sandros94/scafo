@@ -288,7 +288,7 @@ describe("what the reconcile pass hands over", () => {
       config: {
         platformDomains: DOMAINS,
         node: { listen: "127.0.0.1:7400" },
-        api: { public: true },
+        api: { public: true, jsonBytes: 65_536 },
       },
       ingress: {
         apply: (desired: IngressDesired): Promise<void> => {
@@ -333,7 +333,7 @@ describe("what the reconcile pass hands over", () => {
         config: {
           platformDomains: DOMAINS,
           node: { listen: "127.0.0.1:7400" },
-          api: { public: isPublic },
+          api: { public: isPublic, jsonBytes: 65_536 },
         },
         ingress: {
           apply: (desired: IngressDesired): Promise<void> => {

@@ -221,7 +221,7 @@ export interface EnvironmentResult {
   environment: EnvironmentRecord;
 }
 
-/** Body of `POST /v1/aliases`: the environment as it now stands. */
+/** Body of an environment alias change: the environment as it now stands. */
 export interface AliasResult {
   environment: EnvironmentRecord;
   warnings: ScafoWarning[];
@@ -415,7 +415,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     "/v1/environments/:project/:env/selector",
     async (event): Promise<EnvironmentResult> => {
       const [project, name] = await scopedTarget(daemon, event);
-      const request = await readSelectorRequest(event);
+      const request = await readSelectorRequest(event, { maxBytes: daemon.config.api.jsonBytes });
       return {
         environment: await setNodeSelector(daemon.registry, project, name, request.selector),
       };
@@ -436,7 +436,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     "/v1/environments/:project/:env/park",
     async (event): Promise<EnvironmentResult> => {
       const [project, name] = await scopedTarget(daemon, event);
-      const request = await readParkRequest(event);
+      const request = await readParkRequest(event, { maxBytes: daemon.config.api.jsonBytes });
       return {
         environment: await setParkPolicy(daemon.registry, project, name, request.policy),
       };
@@ -450,7 +450,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
    * intent the same way: the nodes serving the environment start the legs it
    * names on their next passes, and the routing follows as each becomes ready.
    *
-   * Authenticated like `POST /v1/aliases` rather than like the selector — with a
+   * Authenticated like the alias route rather than like the selector — with a
    * WORKLOAD token accepted for the project in the path — because a split is the
    * same kind of act as a flip: it moves an application's live traffic between
    * that application's own builds, which is what a project's CI is trusted to do
@@ -462,7 +462,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
          to learn from the request first. */
     await verifyCaller(verifiers, event, project);
 
-    const request = await readSplitRequest(event);
+    const request = await readSplitRequest(event, { maxBytes: daemon.config.api.jsonBytes });
     return {
       environment:
         request.kind === "canary"
@@ -550,24 +550,16 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     return status;
   });
 
-  app.post("/v1/aliases", async (event): Promise<AliasResult> => {
-    const request = await readAliasRequest(event);
-    await verifyCaller(verifiers, event, request.project);
+  app.post("/v1/projects/:project/environments/:env/alias", async (event): Promise<AliasResult> => {
+    const [project, environment] = target(event);
+    await verifyCaller(verifiers, event, project);
+    const request = await readAliasRequest(event, { maxBytes: daemon.config.api.jsonBytes });
 
     if (request.rollback) {
-      const environment = await rollbackAlias(
-        daemon.registry,
-        request.project,
-        request.environment,
-      );
-      return { environment, warnings: [] };
+      const rolledBack = await rollbackAlias(daemon.registry, project, environment);
+      return { environment: rolledBack, warnings: [] };
     }
-    return flipAlias(
-      daemon.registry,
-      request.project,
-      request.environment,
-      request.build as string,
-    );
+    return flipAlias(daemon.registry, project, environment, request.build as string);
   });
 
   /*

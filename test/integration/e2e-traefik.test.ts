@@ -628,8 +628,8 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
     async () => {
       const answer = await httpPost(
         apiPort,
-        "/v1/aliases",
-        { project: PROJECT, environment: ENVIRONMENT, build: buildV1 },
+        `/v1/projects/${PROJECT}/environments/${ENVIRONMENT}/alias`,
+        { build: buildV1 },
         await operatorToken(),
       );
       expect(answer.status, answer.body).toBe(200);

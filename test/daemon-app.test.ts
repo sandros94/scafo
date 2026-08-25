@@ -719,7 +719,7 @@ describe("GET /v1/ingress/ask", () => {
     /* Nothing routes the apex then, so a certificate for it would be a public
        record of a name that answers nothing — exactly what this endpoint
        refuses for a retired environment's claim. */
-    const closed = appWith({ api: { public: false } });
+    const closed = appWith({ api: { public: false, jsonBytes: 65_536 } });
 
     const response = await closed.request(`/v1/ingress/ask?domain=${PLATFORM_DOMAIN}`);
 
@@ -731,7 +731,7 @@ describe("GET /v1/ingress/ask", () => {
     /* The approval is the apex and nothing else: a junk label under it is as
        unmintable as it ever was, which is what keeps a crawler from spending a
        CA's rate limit on names that do not exist. */
-    for (const app_ of [app, appWith({ api: { public: false } })]) {
+    for (const app_ of [app, appWith({ api: { public: false, jsonBytes: 65_536 } })]) {
       const response = await app_.request(`/v1/ingress/ask?domain=nothing.${PLATFORM_DOMAIN}`);
 
       expect(response.status).toBe(404);
@@ -889,7 +889,7 @@ function daemonConfig(): DaemonConfig {
       pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
-    api: { public: true },
+    api: { public: true, jsonBytes: 65_536 },
   };
 }
 

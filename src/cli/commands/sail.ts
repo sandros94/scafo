@@ -141,6 +141,10 @@ const sailArgs: ArgsDef = {
       "at one well-known name (default on; --no-api-public leaves the apex unrouted and " +
       "without a certificate). /v1/storage and /v1/ingress/traefik are never reachable there",
   },
+  "json-bytes": {
+    type: "string",
+    description: "Maximum bytes accepted by a JSON API control request",
+  },
   "ingress-driver": { type: "string", description: "Ingress this node drives (caddy, traefik)" },
   "caddy-admin": { type: "string", description: "Base URL of the Caddy admin API" },
   "caddy-server": { type: "string", description: "Caddy server the node writes its routes into" },

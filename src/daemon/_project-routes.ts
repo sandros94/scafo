@@ -39,6 +39,7 @@ import type { ProjectRecord } from "../core/types/registry.ts";
 import type { DaemonContext } from "./app.ts";
 import { nodeIdentity, operatorIdentity } from "./middleware.ts";
 import { assertProjectScope } from "./_scope.ts";
+import { readJsonBody } from "./_json.ts";
 
 /** Where the project surface lives. */
 export const PROJECTS_PATH: string = "/v1/projects";
@@ -150,7 +151,7 @@ export function registerProjectRoutes(app: H3, daemon: DaemonContext, guard: Mid
     `${PROJECTS_PATH}/:project/labels`,
     async (event): Promise<ProjectResult> => {
       const [, slug] = await adminTarget(daemon, event);
-      const labels = await readLabels(event);
+      const labels = await readLabels(event, daemon.config.api.jsonBytes);
 
       /* Read first, so a project that is not there is a 404 rather than whatever
          the update's own missing-record failure happens to look like. */
@@ -253,13 +254,8 @@ function requireCaller(event: H3Event): TrustedOperator {
  * nested object here would round-trip through the record as something the next
  * reader has to guess at.
  */
-async function readLabels(event: H3Event): Promise<Record<string, string>> {
-  let parsed: unknown;
-  try {
-    parsed = await event.req.json();
-  } catch (error) {
-    throw malformed("the body is not valid JSON", error);
-  }
+async function readLabels(event: H3Event, maxBytes: number): Promise<Record<string, string>> {
+  const parsed = await readJsonBody(event, { maxBytes });
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw malformed("the body must hold a JSON object");
   }

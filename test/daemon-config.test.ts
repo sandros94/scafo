@@ -8,6 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_JSON_BYTES,
   DEFAULT_BIND_HOST,
   DEFAULT_CELL_IDLE_EVICT_S,
   DEFAULT_DURABILITY,
@@ -727,6 +728,66 @@ describe("deploy resource limits", () => {
   });
 });
 
+describe("JSON request limit", () => {
+  it("ships a finite 64 KiB safeguard", async () => {
+    const config = await loadDaemonConfig({ env: REQUIRED_ENV });
+
+    expect(DEFAULT_JSON_BYTES).toBe(65_536);
+    expect(config.api.jsonBytes).toBe(DEFAULT_JSON_BYTES);
+  });
+
+  it("takes the limit from flag, environment, or file in precedence order", async () => {
+    const file = JSON.stringify({ api: { jsonBytes: 10 } });
+    const fromFile = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, file),
+      env: REQUIRED_ENV,
+    });
+    const fromEnv = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, file),
+      env: { ...REQUIRED_ENV, SCAFO_JSON_BYTES: "20" },
+    });
+    const fromFlag = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, file),
+      env: { ...REQUIRED_ENV, SCAFO_JSON_BYTES: "20" },
+      flags: { "json-bytes": "30" },
+    });
+
+    expect([fromFile.api.jsonBytes, fromEnv.api.jsonBytes, fromFlag.api.jsonBytes]).toEqual([
+      10, 20, 30,
+    ]);
+  });
+
+  it.each(["0", "-1", "1.5", "NaN", "Infinity", "9007199254740992", "unlimited"])(
+    "refuses an unusable inline limit: %s",
+    async (jsonBytes) => {
+      const error = await rejectsWith(
+        () =>
+          loadDaemonConfig({
+            env: { ...REQUIRED_ENV, SCAFO_JSON_BYTES: jsonBytes },
+          }),
+        "invalid-input",
+      );
+      expect(error.detail).toContain("api.jsonBytes");
+    },
+  );
+
+  it("refuses null rather than reading it as absent", async () => {
+    const error = await rejectsWith(
+      () =>
+        loadDaemonConfig({
+          configPath: CONFIG_PATH,
+          readFile: fileAt(CONFIG_PATH, JSON.stringify({ api: { jsonBytes: null } })),
+          env: REQUIRED_ENV,
+        }),
+      "invalid-input",
+    );
+    expect(error.detail).toContain("api.jsonBytes");
+  });
+});
+
 describe("the variables an operator hands every runtime process", () => {
   it("reads the comma syntax a flag and an environment variable carry", async () => {
     const config = await loadDaemonConfig({
@@ -953,7 +1014,7 @@ describe("whether the fleet's API answers at the platform apexes", () => {
        name its tooling can reach any node at. */
     const config = await loadDaemonConfig({ env: REQUIRED_ENV });
 
-    expect(config.api).toEqual({ public: true });
+    expect(config.api).toEqual({ public: true, jsonBytes: DEFAULT_JSON_BYTES });
   });
 
   it("is turned off from a flag, the environment or the file alike", async () => {

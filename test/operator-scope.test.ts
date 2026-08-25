@@ -31,9 +31,10 @@ import {
   createProject,
   flipAlias,
   getEnvironment,
+  getProject,
   registerNode,
 } from "../src/core/registry/index.ts";
-import { getOperator } from "../src/core/registry/operators.ts";
+import { getOperator, listOperators } from "../src/core/registry/operators.ts";
 import { deleteKey, putJson } from "../src/core/registry/cas.ts";
 import { operatorKey } from "../src/core/registry/paths.ts";
 import type { OperatorRecord } from "../src/core/types/registry.ts";
@@ -209,19 +210,32 @@ describe("an operator scoped to one project cannot touch another", () => {
   });
 
   it("is refused a flip on another project's environment", async () => {
-    const response = await call("/v1/aliases", TENANT_ID, tenant, {
+    const response = await call(aliasPath(THEIRS), TENANT_ID, tenant, {
       method: "POST",
-      body: { project: THEIRS, environment: ENVIRONMENT, build: OTHER_BUILD },
+      body: { build: OTHER_BUILD },
     });
 
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
   });
 
-  it("flips its own project's environment, which is the same call one project over", async () => {
-    const response = await call("/v1/aliases", TENANT_ID, tenant, {
+  it("refuses an out-of-scope alias before reading its body", async () => {
+    let reads = 0;
+    const response = await app.request(aliasPath(THEIRS), {
       method: "POST",
-      body: { project: MINE, environment: ENVIRONMENT, build: OTHER_BUILD },
+      headers: { authorization: `Bearer ${await signNodeToken(tenant.privateKey, TENANT_ID)}` },
+      body: unreadBody(() => reads++),
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+
+    expect(response.status).toBe(403);
+    expect(reads).toBe(0);
+  });
+
+  it("flips its own project's environment, which is the same call one project over", async () => {
+    const response = await call(aliasPath(MINE), TENANT_ID, tenant, {
+      method: "POST",
+      body: { build: OTHER_BUILD },
     });
 
     expect(response.status).toBe(200);
@@ -252,6 +266,41 @@ describe("what a scoped operator is told about the refusal", () => {
     expect(body).not.toContain("initech");
     expect(body).not.toContain(MINE);
   });
+});
+
+describe("every JSON control route is bounded", () => {
+  it.each(["selector", "park", "split", "alias", "operator", "labels"] as const)(
+    "%s accepts the exact cap and rejects every over-cap or malformed body without mutating",
+    async (name) => {
+      const spec = await jsonRoute(name);
+      const exact = paddedJson(spec.accepted, 65_536);
+      const oversized = paddedJson(spec.rejected, 65_537);
+
+      const accepted = await rawJsonCall(
+        spec.path,
+        await signNodeToken(admin.privateKey, ADMIN_ID),
+        bytes(exact),
+      );
+      expect(accepted.status, await accepted.clone().text()).toBe(200);
+      const standing = await spec.snapshot();
+
+      for (const [what, body, headers] of [
+        ["chunked +1", stream(bytes(oversized)), {}],
+        ["false-small Content-Length", stream(bytes(oversized)), { "content-length": "1" }],
+        ["malformed UTF-8", new Uint8Array([0xc3, 0x28]), {}],
+        ["malformed JSON", bytes("{"), {}],
+      ] as const) {
+        const response = await rawJsonCall(
+          spec.path,
+          await signNodeToken(admin.privateKey, ADMIN_ID),
+          body,
+          headers,
+        );
+        expect(response.status, `${name}: ${what}`).toBe(what.includes("malformed") ? 400 : 413);
+        expect(await spec.snapshot(), `${name}: ${what}`).toBe(standing);
+      }
+    },
+  );
 });
 
 describe("a key that names no projects notices nothing", () => {
@@ -427,6 +476,108 @@ interface Call {
   body?: unknown;
 }
 
+interface JsonRoute {
+  path: string;
+  accepted: Record<string, unknown>;
+  rejected: Record<string, unknown>;
+  snapshot(): Promise<string>;
+}
+
+async function jsonRoute(
+  name: "selector" | "park" | "split" | "alias" | "operator" | "labels",
+): Promise<JsonRoute> {
+  const environment = (): Promise<string> =>
+    getEnvironment(clock.ctx, MINE, ENVIRONMENT).then((record) => JSON.stringify(record));
+  if (name === "selector") {
+    return {
+      path: pathIn(MINE, "/selector"),
+      accepted: { selector: { tier: "fast" } },
+      rejected: { selector: { tier: "slow" } },
+      snapshot: environment,
+    };
+  }
+  if (name === "park") {
+    return {
+      path: pathIn(MINE, "/park"),
+      accepted: { policy: null },
+      rejected: { policy: { afterS: 1 } },
+      snapshot: environment,
+    };
+  }
+  if (name === "split") {
+    return {
+      path: pathIn(MINE, "/split"),
+      accepted: {
+        split: [
+          { build: BUILD, weight: 50 },
+          { build: OTHER_BUILD, weight: 50 },
+        ],
+      },
+      rejected: { split: null },
+      snapshot: environment,
+    };
+  }
+  if (name === "alias") {
+    return {
+      path: aliasPath(MINE),
+      accepted: { build: OTHER_BUILD },
+      rejected: { build: BUILD },
+      snapshot: environment,
+    };
+  }
+  if (name === "labels") {
+    return {
+      path: `/v1/projects/${MINE}/labels`,
+      accepted: { labels: { plan: "pro" } },
+      rejected: { labels: { plan: "free" } },
+      snapshot: () => getProject(clock.ctx, MINE).then((record) => JSON.stringify(record)),
+    };
+  }
+
+  const first = await generateJWK("EdDSA", { kid: "op-json1111" });
+  const second = await generateJWK("EdDSA", { kid: "op-json2222" });
+  return {
+    path: "/v1/operators",
+    accepted: { ...publicHalf("op-json1111", first), projects: [MINE] },
+    rejected: { ...publicHalf("op-json2222", second), projects: [MINE] },
+    snapshot: () => listOperators(clock.ctx).then((records) => JSON.stringify(records)),
+  };
+}
+
+async function rawJsonCall(
+  path: string,
+  token: string,
+  body: BodyInit | Uint8Array,
+  headers: Record<string, string> = {},
+): Promise<Response> {
+  return app.request(path, {
+    method: "POST",
+    headers: { "authorization": `Bearer ${token}`, "content-type": "application/json", ...headers },
+    body: body as BodyInit,
+    ...(body instanceof ReadableStream ? { duplex: "half" } : {}),
+  } as RequestInit & { duplex?: "half" });
+}
+
+function paddedJson(value: Record<string, unknown>, size: number): string {
+  const raw = JSON.stringify(value);
+  expect(raw.length).toBeLessThanOrEqual(size);
+  return raw + " ".repeat(size - raw.length);
+}
+
+function bytes(value: string): Uint8Array {
+  return new TextEncoder().encode(value);
+}
+
+function stream(value: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller): void {
+      controller.enqueue(value.subarray(0, 32_768));
+      controller.enqueue(value.subarray(32_768));
+      controller.close();
+    },
+  });
+}
+
 /** Every operator-authed call that names a project in its PATH. */
 function environmentCalls(): Array<[string, string, Call]> {
   return [
@@ -445,6 +596,10 @@ function environmentCalls(): Array<[string, string, Call]> {
 /** The environment route `suffix` names, inside `project`. */
 function pathIn(project: string, suffix: string): string {
   return `/v1/environments/${project}/${ENVIRONMENT}${suffix}`;
+}
+
+function aliasPath(project: string): string {
+  return `/v1/projects/${project}/environments/${ENVIRONMENT}/alias`;
 }
 
 /** One call to the node, signed by `keys` for exactly this request. */
@@ -570,7 +725,7 @@ function daemonConfig(): DaemonConfig {
       pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
-    api: { public: true },
+    api: { public: true, jsonBytes: 65_536 },
   };
 }
 

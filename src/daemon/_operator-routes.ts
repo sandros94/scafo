@@ -38,6 +38,7 @@ import {
 } from "../core/registry/operators.ts";
 import type { DaemonContext } from "./app.ts";
 import { nodeIdentity, operatorIdentity } from "./middleware.ts";
+import { readJsonBody } from "./_json.ts";
 
 /** Where the trusted-key surface lives. */
 export const OPERATORS_PATH: string = "/v1/operators";
@@ -149,7 +150,7 @@ export function registerOperatorRoutes(app: H3, daemon: DaemonContext, guard: Mi
     OPERATORS_PATH,
     async (event): Promise<OperatorTrusted> => {
       const caller = requireCaller(event);
-      const request = await readTrustRequest(event);
+      const request = await readTrustRequest(event, daemon.config.api.jsonBytes);
       const supersedes = request.key.supersedes;
 
       if (supersedes !== undefined && supersedes !== caller.id) {
@@ -338,13 +339,8 @@ function requireCaller(event: H3Event): TrustedOperator {
 }
 
 /** Reads the body of a trust request: an id, the public half, and what it asks to be. */
-async function readTrustRequest(event: H3Event): Promise<TrustRequest> {
-  let parsed: unknown;
-  try {
-    parsed = await event.req.json();
-  } catch (error) {
-    throw malformed("the body is not valid JSON", error);
-  }
+async function readTrustRequest(event: H3Event, maxBytes: number): Promise<TrustRequest> {
+  const parsed = await readJsonBody(event, { maxBytes });
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw malformed("the body must hold a JSON object");
   }

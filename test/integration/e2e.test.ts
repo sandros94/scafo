@@ -473,8 +473,8 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
     async () => {
       const answer = await httpPost(
         apiPort,
-        "/v1/aliases",
-        { project: PROJECT, environment: ENVIRONMENT, rollback: true },
+        `/v1/projects/${PROJECT}/environments/${ENVIRONMENT}/alias`,
+        { rollback: true },
         await operatorToken(),
       );
       expectStatus(answer, 200);
@@ -719,8 +719,8 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
     async () => {
       const answer = await httpPost(
         apiPort,
-        "/v1/aliases",
-        { project: PROJECT, environment: ENVIRONMENT, build: buildCanary },
+        `/v1/projects/${PROJECT}/environments/${ENVIRONMENT}/alias`,
+        { build: buildCanary },
         await operatorToken(),
       );
       expectStatus(answer, 200);

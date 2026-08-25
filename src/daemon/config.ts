@@ -22,6 +22,9 @@ import { assertLabels, parseLabels } from "../core/utils/labels.ts";
    driver derives for itself, and a copy here would go stale the first time that
    list grew. */
 import { IDLE_EVICT_ENV, RESERVED_ENV, TELEMETRY_ENV } from "../drivers/runtime/celld.ts";
+import { DEFAULT_JSON_BYTES } from "./_json.ts";
+
+export { DEFAULT_JSON_BYTES } from "./_json.ts";
 
 export interface DaemonConfig {
   bucket: {
@@ -191,6 +194,8 @@ export interface ObservabilityConfig {
  */
 export interface ApiConfig {
   public: boolean;
+  /** Maximum bytes accepted by any JSON control request. */
+  jsonBytes: number;
 }
 
 /** How this node gets at the variables its environments are configured with. */
@@ -522,7 +527,10 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
       enabled: observing,
       ...(ingressAccessLog === undefined ? {} : { ingressAccessLog }),
     },
-    api: { public: resolveBoolean("apiPublic", sources, DEFAULT_API_PUBLIC) },
+    api: {
+      public: resolveBoolean("apiPublic", sources, DEFAULT_API_PUBLIC),
+      jsonBytes: resolvePositiveSafeInteger("jsonBytes", sources, DEFAULT_JSON_BYTES),
+    },
     ...(ingress === undefined ? {} : { ingress }),
     ...(keyFile === undefined ? {} : { varsets: { keyFile } }),
     ...(storageTokens === undefined ? {} : { storage: { token: storageTokens } }),
@@ -684,6 +692,7 @@ const ORIGINS = {
     file: "observability.ingressAccessLog",
   },
   apiPublic: { flag: "api-public", env: ["SCAFO_API_PUBLIC"], file: "api.public" },
+  jsonBytes: { flag: "json-bytes", env: ["SCAFO_JSON_BYTES"], file: "api.jsonBytes" },
   ingressDriver: {
     flag: "ingress-driver",
     env: ["SCAFO_INGRESS_DRIVER"],

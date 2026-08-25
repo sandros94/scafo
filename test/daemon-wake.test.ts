@@ -1195,7 +1195,7 @@ function daemonConfig(bindHost = "127.0.0.1", apiPublic = true): DaemonConfig {
       pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
-    api: { public: apiPublic },
+    api: { public: apiPublic, jsonBytes: 65_536 },
   };
 }
 

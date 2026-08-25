@@ -15,6 +15,7 @@ import { fromBase64Url, toBase64Url } from "../core/utils/base64.ts";
 import { stableStringify } from "../core/utils/json.ts";
 import type { DeployMeta } from "./deploys.ts";
 import { bearerToken } from "./middleware.ts";
+import { type JsonBodyOptions, readJsonBody } from "./_json.ts";
 
 /** Environment a deploy lands in when the caller names none. */
 export const DEFAULT_ENVIRONMENT: string = "production";
@@ -61,10 +62,8 @@ export type SplitRequest =
   | { kind: "set"; split: SplitEntry[] | null }
   | { kind: "canary"; canary: CanaryInput };
 
-/** What `POST /v1/aliases` is asked to do. */
+/** What an environment alias change is asked to do. */
 export interface AliasRequest {
-  project: string;
-  environment: string;
   /** Build to point the environment at; absent only on a rollback. */
   build?: string;
   rollback: boolean;
@@ -200,8 +199,11 @@ export function encodeDeployMetadata(meta: DeployMetadata): string {
  * wanted, and clearing a constraint is far too consequential to be what an
  * omission defaults to.
  */
-export async function readSelectorRequest(event: H3Event): Promise<SelectorRequest> {
-  const body = asObject(await readJsonBody(event), "the body");
+export async function readSelectorRequest(
+  event: H3Event,
+  opts?: JsonBodyOptions,
+): Promise<SelectorRequest> {
+  const body = asObject(await readJsonBody(event, opts), "the body");
 
   const selector = body.selector;
   if (selector === null) return { selector: null };
@@ -223,8 +225,11 @@ export async function readSelectorRequest(event: H3Event): Promise<SelectorReque
  * checked here — what a field may hold belongs to the registry, so the refusal
  * an operator reads is the same one they would get writing to the bucket.
  */
-export async function readParkRequest(event: H3Event): Promise<ParkRequest> {
-  const body = asObject(await readJsonBody(event), "the body");
+export async function readParkRequest(
+  event: H3Event,
+  opts?: JsonBodyOptions,
+): Promise<ParkRequest> {
+  const body = asObject(await readJsonBody(event, opts), "the body");
 
   const policy = body.policy;
   if (policy === null) return { policy: null };
@@ -250,8 +255,11 @@ export async function readParkRequest(event: H3Event): Promise<ParkRequest> {
  * route does not either — undoing a split is far too consequential to be what an
  * omission defaults to.
  */
-export async function readSplitRequest(event: H3Event): Promise<SplitRequest> {
-  const body = asObject(await readJsonBody(event), "the body");
+export async function readSplitRequest(
+  event: H3Event,
+  opts?: JsonBodyOptions,
+): Promise<SplitRequest> {
+  const body = asObject(await readJsonBody(event, opts), "the body");
 
   const stated = "split" in body;
   const canary = body.canary;
@@ -282,20 +290,27 @@ export async function readSplitRequest(event: H3Event): Promise<SplitRequest> {
 }
 
 /** Reads the JSON body of an alias change. */
-export async function readAliasRequest(event: H3Event): Promise<AliasRequest> {
-  const body = asObject(await readJsonBody(event), "the body");
+export async function readAliasRequest(
+  event: H3Event,
+  opts?: JsonBodyOptions,
+): Promise<AliasRequest> {
+  const body = asObject(await readJsonBody(event, opts), "the body");
 
-  const project = text(body, "project", true);
-  assertSlug(project);
-  const environment = text(body, "environment", true);
-  assertSlug(environment);
+  const unknown = Object.keys(body).find((name) => name !== "build" && name !== "rollback");
+  if (unknown !== undefined) {
+    throw invalid(
+      unknown === "project" || unknown === "environment"
+        ? `"${unknown}" belongs in the request path`
+        : `"${unknown}" is not accepted by an alias change`,
+    );
+  }
   const rollback = flag(body, "rollback") ?? false;
 
-  if (rollback) return { project, environment, rollback };
+  if (rollback) return { rollback };
 
   const build = text(body, "build", true);
   assertId(build);
-  return { project, environment, build, rollback };
+  return { build, rollback };
 }
 
 /** One leg of a stated split, checked for shape alone. */
@@ -387,24 +402,6 @@ function readSource(value: unknown): BuildSource | undefined {
     commit: text(raw, "commit", true),
   };
   return source;
-}
-
-async function readJsonBody(event: H3Event): Promise<unknown> {
-  let raw: string;
-  try {
-    raw = await event.req.text();
-  } catch (error) {
-    throw invalid("the body could not be read", error);
-  }
-  return parseJson(raw, "the body");
-}
-
-function parseJson(raw: string, what: string): unknown {
-  try {
-    return JSON.parse(raw);
-  } catch (error) {
-    throw invalid(`${what} is not valid JSON`, error);
-  }
 }
 
 function asObject(value: unknown, what: string): Record<string, unknown> {

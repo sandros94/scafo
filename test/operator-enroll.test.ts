@@ -464,7 +464,7 @@ function daemonConfig(): DaemonConfig {
       pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
-    api: { public: true },
+    api: { public: true, jsonBytes: 65_536 },
   };
 }
 

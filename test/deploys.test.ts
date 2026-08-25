@@ -941,11 +941,7 @@ describe("moving an environment's alias", () => {
   });
 
   it("flips to a build and reports the environment as it now stands", async () => {
-    const response = await post("/v1/aliases", await operatorToken(), {
-      project: PROJECT,
-      environment: ENVIRONMENT,
-      build: VERSION_ID,
-    });
+    const response = await post(aliasPath(), await operatorToken(), { build: VERSION_ID });
     const result = (await response.json()) as AliasResult;
 
     expect(response.status).toBe(200);
@@ -956,18 +952,10 @@ describe("moving an environment's alias", () => {
   it("rolls back to the build the environment served before", async () => {
     await createBuildViaDeploy("0f0f0f0f");
     for (const build of [VERSION_ID, "0f0f0f0f"]) {
-      await post("/v1/aliases", await operatorToken(), {
-        project: PROJECT,
-        environment: ENVIRONMENT,
-        build,
-      });
+      await post(aliasPath(), await operatorToken(), { build });
     }
 
-    const response = await post("/v1/aliases", await operatorToken(), {
-      project: PROJECT,
-      environment: ENVIRONMENT,
-      rollback: true,
-    });
+    const response = await post(aliasPath(), await operatorToken(), { rollback: true });
     const result = (await response.json()) as AliasResult;
 
     expect(response.status).toBe(200);
@@ -977,23 +965,68 @@ describe("moving an environment's alias", () => {
   it("refuses a workload token from a project that is not the one being flipped", async () => {
     await createEnvironment(clock.ctx, RIVAL, { name: ENVIRONMENT });
 
-    const response = await post("/v1/aliases", await workloadToken(), {
-      project: RIVAL,
-      environment: ENVIRONMENT,
-      build: VERSION_ID,
-    });
+    const response = await post(aliasPath(RIVAL), await workloadToken(), { build: VERSION_ID });
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual(AUTH_INVALID_PROBLEM);
   });
 
   it("refuses a flip that names no build", async () => {
+    const response = await post(aliasPath(), await operatorToken(), {});
+
+    await expect(problemOf(response)).resolves.toMatchObject({ status: 400 });
+  });
+
+  it("does not retain the body-selected alias route", async () => {
     const response = await post("/v1/aliases", await operatorToken(), {
       project: PROJECT,
       environment: ENVIRONMENT,
+      build: VERSION_ID,
+    });
+
+    expect(response.status).toBe(404);
+  });
+
+  it("refuses targets repeated in the body", async () => {
+    const response = await post(aliasPath(), await operatorToken(), {
+      project: PROJECT,
+      environment: ENVIRONMENT,
+      build: VERSION_ID,
     });
 
     await expect(problemOf(response)).resolves.toMatchObject({ status: 400 });
+  });
+
+  it.each([
+    [
+      "invalid node",
+      async () => {
+        const stranger = await generateJWK("EdDSA", { kid: OPERATOR });
+        return signNodeToken(stranger.privateKey, OPERATOR);
+      },
+      401,
+    ],
+    [
+      "invalid workload",
+      async () => {
+        const valid = await workloadToken();
+        const [header, payload, signature] = valid.split(".") as [string, string, string];
+        return `${header}.${payload}.${signature.startsWith("A") ? "B" : "A"}${signature.slice(1)}`;
+      },
+      401,
+    ],
+    ["trust-mismatched workload", () => workloadToken({ sub: "repo:evil/app" }), 403],
+  ] as const)("does not read an %s token's alias body", async (_what, token, status) => {
+    let reads = 0;
+    const response = await app.request(aliasPath(), {
+      method: "POST",
+      headers: { authorization: `Bearer ${await token()}` },
+      body: unreadBody(() => reads++),
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+
+    expect(response.status).toBe(status);
+    expect(reads).toBe(0);
   });
 });
 
@@ -1021,7 +1054,7 @@ function daemonConfig(): DaemonConfig {
       pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
-    api: { public: true },
+    api: { public: true, jsonBytes: 65_536 },
   };
 }
 
@@ -1234,6 +1267,10 @@ async function post(
     },
     body: JSON.stringify(body),
   });
+}
+
+function aliasPath(project: string = PROJECT): string {
+  return `/v1/projects/${project}/environments/${ENVIRONMENT}/alias`;
 }
 
 async function get(path: string, token: string | undefined): Promise<Response> {
