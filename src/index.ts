@@ -1,9 +1,5 @@
 export * from "./core/error.ts";
 export type * from "./core/types/index.ts";
-export {
-  assertExecutionBackendCapabilities,
-  resolveWorkloadLimits,
-} from "./core/types/execution.ts";
 export * as utils from "./core/utils/index.ts";
 export * as registry from "./core/registry/index.ts";
 export * as auth from "./core/auth/index.ts";
