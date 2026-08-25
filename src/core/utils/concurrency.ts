@@ -28,9 +28,29 @@ export interface ConcurrencyGate {
   run: <T>(fn: () => Promise<T>) => Promise<T>;
 }
 
+/** A {@link ConcurrencyGate} that may decline excess queued work without starting it. */
+export interface BoundedConcurrencyGate extends ConcurrencyGate {
+  /** Starts work when a slot or bounded queue place is available, else returns null. */
+  tryRun: <T>(fn: () => Promise<T>) => Promise<T> | null;
+}
+
+export interface ConcurrencyGateOptions {
+  /** Maximum callers waiting for a slot. Absent leaves the queue unbounded. */
+  maxQueue?: number;
+}
+
 /** A gate of `limit` slots. Anything below 1, fractional or not a number is clamped. */
-export function createConcurrencyGate(limit: number = DEFAULT_CONCURRENCY): ConcurrencyGate {
+export function createConcurrencyGate(
+  limit: number = DEFAULT_CONCURRENCY,
+  opts?: ConcurrencyGateOptions,
+): BoundedConcurrencyGate {
   const slots = Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : DEFAULT_CONCURRENCY;
+  const maxQueue =
+    opts?.maxQueue === undefined
+      ? Number.POSITIVE_INFINITY
+      : Number.isFinite(opts.maxQueue)
+        ? Math.max(0, Math.floor(opts.maxQueue))
+        : 0;
   const waiting: Array<() => void> = [];
   let active = 0;
 
@@ -60,6 +80,11 @@ export function createConcurrencyGate(limit: number = DEFAULT_CONCURRENCY): Conc
         active--;
         waiting.shift()?.();
       }
+    },
+
+    tryRun<T>(fn: () => Promise<T>): Promise<T> | null {
+      if (active >= slots && waiting.length >= maxQueue) return null;
+      return this.run(fn);
     },
   };
 }

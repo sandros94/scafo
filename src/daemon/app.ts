@@ -46,7 +46,6 @@ import type { DaemonConfig } from "./config.ts";
 import type { Coordinator } from "./coordinator.ts";
 import type { DeployService, DeployStatus } from "./deploys.ts";
 import {
-  callerOperator,
   nodeIdentity,
   renderProblem,
   requireNodeToken,
@@ -243,7 +242,6 @@ export function createNodeApp(daemon: DaemonContext): H3 {
   const verifiers: DeployVerifiers = {
     node: nodeVerifier,
     oidc: createOidcVerifier(daemon.registry),
-    registry: daemon.registry,
   };
 
   const app = new H3({
@@ -368,9 +366,8 @@ export function createNodeApp(daemon: DaemonContext): H3 {
         ...(reconcile === undefined ? {} : { reconcile }),
       };
 
-      const callerId = nodeIdentity(event)?.nodeId;
-      const caller =
-        callerId === undefined ? null : await callerOperator(event, daemon.registry, callerId);
+      const identity = nodeIdentity(event);
+      const caller = identity?.kind === "operator" ? identity.operator : null;
       return scopedState(caller, state);
     },
     { middleware: [authenticated] },
@@ -506,12 +503,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
       /* The project is in the BODY here, so the scope cannot be checked where
          `verifyCaller` checks it for every other route — but it is still
          checked before a single byte of the artifact is published. */
-      await assertProjectScope(
-        daemon.registry,
-        event,
-        operator.identity.nodeId,
-        request.meta.project,
-      );
+      assertProjectScope(operator.identity, request.meta.project);
     }
 
     const status = await deployService(daemon).start(request.meta, request.artifact);
@@ -569,7 +561,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
    * that has been taken over must not be able to write its installation a new
    * operator, so these ask WHO the verified id is as well as that it signed.
    */
-  const operatorGuard = requireOperatorToken(nodeVerifier, daemon.registry);
+  const operatorGuard = requireOperatorToken(nodeVerifier);
   registerOperatorRoutes(app, daemon, operatorGuard);
 
   /*
@@ -743,9 +735,9 @@ async function scopedTarget(
   event: H3Event,
 ): Promise<[project: string, env: string]> {
   const pair = target(event);
-  const callerId = nodeIdentity(event)?.nodeId;
-  if (callerId !== undefined) {
-    await assertProjectScope(daemon.registry, event, callerId, pair[0]);
+  const caller = nodeIdentity(event);
+  if (caller !== undefined) {
+    assertProjectScope(caller, pair[0]);
   }
   return pair;
 }

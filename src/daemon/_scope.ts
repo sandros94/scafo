@@ -30,33 +30,26 @@
  * by, and this surface says nothing about it.
  */
 
-import type { H3Event } from "h3";
+import type { NodeIdentity } from "../core/auth/node-token.ts";
 import { ScafoError } from "../core/error.ts";
-import type { RegistryContext } from "../core/registry/context.ts";
 import { canReachProject, type TrustedOperator } from "../core/registry/operators.ts";
 import { parseProcessId } from "../core/placement/ids.ts";
 import type { DaemonState } from "./app.ts";
-import { callerOperator } from "./middleware.ts";
 
 /**
  * Refuses a scoped operator that named a project outside its list.
  *
- * `callerId` is the id of the verified NODE token the request carried; a request
- * that carried none never reaches this. Resolves for a caller that is not an
- * operator record — a machine of the fleet — and for one carrying no scope.
+ * A node identity resolves unchanged; an operator identity is checked against
+ * the scope carried with the verification key, rather than a later registry
+ * lookup that could describe a different caller.
  *
  * Throws `ScafoError("auth-scope")`, which is authorization rather than
  * authentication: the caller has proved which key it holds, so what is left to
  * say is that the key is not for this project.
  */
-export async function assertProjectScope(
-  registry: RegistryContext,
-  event: H3Event,
-  callerId: string,
-  project: string,
-): Promise<void> {
-  const caller = await callerOperator(event, registry, callerId);
-  if (caller === null || canReachProject(caller, project)) return;
+export function assertProjectScope(identity: NodeIdentity, project: string): void {
+  if (identity.kind === "node" || canReachProject(identity.operator, project)) return;
+  const caller = identity.operator;
 
   /*
    * THE OTHER PROJECTS ARE NEVER NAMED. The point of handing a tenant an

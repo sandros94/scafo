@@ -213,7 +213,11 @@ async function adminTarget(
   const caller = requireCaller(event);
   const slug = event.context.params?.project ?? "";
 
-  await assertProjectScope(daemon.registry, event, caller.id, slug);
+  const identity = nodeIdentity(event);
+  if (identity === undefined) {
+    throw new ScafoError("auth-scope", "Not an operator of this fleet");
+  }
+  assertProjectScope(identity, slug);
   if (caller.role !== "admin") {
     throw new ScafoError("auth-scope", "Only an admin administers a project", {
       detail:

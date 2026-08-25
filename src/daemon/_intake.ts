@@ -6,7 +6,6 @@ import type { OidcIdentity, OidcVerifier } from "../core/auth/oidc.ts";
 import { isScafoError, ScafoError } from "../core/error.ts";
 import { assertReplicas } from "../core/placement/replicas.ts";
 import { assertSelector } from "../core/placement/selector.ts";
-import type { RegistryContext } from "../core/registry/context.ts";
 import type { CanaryInput } from "../core/registry/environments.ts";
 import { assertId } from "../core/registry/paths.ts";
 import { assertProjectScope } from "./_scope.ts";
@@ -27,11 +26,6 @@ export type DeployCaller =
 export interface DeployVerifiers {
   node: NodeVerifier;
   oidc: OidcVerifier;
-  /**
-   * Where an admitted operator's own record is read from, which is what says
-   * whether the key is scoped to projects. See `_scope.ts`.
-   */
-  registry: RegistryContext;
 }
 
 /** The parts of a deploy upload. */
@@ -99,7 +93,7 @@ export async function verifyCaller(
   const operator = await tryNodeToken(verifiers, event);
   if (operator !== null) {
     if (project !== null && operator.kind === "node") {
-      await assertProjectScope(verifiers.registry, event, operator.identity.nodeId, project);
+      assertProjectScope(operator.identity, project);
     }
     return operator;
   }

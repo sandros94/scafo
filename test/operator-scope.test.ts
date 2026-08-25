@@ -34,7 +34,7 @@ import {
   registerNode,
 } from "../src/core/registry/index.ts";
 import { getOperator } from "../src/core/registry/operators.ts";
-import { putJson } from "../src/core/registry/cas.ts";
+import { deleteKey, putJson } from "../src/core/registry/cas.ts";
 import { operatorKey } from "../src/core/registry/paths.ts";
 import type { OperatorRecord } from "../src/core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
@@ -139,6 +139,30 @@ describe("an operator scoped to one project cannot touch another", () => {
     await call(pathIn(THEIRS, "/retire"), TENANT_ID, tenant, { method: "POST" });
 
     expect((await getEnvironment(clock.ctx, THEIRS, ENVIRONMENT)).retiredAt).toBeUndefined();
+  });
+
+  it("keeps a warm scoped key scoped after its record is revoked within the auth TTL", async () => {
+    expect((await call("/v1/state", TENANT_ID, tenant, { method: "GET" })).status).toBe(200);
+    await deleteKey(clock.ctx, operatorKey(TENANT_ID));
+
+    const state = await call("/v1/state", TENANT_ID, tenant, { method: "GET" });
+    const mutation = await call(pathIn(THEIRS, "/retire"), TENANT_ID, tenant, { method: "POST" });
+
+    expect((await state.json()) as { scoped?: true }).toMatchObject({ scoped: true });
+    expect(mutation.status).toBe(403);
+    await expect(mutation.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
+  });
+
+  it("does not let a warm old key inherit a same-id replacement's admin scope", async () => {
+    expect((await call("/v1/state", TENANT_ID, tenant, { method: "GET" })).status).toBe(200);
+
+    const replacement = await generateJWK("EdDSA", { kid: TENANT_ID });
+    await fileKey(TENANT_ID, replacement, { role: "admin" });
+
+    const foreign = await call(pathIn(THEIRS, "/retire"), TENANT_ID, tenant, { method: "POST" });
+
+    expect(foreign.status).toBe(403);
+    await expect(foreign.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
   });
 
   it("is refused the status of a deploy that belongs to another project", async () => {

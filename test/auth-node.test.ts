@@ -16,15 +16,17 @@ import {
 } from "../src/core/auth/index.ts";
 import {
   acquireLease,
+  createCountingStore,
   type LeaseHandle,
+  operatorKey,
   registerNode,
   removeNode,
 } from "../src/core/registry/index.ts";
 import type { ScafoError } from "../src/core/error.ts";
-import type { NodeRecord } from "../src/core/types/registry.ts";
+import type { NodeRecord, OperatorRecord } from "../src/core/types/registry.ts";
 import { fromBase64Url, toBase64Url } from "../src/core/utils/base64.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock, rejectionOf } from "./_helpers.ts";
+import { ctxWith, type ManualClock, ObservingStore, rejectionOf } from "./_helpers.ts";
 
 interface NodeKeys {
   privateKey: JWK_OKP_Private<"EdDSA">;
@@ -259,6 +261,112 @@ describe("a removed node stops verifying within the key-cache TTL", () => {
   });
 });
 
+describe("verified identity provenance and bounded key lookups", () => {
+  it.each([
+    ["keyTtlS", -1],
+    ["keyTtlS", Number.NaN],
+    ["keyTtlS", Number.POSITIVE_INFINITY],
+    ["keyCapacity", -1],
+    ["keyCapacity", Number.NaN],
+    ["keyCapacity", Number.POSITIVE_INFINITY],
+    ["keyCapacity", 1.5],
+    ["keyNegativeCapacity", -1],
+    ["keyNegativeCapacity", Number.NaN],
+    ["keyNegativeCapacity", Number.POSITIVE_INFINITY],
+    ["keyNegativeCapacity", 1.5],
+    ["keyLookupConcurrency", 0],
+    ["keyLookupConcurrency", -1],
+    ["keyLookupConcurrency", Number.NaN],
+    ["keyLookupConcurrency", Number.POSITIVE_INFINITY],
+    ["keyLookupConcurrency", 1.5],
+    ["keyLookupQueue", -1],
+    ["keyLookupQueue", Number.NaN],
+    ["keyLookupQueue", Number.POSITIVE_INFINITY],
+    ["keyLookupQueue", 1.5],
+  ] as const)("refuses unsafe %s option values", async (name, value) => {
+    const error = await rejectionOf(async () =>
+      createNodeVerifier(clock.ctx, { now: now, [name]: value }),
+    );
+
+    expect(error.code).toBe("invalid-input");
+  });
+
+  it("refuses a key id filed in both namespaces with the uniform authentication rejection", async () => {
+    await clock.ctx.store.put(
+      operatorKey(NODE_ID),
+      JSON.stringify(operatorRecord(NODE_ID, keys.publicKey.x)),
+      { ifNoneMatch: "*" },
+    );
+
+    expect(await refusal(await mint())).toMatchObject(AUTH_INVALID);
+  });
+
+  it("coalesces concurrent requests for one unknown key into one namespace-read pair", async () => {
+    const inner = createCountingStore(clock.ctx.store);
+    const store = new ObservingStore(inner);
+    store.delays.set(`_scafo/operators/${OTHER_ID}.json`, 20);
+    store.delays.set(`_scafo/nodes/${OTHER_ID}.json`, 20);
+    const shared = createNodeVerifier({ ...clock.ctx, store }, { now: now });
+    const unknown = await generateJWK("EdDSA", { kid: OTHER_ID });
+    const tokens = await Promise.all(
+      Array.from({ length: 20 }, () => signNodeToken(unknown.privateKey, OTHER_ID, { now: now })),
+    );
+
+    await Promise.all(tokens.map((token) => rejectionOf(() => shared.verify(token))));
+
+    expect(inner.counts().get).toBe(2);
+  });
+
+  it("keeps a warmed positive identity through negative-key churn", async () => {
+    const counted = createCountingStore(clock.ctx.store);
+    const shared = createNodeVerifier(
+      { ...clock.ctx, store: counted },
+      { now: now, keyCapacity: 1, keyNegativeCapacity: 32 },
+    );
+
+    await expect(shared.verify(await mint())).resolves.toMatchObject({ nodeId: NODE_ID });
+    const readsAfterWarm = counted.counts().get;
+
+    for (let index = 0; index < 16; index++) {
+      const id = `unknown-${String(index)}`;
+      const unknown = await generateJWK("EdDSA", { kid: id });
+      await rejectionOf(() =>
+        signNodeToken(unknown.privateKey, id, { now: now }).then((token) => shared.verify(token)),
+      );
+    }
+
+    await expect(shared.verify(await mint())).resolves.toMatchObject({ nodeId: NODE_ID });
+    expect(counted.counts().get - readsAfterWarm).toBe(32);
+  });
+
+  it("bounds distinct concurrent miss work and refuses lookup overflow locally", async () => {
+    const store = new ObservingStore(clock.ctx.store);
+    const shared = createNodeVerifier(
+      { ...clock.ctx, store },
+      { now: now, keyLookupConcurrency: 2, keyLookupQueue: 1 },
+    );
+
+    for (let index = 0; index < 8; index++) {
+      store.delays.set(`_scafo/operators/unknown-${String(index)}.json`, 20);
+      store.delays.set(`_scafo/nodes/unknown-${String(index)}.json`, 20);
+    }
+
+    const unknown = await Promise.all(
+      Array.from({ length: 8 }, async (_, index) => {
+        const id = `unknown-${String(index)}`;
+        const key = await generateJWK("EdDSA", { kid: id });
+        return rejectionOf(() =>
+          signNodeToken(key.privateKey, id, { now: now }).then((token) => shared.verify(token)),
+        );
+      }),
+    );
+
+    expect(unknown).toHaveLength(8);
+    expect(store.peakReads).toBeLessThanOrEqual(4);
+    expect(store.reads).toHaveLength(6);
+  });
+});
+
 function now(): Date {
   return new Date(clock.nowMs());
 }
@@ -274,6 +382,10 @@ function nodeRecord(id: string, x: string): NodeRecord {
     publicKey: { kty: "OKP", crv: "Ed25519", x },
     addresses: { internal: "10.0.0.1", apiPort: 4600 },
   };
+}
+
+function operatorRecord(id: string, x: string): OperatorRecord {
+  return { v: 1, id, publicKey: { kty: "OKP", crv: "Ed25519", x }, role: "admin" };
 }
 
 function baseClaims(): Record<string, unknown> {

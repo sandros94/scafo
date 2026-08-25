@@ -6,6 +6,7 @@ import { sign as signJws, verify as verifyJws } from "unjwt/jws";
 import { isCryptoKey } from "unjwt/utils";
 import { ScafoError } from "../error.ts";
 import type { RegistryContext } from "../registry/context.ts";
+import type { TrustedOperator } from "../registry/operators.ts";
 import { toBase64Url } from "../utils/base64.ts";
 import { createNodeKeyCache } from "./_key-cache.ts";
 import { createReplayCache } from "./_replay.ts";
@@ -49,14 +50,21 @@ export interface NodeVerifierOptions {
   maxLifetimeS?: number;
   /** How long registry public keys are cached — the revocation bound. Defaults to 60. */
   keyTtlS?: number;
+  /** Maximum cached positive identities. Defaults to the auth cache's safe bound. */
+  keyCapacity?: number;
+  /** Maximum cached negative identities. Defaults to the auth cache's safe bound. */
+  keyNegativeCapacity?: number;
+  /** Registry lookup pairs in flight for uncached identities. */
+  keyLookupConcurrency?: number;
+  /** Distinct uncached identities allowed to wait for lookup work. */
+  keyLookupQueue?: number;
   now?: () => Date;
 }
 
 /** Who a verified token belongs to. */
-export interface NodeIdentity {
-  nodeId: string;
-  claims: NodeTokenClaims;
-}
+export type NodeIdentity =
+  | { kind: "node"; nodeId: string; claims: NodeTokenClaims }
+  | { kind: "operator"; nodeId: string; operator: TrustedOperator; claims: NodeTokenClaims };
 
 export interface NodeVerifier {
   /** Resolves the caller's identity, or throws `ScafoError("auth-invalid")`. */
@@ -111,7 +119,14 @@ export function createNodeVerifier(ctx: RegistryContext, opts?: NodeVerifierOpti
   const maxLifetimeS = opts?.maxLifetimeS ?? NODE_TOKEN_MAX_LIFETIME_S;
   const now = opts?.now ?? ((): Date => new Date());
 
-  const keys = createNodeKeyCache(ctx, { ttlS: opts?.keyTtlS ?? 60, now });
+  const keys = createNodeKeyCache(ctx, {
+    ttlS: opts?.keyTtlS ?? 60,
+    now,
+    capacity: opts?.keyCapacity,
+    negativeCapacity: opts?.keyNegativeCapacity,
+    lookupConcurrency: opts?.keyLookupConcurrency,
+    lookupQueue: opts?.keyLookupQueue,
+  });
   const replay = createReplayCache({ now });
 
   return {
@@ -122,13 +137,13 @@ export function createNodeVerifier(ctx: RegistryContext, opts?: NodeVerifierOpti
       if (header.alg !== ALG) throw authInvalid(`Header "alg" is not ${ALG}`);
 
       const kid = stringClaim(header, "kid");
-      const key = await keys.get(kid);
-      if (key === null)
+      const caller = await keys.get(kid);
+      if (caller === null)
         throw authInvalid(`No machine and no operator key is registered as "${kid}"`);
 
       let payload: unknown;
       try {
-        ({ payload } = await verifyJws(token, key, {
+        ({ payload } = await verifyJws(token, caller.key, {
           algorithms: [ALG],
           validateClaims: false,
         }));
@@ -151,7 +166,14 @@ export function createNodeVerifier(ctx: RegistryContext, opts?: NodeVerifierOpti
       if (replay.seen(claims.jti)) throw authInvalid("Token has already been used");
 
       replay.record(claims.jti, (claims.exp + skewS) * 1000);
-      return { nodeId: kid, claims };
+      return caller.identity.kind === "node"
+        ? { kind: "node", nodeId: caller.identity.nodeId, claims }
+        : {
+            kind: "operator",
+            nodeId: caller.identity.nodeId,
+            operator: caller.identity.operator,
+            claims,
+          };
     },
   };
 }
