@@ -61,6 +61,7 @@ it("cancels mid-expansion and removes the partial extraction directory", async (
   await packed.dispose();
   let reads = 0;
   const slow: StagedArtifact = {
+    byteLength: bytes.byteLength,
     open: () => {
       let offset = 0;
       return new ReadableStream<Uint8Array>({
@@ -235,6 +236,81 @@ it("tears down an inherited-pipe descendant when the builder leader exits", asyn
       }
     }
     await running?.catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("finds a split version marker before unlimited later stdout and stderr", async () => {
+  const root = await mkdtemp(join(tmpdir(), "scafo-deploy-output-"));
+  const source = join(root, "source");
+  const staging = join(root, "staging");
+  const bin = join(root, "celld-test");
+  try {
+    await writeFile(
+      bin,
+      [
+        `#!${process.execPath}`,
+        'import { writeSync } from "node:fs";',
+        'writeSync(1, "prefix-€-Current Ver");',
+        'writeSync(1, "sion ID: abcdef12\\n");',
+        'writeSync(1, "x".repeat(200_000));',
+        'writeSync(2, "y".repeat(200_000));',
+      ].join("\n"),
+    );
+    await chmod(bin, 0o755);
+    await Promise.all([mkdir(source), mkdir(staging)]);
+    await writeFile(join(source, "wrangler.jsonc"), '{ "name": "shop" }');
+    const artifact = await packDirectory(source);
+
+    const result = await createCelldDeployRunner({
+      binPath: bin,
+      stagingDir: staging,
+      baseEnv: {},
+      outputBytes: 1024,
+    }).run(input(artifact), { signal: new AbortController().signal });
+
+    expect(result).toEqual({ celldVersionId: "abcdef12" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("bounds failed publish detail by UTF-8 bytes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "scafo-deploy-output-fail-"));
+  const source = join(root, "source");
+  const staging = join(root, "staging");
+  const bin = join(root, "celld-test");
+  try {
+    await writeFile(
+      bin,
+      [
+        `#!${process.execPath}`,
+        'import { writeSync } from "node:fs";',
+        'writeSync(2, "€".repeat(100_000));',
+        "process.exit(1);",
+      ].join("\n"),
+    );
+    await chmod(bin, 0o755);
+    await Promise.all([mkdir(source), mkdir(staging)]);
+    await writeFile(join(source, "wrangler.jsonc"), '{ "name": "shop" }');
+    const artifact = await packDirectory(source);
+    let failure: unknown;
+    try {
+      await createCelldDeployRunner({
+        binPath: bin,
+        stagingDir: staging,
+        baseEnv: {},
+        outputBytes: 65_536,
+      }).run(input(artifact), { signal: new AbortController().signal });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({ code: "invalid-input" });
+    const detail = (failure as ScafoError).detail ?? "";
+    expect(new TextEncoder().encode(detail).byteLength).toBeLessThanOrEqual(4096);
+    expect(detail).not.toContain("�");
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

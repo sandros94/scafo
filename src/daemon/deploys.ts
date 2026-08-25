@@ -7,7 +7,7 @@
  * Progress is reported through a status object the caller polls.
  */
 
-import { isScafoError } from "../core/error.ts";
+import { describeError, isScafoError, ScafoError } from "../core/error.ts";
 import { createBuild } from "../core/registry/builds.ts";
 import { createEnvironment, flipAlias, getEnvironment } from "../core/registry/environments.ts";
 import { lockHolder, withLock } from "../core/registry/locks.ts";
@@ -20,7 +20,11 @@ import {
 } from "../core/registry/pointer-lock.ts";
 import { assertProjectUnblocked, createProject } from "../core/registry/projects.ts";
 import { stampEnvironmentWake } from "../core/registry/wake.ts";
-import type { DeployRunner, StagedArtifact } from "../core/types/deploy.ts";
+import {
+  DEFAULT_ARTIFACT_BYTES,
+  type DeployRunner,
+  type StagedArtifact,
+} from "../core/types/deploy.ts";
 import type {
   BuildSource,
   NodeSelector,
@@ -31,6 +35,20 @@ import type {
 import { startBudget } from "../core/utils/budget.ts";
 import { createRoutedWatch } from "./_routed.ts";
 import type { DaemonContext } from "./app.ts";
+import {
+  createDeployScheduler,
+  DEFAULT_ACTIVE_TASKS,
+  DEFAULT_PROJECT_ACTIVE_TASKS,
+  DEFAULT_PROJECT_QUEUED_TASKS,
+  DEFAULT_PROJECT_STAGED_BYTES,
+  DEFAULT_QUEUED_TASKS,
+  DEFAULT_QUEUE_TIMEOUT_MS,
+  DEFAULT_RECEIVE_TIMEOUT_MS,
+  DEFAULT_STAGED_BYTES,
+  DEFAULT_TASK_TIMEOUT_MS,
+  type DeployReservation,
+  type DeploySchedulerOptions,
+} from "./_deploy-scheduler.ts";
 
 /** How long a flipped deploy waits to be observed serving traffic. */
 export const DEFAULT_ROUTED_TIMEOUT_MS: number = 120_000;
@@ -112,9 +130,12 @@ export interface DeployServiceOptions {
    * fails. Defaults to {@link DEPLOY_LOCK_TIMEOUT_MS}.
    */
   lockTimeoutMs?: number;
+  scheduler?: DeploySchedulerOptions;
 }
 
 export interface DeployService {
+  /** Atomically reserves receive capacity before the request body is read. */
+  reserve(project: string): DeployReservation;
   /**
    * Validates the project and environment before any artifact bytes are read.
    * No status exists until the returned admission is started with a complete
@@ -123,12 +144,14 @@ export interface DeployService {
   admit(meta: DeployMeta): Promise<DeployAdmission>;
   /** The deploy's status, or null when this daemon has never heard of it. */
   get(id: string): DeployStatus | null;
+  /** Closes admission and joins every receive, task, watch, and cleanup. */
+  stop(reason: unknown): Promise<void>;
 }
 
 /** One validated deploy waiting only for a complete staged artifact. */
 export interface DeployAdmission {
   /** Transfers artifact ownership to background deploy processing. */
-  start(artifact: StagedArtifact): DeployStatus;
+  start(artifact: StagedArtifact, reservation: DeployReservation): DeployStatus;
 }
 
 /**
@@ -150,6 +173,23 @@ export function createDeployService(
   const history = Math.max(1, opts?.history ?? DEFAULT_HISTORY);
   const lockTimeoutMs = opts?.lockTimeoutMs ?? DEPLOY_LOCK_TIMEOUT_MS;
   const holder = lockHolder(daemon.nodeId);
+  const deploy = daemon.config.deploy;
+  const scheduler = createDeployScheduler(
+    opts?.scheduler ?? {
+      artifactBytes: deploy?.artifactBytes ?? DEFAULT_ARTIFACT_BYTES,
+      activeTasks: deploy?.activeTasks ?? DEFAULT_ACTIVE_TASKS,
+      projectActiveTasks: deploy?.projectActiveTasks ?? DEFAULT_PROJECT_ACTIVE_TASKS,
+      queuedTasks: deploy?.queuedTasks ?? DEFAULT_QUEUED_TASKS,
+      projectQueuedTasks: deploy?.projectQueuedTasks ?? DEFAULT_PROJECT_QUEUED_TASKS,
+      stagedBytes: deploy?.stagedBytes ?? DEFAULT_STAGED_BYTES,
+      projectStagedBytes: deploy?.projectStagedBytes ?? DEFAULT_PROJECT_STAGED_BYTES,
+      receiveTimeoutMs: deploy?.receiveTimeoutMs ?? DEFAULT_RECEIVE_TIMEOUT_MS,
+      queueTimeoutMs: deploy?.queueTimeoutMs ?? DEFAULT_QUEUE_TIMEOUT_MS,
+      taskTimeoutMs: deploy?.taskTimeoutMs ?? DEFAULT_TASK_TIMEOUT_MS,
+    },
+  );
+  const stopping = new AbortController();
+  const continuations = new Set<Promise<void>>();
 
   const statuses = new Map<string, DeployStatus>();
 
@@ -196,7 +236,12 @@ export function createDeployService(
    * the alias points at it, so the loop will keep trying to start it long after
    * this deploy stopped watching.
    */
-  async function awaitRouted(id: string, meta: DeployMeta, build: string): Promise<void> {
+  async function awaitRouted(
+    id: string,
+    meta: DeployMeta,
+    build: string,
+    signal: AbortSignal,
+  ): Promise<void> {
     const giveUp = async (detail: string): Promise<void> => {
       await stampAwake(meta);
       update(id, { state: "deployed" });
@@ -223,6 +268,7 @@ export function createDeployService(
        bringing it up. */
     const remaining = startBudget(routedTimeoutMs);
     for (;;) {
+      throwIfStopped(signal);
       if (await watch.routed()) {
         await stampAwake(meta);
         update(id, { state: "routed" });
@@ -238,62 +284,66 @@ export function createDeployService(
         );
         return;
       }
-      await delay(pollMs);
+      await delay(pollMs, signal);
     }
   }
 
-  async function publish(id: string, meta: DeployMeta, artifact: StagedArtifact): Promise<void> {
-    try {
-      update(id, { state: "uploading" });
-
-      const bucket = daemon.config.bucket;
-      /*
-       * PUBLISHING MOVES THE FLEET'S DEPLOYMENT POINTER, so it holds the
-       * environment's pointer lock for the whole shell-out — the bundling and
-       * the upload included, because the pointer moves at the end of them and
-       * the lock has to have been held since before whoever else wants it could
-       * have started. It therefore waits behind an in-flight rollout of this
-       * environment, on this node or any other, and makes those rollouts wait
-       * behind it: that IS the serialization, and it is what it costs.
-       *
-       * The flip and the wait for the routing below are deliberately OUTSIDE
-       * it. They wait on the reconcile loop, whose rollout needs this very
-       * lock — holding it across them would deadlock a deploy against the loop
-       * that carries it out.
-       */
-      let celldVersionId: string;
-      try {
-        ({ celldVersionId } = await withLock(
-          daemon.registry,
+  async function publish(
+    id: string,
+    meta: DeployMeta,
+    artifact: StagedArtifact,
+    signal: AbortSignal,
+  ): Promise<string> {
+    update(id, { state: "uploading" });
+    const bucket = daemon.config.bucket;
+    /*
+     * PUBLISHING MOVES THE FLEET'S DEPLOYMENT POINTER, so it holds the
+     * environment's pointer lock for the whole shell-out — the bundling and
+     * the upload included, because the pointer moves at the end of them and
+     * the lock has to have been held since before whoever else wants it could
+     * have started. It therefore waits behind an in-flight rollout of this
+     * environment, on this node or any other, and makes those rollouts wait
+     * behind it: that IS the serialization, and it is what it costs.
+     *
+     * The flip and the wait for the routing below are deliberately OUTSIDE
+     * it. They wait on the reconcile loop, whose rollout needs this very
+     * lock — holding it across them would deadlock a deploy against the loop
+     * that carries it out.
+     */
+    const { celldVersionId } = await withLock(
+      daemon.registry,
+      {
+        space: POINTER_LOCK_SPACE,
+        name: pointerLockName(meta.project, meta.environment),
+        holder,
+        timeoutMs: lockTimeoutMs,
+        signal,
+      },
+      (signal) =>
+        runner.run(
           {
-            space: POINTER_LOCK_SPACE,
-            name: pointerLockName(meta.project, meta.environment),
-            holder,
-            timeoutMs: lockTimeoutMs,
+            project: meta.project,
+            environment: meta.environment,
+            script: meta.script,
+            artifact,
+            target: {
+              endpoint: bucket.endpoint,
+              region: bucket.region,
+              bucket: bucket.bucket,
+              prefix: joinPrefix(bucket.prefix, fleetPrefix(meta.project, meta.environment)),
+              accessKey: bucket.accessKey,
+              secretKey: bucket.secretKey,
+            },
           },
-          (signal) =>
-            runner.run(
-              {
-                project: meta.project,
-                environment: meta.environment,
-                script: meta.script,
-                artifact,
-                target: {
-                  endpoint: bucket.endpoint,
-                  region: bucket.region,
-                  bucket: bucket.bucket,
-                  prefix: joinPrefix(bucket.prefix, fleetPrefix(meta.project, meta.environment)),
-                  accessKey: bucket.accessKey,
-                  secretKey: bucket.secretKey,
-                },
-              },
-              { signal },
-            ),
-        ));
-      } finally {
-        await artifact.dispose();
-      }
+          { signal },
+        ),
+    );
+    return celldVersionId;
+  }
 
+  async function finish(id: string, meta: DeployMeta, celldVersionId: string): Promise<void> {
+    try {
+      throwIfStopped(stopping.signal);
       const build = await createBuild(daemon.registry, meta.project, {
         id: meta.buildId ?? celldVersionId,
         celldVersionId,
@@ -306,27 +356,34 @@ export function createDeployService(
         ...(meta.oidc === undefined ? {} : { oidc: meta.oidc }),
       });
       update(id, { build: build.id });
+      throwIfStopped(stopping.signal);
 
       /* A deploy that was not asked to flip is finished: the build is recorded
          and startable, and what the environment serves is deliberately unchanged. */
       if (!meta.flip) {
         await stampAwake(meta);
+        throwIfStopped(stopping.signal);
         update(id, { state: "deployed" });
         return;
       }
 
+      throwIfStopped(stopping.signal);
       const flipped = await flipAlias(daemon.registry, meta.project, meta.environment, build.id);
       for (const warning of flipped.warnings) warn(id, warning);
 
       /* Starting, gating and routing the new build is the reconcile loop's job;
          this only watches for it to happen, and settles the state either way. */
-      await awaitRouted(id, meta, build.id);
+      await awaitRouted(id, meta, build.id, stopping.signal);
     } catch (error) {
-      update(id, { state: "failed", detail: describe(error) });
+      update(id, { state: "failed", detail: boundedDetail(error) });
     }
   }
 
   return {
+    reserve(project): DeployReservation {
+      return scheduler.reserve(project);
+    },
+
     async admit(meta): Promise<DeployAdmission> {
       /* Done before the deploy is acknowledged: a project or environment name
          the registry refuses is the caller's mistake and must be answered as
@@ -351,7 +408,12 @@ export function createDeployService(
       });
 
       return {
-        start(artifact): DeployStatus {
+        start(artifact, reserved): DeployStatus {
+          if (reserved.project !== meta.project) {
+            throw new ScafoError("invalid-input", "Deploy reservation belongs to another project", {
+              detail: `the reservation is for "${reserved.project}", not "${meta.project}"`,
+            });
+          }
           const id = randomDeployId();
           const accepted: DeployStatus = {
             id,
@@ -359,10 +421,22 @@ export function createDeployService(
             state: "accepted",
             warnings: [],
           };
+          /* Enqueue owns the handoff. It must succeed before an id becomes
+             observable; a refused one leaves no ghost status or history row. */
+          const scheduled = reserved.enqueue(artifact, (signal) =>
+            publish(id, meta, artifact, signal),
+          );
           statuses.set(id, accepted);
           forget(statuses, history);
           const answer = snapshot(accepted);
-          void publish(id, meta, artifact);
+          const continuation = scheduled.completion.then(
+            (celldVersionId) => finish(id, meta, celldVersionId),
+            (error) => {
+              update(id, { state: "failed", detail: boundedDetail(error) });
+            },
+          );
+          continuations.add(continuation);
+          void continuation.finally(() => continuations.delete(continuation));
           return answer;
         },
       };
@@ -371,6 +445,12 @@ export function createDeployService(
     get(id): DeployStatus | null {
       const status = statuses.get(id);
       return status === undefined ? null : snapshot(status);
+    },
+
+    async stop(reason): Promise<void> {
+      stopping.abort(reason);
+      await scheduler.stop(reason);
+      await Promise.allSettled(continuations);
     },
   };
 }
@@ -459,13 +539,38 @@ function randomDeployId(): string {
 }
 
 /** The specifics a scafo failure carries are the useful half; keep both. */
-function describe(error: unknown): string {
-  if (isScafoError(error)) {
-    return error.detail === undefined ? error.message : `${error.message}: ${error.detail}`;
+function boundedDetail(error: unknown): string {
+  const encoded = new TextEncoder().encode(describeError(error));
+  if (encoded.byteLength <= 4096) return new TextDecoder().decode(encoded);
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  for (let end = 4096; end > 4092; end -= 1) {
+    try {
+      return decoder.decode(encoded.subarray(0, end));
+    } catch {}
   }
-  return error instanceof Error ? error.message : String(error);
+  return "";
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function throwIfStopped(signal: AbortSignal): void {
+  if (signal.aborted) throw signal.reason;
+}
+
+function delay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const timer = setTimeout(done, ms);
+    const cancel = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", cancel);
+      reject(signal.reason);
+    };
+    function done(): void {
+      signal.removeEventListener("abort", cancel);
+      resolve();
+    }
+    signal.addEventListener("abort", cancel, { once: true });
+  });
 }

@@ -23,6 +23,7 @@ describe("the CLI deploy upload", () => {
       project: "shop",
       metadata: { runtimeConfigurable: false, environment: "production" },
       artifact: {
+        byteLength: 3,
         open: () => new Blob([new Uint8Array([1, 2, 3])]).stream(),
         dispose: () => Promise.resolve(),
       },

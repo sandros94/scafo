@@ -23,6 +23,18 @@ import { assertLabels, parseLabels } from "../core/utils/labels.ts";
    list grew. */
 import { IDLE_EVICT_ENV, RESERVED_ENV, TELEMETRY_ENV } from "../drivers/runtime/celld.ts";
 import { DEFAULT_JSON_BYTES } from "./_json.ts";
+import {
+  DEFAULT_ACTIVE_TASKS,
+  DEFAULT_OUTPUT_BYTES,
+  DEFAULT_PROJECT_ACTIVE_TASKS,
+  DEFAULT_PROJECT_QUEUED_TASKS,
+  DEFAULT_PROJECT_STAGED_BYTES,
+  DEFAULT_QUEUED_TASKS,
+  DEFAULT_QUEUE_TIMEOUT_MS,
+  DEFAULT_RECEIVE_TIMEOUT_MS,
+  DEFAULT_STAGED_BYTES,
+  DEFAULT_TASK_TIMEOUT_MS,
+} from "./_deploy-scheduler.ts";
 
 export { DEFAULT_JSON_BYTES } from "./_json.ts";
 
@@ -112,6 +124,16 @@ export interface DeployConfig {
   artifactBytes: number;
   /** Maximum entries in one tar archive. */
   archiveEntries: number;
+  activeTasks: number;
+  projectActiveTasks: number;
+  queuedTasks: number;
+  projectQueuedTasks: number;
+  stagedBytes: number;
+  projectStagedBytes: number;
+  receiveTimeoutMs: number;
+  queueTimeoutMs: number;
+  taskTimeoutMs: number;
+  outputBytes: number;
 }
 
 /**
@@ -515,14 +537,7 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
       pointerHoldMs: resolvePointerHold(sources),
       ...(celldEnv === undefined ? {} : { celldEnv }),
     },
-    deploy: {
-      artifactBytes: resolvePositiveSafeInteger("artifactBytes", sources, DEFAULT_ARTIFACT_BYTES),
-      archiveEntries: resolvePositiveSafeInteger(
-        "archiveEntries",
-        sources,
-        DEFAULT_ARCHIVE_ENTRIES,
-      ),
-    },
+    deploy: resolveDeploy(sources),
     observability: {
       enabled: observing,
       ...(ingressAccessLog === undefined ? {} : { ingressAccessLog }),
@@ -681,6 +696,40 @@ const ORIGINS = {
     env: ["SCAFO_ARCHIVE_ENTRIES"],
     file: "deploy.archiveEntries",
   },
+  activeTasks: { flag: "active-tasks", env: ["SCAFO_ACTIVE_TASKS"], file: "deploy.activeTasks" },
+  projectActiveTasks: {
+    flag: "project-active-tasks",
+    env: ["SCAFO_PROJECT_ACTIVE_TASKS"],
+    file: "deploy.projectActiveTasks",
+  },
+  queuedTasks: { flag: "queued-tasks", env: ["SCAFO_QUEUED_TASKS"], file: "deploy.queuedTasks" },
+  projectQueuedTasks: {
+    flag: "project-queued-tasks",
+    env: ["SCAFO_PROJECT_QUEUED_TASKS"],
+    file: "deploy.projectQueuedTasks",
+  },
+  stagedBytes: { flag: "staged-bytes", env: ["SCAFO_STAGED_BYTES"], file: "deploy.stagedBytes" },
+  projectStagedBytes: {
+    flag: "project-staged-bytes",
+    env: ["SCAFO_PROJECT_STAGED_BYTES"],
+    file: "deploy.projectStagedBytes",
+  },
+  receiveTimeoutMs: {
+    flag: "receive-timeout-ms",
+    env: ["SCAFO_RECEIVE_TIMEOUT_MS"],
+    file: "deploy.receiveTimeoutMs",
+  },
+  queueTimeoutMs: {
+    flag: "queue-timeout-ms",
+    env: ["SCAFO_QUEUE_TIMEOUT_MS"],
+    file: "deploy.queueTimeoutMs",
+  },
+  taskTimeoutMs: {
+    flag: "task-timeout-ms",
+    env: ["SCAFO_TASK_TIMEOUT_MS"],
+    file: "deploy.taskTimeoutMs",
+  },
+  outputBytes: { flag: "output-bytes", env: ["SCAFO_OUTPUT_BYTES"], file: "deploy.outputBytes" },
   observability: {
     flag: "observability",
     env: ["SCAFO_OBSERVABILITY"],
@@ -792,6 +841,76 @@ function resolvePositiveSafeInteger(setting: Setting, sources: Sources, fallback
   const value = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN;
   assertPositiveSafeInteger(value, origin.file);
   return value;
+}
+
+function resolveNonNegativeSafeInteger(
+  setting: Setting,
+  sources: Sources,
+  fallback: number,
+): number {
+  const origin: Origin = ORIGINS[setting];
+  const raw = flagOrEnv(origin, sources) ?? fileValue(sources.file, origin.file);
+  if (raw === undefined || raw === "") return fallback;
+  const value = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN;
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new ScafoError("invalid-input", "Invalid configuration value", {
+      detail: `"${origin.file}" must be a non-negative safe integer, got ${JSON.stringify(raw)}`,
+    });
+  }
+  return value;
+}
+
+function resolveDeploy(sources: Sources): DeployConfig {
+  const deploy: DeployConfig = {
+    artifactBytes: resolvePositiveSafeInteger("artifactBytes", sources, DEFAULT_ARTIFACT_BYTES),
+    archiveEntries: resolvePositiveSafeInteger("archiveEntries", sources, DEFAULT_ARCHIVE_ENTRIES),
+    activeTasks: resolvePositiveSafeInteger("activeTasks", sources, DEFAULT_ACTIVE_TASKS),
+    projectActiveTasks: resolvePositiveSafeInteger(
+      "projectActiveTasks",
+      sources,
+      DEFAULT_PROJECT_ACTIVE_TASKS,
+    ),
+    queuedTasks: resolveNonNegativeSafeInteger("queuedTasks", sources, DEFAULT_QUEUED_TASKS),
+    projectQueuedTasks: resolveNonNegativeSafeInteger(
+      "projectQueuedTasks",
+      sources,
+      DEFAULT_PROJECT_QUEUED_TASKS,
+    ),
+    stagedBytes: resolvePositiveSafeInteger("stagedBytes", sources, DEFAULT_STAGED_BYTES),
+    projectStagedBytes: resolvePositiveSafeInteger(
+      "projectStagedBytes",
+      sources,
+      DEFAULT_PROJECT_STAGED_BYTES,
+    ),
+    receiveTimeoutMs: resolvePositiveSafeInteger(
+      "receiveTimeoutMs",
+      sources,
+      DEFAULT_RECEIVE_TIMEOUT_MS,
+    ),
+    queueTimeoutMs: resolvePositiveSafeInteger("queueTimeoutMs", sources, DEFAULT_QUEUE_TIMEOUT_MS),
+    taskTimeoutMs: resolvePositiveSafeInteger("taskTimeoutMs", sources, DEFAULT_TASK_TIMEOUT_MS),
+    outputBytes: resolvePositiveSafeInteger("outputBytes", sources, DEFAULT_OUTPUT_BYTES),
+  };
+
+  for (const [project, global] of [
+    ["projectActiveTasks", "activeTasks"],
+    ["projectQueuedTasks", "queuedTasks"],
+    ["projectStagedBytes", "stagedBytes"],
+  ] as const) {
+    if (deploy[project] > deploy[global]) {
+      throw new ScafoError("invalid-input", "Invalid deploy limits", {
+        detail: `"deploy.${project}" must not exceed "deploy.${global}"`,
+      });
+    }
+  }
+  for (const field of ["stagedBytes", "projectStagedBytes"] as const) {
+    if (deploy[field] < deploy.artifactBytes) {
+      throw new ScafoError("invalid-input", "Invalid deploy byte limits", {
+        detail: `"deploy.${field}" must be at least "deploy.artifactBytes"`,
+      });
+    }
+  }
+  return deploy;
 }
 
 /**

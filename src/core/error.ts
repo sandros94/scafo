@@ -13,6 +13,8 @@ export type ScafoErrorCode =
   | "project-blocked"
   | "wake-unavailable"
   | "draining"
+  | "deploy-overloaded"
+  | "deploy-timeout"
   | "store-nonconforming"
   | "not-found"
   | "immutable"
@@ -56,6 +58,8 @@ const DEFAULT_STATUS: Record<ScafoErrorCode, number> = {
      because the very next try may well succeed. */
   "wake-unavailable": 503,
   "draining": 503,
+  "deploy-overloaded": 429,
+  "deploy-timeout": 408,
   "store-nonconforming": 500,
   "not-found": 404,
   "immutable": 409,

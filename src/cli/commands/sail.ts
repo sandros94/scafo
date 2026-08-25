@@ -121,6 +121,28 @@ const sailArgs: ArgsDef = {
     type: "string",
     description: "Maximum entries per deploy archive",
   },
+  "active-tasks": { type: "string", description: "Maximum active deploy tasks on this node" },
+  "project-active-tasks": {
+    type: "string",
+    description: "Maximum active deploy tasks for one project",
+  },
+  "queued-tasks": { type: "string", description: "Maximum receiving and queued deploys" },
+  "project-queued-tasks": {
+    type: "string",
+    description: "Maximum receiving and queued deploys for one project",
+  },
+  "staged-bytes": { type: "string", description: "Maximum staged deploy bytes on this node" },
+  "project-staged-bytes": {
+    type: "string",
+    description: "Maximum staged deploy bytes for one project",
+  },
+  "receive-timeout-ms": {
+    type: "string",
+    description: "Artifact receive deadline in milliseconds",
+  },
+  "queue-timeout-ms": { type: "string", description: "Queued deploy deadline in milliseconds" },
+  "task-timeout-ms": { type: "string", description: "Active deploy deadline in milliseconds" },
+  "output-bytes": { type: "string", description: "Subprocess output tail retained in memory" },
   "probe-path": { type: "string", description: "Path the application readiness probe requests" },
   "observability": {
     type: "boolean",
@@ -322,7 +344,24 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
       baseEnv,
       artifactBytes: config.deploy?.artifactBytes ?? DEFAULT_ARTIFACT_BYTES,
       archiveEntries: config.deploy?.archiveEntries ?? DEFAULT_ARCHIVE_ENTRIES,
+      outputBytes: config.deploy?.outputBytes,
     }),
+    config.deploy === undefined
+      ? undefined
+      : {
+          scheduler: {
+            artifactBytes: config.deploy.artifactBytes,
+            activeTasks: config.deploy.activeTasks,
+            projectActiveTasks: config.deploy.projectActiveTasks,
+            queuedTasks: config.deploy.queuedTasks,
+            projectQueuedTasks: config.deploy.projectQueuedTasks,
+            stagedBytes: config.deploy.stagedBytes,
+            projectStagedBytes: config.deploy.projectStagedBytes,
+            receiveTimeoutMs: config.deploy.receiveTimeoutMs,
+            queueTimeoutMs: config.deploy.queueTimeoutMs,
+            taskTimeoutMs: config.deploy.taskTimeoutMs,
+          },
+        },
   );
   daemon.artifactStager = createFileArtifactStager();
 
@@ -384,6 +423,7 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
      * reached delays the shutdown briefly and changes nothing else.
      */
     await drainThisNode(registry, state.id);
+    await daemon.deploys?.stop(new Error("node is shutting down"));
     /* Stopped first among the loops: everything below still emits, and one
        final flush at the end writes what they emitted on the way out. */
     flusher?.stop();

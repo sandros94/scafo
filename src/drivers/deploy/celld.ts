@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { parseJSONC } from "confbox";
 import { ScafoError } from "../../core/error.ts";
 import { assertPositiveSafeInteger } from "../../core/utils/number.ts";
+import { ByteTail, decodeUtf8Tail } from "../../core/utils/byte-tail.ts";
 import type {
   DeployRunInput,
   DeployRunner,
@@ -26,9 +27,6 @@ import { assertProcessGroups, processGroupId, stopProcessGroup } from "../_proce
 
 /** Command run when the caller does not name one. */
 export const DEFAULT_CELLD_BIN: string = "celld";
-
-/** How long one publish may take before it is killed. */
-export const DEFAULT_DEPLOY_TIMEOUT_MS: number = 300_000;
 
 /** Config files an artifact may carry, in the order they are looked for. */
 const CONFIG_NAMES: string[] = ["wrangler.jsonc", "wrangler.json"];
@@ -50,8 +48,8 @@ export interface CelldDeployRunnerOptions {
    * which only works when `binPath` is an absolute path.
    */
   baseEnv?: Record<string, string>;
-  /** Time a publish is given. Defaults to {@link DEFAULT_DEPLOY_TIMEOUT_MS}. */
-  timeoutMs?: number;
+  /** In-flight subprocess output retained. */
+  outputBytes?: number;
   /** Maximum expanded archive bytes. */
   artifactBytes?: number;
   /** Maximum archive entries. */
@@ -66,11 +64,12 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
   if (opts?.archiveEntries !== undefined) {
     assertPositiveSafeInteger(opts.archiveEntries, "archiveEntries");
   }
+  if (opts?.outputBytes !== undefined) assertPositiveSafeInteger(opts.outputBytes, "outputBytes");
   assertProcessGroups();
   const binPath = opts?.binPath ?? DEFAULT_CELLD_BIN;
   const staging = opts?.stagingDir ?? tmpdir();
   const baseEnv = opts?.baseEnv ?? {};
-  const timeoutMs = opts?.timeoutMs ?? DEFAULT_DEPLOY_TIMEOUT_MS;
+  const outputBytes = opts?.outputBytes ?? 65_536;
 
   return {
     async run(input: DeployRunInput, runOpts: DeployRunOptions): Promise<DeployRunResult> {
@@ -88,7 +87,7 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
         });
         const config = await prepareConfig(dir, input.script);
 
-        const output = await run(
+        const version = await run(
           binPath,
           [
             "deploy",
@@ -100,8 +99,8 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
             input.target.endpoint,
           ],
           {
-            timeoutMs,
             signal: runOpts.signal,
+            outputBytes,
             env: {
               ...baseEnv,
               AWS_ACCESS_KEY_ID: input.target.accessKey,
@@ -112,7 +111,6 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
           },
         );
 
-        const version = VERSION_RE.exec(output)?.[1];
         if (version === undefined) {
           throw new ScafoError("store-nonconforming", "Publish reported no version", {
             detail: `"${binPath} deploy" exited successfully without naming a version id`,
@@ -169,9 +167,9 @@ async function prepareConfig(dir: string, script: string): Promise<string> {
 function run(
   command: string,
   args: string[],
-  opts: { timeoutMs: number; signal: AbortSignal; env: Record<string, string> },
-): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
+  opts: { signal: AbortSignal; env: Record<string, string>; outputBytes: number },
+): Promise<string | undefined> {
+  return new Promise<string | undefined>((resolve, reject) => {
     if (opts.signal.aborted) {
       reject(aborted(opts.signal));
       return;
@@ -180,19 +178,24 @@ function run(
     const child = spawn(command, args, {
       env: opts.env,
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: opts.timeoutMs,
       detached: true,
     });
 
-    let output = "";
+    const output = new ByteTail(opts.outputBytes);
+    let stdoutCarry = "";
+    let version: string | undefined;
     let spawned = false;
     let cancelled = false;
     let spawnFailure: ScafoError | undefined;
     let cleanup: Promise<void> | undefined;
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => (output += chunk));
-    child.stderr.on("data", (chunk: string) => (output += chunk));
+    child.stdout.on("data", (chunk: Buffer) => {
+      output.push(chunk);
+      if (version !== undefined) return;
+      const text = stdoutCarry + new TextDecoder().decode(chunk);
+      version = VERSION_RE.exec(text)?.[1];
+      stdoutCarry = text.slice(-128);
+    });
+    child.stderr.on("data", (chunk: Buffer) => output.push(chunk));
 
     const beginCleanup = (): void => {
       if (!spawned) return;
@@ -242,14 +245,17 @@ function run(
         return;
       }
       if (code === 0) {
-        resolve(output);
+        resolve(version);
         return;
       }
       const ended =
         signal === null ? `exited with code ${String(code)}` : `was killed by ${signal}`;
+      const prefix = `"${command} ${args[0] ?? ""}" ${ended}: `;
+      const tailBytes = Math.max(1, 4096 - new TextEncoder().encode(prefix).byteLength);
       reject(
         new ScafoError("invalid-input", "Publish failed", {
-          detail: `"${command} ${args[0] ?? ""}" ${ended}: ${lastLines(output)}`,
+          detail:
+            prefix + decodeUtf8Tail(output.bytes(), Math.min(opts.outputBytes, tailBytes)).trim(),
         }),
       );
     }
@@ -259,10 +265,4 @@ function run(
 function aborted(signal: AbortSignal): ScafoError {
   if (signal.reason instanceof ScafoError) return signal.reason;
   return new ScafoError("lease-lost", "Publish authority was lost", { cause: signal.reason });
-}
-
-/** The tail of a failed publish's output, which is where its reason is. */
-function lastLines(output: string, limit: number = 2000): string {
-  const trimmed = output.trim();
-  return trimmed.length <= limit ? trimmed : `…${trimmed.slice(-limit)}`;
 }

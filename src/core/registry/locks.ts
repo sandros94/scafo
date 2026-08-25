@@ -64,6 +64,8 @@ export interface LockRequest {
    * `ScafoError("cas-conflict")`. Zero tries exactly once.
    */
   timeoutMs: number;
+  /** Cancels acquisition and held work under a caller-owned deadline. */
+  signal?: AbortSignal;
 }
 
 /** True once `refreshedAt` has aged past `staleMs`. Unparseable times count as stale. */
@@ -195,6 +197,11 @@ export async function withLock<T>(
   const { space } = request;
   let handle = await take(ctx, request);
 
+  if (request.signal?.aborted === true) {
+    await releaseLock(ctx, space, handle).catch(() => {});
+    throw abortReason(request.signal);
+  }
+
   const ending = new AbortController();
   const work = new AbortController();
   /* Rejects the moment a restamp does not land; nothing else ever settles it. */
@@ -203,6 +210,19 @@ export async function withLock<T>(
   lost.promise.catch(() => {});
   let lockLost = false;
   let lostError: unknown;
+  let externallyAborted = false;
+  let externalError: unknown;
+  const external = Promise.withResolvers<never>();
+  external.promise.catch(() => {});
+  const abortExternal = (): void => {
+    if (externallyAborted) return;
+    externallyAborted = true;
+    externalError = abortReason(request.signal as AbortSignal);
+    work.abort(externalError);
+    external.reject(externalError);
+  };
+  request.signal?.addEventListener("abort", abortExternal, { once: true });
+  if (isAborted(request.signal)) abortExternal();
 
   const keepAlive = (async (): Promise<void> => {
     for (;;) {
@@ -228,22 +248,24 @@ export async function withLock<T>(
     running.catch(() => {});
 
     try {
-      outcome = { ok: true, value: await Promise.race([running, lost.promise]) };
+      outcome = { ok: true, value: await Promise.race([running, lost.promise, external.promise]) };
     } catch (error) {
       outcome = { ok: false, error };
     }
   } finally {
     ending.abort();
+    request.signal?.removeEventListener("abort", abortExternal);
     await keepAlive;
     /* A refresh may have failed while a completed callback was ending the
        keepalive. Either way, stale work is joined before lease loss escapes. */
-    if (lockLost && running !== undefined) await running.catch(() => {});
+    if ((lockLost || externallyAborted) && running !== undefined) await running.catch(() => {});
     if (!lockLost) await releaseLock(ctx, space, handle).catch(() => {});
   }
 
   /* The refresh failure is the authority loss that decides this section. A
      callback cleanup failure stays observed above but cannot replace it. */
   if (lockLost) throw lostError;
+  if (externallyAborted) throw externalError;
   if (!outcome.ok) throw outcome.error;
   return outcome.value;
 }
@@ -277,8 +299,12 @@ async function take(ctx: RegistryContext, request: LockRequest): Promise<LockHan
   let refusal: unknown = null;
 
   for (;;) {
+    if (request.signal?.aborted === true) throw abortReason(request.signal);
     try {
-      return await acquireLock(ctx, space, name, holder);
+      const handle = await acquireLock(ctx, space, name, holder);
+      if (!isAborted(request.signal)) return handle;
+      await releaseLock(ctx, space, handle).catch(() => {});
+      throw abortReason(request.signal as AbortSignal);
     } catch (error) {
       if (!isCasConflict(error)) throw error;
       refusal = error;
@@ -286,7 +312,7 @@ async function take(ctx: RegistryContext, request: LockRequest): Promise<LockHan
 
     const left = remaining();
     if (left <= 0) break;
-    await sleep(Math.min(space.pollMs, left));
+    await sleep(Math.min(space.pollMs, left), request.signal);
   }
 
   throw new ScafoError("cas-conflict", "Lock could not be taken", {
@@ -295,6 +321,14 @@ async function take(ctx: RegistryContext, request: LockRequest): Promise<LockHan
       `"${holder}" waited for it`,
     cause: refusal,
   });
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new ScafoError("invalid-input", "Lock wait was cancelled");
+}
+
+function isAborted(signal?: AbortSignal): boolean {
+  return signal?.aborted === true;
 }
 
 /** A delay that can be cut short, so nothing is left pending once a section ends. */

@@ -1,6 +1,7 @@
 /* The streamed tar+zstd artifact format shared by the CLI and deploy runner. */
 
 import { createWriteStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -52,7 +53,7 @@ export async function packDirectory(
   opts?: PackDirectoryOptions,
 ): Promise<StagedArtifact> {
   const tar = await loadTar();
-  const stage = await createFileStage(opts?.stagingDir);
+  const stage = await createFileStage({ stagingDir: opts?.stagingDir });
   await stage.file.close();
 
   try {
@@ -62,7 +63,7 @@ export async function packDirectory(
       createWriteStream(stage.path, { flags: "w", mode: 0o600 }),
       ...(opts?.signal === undefined ? [] : [{ signal: opts.signal }]),
     );
-    return stage.artifact;
+    return stage.artifact((await stat(stage.path)).size);
   } catch (error) {
     await stage.dispose();
     throw error;

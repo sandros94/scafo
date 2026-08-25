@@ -207,6 +207,198 @@ describe("who may deploy", () => {
     expect(status).toMatchObject({ project: PROJECT, state: "accepted", warnings: [] });
   });
 
+  it("answers 202 without awaiting builder completion", async () => {
+    const builder = Promise.withResolvers<DeployRunResult>();
+    publish = () => builder.promise;
+
+    const response = await upload(await operatorToken());
+    const status = (await response.json()) as DeployStatus;
+
+    expect(response.status).toBe(202);
+    expect(status.state).toBe("accepted");
+    expect(daemon.deploys?.get(status.id)?.state).toMatch(/accepted|uploading/);
+    builder.resolve({ celldVersionId: VERSION_ID });
+    await settled(status.id);
+  });
+
+  it("refuses overload before reading the artifact body", async () => {
+    daemon.deploys = createDeployService(daemon, fakeRunner(), {
+      scheduler: {
+        artifactBytes: 100,
+        activeTasks: 1,
+        projectActiveTasks: 1,
+        queuedTasks: 0,
+        projectQueuedTasks: 0,
+        stagedBytes: 100,
+        projectStagedBytes: 100,
+        receiveTimeoutMs: 600_000,
+        queueTimeoutMs: 600_000,
+        taskTimeoutMs: 300_000,
+      },
+    });
+    let reads = 0;
+
+    const response = await streamedUpload(
+      await operatorToken(),
+      PROJECT,
+      { runtimeConfigurable: false },
+      unreadBody(() => reads++),
+    );
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("1");
+    expect(response.headers.get("location")).toBeNull();
+    expect(reads).toBe(0);
+  });
+
+  it("times out a partial receive without a status or staged file", async () => {
+    const staging = await mkdtemp(join(tmpdir(), "scafo-receive-timeout-"));
+    daemon.artifactStager = createFileArtifactStager({ stagingDir: staging });
+    daemon.deploys = createDeployService(daemon, fakeRunner(), {
+      scheduler: {
+        artifactBytes: 100,
+        activeTasks: 1,
+        projectActiveTasks: 1,
+        queuedTasks: 1,
+        projectQueuedTasks: 1,
+        stagedBytes: 100,
+        projectStagedBytes: 100,
+        receiveTimeoutMs: 10,
+        queueTimeoutMs: 600_000,
+        taskTimeoutMs: 300_000,
+      },
+    });
+    const body = new ReadableStream<Uint8Array>({
+      start(stream): void {
+        stream.enqueue(new Uint8Array([1]));
+      },
+      pull: () => new Promise<void>(() => {}),
+    });
+
+    const response = await streamedUpload(
+      await operatorToken(),
+      PROJECT,
+      { runtimeConfigurable: false },
+      body,
+    );
+
+    expect(response.status).toBe(408);
+    expect(response.headers.get("location")).toBeNull();
+    expect(runs).toEqual([]);
+    expect(await readdir(staging)).toEqual([]);
+  });
+
+  it("disposes a staged artifact when enqueue refuses before ownership transfer", async () => {
+    const cap = artifactBytes.byteLength;
+    daemon.deploys = createDeployService(daemon, fakeRunner(), {
+      history: 1,
+      scheduler: {
+        artifactBytes: cap,
+        activeTasks: 1,
+        projectActiveTasks: 1,
+        queuedTasks: 1,
+        projectQueuedTasks: 1,
+        stagedBytes: cap,
+        projectStagedBytes: cap,
+        receiveTimeoutMs: 600_000,
+        queueTimeoutMs: 600_000,
+        taskTimeoutMs: 300_000,
+      },
+    });
+    const retained = (await responseId(await upload(await operatorToken()))) as string;
+    await settled(retained);
+    runs = [];
+    const dispose = vi.fn(() => Promise.resolve());
+    daemon.artifactStager = {
+      stage: () =>
+        Promise.resolve({
+          byteLength: cap + 1,
+          open: () => new Blob([new Uint8Array([1])]).stream(),
+          dispose,
+        }),
+    };
+
+    const response = await upload(await operatorToken());
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get("location")).toBeNull();
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(runs).toEqual([]);
+    expect(daemon.deploys.get(retained)).not.toBeNull();
+  });
+
+  it("keeps pre-handoff capacity charged when staged-artifact disposal fails", async () => {
+    let disposals = 0;
+    daemon.artifactStager = {
+      stage: () =>
+        Promise.resolve({
+          byteLength: 101,
+          open: () => new Blob([new Uint8Array([1])]).stream(),
+          dispose: () => {
+            disposals += 1;
+            return disposals === 1 ? Promise.reject(new Error("disk busy")) : Promise.resolve();
+          },
+        }),
+    };
+    daemon.deploys = createDeployService(daemon, fakeRunner(), {
+      scheduler: {
+        artifactBytes: 100,
+        activeTasks: 1,
+        projectActiveTasks: 1,
+        queuedTasks: 1,
+        projectQueuedTasks: 1,
+        stagedBytes: 100,
+        projectStagedBytes: 100,
+        receiveTimeoutMs: 600_000,
+        queueTimeoutMs: 600_000,
+        taskTimeoutMs: 300_000,
+      },
+    });
+
+    expect((await upload(await operatorToken())).status).toBe(500);
+    expect((await upload(await operatorToken())).status).toBe(429);
+    expect(disposals).toBe(1);
+
+    await daemon.deploys.stop(new Error("node stopping"));
+    expect(disposals).toBe(2);
+  });
+
+  it("makes shutdown join disposal at the completed-stage handoff", async () => {
+    const stageCalled = Promise.withResolvers<void>();
+    const stagedArtifact = Promise.withResolvers<StagedArtifact>();
+    const disposal = Promise.withResolvers<void>();
+    const dispose = vi.fn(async (): Promise<void> => disposal.promise);
+    daemon.artifactStager = {
+      stage: () => {
+        stageCalled.resolve();
+        return stagedArtifact.promise;
+      },
+    };
+
+    const uploading = upload(await operatorToken());
+    await stageCalled.promise;
+    stagedArtifact.resolve({
+      byteLength: artifactBytes.byteLength,
+      open: () => new Blob([artifactBytes as BlobPart]).stream(),
+      dispose,
+    });
+    let stopped = false;
+    const stopping = daemon.deploys!.stop(new Error("node stopping")).then(() => {
+      stopped = true;
+    });
+
+    await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
+    expect(stopped).toBe(false);
+    expect(runs).toEqual([]);
+
+    disposal.resolve();
+    await stopping;
+    const response = await uploading;
+    expect(response.status).toBe(400);
+    expect(response.headers.get("location")).toBeNull();
+    expect(stopped).toBe(true);
+  });
+
   it("accepts a workload token the project's trust policy admits", async () => {
     const response = await upload(await workloadToken());
 
@@ -386,8 +578,8 @@ describe("what an upload must carry", () => {
     const staging = await mkdtemp(join(tmpdir(), "scafo-receive-route-"));
     daemon.artifactStager = createFileArtifactStager({ stagingDir: staging });
     daemon.config.deploy = {
+      ...daemon.config.deploy!,
       artifactBytes: artifactBytes.byteLength - 1,
-      archiveEntries: 20_000,
     };
 
     const response = await upload(await operatorToken());
@@ -400,8 +592,8 @@ describe("what an upload must carry", () => {
 
   it("accepts a chunked body at the exact receive cap", async () => {
     daemon.config.deploy = {
+      ...daemon.config.deploy!,
       artifactBytes: artifactBytes.byteLength,
-      archiveEntries: 20_000,
     };
 
     const response = await upload(await operatorToken());
@@ -718,6 +910,16 @@ describe("what happens to an accepted deploy", () => {
     expect(status.build).toBeUndefined();
   });
 
+  it("caps every retained background failure detail on a UTF-8 boundary", async () => {
+    publish = () => Promise.reject(new Error(`failed-${"€".repeat(10_000)}`));
+
+    const id = (await responseId(await upload(await operatorToken()))) as string;
+    const detail = (await settled(id)).detail ?? "";
+
+    expect(new TextEncoder().encode(detail).byteLength).toBeLessThanOrEqual(4096);
+    expect(detail).not.toContain("�");
+  });
+
   it("records a background archive limit as a precise failed status, not an HTTP 413", async () => {
     publish = () =>
       Promise.reject(
@@ -747,10 +949,14 @@ describe("what happens to an accepted deploy", () => {
       runtimeConfigurable: false,
       flip: false,
     });
-    const status = admission?.start({
-      open: () => new Blob([artifactBytes as BlobPart]).stream(),
-      dispose,
-    });
+    const status = admission?.start(
+      {
+        byteLength: artifactBytes.byteLength,
+        open: () => new Blob([artifactBytes as BlobPart]).stream(),
+        dispose,
+      },
+      daemon.deploys!.reserve(PROJECT),
+    );
 
     await settled(status?.id as string);
     expect(dispose).toHaveBeenCalledOnce();

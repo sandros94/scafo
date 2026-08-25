@@ -20,7 +20,7 @@ export function createFileArtifactStager(opts?: FileArtifactStagerOptions): Arti
       stageOpts: ArtifactStageOptions,
     ): Promise<StagedArtifact> {
       assertPositiveSafeInteger(stageOpts.maxBytes, "maxBytes");
-      const stage = await createFileStage(opts?.stagingDir);
+      const stage = await createFileStage({ stagingDir: opts?.stagingDir });
       const reader = source.getReader();
       let received = 0;
       const cancel = (): void => {
@@ -53,7 +53,7 @@ export function createFileArtifactStager(opts?: FileArtifactStagerOptions): Arti
           received = after;
         }
         await stage.file.close();
-        return stage.artifact;
+        return stage.artifact(received);
       } catch (error) {
         await reader.cancel(error).catch(() => {});
         await stage.file.close().catch(() => {});

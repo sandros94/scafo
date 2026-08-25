@@ -8,36 +8,56 @@ import type { StagedArtifact } from "../../core/types/deploy.ts";
 export interface FileStage {
   path: string;
   file: FileHandle;
-  artifact: StagedArtifact;
+  artifact(byteLength: number): StagedArtifact;
   dispose(): Promise<void>;
 }
 
+interface FileStageOptions {
+  stagingDir?: string;
+  remove?: typeof rm;
+}
+
 /** Allocates one exclusive file and the staged-artifact handle that owns it. */
-export async function createFileStage(stagingDir?: string): Promise<FileStage> {
-  const dir = await mkdtemp(join(stagingDir ?? tmpdir(), "scafo-artifact-"));
+export async function createFileStage(options: FileStageOptions = {}): Promise<FileStage> {
+  const remove = options.remove ?? rm;
+  const dir = await mkdtemp(join(options.stagingDir ?? tmpdir(), "scafo-artifact-"));
   const path = join(dir, "artifact.tar.zst");
   let disposed = false;
+  let disposing: Promise<void> | undefined;
 
   try {
     const file = await open(path, "wx", 0o600);
-    const dispose = async (): Promise<void> => {
-      if (disposed) return;
-      disposed = true;
-      await rm(dir, { recursive: true, force: true });
+    const dispose = (): Promise<void> => {
+      if (disposed) return Promise.resolve();
+      if (disposing !== undefined) return disposing;
+      const attempt = Promise.resolve().then(() => remove(dir, { recursive: true, force: true }));
+      disposing = attempt;
+      void attempt.then(
+        () => {
+          disposed = true;
+        },
+        () => {
+          disposing = undefined;
+        },
+      );
+      return attempt;
     };
     return {
       path,
       file,
       dispose,
-      artifact: {
-        open(): ReadableStream<Uint8Array> {
-          return Readable.toWeb(createReadStream(path)) as ReadableStream<Uint8Array>;
-        },
-        dispose,
+      artifact(byteLength): StagedArtifact {
+        return {
+          byteLength,
+          open(): ReadableStream<Uint8Array> {
+            return Readable.toWeb(createReadStream(path)) as ReadableStream<Uint8Array>;
+          },
+          dispose,
+        };
       },
     };
   } catch (error) {
-    await rm(dir, { recursive: true, force: true });
+    await remove(dir, { recursive: true, force: true });
     throw error;
   }
 }

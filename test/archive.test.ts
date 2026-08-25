@@ -51,9 +51,11 @@ describe("a directory packed and unpacked again", () => {
 
   it("is a zstd frame, which is what the artifact key promises", async () => {
     const archive = await packDirectory(source);
-    const magic = Array.from((await bytesOf(archive)).subarray(0, 4));
+    const bytes = await bytesOf(archive);
+    const magic = Array.from(bytes.subarray(0, 4));
     await archive.dispose();
 
+    expect(archive.byteLength).toBe(bytes.byteLength);
     expect(magic).toEqual([0x28, 0xb5, 0x2f, 0xfd]);
   });
 });
@@ -91,6 +93,7 @@ describe("archive resource limits", () => {
       ]) {
         let opens = 0;
         const artifact: StagedArtifact = {
+          byteLength: 0,
           open: () => {
             opens += 1;
             return stagedOf(new Uint8Array()).open();
@@ -171,6 +174,7 @@ describe("what is not an artifact", () => {
       },
     });
     const artifact: StagedArtifact = {
+      byteLength: 0,
       open: () => stream,
       dispose: () => Promise.resolve(),
     };
@@ -251,6 +255,7 @@ function scratch(): Promise<string> {
 
 function stagedOf(bytes: Uint8Array): StagedArtifact {
   return {
+    byteLength: bytes.byteLength,
     open: () => new Blob([bytes as BlobPart]).stream(),
     dispose: () => Promise.resolve(),
   };

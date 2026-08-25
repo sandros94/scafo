@@ -714,6 +714,15 @@ function stubDeploys(): StubDeploys {
   return {
     started,
     recordFor: record,
+    reserve: () => ({
+      project: "stub",
+      signal: new AbortController().signal,
+      cancel: () => {},
+      discard: () => Promise.resolve(),
+      enqueue: () => {
+        throw new Error("stub admission consumes artifacts directly");
+      },
+    }),
     admit: (meta) => {
       started.push(meta);
       return Promise.resolve({
@@ -724,6 +733,7 @@ function stubDeploys(): StubDeploys {
       });
     },
     get: (id) => byId.get(id) ?? null,
+    stop: () => Promise.resolve(),
   };
 }
 

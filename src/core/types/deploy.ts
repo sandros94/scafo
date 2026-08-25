@@ -47,6 +47,8 @@ export interface DeployRunInput {
  * deploy processing owns it from then on and disposes it after every outcome.
  */
 export interface StagedArtifact {
+  /** Exact immutable number of staged bytes. */
+  readonly byteLength: number;
   /** Opens a fresh byte stream from the beginning of the artifact. */
   open(): ReadableStream<Uint8Array>;
   /** Removes the artifact's backing storage. Idempotent. */

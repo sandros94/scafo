@@ -114,6 +114,44 @@ describe("waiting for a lock somebody else has", () => {
     await expect(second).resolves.toBe("second");
   });
 
+  it("aborts while waiting and never acquires later", async () => {
+    const { clock } = world();
+    const first = await acquireLock(clock.ctx, SPACE, "one", FOREIGN);
+    const controller = new AbortController();
+    const reason = new Error("task deadline");
+    let ran = false;
+    const waiting = withLock(
+      clock.ctx,
+      request({ timeoutMs: 1000, signal: controller.signal }),
+      async () => {
+        ran = true;
+      },
+    );
+
+    controller.abort(reason);
+    await expect(waiting).rejects.toBe(reason);
+    await releaseLock(clock.ctx, SPACE, first);
+    await elapse(SPACE.pollMs * 2);
+    expect(ran).toBe(false);
+  });
+
+  it("never acquires or invokes work for a signal already aborted", async () => {
+    const { store, clock } = world();
+    const controller = new AbortController();
+    const reason = new Error("task deadline");
+    controller.abort(reason);
+    let ran = false;
+
+    await expect(
+      withLock(clock.ctx, request({ signal: controller.signal }), async () => {
+        ran = true;
+      }),
+    ).rejects.toBe(reason);
+
+    expect(ran).toBe(false);
+    await expect(record(store, "one")).resolves.toBeNull();
+  });
+
   it("gives up with a refusal rather than hanging, and never runs the work", async () => {
     const { clock } = world();
     await acquireLock(clock.ctx, SPACE, "one", FOREIGN);
@@ -212,6 +250,31 @@ describe("waiting for a lock somebody else has", () => {
 });
 
 describe("keeping a lock while the work runs", () => {
+  it("aborts held work and awaits cleanup before release", async () => {
+    const { store, clock } = world();
+    const controller = new AbortController();
+    const cleanup = deferred<void>();
+    const reason = new Error("task deadline");
+    let cleaned = false;
+    const held = withLock(clock.ctx, request({ signal: controller.signal }), async (signal) => {
+      await new Promise<void>((resolve) =>
+        signal.addEventListener("abort", () => resolve(), { once: true }),
+      );
+      await cleanup.promise;
+      cleaned = true;
+    });
+    await expect.poll(() => record(store, "one"), { interval: 2 }).not.toBeNull();
+
+    controller.abort(reason);
+    await elapse(1);
+    expect(cleaned).toBe(false);
+    await expect(record(store, "one")).resolves.not.toBeNull();
+
+    cleanup.resolve();
+    await expect(held).rejects.toBe(reason);
+    expect(cleaned).toBe(true);
+    await expect(record(store, "one")).resolves.toBeNull();
+  });
   it("restamps it, so work outlasting the stale window is never taken over", async () => {
     const { store, clock } = world();
     const working = deferred<string>();
@@ -373,17 +436,24 @@ function world(): { store: MemoryCasStore; clock: ManualClock } {
 }
 
 /** One request for the test lock, with whatever a case wants to change about it. */
-function request(opts?: { name?: string; holder?: string; timeoutMs?: number }): {
+function request(opts?: {
+  name?: string;
+  holder?: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}): {
   space: LockSpace;
   name: string;
   holder: string;
   timeoutMs: number;
+  signal?: AbortSignal;
 } {
   return {
     space: SPACE,
     name: opts?.name ?? "one",
     holder: opts?.holder ?? HOLDER,
     timeoutMs: opts?.timeoutMs ?? 0,
+    ...(opts?.signal === undefined ? {} : { signal: opts.signal }),
   };
 }
 

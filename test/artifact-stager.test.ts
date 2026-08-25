@@ -1,7 +1,8 @@
-import { mkdir, mkdtemp, readdir } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { createFileStage } from "../src/drivers/artifact/_file-stage.ts";
 import { createFileArtifactStager } from "../src/drivers/artifact/file.ts";
 
 describe("the file-backed artifact receive", () => {
@@ -64,6 +65,7 @@ describe("the file-backed artifact receive", () => {
       signal: new AbortController().signal,
     });
 
+    expect(staged.byteLength).toBe(5);
     await expect(new Response(staged.open()).arrayBuffer()).resolves.toHaveProperty(
       "byteLength",
       5,
@@ -104,6 +106,37 @@ describe("the file-backed artifact receive", () => {
       }),
     ).rejects.toThrow("client left");
     expect(await readdir(staging)).toEqual([]);
+  });
+
+  it("joins concurrent disposal and retries removal after failure", async () => {
+    const staging = await scratch();
+    const gate = Promise.withResolvers<void>();
+    let attempts = 0;
+    const remove = vi.fn(
+      async (path: Parameters<typeof rm>[0], options: Parameters<typeof rm>[1]) => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("disk busy");
+        await gate.promise;
+        await rm(path, options);
+      },
+    );
+    const stage = await createFileStage({ stagingDir: staging, remove });
+    await stage.file.close();
+
+    await expect(stage.dispose()).rejects.toThrow("disk busy");
+    expect(await readdir(staging)).toHaveLength(1);
+
+    const first = stage.dispose();
+    const concurrent = stage.dispose();
+    expect(concurrent).toBe(first);
+    await Promise.resolve();
+    expect(remove).toHaveBeenCalledTimes(2);
+    gate.resolve();
+    await Promise.all([first, concurrent]);
+
+    expect(await readdir(staging)).toEqual([]);
+    await stage.dispose();
+    expect(remove).toHaveBeenCalledTimes(2);
   });
 });
 

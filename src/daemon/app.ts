@@ -18,7 +18,11 @@ import { setNodeSelector } from "../core/registry/placement.ts";
 import { retireEnvironment, unretireEnvironment } from "../core/registry/retirement.ts";
 import type { CapacityPlan } from "../core/capacity/compute.ts";
 import type { IngressDriver } from "../core/types/ingress.ts";
-import { DEFAULT_ARTIFACT_BYTES, type ArtifactStager } from "../core/types/deploy.ts";
+import {
+  DEFAULT_ARTIFACT_BYTES,
+  type ArtifactStager,
+  type StagedArtifact,
+} from "../core/types/deploy.ts";
 import type {
   CoordinatorLease,
   EnvironmentRecord,
@@ -503,27 +507,27 @@ export function createNodeApp(daemon: DaemonContext): H3 {
 
     const service = deployService(daemon);
     const stager = artifactStager(daemon);
-    const admission = await service.admit(meta);
-    const body = event.req.body;
-    if (body === null) {
-      throw new ScafoError("invalid-input", "Malformed request", {
-        detail: "the raw artifact body is required",
-      });
-    }
-    const artifact = await stager.stage(body, {
-      maxBytes: daemon.config.deploy?.artifactBytes ?? DEFAULT_ARTIFACT_BYTES,
-      signal: event.req.signal,
-    });
-    let handedOff = false;
+    const reservation = service.reserve(project);
+    let artifact: StagedArtifact | undefined;
     let status: DeployStatus;
     try {
-      status = admission.start(artifact);
-      handedOff = true;
-    } finally {
-      if (!handedOff) await artifact.dispose();
+      const admission = await service.admit(meta);
+      const body = event.req.body;
+      if (body === null) {
+        throw new ScafoError("invalid-input", "Malformed request", {
+          detail: "the raw artifact body is required",
+        });
+      }
+      artifact = await stager.stage(body, {
+        maxBytes: daemon.config.deploy?.artifactBytes ?? DEFAULT_ARTIFACT_BYTES,
+        signal: AbortSignal.any([event.req.signal, reservation.signal]),
+      });
+      status = admission.start(artifact, reservation);
+    } catch (error) {
+      if (artifact === undefined) reservation.cancel(error);
+      else await reservation.discard(artifact, error);
+      throw error;
     }
-    /* Answered before the artifact has been published: the rest of the work
-       outlives this request and is reported at the location below. */
     return new Response(JSON.stringify(status), {
       status: 202,
       headers: { "content-type": "application/json", "location": deployLocation(status.id) },

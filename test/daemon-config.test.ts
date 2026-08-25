@@ -15,6 +15,7 @@ import {
   DEFAULT_CONFIG_PATHS,
   DEFAULT_LISTEN,
   DEFAULT_REGION,
+  type DeployConfig,
   loadDaemonConfig,
   type LoadConfigOptions,
   parseHostPort,
@@ -22,6 +23,18 @@ import {
 } from "../src/daemon/config.ts";
 import { POINTER_READ_HOLD_MS } from "../src/core/registry/pointer-lock.ts";
 import { DEFAULT_ARCHIVE_ENTRIES, DEFAULT_ARTIFACT_BYTES } from "../src/core/types/deploy.ts";
+import {
+  DEFAULT_ACTIVE_TASKS,
+  DEFAULT_OUTPUT_BYTES,
+  DEFAULT_PROJECT_ACTIVE_TASKS,
+  DEFAULT_PROJECT_QUEUED_TASKS,
+  DEFAULT_PROJECT_STAGED_BYTES,
+  DEFAULT_QUEUED_TASKS,
+  DEFAULT_QUEUE_TIMEOUT_MS,
+  DEFAULT_RECEIVE_TIMEOUT_MS,
+  DEFAULT_STAGED_BYTES,
+  DEFAULT_TASK_TIMEOUT_MS,
+} from "../src/daemon/_deploy-scheduler.ts";
 import { rejectionOf, rejectsWith } from "./_helpers.ts";
 
 /** The four settings with no default; every case starts from these. */
@@ -33,6 +46,21 @@ const REQUIRED_ENV: Record<string, string> = {
 };
 
 const CONFIG_PATH = "/etc/scafo/scafo.config.jsonc";
+
+function schedulerValues(config: DeployConfig): number[] {
+  return [
+    config.activeTasks,
+    config.projectActiveTasks,
+    config.queuedTasks,
+    config.projectQueuedTasks,
+    config.stagedBytes,
+    config.projectStagedBytes,
+    config.receiveTimeoutMs,
+    config.queueTimeoutMs,
+    config.taskTimeoutMs,
+    config.outputBytes,
+  ];
+}
 
 describe("source precedence", () => {
   it("lets a flag override both the environment and the file", async () => {
@@ -671,6 +699,16 @@ describe("deploy resource limits", () => {
     expect(config.deploy).toEqual({
       artifactBytes: DEFAULT_ARTIFACT_BYTES,
       archiveEntries: DEFAULT_ARCHIVE_ENTRIES,
+      activeTasks: DEFAULT_ACTIVE_TASKS,
+      projectActiveTasks: DEFAULT_PROJECT_ACTIVE_TASKS,
+      queuedTasks: DEFAULT_QUEUED_TASKS,
+      projectQueuedTasks: DEFAULT_PROJECT_QUEUED_TASKS,
+      stagedBytes: DEFAULT_STAGED_BYTES,
+      projectStagedBytes: DEFAULT_PROJECT_STAGED_BYTES,
+      receiveTimeoutMs: DEFAULT_RECEIVE_TIMEOUT_MS,
+      queueTimeoutMs: DEFAULT_QUEUE_TIMEOUT_MS,
+      taskTimeoutMs: DEFAULT_TASK_TIMEOUT_MS,
+      outputBytes: DEFAULT_OUTPUT_BYTES,
     });
   });
 
@@ -693,7 +731,12 @@ describe("deploy resource limits", () => {
       flags: { "artifact-bytes": "50", "archive-entries": "60" },
     });
 
-    expect([fromFile.deploy, fromEnv.deploy, fromFlags.deploy]).toEqual([
+    expect(
+      [fromFile.deploy, fromEnv.deploy, fromFlags.deploy].map((value) => ({
+        artifactBytes: value?.artifactBytes,
+        archiveEntries: value?.archiveEntries,
+      })),
+    ).toEqual([
       { artifactBytes: 10, archiveEntries: 20 },
       { artifactBytes: 30, archiveEntries: 40 },
       { artifactBytes: 50, archiveEntries: 60 },
@@ -725,6 +768,91 @@ describe("deploy resource limits", () => {
       "invalid-input",
     );
     expect(nullError.detail).toContain("deploy.artifactBytes");
+  });
+
+  it("takes every scheduler limit from file, environment, and flags in precedence order", async () => {
+    const file = JSON.stringify({
+      deploy: {
+        artifactBytes: 5,
+        activeTasks: 3,
+        projectActiveTasks: 2,
+        queuedTasks: 6,
+        projectQueuedTasks: 3,
+        stagedBytes: 1000,
+        projectStagedBytes: 800,
+        receiveTimeoutMs: 10,
+        queueTimeoutMs: 20,
+        taskTimeoutMs: 30,
+        outputBytes: 40,
+      },
+    });
+    const env = {
+      ...REQUIRED_ENV,
+      SCAFO_ACTIVE_TASKS: "5",
+      SCAFO_PROJECT_ACTIVE_TASKS: "4",
+      SCAFO_QUEUED_TASKS: "8",
+      SCAFO_PROJECT_QUEUED_TASKS: "6",
+      SCAFO_STAGED_BYTES: "2000",
+      SCAFO_PROJECT_STAGED_BYTES: "1500",
+      SCAFO_RECEIVE_TIMEOUT_MS: "100",
+      SCAFO_QUEUE_TIMEOUT_MS: "200",
+      SCAFO_TASK_TIMEOUT_MS: "300",
+      SCAFO_OUTPUT_BYTES: "400",
+    };
+    const flags = {
+      "active-tasks": "7",
+      "project-active-tasks": "6",
+      "queued-tasks": "10",
+      "project-queued-tasks": "8",
+      "staged-bytes": "3000",
+      "project-staged-bytes": "2500",
+      "receive-timeout-ms": "1000",
+      "queue-timeout-ms": "2000",
+      "task-timeout-ms": "3000",
+      "output-bytes": "4000",
+    };
+    const fromFile = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, file),
+      env: REQUIRED_ENV,
+    });
+    const fromEnv = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, file),
+      env,
+    });
+    const fromFlags = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, file),
+      env,
+      flags,
+    });
+
+    expect(schedulerValues(fromFile.deploy!)).toEqual([3, 2, 6, 3, 1000, 800, 10, 20, 30, 40]);
+    expect(schedulerValues(fromEnv.deploy!)).toEqual([5, 4, 8, 6, 2000, 1500, 100, 200, 300, 400]);
+    expect(schedulerValues(fromFlags.deploy!)).toEqual([
+      7, 6, 10, 8, 3000, 2500, 1000, 2000, 3000, 4000,
+    ]);
+  });
+
+  it("accepts zero only for queue counts and enforces cross-field bounds", async () => {
+    const zero = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_QUEUED_TASKS: "0", SCAFO_PROJECT_QUEUED_TASKS: "0" },
+    });
+    expect(zero.deploy).toMatchObject({ queuedTasks: 0, projectQueuedTasks: 0 });
+
+    for (const env of [
+      { SCAFO_ACTIVE_TASKS: "1", SCAFO_PROJECT_ACTIVE_TASKS: "2" },
+      { SCAFO_QUEUED_TASKS: "1", SCAFO_PROJECT_QUEUED_TASKS: "2" },
+      { SCAFO_STAGED_BYTES: "1073741824", SCAFO_PROJECT_STAGED_BYTES: "1073741825" },
+      { SCAFO_ARTIFACT_BYTES: "100", SCAFO_STAGED_BYTES: "99" },
+      { SCAFO_ARTIFACT_BYTES: "100", SCAFO_PROJECT_STAGED_BYTES: "99" },
+    ]) {
+      await rejectsWith(
+        () => loadDaemonConfig({ env: { ...REQUIRED_ENV, ...env } }),
+        "invalid-input",
+      );
+    }
   });
 });
 

@@ -98,7 +98,12 @@ export function operatorIdentity(event: H3Event): TrustedOperator | undefined {
  * Install as the app's `onError` hook; it is also what logs the unexpected ones.
  */
 export function renderProblem(error: HTTPError): Response {
-  return problemResponse(toProblem(error));
+  return problemResponse(
+    toProblem(error),
+    isScafoError(error.cause) && error.cause.code === "deploy-overloaded"
+      ? { "retry-after": "1" }
+      : undefined,
+  );
 }
 
 /**

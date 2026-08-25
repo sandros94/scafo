@@ -356,10 +356,14 @@ function deployMeta(): DeployMeta {
 
 async function startDeploy(deploys: DeployService): Promise<DeployStatus> {
   const admission = await deploys.admit(deployMeta());
-  return admission.start({
-    open: () => new Blob([new Uint8Array([1])]).stream(),
-    dispose: () => Promise.resolve(),
-  });
+  return admission.start(
+    {
+      byteLength: 1,
+      open: () => new Blob([new Uint8Array([1])]).stream(),
+      dispose: () => Promise.resolve(),
+    },
+    deploys.reserve(PROJECT),
+  );
 }
 
 /**
