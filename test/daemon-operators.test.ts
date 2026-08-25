@@ -427,16 +427,52 @@ describe("POST /v1/operators", () => {
     const minted = await generateJWK("EdDSA", { kid: SECOND_ID });
     const body = JSON.stringify(scopedHalf(SECOND_ID, minted));
 
-    for (const _ of [0, 1]) {
-      const response = await app.request("/v1/operators", {
-        method: "POST",
-        headers: { ...(await asOperator()), "content-type": "application/json" },
-        body,
-      });
-      expect(response.status).toBe(200);
+    const first = await app.request("/v1/operators", {
+      method: "POST",
+      headers: { ...(await asOperator()), "content-type": "application/json" },
+      body,
+    });
+    expect(first.status).toBe(200);
+    const stored = await clock.ctx.store.getBytes(operatorKey(SECOND_ID));
+
+    const retried = await app.request("/v1/operators", {
+      method: "POST",
+      headers: { ...(await asOperator()), "content-type": "application/json" },
+      body,
+    });
+    expect(retried.status).toBe(200);
+
+    expect(await clock.ctx.store.getBytes(operatorKey(SECOND_ID))).toEqual(stored);
+    expect(await listOperators(clock.ctx)).toHaveLength(2);
+  });
+
+  it("refuses changed POST data for existing admin, peer and caller ids without rewriting them", async () => {
+    const peer = await generateJWK("EdDSA", { kid: SECOND_ID });
+    const caller = await generateJWK("EdDSA", { kid: THIRD_ID });
+    await trustAs(SECOND_ID, peer, "admin");
+    await trustAs(THIRD_ID, caller, "admin");
+
+    const originals = new Map<string, Uint8Array>();
+    for (const id of [OPERATOR_ID, SECOND_ID, THIRD_ID]) {
+      originals.set(id, (await clock.ctx.store.getBytes(operatorKey(id))) as Uint8Array);
     }
 
-    expect(await listOperators(clock.ctx)).toHaveLength(2);
+    for (const [id, headers] of [
+      [OPERATOR_ID, await asOperator()],
+      [SECOND_ID, await asOperator()],
+      [THIRD_ID, await asKey(THIRD_ID, caller)],
+    ] as const) {
+      const response = await app.request("/v1/operators", {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({
+          ...publicHalf(id, await generateJWK("EdDSA", { kid: id })),
+          role: "admin",
+        }),
+      });
+      expect(response.status).toBe(409);
+      expect(await clock.ctx.store.getBytes(operatorKey(id))).toEqual(originals.get(id));
+    }
   });
 
   it("relays the registry's refusal of an id a node already holds", async () => {

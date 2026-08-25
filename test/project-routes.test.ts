@@ -192,16 +192,8 @@ describe("GET /v1/projects", () => {
   });
 
   it("refuses a machine's own token, like every other operator surface", async () => {
-    const machine = await generateJWK("EdDSA", { kid: NODE_ID });
-    await registerNode(clock.ctx, {
-      v: 1,
-      id: NODE_ID,
-      publicKey: { kty: "OKP", crv: "Ed25519", x: machine.publicKey.x },
-      addresses: { internal: "10.0.0.4", apiPort: 7400 },
-    });
-
     const response = await app.request("/v1/projects", {
-      headers: await asKey(NODE_ID, machine),
+      headers: await asKey(NODE_ID, admin),
     });
 
     expect(response.status).toBe(403);

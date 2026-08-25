@@ -1,8 +1,9 @@
 import { ScafoError } from "../error.ts";
 import type { NodeRecord } from "../types/registry.ts";
-import { isCasConflict, namesFromKeys } from "./_shared.ts";
+import { deepEqual, isCasConflict, namesFromKeys } from "./_shared.ts";
 import { createJson, deleteKey, readJson, requireJson, updateJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
+import { claimIdentity, identityReservation } from "./identity.ts";
 import { type LeaseHandle, verifyLease } from "./lease.ts";
 import { nodeKey, nodesPrefix, operatorKey } from "./paths.ts";
 
@@ -27,11 +28,9 @@ export const NODE_LIVENESS_WINDOW_MS: number = 3 * NODE_HEARTBEAT_INTERVAL_MS;
  * the node back in service. A node that has started is a node that serves.
  *
  * ONE ID IS ONE IDENTITY, and this is the second of the two sides it is enforced
- * from ({@link trustOperator} is the other). A machine registered under an id
- * the fleet trusts as an OPERATOR key would take that key's identity — every
- * node of the installation would then verify an operator's tokens against a
- * machine's public key, which is the escalation the two namespaces exist to make
- * unreachable. Refused with `ScafoError("reference-held")`.
+ * from ({@link trustOperator} is the other). The durable reservation claims the
+ * id before this mutable record is written, so a machine cannot replace an
+ * operator or re-key a registered node. Refused with `ScafoError("reference-held")`.
  *
  * THE WORDING IS FREE HERE and the check costs one read on a path taken once per
  * boot. This is the BUCKET PLANE: whoever reaches it holds the bucket's own
@@ -42,6 +41,13 @@ export const NODE_LIVENESS_WINDOW_MS: number = 3 * NODE_HEARTBEAT_INTERVAL_MS;
 export async function registerNode(ctx: RegistryContext, record: NodeRecord): Promise<NodeRecord> {
   const key = nodeKey(record.id);
 
+  const existing = await readJson<NodeRecord>(ctx, key);
+  if (existing !== null && !deepEqual(existing.value.publicKey, record.publicKey)) {
+    throw new ScafoError("reference-held", "Id belongs to another identity of this installation", {
+      detail: `"${record.id}" is already reserved by another identity; choose another id`,
+    });
+  }
+
   if ((await readJson(ctx, operatorKey(record.id))) !== null) {
     throw new ScafoError("reference-held", "Id belongs to an operator key of this installation", {
       detail:
@@ -50,6 +56,8 @@ export async function registerNode(ctx: RegistryContext, record: NodeRecord): Pr
         `public key; give the node another id, or revoke the key first`,
     });
   }
+
+  await claimIdentity(ctx, record.id, identityReservation("node", record.publicKey));
 
   try {
     await createJson(ctx, key, record);

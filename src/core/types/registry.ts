@@ -86,6 +86,21 @@ export interface NodeWireguard {
  */
 export type OperatorRole = "admin" | "operator";
 
+/** The two namespaces a registry identity may permanently belong to. */
+export type IdentityKind = "node" | "operator";
+
+/**
+ * Durable first-claim record. Key: `_scafo/identities/<id>.json`.
+ *
+ * Deleting a node or an operator record deliberately leaves this object behind:
+ * an id is a public-key identity, not a reusable name.
+ */
+export interface IdentityReservation {
+  v: 1;
+  kind: IdentityKind;
+  publicKey: { kty: "OKP"; crv: "Ed25519"; x: string };
+}
+
 /**
  * One key a fleet trusts. Key: `_scafo/operators/<id>.json`.
  *

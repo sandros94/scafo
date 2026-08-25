@@ -70,9 +70,10 @@
 import { ScafoError } from "../error.ts";
 import type { NodeRecord, OperatorRecord, OperatorRole } from "../types/registry.ts";
 import { assertSlug } from "../utils/slug.ts";
-import { namesFromKeys } from "./_shared.ts";
-import { deleteKey, putJson, readJson } from "./cas.ts";
+import { deepEqual, isCasConflict, namesFromKeys } from "./_shared.ts";
+import { createJson, deleteKey, readJson } from "./cas.ts";
 import type { RegistryContext } from "./context.ts";
+import { claimIdentity, identityReservation } from "./identity.ts";
 import { nodeKey, operatorKey, operatorsPrefix } from "./paths.ts";
 
 export type { OperatorRecord, OperatorRole };
@@ -428,9 +429,9 @@ export async function bootstrapRole(
  * Records `key` as one the fleet trusts, which is what makes a node accept the
  * tokens it signs.
  *
- * IDEMPOTENT: trusting a key that is already trusted rewrites the same record,
- * so a rotation interrupted after this step and rerun costs nothing. That is
- * what lets the expand half of an expand-contract be retried blindly.
+ * IDEMPOTENT: an exact normalized retry leaves the already trusted record
+ * byte-for-byte intact, so a rotation interrupted after this step can rerun
+ * blindly. Changed input is refused rather than rewriting an identity.
  *
  * THE TIER IS THE CALLER'S TO DECIDE and is required here, because this surface
  * writes what it is told and never guesses: the two places a key is granted from
@@ -459,6 +460,7 @@ export async function trustOperator(
 ): Promise<TrustedOperator> {
   assertOperatorScope(key);
 
+  const record: OperatorRecord = operatorRecord(key);
   const machine = await readJson<NodeRecord>(ctx, nodeKey(key.id));
   if (machine !== null) {
     throw new ScafoError("reference-held", "Id belongs to a machine of this installation", {
@@ -468,20 +470,24 @@ export async function trustOperator(
     });
   }
 
-  const record: OperatorRecord = {
-    v: 1,
-    id: key.id,
-    publicKey: key.publicKey,
-    role: key.role,
-    ...(key.supersedes === undefined ? {} : { supersedes: key.supersedes }),
-    ...(key.projects === undefined ? {} : { projects: [...key.projects] }),
-  };
-  /* Unconditional: the id addresses the record, so there is no identity here for
-     a conditional write to protect, and re-trusting a trusted key must rewrite
-     the same bytes rather than conflict. That is what lets the expand half of a
-     rotation be retried blindly. */
-  await putJson(ctx, operatorKey(key.id), record);
-  return key;
+  const current = await readJson<OperatorRecord>(ctx, operatorKey(key.id));
+  if (current !== null) {
+    await claimIdentity(ctx, key.id, identityReservation("operator", current.value.publicKey));
+    if (deepEqual(readOperator(current.value), key)) return key;
+    throw identityHeld(key.id);
+  }
+
+  await claimIdentity(ctx, key.id, identityReservation("operator", record.publicKey));
+  try {
+    await createJson(ctx, operatorKey(key.id), record);
+    return key;
+  } catch (error) {
+    if (!isCasConflict(error)) throw error;
+  }
+
+  const raced = await readJson<OperatorRecord>(ctx, operatorKey(key.id));
+  if (raced !== null && deepEqual(readOperator(raced.value), key)) return key;
+  throw identityHeld(key.id);
 }
 
 /**
@@ -549,4 +555,21 @@ export async function revokeOperator(ctx: RegistryContext, id: string): Promise<
 
   await deleteKey(ctx, operatorKey(id));
   return removed;
+}
+
+function operatorRecord(key: TrustedOperator): OperatorRecord {
+  return {
+    v: 1,
+    id: key.id,
+    publicKey: key.publicKey,
+    role: key.role,
+    ...(key.supersedes === undefined ? {} : { supersedes: key.supersedes }),
+    ...(key.projects === undefined ? {} : { projects: [...key.projects] }),
+  };
+}
+
+function identityHeld(id: string): ScafoError {
+  return new ScafoError("reference-held", "Id belongs to another identity of this installation", {
+    detail: `"${id}" is already reserved by another identity; choose another id`,
+  });
 }

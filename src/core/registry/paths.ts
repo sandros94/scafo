@@ -104,6 +104,16 @@ export function operatorKey(id: string): string {
   return `${operatorsPrefix()}${id}.json`;
 }
 
+/** Durable identity reservations, one conditional-create object per shared id. */
+export function identitiesPrefix(): string {
+  return `${ROOT}/identities/`;
+}
+
+export function identityKey(id: string): string {
+  assertNodeId(id);
+  return `${identitiesPrefix()}${id}.json`;
+}
+
 /**
  * Prefix the placement decisions of one project live under. Listed once per
  * project rather than fetched per environment: an environment with no decision

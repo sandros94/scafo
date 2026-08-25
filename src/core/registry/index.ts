@@ -11,6 +11,7 @@ export * from "./retirement.ts";
 export * from "./placement.ts";
 export * from "./varsets.ts";
 export * from "./nodes.ts";
+export * from "./identity.ts";
 export * from "./operators.ts";
 export * from "./trust.ts";
 export * from "./domains.ts";
