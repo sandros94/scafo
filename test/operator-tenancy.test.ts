@@ -595,7 +595,7 @@ async function fileKey(
     v: 1,
     id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: keys.publicKey.x },
-    ...(operator ?? {}),
+    ...operator,
   });
 }
 
