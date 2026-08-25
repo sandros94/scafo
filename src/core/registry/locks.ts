@@ -133,8 +133,9 @@ export async function refreshLock(
     const { etag } = await putJson(ctx, space.keyOf(handle.name), lock, { ifMatch: handle.etag });
     return { name: handle.name, lock, etag };
   } catch (error) {
-    if (isCasConflict(error)) throw lost(handle, error);
-    throw error;
+    /* A refused conditional write and a store this holder cannot reach are
+       indistinguishable here: neither proves the refresh landed. */
+    throw lost(handle, error);
   }
 }
 
@@ -176,14 +177,12 @@ export async function releaseLock(
  *   than `staleMs` — bundling and uploading an artifact takes minutes — and an
  *   unrefreshed lock is taken over mid-section, which is the one outcome a lock
  *   exists to prevent.
- * - IT ABORTS LOUDLY when a refresh does not land, with
- *   `ScafoError("lease-lost")`, without waiting for `fn` to finish. A refused
+ * - IT ABORTS `fn` when a refresh does not land, with
+ *   `ScafoError("lease-lost")`, and waits for `fn` to clean up. A refused
  *   conditional write and an unreachable bucket are indistinguishable from here
  *   and the safe reading of both is the same: this caller is no longer alone
- *   inside the section, so whatever it goes on to do must not be reported as
- *   having happened under a lock. CAVEAT: `fn` itself is not interrupted —
- *   nothing here can unspawn a process or unkill a shell-out — so what the
- *   rejection means is "this stopped being serialized", not "this was undone".
+ *   inside the section. The callback owns cancellation of whatever it launched;
+ *   this boundary owns waiting for that cleanup before it reports the loss.
  *
  * A release the bucket refuses is left to go stale, which is the same path a
  * crashed holder takes: it costs the next caller `staleMs` and nothing else.
@@ -191,17 +190,19 @@ export async function releaseLock(
 export async function withLock<T>(
   ctx: RegistryContext,
   request: LockRequest,
-  fn: () => Promise<T>,
+  fn: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
   const { space } = request;
   let handle = await take(ctx, request);
 
   const ending = new AbortController();
+  const work = new AbortController();
   /* Rejects the moment a restamp does not land; nothing else ever settles it. */
   const lost = Promise.withResolvers<never>();
   /* Always observed below, but never before `fn` has had its turn to fail. */
   lost.promise.catch(() => {});
-  let lostError: unknown = null;
+  let lockLost = false;
+  let lostError: unknown;
 
   const keepAlive = (async (): Promise<void> => {
     for (;;) {
@@ -211,28 +212,40 @@ export async function withLock<T>(
       try {
         handle = await refreshLock(ctx, space, handle);
       } catch (error) {
+        lockLost = true;
         lostError = error;
+        work.abort(error);
         lost.reject(error);
         return;
       }
     }
   })();
 
+  let running: Promise<T> | undefined;
+  let outcome: { ok: true; value: T } | { ok: false; error: unknown };
   try {
-    const running = fn();
-    /* The race below may abandon it; its failure is handled either way. */
+    running = fn(work.signal);
     running.catch(() => {});
 
-    const value = await Promise.race([running, lost.promise]);
-    /* Lost between `fn` finishing and this line: the section still overlapped
-       whoever took the lock over, so it is reported rather than passed off. */
-    if (lostError !== null) throw lostError;
-    return value;
+    try {
+      outcome = { ok: true, value: await Promise.race([running, lost.promise]) };
+    } catch (error) {
+      outcome = { ok: false, error };
+    }
   } finally {
     ending.abort();
     await keepAlive;
-    if (lostError === null) await releaseLock(ctx, space, handle).catch(() => {});
+    /* A refresh may have failed while a completed callback was ending the
+       keepalive. Either way, stale work is joined before lease loss escapes. */
+    if (lockLost && running !== undefined) await running.catch(() => {});
+    if (!lockLost) await releaseLock(ctx, space, handle).catch(() => {});
   }
+
+  /* The refresh failure is the authority loss that decides this section. A
+     callback cleanup failure stays observed above but cannot replace it. */
+  if (lockLost) throw lostError;
+  if (!outcome.ok) throw outcome.error;
+  return outcome.value;
 }
 
 /**

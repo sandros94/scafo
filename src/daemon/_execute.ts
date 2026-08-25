@@ -92,6 +92,9 @@ export function createExecutor(deps: ExecutorDeps): Executor {
   const lockTimeoutMs = deps.pointerLock?.timeoutMs ?? ROLLOUT_LOCK_TIMEOUT_MS;
   const holder = lockHolder(daemon.nodeId);
   const observe = daemon.observability;
+  /* A runtime whose teardown failed stays exactly known but can never be
+     routed or gated. A later pass retries the stop through this set. */
+  const quarantined = new Set<string>();
 
   /**
    * Brings one build into service, as one uninterrupted sequence.
@@ -130,8 +133,8 @@ export function createExecutor(deps: ExecutorDeps): Executor {
    * servable has not started either, which measured 66% of a median live wake.
    * So the rollout registers and gates alongside the rest of the hold. It still
    * AWAITS that hold before it is done — the pass owes the process its read
-   * window either way — and a lock lost while it ran is still this rollout's
-   * failure.
+   * window either way. Losing the lock cancels that hold, stops and awaits the
+   * process, and only then reports the original lock loss.
    */
   async function runRollout(
     action: Extract<ReconcileAction, { type: "rollout" }>,
@@ -199,6 +202,27 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     const spawned = Promise.withResolvers<void>();
     spawned.promise.catch(() => {});
 
+    let cancelled = false;
+    let cleanup: Promise<void> | undefined;
+    const stopStarted = (): Promise<void> => {
+      cancelled = true;
+      if (cleanup !== undefined) return cleanup;
+      /* Unroute synchronously, before a stop that may take the whole grace. */
+      known.set(spec.id, started);
+      cleanup = (async (): Promise<void> => {
+        try {
+          await daemon.supervisor.stop(spec.id, { graceMs: driver.stopGraceMs });
+          quarantined.delete(spec.id);
+          known.delete(spec.id);
+        } catch (error) {
+          quarantined.add(spec.id);
+          known.set(spec.id, started);
+          pending.push(failureOf(error, { action: "stop", subject: spec.id }));
+        }
+      })();
+      return cleanup;
+    };
+
     const section = withLock(
       registry,
       {
@@ -207,17 +231,27 @@ export function createExecutor(deps: ExecutorDeps): Executor {
         holder,
         timeoutMs: lockTimeoutMs,
       },
-      async () => {
-        await driver.activateVersion(fleetPrefix(action.project, action.env), version);
-        await daemon.supervisor.start(spec);
-        /* THE MOMENT THE PROCESS EXISTS, and the one a held wake is waiting on:
-           everything past here — the bookkeeping, the gate, the rest of the hold
-           — runs beside it rather than in front of it. */
-        observe?.emit({ type: "rollout.spawned", processId: spec.id, build: leg.build.id });
-        spawned.resolve();
-        /* The process is running and has not read the pointer yet. Held for it,
-           because nothing here can observe the read itself. */
-        await delay(holdMs);
+      async (signal) => {
+        let processStarted = false;
+        try {
+          await driver.activateVersion(fleetPrefix(action.project, action.env), version);
+          signal.throwIfAborted();
+          await daemon.supervisor.start(spec);
+          processStarted = true;
+          signal.throwIfAborted();
+          /* THE MOMENT THE PROCESS EXISTS, and the one a held wake is waiting on:
+             everything past here — the bookkeeping, the gate, the rest of the hold
+             — runs beside it rather than in front of it. */
+          observe?.emit({ type: "rollout.spawned", processId: spec.id, build: leg.build.id });
+          spawned.resolve();
+          /* The process is running and has not read the pointer yet. Held for it,
+             because nothing here can observe the read itself. */
+          await delay(holdMs, signal);
+          signal.throwIfAborted();
+        } catch (error) {
+          if (processStarted) await stopStarted();
+          throw error;
+        }
       },
     );
     /* A section that failed BEFORE the spawn — a lock it could not take, an
@@ -238,7 +272,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       /* Both off the lock, and both the moment the spawn returned: this is what
          the wake surface holding a request for this process is waiting to see. */
       known.set(spec.id, started);
-      gating = gateStarted(started, pending);
+      gating = gateStarted(started, pending, () => cancelled);
       /* Awaited in every path below; this only keeps a gate that fails while the
          hold is still running from being read as unhandled. */
       gating.catch(() => {});
@@ -251,18 +285,13 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       await section;
     } catch (error) {
       if (gating !== undefined) {
-        /*
-         * The section stopped being serialized, so the process may have read a
-         * pointer another writer moved. It is left RUNNING — nothing here can
-         * unspawn one — and taken back out of this node's bookkeeping, which is
-         * where a lost lock left it before the gate moved off the hold: unrouted,
-         * unready, reported, and adopted by the next pass. The gate is awaited
-         * first, so it cannot register it back afterwards.
-         */
+        /* A process that may have read a superseded pointer cannot survive this
+           rollout. Stop is idempotent, so this also closes the narrow loss after
+           the callback's final signal check. */
+        await stopStarted();
         await gating.catch((failed: unknown) => {
           pending.push(failureOf(failed, { action: "await-ready", subject: spec.id }));
         });
-        known.delete(spec.id);
       }
       throw error;
     }
@@ -279,11 +308,17 @@ export function createExecutor(deps: ExecutorDeps): Executor {
    * still counting down. Registering the process happens at the spawn itself,
    * because the wake surface reads it from there.
    */
-  async function gateStarted(started: RuntimeProcess, pending: ReconcileFailure[]): Promise<void> {
+  async function gateStarted(
+    started: RuntimeProcess,
+    pending: ReconcileFailure[],
+    cancelled: () => boolean,
+  ): Promise<void> {
     if (await gate(started)) {
+      if (cancelled()) return;
       known.set(started.processId, { ...started, ready: true });
       return;
     }
+    if (cancelled()) return;
     pending.push(noted(started.processId, "the process did not pass its readiness gate"));
 
     /*
@@ -313,6 +348,18 @@ export function createExecutor(deps: ExecutorDeps): Executor {
   ): Promise<void> {
     const process = known.get(action.processId);
     if (process === undefined) return;
+
+    if (quarantined.has(action.processId)) {
+      try {
+        await daemon.supervisor.stop(action.processId, { graceMs: driver.stopGraceMs });
+        quarantined.delete(action.processId);
+        known.delete(action.processId);
+      } catch (error) {
+        known.set(action.processId, { ...process, ready: false });
+        pending.push(failureOf(error, { action: "stop", subject: action.processId }));
+      }
+      return;
+    }
 
     if (process.port === UNKNOWN_PORT) {
       /* Nothing to send a probe to. Reported rather than waited on: a gate that
@@ -390,6 +437,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
             }
             case "stop": {
               await daemon.supervisor.stop(action.processId, { graceMs: driver.stopGraceMs });
+              quarantined.delete(action.processId);
               known.delete(action.processId);
               break;
             }
@@ -405,13 +453,14 @@ export function createExecutor(deps: ExecutorDeps): Executor {
 
       for (const status of daemon.supervisor.list()) {
         if (status.state !== "running") {
+          quarantined.delete(status.id);
           known.delete(status.id);
           continue;
         }
 
         const bookkept = known.get(status.id);
         if (bookkept !== undefined) {
-          processes.push(bookkept);
+          processes.push(quarantined.has(status.id) ? { ...bookkept, ready: false } : bookkept);
           continue;
         }
 
@@ -445,8 +494,23 @@ export function createExecutor(deps: ExecutorDeps): Executor {
   };
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function delay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+
+    const aborted = (): void => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", aborted);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", aborted, { once: true });
+  });
 }
 
 /** Records a readiness failure against the process it concerns. */

@@ -635,7 +635,7 @@ describe("the hold a rollout keeps the deployment pointer for", () => {
     expect(world.reconciler.status().failures).toEqual([]);
   });
 
-  it("fails the rollout when the lock is lost mid-hold, and un-registers what it started", async () => {
+  it("stops and awaits a spawned runtime when the lock is lost mid-hold", async () => {
     vi.useFakeTimers();
     try {
       /* Long enough for the holder to restamp once while it holds it, which is
@@ -651,9 +651,28 @@ describe("the hold a rollout keeps the deployment pointer for", () => {
         });
         return true;
       };
+      const stopped = deferred<void>();
+      const stop = world.supervisor.stop.bind(world.supervisor);
+      world.supervisor.stop = async (id, opts): Promise<void> => {
+        await stop(id, opts);
+        await stopped.promise;
+      };
 
       const pass = world.reconciler.runOnce();
-      await vi.advanceTimersByTimeAsync(LOCK_REFRESH_MS * 2);
+      let finished = false;
+      void pass.then(() => {
+        finished = true;
+      });
+      await vi.advanceTimersByTimeAsync(LOCK_REFRESH_MS);
+
+      /* The stale runtime is already being stopped, and the pass cannot report
+         lease loss until the supervisor confirms that child is gone. */
+      expect(world.supervisor.stopped).toEqual([
+        { id: processIdOf(BUILD_ONE), graceMs: world.driver.stopGraceMs },
+      ]);
+      expect(finished).toBe(false);
+
+      stopped.resolve();
       await pass;
       const status = world.reconciler.status();
 
@@ -666,17 +685,65 @@ describe("the hold a rollout keeps the deployment pointer for", () => {
       });
       expect(status.failures[0].detail).toContain("no longer held");
 
-      /*
-       * And the process is where a lost lock has always left one: RUNNING —
-       * nothing here can unspawn one — and out of this node's bookkeeping, so it
-       * is neither routed nor handed a held request, because what it read out of
-       * the pointer is exactly what stopped being guaranteed. The next pass
-       * adopts it as a process with unknown listeners and reports it.
-       */
+      /* No running child remains for the next pass to adopt with unknown ports. */
       expect(world.supervisor.started.map((spec) => spec.id)).toEqual([processIdOf(BUILD_ONE)]);
-      expect(world.supervisor.stopped).toEqual([]);
-      expect(world.supervisor.status(processIdOf(BUILD_ONE))?.state).toBe("running");
+      expect(world.supervisor.status(processIdOf(BUILD_ONE))?.state).toBe("exited");
       expect(status.processes).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("quarantines a runtime whose lock-loss teardown fails and retries it next pass", async () => {
+    vi.useFakeTimers();
+    try {
+      const world = await seededWorld({ pointerLock: { holdMs: LOCK_REFRESH_MS * 2 } });
+      world.driver.gate = async (): Promise<boolean> => {
+        await putJson(world.registry, pointerLockKey(PROJECT, ENVIRONMENT), {
+          holder: ANOTHER_NODE,
+          acquiredAt: STARTED_AT,
+          refreshedAt: STARTED_AT,
+        });
+        return true;
+      };
+
+      const stop = world.supervisor.stop.bind(world.supervisor);
+      let stopAttempts = 0;
+      world.supervisor.stop = async (id, opts): Promise<void> => {
+        stopAttempts++;
+        if (stopAttempts === 1) {
+          world.supervisor.stopped.push({ id, graceMs: opts?.graceMs });
+          throw new Error("the runtime refused teardown");
+        }
+        await stop(id, opts);
+      };
+
+      const first = world.reconciler.runOnce();
+      await vi.advanceTimersByTimeAsync(LOCK_REFRESH_MS);
+      await first;
+
+      const failed = world.reconciler.status();
+      expect(failed.failures.map((failure) => failure.action)).toEqual(["stop", "rollout"]);
+      expect(world.supervisor.status(processIdOf(BUILD_ONE))?.state).toBe("running");
+      expect(failed.processes).toEqual([
+        {
+          processId: processIdOf(BUILD_ONE),
+          project: PROJECT,
+          env: ENVIRONMENT,
+          build: BUILD_ONE,
+          port: PORT_RANGE_START,
+          internalPort: PORT_RANGE_START + 1,
+          ready: false,
+        },
+      ]);
+      const probesAfterLoss = world.driver.probed.length;
+
+      await world.reconciler.runOnce();
+
+      expect(stopAttempts).toBe(2);
+      expect(world.driver.probed).toHaveLength(probesAfterLoss);
+      expect(world.supervisor.status(processIdOf(BUILD_ONE))?.state).toBe("exited");
+      expect(world.reconciler.status().processes).toEqual([]);
     } finally {
       vi.useRealTimers();
     }

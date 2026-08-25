@@ -7,6 +7,9 @@
  * runs under, so nothing has to be installed for them to work.
  */
 
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ProcessSpec, ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import { createChildSupervisor } from "../src/drivers/supervisor/child.ts";
@@ -143,6 +146,35 @@ describe("stopping a process", () => {
     },
   );
 
+  it("does not return until every descendant in the process group is gone", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scafo-supervisor-group-"));
+    const descendantFile = join(root, "descendant.pid");
+    let descendantPid: number | undefined;
+
+    try {
+      const source = [
+        'const { spawn } = require("node:child_process");',
+        'const { writeFileSync } = require("node:fs");',
+        'const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });',
+        "writeFileSync(process.env.SCAFO_DESCENDANT_PID, String(descendant.pid));",
+        "setInterval(() => {}, 1000);",
+      ].join("\n");
+      const spec = child("family", source);
+      spec.env = { SCAFO_DESCENDANT_PID: descendantFile };
+
+      const parent = await supervisor.start(spec);
+      descendantPid = await pidFrom(descendantFile);
+
+      await supervisor.stop("family", { graceMs: 100 });
+
+      expect(() => process.kill(parent.pid as number, 0)).toThrow(/kill ESRCH/);
+      expect(() => process.kill(descendantPid as number, 0)).toThrow(/kill ESRCH/);
+    } finally {
+      killIfAlive(descendantPid);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("is a no-op for an unknown id and for one that has already exited", async () => {
     await expect(supervisor.stop("never-started")).resolves.toBeUndefined();
 
@@ -188,6 +220,28 @@ describe("exit notifications", () => {
 /** A supervised process running `source` under the node binary of this test run. */
 function child(id: string, source: string): ProcessSpec {
   return { id, command: process.execPath, args: ["-e", source], env: {} };
+}
+
+async function pidFrom(path: string): Promise<number> {
+  await expect
+    .poll(async () => {
+      try {
+        return await readFile(path, "utf8");
+      } catch {
+        return "";
+      }
+    })
+    .not.toBe("");
+  return Number(await readFile(path, "utf8"));
+}
+
+function killIfAlive(pid: number | undefined): void {
+  if (pid === undefined) return;
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    /* Already gone, which is the expected path. */
+  }
 }
 
 /** Waits for `id` to reach its final status, or fails the test that is waiting. */

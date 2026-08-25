@@ -263,23 +263,26 @@ export function createDeployService(
           holder,
           timeoutMs: lockTimeoutMs,
         },
-        () =>
-          runner.run({
-            project: meta.project,
-            environment: meta.environment,
-            script: meta.script,
-            artifact,
-            target: {
-              endpoint: bucket.endpoint,
-              region: bucket.region,
-              bucket: bucket.bucket,
-              /* The same prefix a runtime process reads its fleet from, so what
+        (signal) =>
+          runner.run(
+            {
+              project: meta.project,
+              environment: meta.environment,
+              script: meta.script,
+              artifact,
+              target: {
+                endpoint: bucket.endpoint,
+                region: bucket.region,
+                bucket: bucket.bucket,
+                /* The same prefix a runtime process reads its fleet from, so what
                  is published is what gets served. */
-              prefix: joinPrefix(bucket.prefix, fleetPrefix(meta.project, meta.environment)),
-              accessKey: bucket.accessKey,
-              secretKey: bucket.secretKey,
+                prefix: joinPrefix(bucket.prefix, fleetPrefix(meta.project, meta.environment)),
+                accessKey: bucket.accessKey,
+                secretKey: bucket.secretKey,
+              },
             },
-          }),
+            { signal },
+          ),
       );
 
       const build = await createBuild(daemon.registry, meta.project, {

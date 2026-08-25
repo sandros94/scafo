@@ -233,23 +233,77 @@ describe("keeping a lock while the work runs", () => {
     await expect(held).resolves.toBe("done");
   });
 
-  it("aborts loudly the moment a restamp does not land, without waiting for the work", async () => {
+  it("aborts the work and awaits its cleanup while a successor holds the name", async () => {
     const { store, clock } = world();
-    /* Work that would never end on its own: the rejection has to come from the
-       lock being gone, not from the section finishing. */
-    const held = withLock(clock.ctx, request(), () => deferred<string>().promise);
+    const cleanup = deferred<void>();
+    let signalSeen: AbortSignal | undefined;
+    let cleaned = false;
+
+    const held = withLock(clock.ctx, request(), async (signal: AbortSignal) => {
+      signalSeen = signal;
+      await new Promise<void>((resolve) =>
+        signal.addEventListener("abort", () => resolve(), { once: true }),
+      );
+      await cleanup.promise;
+      cleaned = true;
+      return "stale";
+    });
     await expect.poll(() => record(store, "one"), { interval: 2 }).not.toBeNull();
 
     /* Another node, whose clock is well past this holder's last restamp, takes
-       the lock over. */
+       the lock over and completes its own section. */
     const ahead = ctxWith(store, CLOCK_START_MS + SPACE.staleMs * 5);
-    const stolen = await acquireLock(ahead.ctx, SPACE, "one", FOREIGN);
+    const successor = withLock(
+      ahead.ctx,
+      request({ timeoutMs: SPACE.pollMs * 20, holder: FOREIGN }),
+      async () => "winner",
+    );
+
+    await expect(successor).resolves.toBe("winner");
+    await expect.poll(() => signalSeen?.aborted, { interval: 2 }).toBe(true);
+
+    /* Losing the lock is not allowed to abandon stale work. The callback owns
+       its cleanup, and the lock boundary does not return until that cleanup has
+       completed. */
+    let returned = false;
+    held.catch(() => {
+      returned = true;
+    });
+    await settle();
+    expect(returned).toBe(false);
+    expect(cleaned).toBe(false);
+
+    cleanup.resolve();
 
     const error = await rejectsWith(() => held, "lease-lost");
     expect(error.detail).toContain(HOLDER);
-    /* And it removed nothing on its way out: what is at that name now belongs to
-       whoever holds it. */
-    expect(await record(store, "one")).toEqual(stolen.lock);
+    expect(signalSeen?.reason).toBe(error);
+    expect(cleaned).toBe(true);
+    expect(returned).toBe(true);
+    /* The successor gave its own handle back; the stale holder removed nothing
+       on its way out. */
+    await expect(record(store, "one")).resolves.toBeNull();
+  });
+
+  it("types an unreachable refresh as lease loss and preserves its cause", async () => {
+    const { store, clock } = world();
+    const put = store.put.bind(store);
+    const storeFailure = new Error("the bucket is unreachable");
+    store.put = (key, body, cas) =>
+      cas?.ifMatch === undefined ? put(key, body, cas) : Promise.reject(storeFailure);
+
+    let signalSeen: AbortSignal | undefined;
+    const held = withLock(clock.ctx, request(), async (signal) => {
+      signalSeen = signal;
+      await new Promise<void>((resolve) =>
+        signal.addEventListener("abort", () => resolve(), { once: true }),
+      );
+    });
+
+    const error = await rejectsWith(() => held, "lease-lost");
+
+    expect(error.cause).toBe(storeFailure);
+    expect(signalSeen?.reason).toBe(error);
   });
 });
 
@@ -319,7 +373,7 @@ function world(): { store: MemoryCasStore; clock: ManualClock } {
 }
 
 /** One request for the test lock, with whatever a case wants to change about it. */
-function request(opts?: { name?: string; timeoutMs?: number }): {
+function request(opts?: { name?: string; holder?: string; timeoutMs?: number }): {
   space: LockSpace;
   name: string;
   holder: string;
@@ -328,7 +382,7 @@ function request(opts?: { name?: string; timeoutMs?: number }): {
   return {
     space: SPACE,
     name: opts?.name ?? "one",
-    holder: HOLDER,
+    holder: opts?.holder ?? HOLDER,
     timeoutMs: opts?.timeoutMs ?? 0,
   };
 }

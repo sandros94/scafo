@@ -40,6 +40,12 @@ export interface DeployRunResult {
   celldVersionId: string;
 }
 
+/** Execution controls for one publish. */
+export interface DeployRunOptions {
+  /** Cancels the publish and resolves only once its child process is gone. */
+  signal: AbortSignal;
+}
+
 /** Publishes an uploaded artifact into a fleet as a servable version. */
 export interface DeployRunner {
   /**
@@ -47,5 +53,5 @@ export interface DeployRunner {
    * artifact is not a readable archive, or when publishing itself failed; the
    * caller reports either as a failed deploy and keeps serving what it had.
    */
-  run(input: DeployRunInput): Promise<DeployRunResult>;
+  run(input: DeployRunInput, opts: DeployRunOptions): Promise<DeployRunResult>;
 }
