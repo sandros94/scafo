@@ -119,5 +119,8 @@ EXPOSE 7400
 # Docker's own default is 10s, which is not enough. See examples/.
 STOPSIGNAL SIGTERM
 
+# Keep this direct Node entrypoint as container process 1. Container lifecycle
+# containment relies on a private PID namespace; do not insert a persistent
+# wrapper or run this image with the host PID namespace.
 ENTRYPOINT ["node", "/app/dist/cli/index.mjs"]
 CMD ["sail"]

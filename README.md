@@ -108,7 +108,11 @@ those names for you — send the `Host` header, or add them to `/etc/hosts`.
   prerequisites; the binary carries none of them.
 - **The node image:** `docker build -t scafo .` — the daemon, celld and esbuild in
   one image. `ENTRYPOINT` is the CLI, so `docker run scafo sail --listen 0.0.0.0:7400`
-  is the whole invocation. **Give it a stop grace of at least 35 seconds**
+  is the whole invocation. Keep that direct Node entrypoint as container process 1
+  in a private PID namespace: do not use host PID mode or a persistent wrapper,
+  because container lifecycle containment removes remaining descendants, including
+  in-flight builders, after an abrupt daemon death. **Give it a stop grace of at
+  least 35 seconds**
   (`stop_grace_period: 35s`, `terminationGracePeriodSeconds: 35`): a node drains
   its in-flight requests on the way out, and a shorter grace kills it mid-drain.
 - **One host:** [`examples/compose.yaml`](./examples/compose.yaml), the stack the

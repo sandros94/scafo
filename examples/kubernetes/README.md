@@ -214,6 +214,13 @@ default of 30 cuts that off in the middle: requests are dropped mid-flight, and
 the fleet has to time the node out over the liveness window instead of being told
 it left. `terminationGracePeriodSeconds: 35` is the minimum, not a suggestion.
 
+**The node stays process 1 in a private PID namespace.** `hostPID: false` and
+`shareProcessNamespace: false` are deliberate: the container lifecycle then
+contains the node and every remaining runtime or builder process when a pod is
+terminated. Do not replace the image entrypoint with a persistent wrapper. The
+Traefik sidecar shares the pod network namespace, not this process-lifecycle
+boundary.
+
 **One bucket and prefix is one fleet.** Every node naming the same
 `SCAFO_S3_BUCKET` and `SCAFO_S3_PREFIX` is part of the same installation: they
 share every record, compete for one coordinator lease, and are placed against

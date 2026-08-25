@@ -154,6 +154,11 @@ spec:
       labels:
         app.kubernetes.io/name: scafo
     spec:
+      # The node image's entrypoint remains process 1 in its own PID namespace.
+      # Do not use host PID or a shared pod process namespace: container lifecycle
+      # containment is what removes runtime descendants and builders after node death.
+      hostPID: false
+      shareProcessNamespace: false
       # THIRTY-FIVE SECONDS, AND NOT KUBERNETES' DEFAULT THIRTY.
       #
       # On SIGTERM a node writes that it is draining so the coordinator stops

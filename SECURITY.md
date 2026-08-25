@@ -55,8 +55,19 @@ buckets and host or VM security boundaries.
   [security guidance](https://github.com/denoland/celld/blob/main/docs/security.md).
 - Deploy intake, archive expansion, build, log, and concurrency resource
   safeguards are incomplete. Apply external host or container limits.
-- An abrupt bare-host daemon death can leave descendants until external process
-  supervision cleans them up.
+- Manual `scafo sail` is development-only for abrupt-death containment. Normal
+  shutdown tears down supervised runtime process groups; it does not currently
+  cancel an in-flight Celld deploy builder. An uncatchable bare-host daemon death
+  can orphan Celld or esbuild descendants that hold fleet credentials. Production
+  bare hosts must use the installer's systemd unit or an equivalent cgroup-owning
+  supervisor: it must TERM the daemon first, hard-kill remaining members of its
+  one non-delegated cgroup, including builders, on daemon exit or timeout, and
+  allow the node's 35-second drain window.
+- The image relies on its direct Node entrypoint as container process 1 in a
+  private PID namespace; do not use a host PID namespace or a persistent wrapper.
+  The Kubernetes manifest makes the same boundary explicit with `hostPID: false`
+  and `shareProcessNamespace: false`. Physical-host failure remains outside
+  process-code guarantees.
 - Application authentication, public TLS, and ingress policy remain operator
   responsibilities. Celld likewise requires an operator to protect its public
   application surface and terminate TLS where needed; see its

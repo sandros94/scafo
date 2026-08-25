@@ -775,10 +775,15 @@ RestartSec=5s
 # beside the daemon instead of letting the daemon stop them in its own order —
 # mark draining, release the lease, stop reconciling, close the listener, and
 # only then drain each runtime. "mixed" signals the daemon alone, exactly as a
-# container runtime signals PID 1.
+# container runtime signals PID 1. Once the daemon exits or this timeout elapses,
+# systemd hard-kills every remaining process in this unit's cgroup.
 KillMode=mixed
 KillSignal=SIGTERM
+SendSIGKILL=yes
 TimeoutStopSec=${STOP_TIMEOUT}s
+# Runtime processes must remain in this unit's cgroup for the hard-kill above to
+# contain an abrupt daemon death.
+Delegate=no
 
 StateDirectory=scafo
 StateDirectoryMode=${STATE_DIR_MODE}
