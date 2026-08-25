@@ -18,6 +18,7 @@ import { setNodeSelector } from "../core/registry/placement.ts";
 import { retireEnvironment, unretireEnvironment } from "../core/registry/retirement.ts";
 import type { CapacityPlan } from "../core/capacity/compute.ts";
 import type { IngressDriver } from "../core/types/ingress.ts";
+import { DEFAULT_ARTIFACT_BYTES, type ArtifactStager } from "../core/types/deploy.ts";
 import type {
   CoordinatorLease,
   EnvironmentRecord,
@@ -26,20 +27,18 @@ import type {
 } from "../core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../core/types/supervisor.ts";
 import { isHost } from "../core/utils/host.ts";
-import { formatHostLabel, parseHostLabel } from "../core/utils/slug.ts";
+import { assertSlug, formatHostLabel, parseHostLabel } from "../core/utils/slug.ts";
 import type { AssignmentFailure } from "./_assign.ts";
 import { deleteEnvironmentRequest } from "./_environments.ts";
 import { isPullingIngress } from "./_ingress.ts";
 import {
   type DeployVerifiers,
   readAliasRequest,
-  readDeployRequest,
+  readDeployMetadata,
   readParkRequest,
   readSelectorRequest,
   readSplitRequest,
-  tryNodeToken,
   verifyCaller,
-  verifyWorkload,
 } from "./_intake.ts";
 import type { IngressCounters } from "./access-counters.ts";
 import type { DaemonConfig } from "./config.ts";
@@ -126,6 +125,8 @@ export interface DaemonContext {
   ingress?: IngressDriver;
   /** Accepts uploaded artifacts; without it this node refuses deploys. */
   deploys?: DeployService;
+  /** Stages request bodies outside memory; without it this node refuses deploys. */
+  artifactStager?: ArtifactStager;
   /**
    * Guards and keeps the `/v1/storage` surface, where a colocated process
    * persists its TLS material through this node. Without it that surface is not
@@ -491,23 +492,36 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     { middleware: [authenticated] },
   );
 
-  app.post("/v1/deploys", async (event): Promise<Response> => {
-    /* An operator's token needs nothing but the header, so it is checked before
-       the artifact is buffered. A workload's is checked against the project the
-       upload names, which cannot be known until the body has been read. */
-    const operator = await tryNodeToken(verifiers, event);
-    const request = await readDeployRequest(event);
-    if (operator === null) {
-      const workload = await verifyWorkload(verifiers, event, request.meta.project);
-      request.meta.oidc = workload.identity.actor;
-    } else if (operator.kind === "node") {
-      /* The project is in the BODY here, so the scope cannot be checked where
-         `verifyCaller` checks it for every other route — but it is still
-         checked before a single byte of the artifact is published. */
-      assertProjectScope(operator.identity, request.meta.project);
-    }
+  app.post("/v1/projects/:project/deploys", async (event): Promise<Response> => {
+    const project = event.context.params?.project ?? "";
+    assertSlug(project);
+    /* Project is in the path: both token forms and operator scope are decided
+       before metadata or a single body chunk is read. */
+    const caller = await verifyCaller(verifiers, event, project);
+    const meta = readDeployMetadata(event, project);
+    if (caller.kind === "workload") meta.oidc = caller.identity.actor;
 
-    const status = await deployService(daemon).start(request.meta, request.artifact);
+    const service = deployService(daemon);
+    const stager = artifactStager(daemon);
+    const admission = await service.admit(meta);
+    const body = event.req.body;
+    if (body === null) {
+      throw new ScafoError("invalid-input", "Malformed request", {
+        detail: "the raw artifact body is required",
+      });
+    }
+    const artifact = await stager.stage(body, {
+      maxBytes: daemon.config.deploy?.artifactBytes ?? DEFAULT_ARTIFACT_BYTES,
+      signal: event.req.signal,
+    });
+    let handedOff = false;
+    let status: DeployStatus;
+    try {
+      status = admission.start(artifact);
+      handedOff = true;
+    } finally {
+      if (!handedOff) await artifact.dispose();
+    }
     /* Answered before the artifact has been published: the rest of the work
        outlives this request and is reported at the location below. */
     return new Response(JSON.stringify(status), {
@@ -751,4 +765,11 @@ function deployService(daemon: DaemonContext): DeployService {
     });
   }
   return deploys;
+}
+
+function artifactStager(daemon: DaemonContext): ArtifactStager {
+  if (daemon.artifactStager !== undefined) return daemon.artifactStager;
+  throw new ScafoError("capability-missing", "Artifact staging is unavailable", {
+    detail: "no file-backed artifact stager is configured on this node",
+  });
 }

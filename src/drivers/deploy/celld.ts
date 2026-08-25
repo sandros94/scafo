@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseJSONC } from "confbox";
 import { ScafoError } from "../../core/error.ts";
+import { assertPositiveSafeInteger } from "../../core/utils/number.ts";
 import type {
   DeployRunInput,
   DeployRunner,
@@ -51,10 +52,20 @@ export interface CelldDeployRunnerOptions {
   baseEnv?: Record<string, string>;
   /** Time a publish is given. Defaults to {@link DEFAULT_DEPLOY_TIMEOUT_MS}. */
   timeoutMs?: number;
+  /** Maximum expanded archive bytes. */
+  artifactBytes?: number;
+  /** Maximum archive entries. */
+  archiveEntries?: number;
 }
 
 /** Builds the runner that publishes artifacts through the celld CLI. */
 export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): DeployRunner {
+  if (opts?.artifactBytes !== undefined) {
+    assertPositiveSafeInteger(opts.artifactBytes, "artifactBytes");
+  }
+  if (opts?.archiveEntries !== undefined) {
+    assertPositiveSafeInteger(opts.archiveEntries, "archiveEntries");
+  }
   assertProcessGroups();
   const binPath = opts?.binPath ?? DEFAULT_CELLD_BIN;
   const staging = opts?.stagingDir ?? tmpdir();
@@ -70,7 +81,11 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
       const dir = await mkdtemp(join(staging, "scafo-deploy-"));
 
       try {
-        await unpackArchive(input.artifact, dir);
+        await unpackArchive(input.artifact, dir, {
+          ...(opts?.artifactBytes === undefined ? {} : { maxBytes: opts.artifactBytes }),
+          ...(opts?.archiveEntries === undefined ? {} : { maxEntries: opts.archiveEntries }),
+          signal: runOpts.signal,
+        });
         const config = await prepareConfig(dir, input.script);
 
         const output = await run(

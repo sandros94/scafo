@@ -20,6 +20,7 @@ import {
   runtimeDialHost,
 } from "../src/daemon/config.ts";
 import { POINTER_READ_HOLD_MS } from "../src/core/registry/pointer-lock.ts";
+import { DEFAULT_ARCHIVE_ENTRIES, DEFAULT_ARTIFACT_BYTES } from "../src/core/types/deploy.ts";
 import { rejectionOf, rejectsWith } from "./_helpers.ts";
 
 /** The four settings with no default; every case starts from these. */
@@ -659,6 +660,70 @@ describe("how long a rollout holds the deployment pointer", () => {
       expect(error.detail, bad).toContain("runtime.pointerHoldMs");
       expect(error.detail, bad).toContain("whole number of milliseconds");
     }
+  });
+});
+
+describe("deploy resource limits", () => {
+  it("ships finite safeguards for artifact bytes and archive entries", async () => {
+    const config = await loadDaemonConfig({ env: REQUIRED_ENV });
+
+    expect(config.deploy).toEqual({
+      artifactBytes: DEFAULT_ARTIFACT_BYTES,
+      archiveEntries: DEFAULT_ARCHIVE_ENTRIES,
+    });
+  });
+
+  it("takes both limits from flags, environment, or file in precedence order", async () => {
+    const file = JSON.stringify({ deploy: { artifactBytes: 10, archiveEntries: 20 } });
+    const fromFile = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, file),
+      env: REQUIRED_ENV,
+    });
+    const fromEnv = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, file),
+      env: { ...REQUIRED_ENV, SCAFO_ARTIFACT_BYTES: "30", SCAFO_ARCHIVE_ENTRIES: "40" },
+    });
+    const fromFlags = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, file),
+      env: { ...REQUIRED_ENV, SCAFO_ARTIFACT_BYTES: "30", SCAFO_ARCHIVE_ENTRIES: "40" },
+      flags: { "artifact-bytes": "50", "archive-entries": "60" },
+    });
+
+    expect([fromFile.deploy, fromEnv.deploy, fromFlags.deploy]).toEqual([
+      { artifactBytes: 10, archiveEntries: 20 },
+      { artifactBytes: 30, archiveEntries: 40 },
+      { artifactBytes: 50, archiveEntries: 60 },
+    ]);
+  });
+
+  it("refuses zero, negative, fractional, null, infinite, and unsafe limits", async () => {
+    for (const [field, env, bad] of [
+      ["artifactBytes", "SCAFO_ARTIFACT_BYTES", "0"],
+      ["artifactBytes", "SCAFO_ARTIFACT_BYTES", "-1"],
+      ["archiveEntries", "SCAFO_ARCHIVE_ENTRIES", "1.5"],
+      ["archiveEntries", "SCAFO_ARCHIVE_ENTRIES", "Infinity"],
+      ["artifactBytes", "SCAFO_ARTIFACT_BYTES", "9007199254740992"],
+    ] as const) {
+      const error = await rejectsWith(
+        () => loadDaemonConfig({ env: { ...REQUIRED_ENV, [env]: bad } }),
+        "invalid-input",
+      );
+      expect(error.detail).toContain(`deploy.${field}`);
+    }
+
+    const nullError = await rejectsWith(
+      () =>
+        loadDaemonConfig({
+          configPath: CONFIG_PATH,
+          readFile: fileAt(CONFIG_PATH, '{"deploy":{"artifactBytes":null}}'),
+          env: REQUIRED_ENV,
+        }),
+      "invalid-input",
+    );
+    expect(nullError.detail).toContain("deploy.artifactBytes");
   });
 });
 

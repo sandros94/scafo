@@ -27,10 +27,12 @@ import { createReconciler, runtimeBaseEnv } from "../../daemon/reconcile.ts";
 import { startDaemon } from "../../daemon/serve.ts";
 import { createStorageService } from "../../daemon/storage.ts";
 import { probeCapacity } from "../../core/capacity/reader.ts";
+import { DEFAULT_ARCHIVE_ENTRIES, DEFAULT_ARTIFACT_BYTES } from "../../core/types/deploy.ts";
 import { initRegistry, readMeta } from "../../core/registry/meta.ts";
 import { wakeActivity } from "../../core/registry/wake.ts";
 import { createDeployService } from "../../daemon/deploys.ts";
 import { createCelldDeployRunner } from "../../drivers/deploy/celld.ts";
+import { createFileArtifactStager } from "../../drivers/artifact/file.ts";
 import { createNodeHostReader } from "../../drivers/host/node.ts";
 import { type AccessLogTailer, createAccessLogTailer } from "../../drivers/observe/access-log.ts";
 import { createCaddyDriver } from "../../drivers/ingress/caddy.ts";
@@ -110,6 +112,14 @@ const sailArgs: ArgsDef = {
     description:
       "Milliseconds a rollout holds the deployment pointer past the spawn; " +
       "size it to the store's worst request stall (0 = release at the spawn)",
+  },
+  "artifact-bytes": {
+    type: "string",
+    description: "Maximum compressed and expanded bytes per deploy artifact",
+  },
+  "archive-entries": {
+    type: "string",
+    description: "Maximum entries per deploy archive",
   },
   "probe-path": { type: "string", description: "Path the application readiness probe requests" },
   "observability": {
@@ -303,8 +313,14 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   const baseEnv = runtimeBaseEnv(process.env);
   daemon.deploys = createDeployService(
     daemon,
-    createCelldDeployRunner({ binPath: config.runtime.binPath, baseEnv }),
+    createCelldDeployRunner({
+      binPath: config.runtime.binPath,
+      baseEnv,
+      artifactBytes: config.deploy?.artifactBytes ?? DEFAULT_ARTIFACT_BYTES,
+      archiveEntries: config.deploy?.archiveEntries ?? DEFAULT_ARCHIVE_ENTRIES,
+    }),
   );
+  daemon.artifactStager = createFileArtifactStager();
 
   /* The driver writes deployment pointers through the same store the registry
      uses, so a configured key prefix applies to fleets exactly as it does to

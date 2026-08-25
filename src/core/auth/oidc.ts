@@ -3,6 +3,7 @@
 import type { JWSAlgorithm } from "unjwt/jws";
 import { verify as verifyJws } from "unjwt/jws";
 import { ScafoError } from "../error.ts";
+import { assertPositiveSafeInteger } from "../utils/number.ts";
 import type { OidcActor, TrustIssuer, TrustPolicy } from "../types/registry.ts";
 import { readJson } from "../registry/cas.ts";
 import type { RegistryContext } from "../registry/context.ts";
@@ -154,10 +155,6 @@ function cacheDuration(value: number, name: string): number {
 }
 
 function cacheEntries(value: number): number {
-  if (!Number.isSafeInteger(value) || value < 1) {
-    throw new ScafoError("invalid-input", "Invalid jwksCacheEntries", {
-      detail: "jwksCacheEntries must be a positive safe integer",
-    });
-  }
+  assertPositiveSafeInteger(value, "jwksCacheEntries");
   return value;
 }

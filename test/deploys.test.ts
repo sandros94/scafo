@@ -4,23 +4,28 @@
  *
  * Nothing is published for real — the runner is a stand-in and the reconcile
  * loop is a fixed report — but the artifact is a genuine `.tar.zst`, packed by
- * the same code the client uses, so the whole multipart path is exercised.
+ * the same code the client uses, so raw streaming and file staging are exercised.
  */
 
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { H3 } from "h3";
 import type { JWK_RSA_Private, JWK_RSA_Public, JWKSet } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { sign as signJws } from "unjwt/jws";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { type DaemonContext, type AliasResult, createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { createDeployService, type DeployStatus } from "../src/daemon/deploys.ts";
+import {
+  DEPLOY_METADATA_HEADER,
+  DEPLOY_METADATA_MAX_BYTES,
+  encodeDeployMetadata,
+} from "../src/daemon/_intake.ts";
 import type { Reconciler } from "../src/daemon/reconcile.ts";
 import { OIDC_AUDIENCE, signNodeToken } from "../src/core/auth/index.ts";
-import type { ProblemDetails } from "../src/core/error.ts";
+import { ScafoError, type ProblemDetails } from "../src/core/error.ts";
 import {
   blockProject,
   createEnvironment,
@@ -34,12 +39,18 @@ import {
   setTrustPolicy,
   unblockProject,
 } from "../src/core/registry/index.ts";
-import type { DeployRunInput, DeployRunResult, DeployRunner } from "../src/core/types/deploy.ts";
+import type {
+  DeployRunInput,
+  DeployRunResult,
+  DeployRunner,
+  StagedArtifact,
+} from "../src/core/types/deploy.ts";
 import type { NodeRecord } from "../src/core/types/registry.ts";
 import type { CasStore } from "../src/core/types/store.ts";
 import type { RuntimeProcess } from "../src/core/types/runtime.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { packDirectory } from "../src/drivers/archive/tar-zst.ts";
+import { createFileArtifactStager } from "../src/drivers/artifact/file.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock } from "./_helpers.ts";
 
@@ -69,12 +80,14 @@ const AUTH_INVALID_PROBLEM = {
 
 let issuerKeys: { privateKey: JWK_RSA_Private<"RS256">; publicKey: JWK_RSA_Public<"RS256"> };
 let operatorKeys: Awaited<ReturnType<typeof generateJWK<"EdDSA">>>;
-let artifact: Uint8Array;
+let artifact: StagedArtifact;
+let artifactBytes: Uint8Array;
 
 let clock: ManualClock;
 let daemon: DaemonContext;
 let app: H3;
 let runs: DeployRunInput[];
+let receivedArtifacts: Uint8Array[];
 let publish: () => Promise<DeployRunResult>;
 let running: RuntimeProcess[];
 let issuerCalls: string[];
@@ -87,11 +100,13 @@ beforeAll(async () => {
   await writeFile(join(dir, "wrangler.jsonc"), '{ "name": "shop" /* the app */ }');
   await writeFile(join(dir, "index.mjs"), "export default { fetch: () => new Response('hi') };");
   artifact = await packDirectory(dir);
+  artifactBytes = new Uint8Array(await new Response(artifact.open()).arrayBuffer());
 });
 
 beforeEach(async () => {
   clock = ctxWith(new MemoryCasStore());
   runs = [];
+  receivedArtifacts = [];
   issuerCalls = [];
   running = [];
   publish = () => Promise.resolve({ celldVersionId: VERSION_ID });
@@ -124,6 +139,7 @@ beforeEach(async () => {
     routedTimeoutMs: 300,
     pollMs: 5,
   });
+  daemon.artifactStager = createFileArtifactStager();
   app = createNodeApp(daemon);
 
   vi.stubGlobal("fetch", issuerFetch);
@@ -133,7 +149,55 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+afterAll(async () => {
+  await artifact.dispose();
+});
+
 describe("who may deploy", () => {
+  it("never reads an invalid node token's artifact body", async () => {
+    const stranger = await generateJWK("EdDSA", { kid: OPERATOR });
+    let reads = 0;
+    const response = await streamedUpload(
+      await signNodeToken(stranger.privateKey, OPERATOR),
+      PROJECT,
+      meta(),
+      unreadBody(() => reads++),
+    );
+
+    expect(response.status).toBe(401);
+    expect(reads).toBe(0);
+  });
+
+  it("never reads an invalid workload token's artifact body", async () => {
+    const valid = await workloadToken();
+    const [header, payload, signature] = valid.split(".") as [string, string, string];
+    const forged = `${header}.${payload}.${signature.startsWith("A") ? "B" : "A"}${signature.slice(1)}`;
+    let reads = 0;
+    const response = await streamedUpload(
+      forged,
+      PROJECT,
+      meta(),
+      unreadBody(() => reads++),
+    );
+
+    expect(response.status).toBe(401);
+    expect(reads).toBe(0);
+  });
+
+  it("never reads a trust-mismatched workload's artifact body", async () => {
+    let reads = 0;
+    const response = await streamedUpload(
+      await workloadToken({ sub: "repo:evil/app" }),
+      PROJECT,
+      { runtimeConfigurable: false },
+      unreadBody(() => reads++),
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:trust-mismatch" });
+    expect(reads).toBe(0);
+  });
+
   it("accepts an operator's token, answering at once with where to watch", async () => {
     const response = await upload(await operatorToken());
     const status = (await response.json()) as DeployStatus;
@@ -307,8 +371,90 @@ describe("a project an admin has blocked", () => {
 });
 
 describe("what an upload must carry", () => {
-  it("refuses a body that is not a form at all", async () => {
+  it("does not retain the legacy body-selected deploy route", async () => {
     const response = await app.request("/v1/deploys", {
+      method: "POST",
+      headers: { authorization: `Bearer ${await operatorToken()}` },
+      body: artifact.open(),
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+
+    expect(response.status).toBe(404);
+  });
+
+  it("refuses a chunked body over the receive cap without a status, file, or runner call", async () => {
+    const staging = await mkdtemp(join(tmpdir(), "scafo-receive-route-"));
+    daemon.artifactStager = createFileArtifactStager({ stagingDir: staging });
+    daemon.config.deploy = {
+      artifactBytes: artifactBytes.byteLength - 1,
+      archiveEntries: 20_000,
+    };
+
+    const response = await upload(await operatorToken());
+
+    expect(response.status).toBe(413);
+    expect(response.headers.get("location")).toBeNull();
+    expect(runs).toEqual([]);
+    expect(await readdir(staging)).toEqual([]);
+  });
+
+  it("accepts a chunked body at the exact receive cap", async () => {
+    daemon.config.deploy = {
+      artifactBytes: artifactBytes.byteLength,
+      archiveEntries: 20_000,
+    };
+
+    const response = await upload(await operatorToken());
+    expect(response.status).toBe(202);
+  });
+
+  it.each(["", "%%%", "e30", "eyJiIjoyLCJhIjoxfQ"])(
+    "refuses absent, malformed, or non-canonical metadata before reading the body: %s",
+    async (header) => {
+      let reads = 0;
+      const response = await streamedUpload(
+        await operatorToken(),
+        PROJECT,
+        header,
+        unreadBody(() => reads++),
+      );
+
+      expect(response.status).toBe(400);
+      expect(reads).toBe(0);
+    },
+  );
+
+  it("refuses a project duplicated in metadata before reading the body", async () => {
+    let reads = 0;
+    const response = await streamedUpload(
+      await operatorToken(),
+      PROJECT,
+      { project: PROJECT, runtimeConfigurable: false },
+      unreadBody(() => reads++),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(problemOf(response)).resolves.toMatchObject({
+      detail: expect.stringContaining("request path"),
+    });
+    expect(reads).toBe(0);
+  });
+
+  it("refuses oversized metadata before reading the body", async () => {
+    let reads = 0;
+    const response = await streamedUpload(
+      await operatorToken(),
+      PROJECT,
+      "A".repeat(DEPLOY_METADATA_MAX_BYTES + 1),
+      unreadBody(() => reads++),
+    );
+
+    expect(response.status).toBe(400);
+    expect(reads).toBe(0);
+  });
+
+  it("refuses a raw body without metadata", async () => {
+    const response = await app.request(`/v1/projects/${PROJECT}/deploys`, {
       method: "POST",
       headers: { "authorization": `Bearer ${await operatorToken()}`, "content-type": "text/plain" },
       body: "just some bytes",
@@ -320,22 +466,18 @@ describe("what an upload must carry", () => {
     });
   });
 
-  it("refuses a form that is missing either part", async () => {
-    const withoutMeta = new FormData();
-    withoutMeta.set("artifact", blob());
-    const withoutArtifact = new FormData();
-    withoutArtifact.set("meta", JSON.stringify(meta()));
+  it("refuses an upload without an artifact body", async () => {
+    const response = await app.request(`/v1/projects/${PROJECT}/deploys`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${await operatorToken()}`,
+        [DEPLOY_METADATA_HEADER]: encodeDeployMetadata({ runtimeConfigurable: false }),
+      },
+    });
 
-    for (const [what, body] of [
-      ["meta", withoutMeta],
-      ["artifact", withoutArtifact],
-    ] as const) {
-      const response = await post("/v1/deploys", await operatorToken(), body);
-      const problem = await problemOf(response);
-
-      expect(problem.status, `without ${what}`).toBe(400);
-      expect(problem.detail, `without ${what}`).toContain(what);
-    }
+    const problem = await problemOf(response);
+    expect(problem.status).toBe(400);
+    expect(problem.detail).toContain("artifact body");
   });
 
   it("refuses meta that does not say whether the build reads its config at runtime", async () => {
@@ -384,8 +526,8 @@ describe("what happens to an accepted deploy", () => {
       script: PROJECT,
       target: { prefix: `${PREFIX}/fleets/${PROJECT}/${ENVIRONMENT}`, bucket: "registry" },
     });
-    /* The bytes the client packed arrive intact through the multipart body. */
-    expect(runs[0]?.artifact).toEqual(artifact);
+    /* The bytes the client packed arrive intact through the raw body. */
+    expect(receivedArtifacts[0]).toEqual(artifactBytes);
 
     const build = await getBuild(clock.ctx, PROJECT, VERSION_ID);
     expect(build).toMatchObject({ celldVersionId: VERSION_ID, runtimeConfigurable: false });
@@ -574,6 +716,44 @@ describe("what happens to an accepted deploy", () => {
     expect(status.state).toBe("failed");
     expect(status.detail).toContain("celld exited with code 1");
     expect(status.build).toBeUndefined();
+  });
+
+  it("records a background archive limit as a precise failed status, not an HTTP 413", async () => {
+    publish = () =>
+      Promise.reject(
+        new ScafoError("resource-limit", "Artifact expands too large", {
+          detail: "the archive exceeded the 1024-byte expanded-artifact limit",
+        }),
+      );
+
+    const response = await upload(await operatorToken());
+    const id = (await responseId(response)) as string;
+
+    expect(response.status).toBe(202);
+    await expect(settled(id)).resolves.toMatchObject({
+      state: "failed",
+      detail:
+        "Artifact expands too large: the archive exceeded the 1024-byte expanded-artifact limit",
+    });
+  });
+
+  it("disposes the staged artifact after background publishing is cancelled", async () => {
+    publish = () => Promise.reject(new DOMException("publish cancelled", "AbortError"));
+    const dispose = vi.fn(() => Promise.resolve());
+    const admission = await daemon.deploys?.admit({
+      project: PROJECT,
+      environment: ENVIRONMENT,
+      script: PROJECT,
+      runtimeConfigurable: false,
+      flip: false,
+    });
+    const status = admission?.start({
+      open: () => new Blob([artifactBytes as BlobPart]).stream(),
+      dispose,
+    });
+
+    await settled(status?.id as string);
+    expect(dispose).toHaveBeenCalledOnce();
   });
 });
 
@@ -944,8 +1124,11 @@ async function placeOn(...nodes: string[]): Promise<void> {
 
 function fakeRunner(): DeployRunner {
   return {
-    run(input) {
+    async run(input) {
       runs.push(input);
+      receivedArtifacts.push(
+        new Uint8Array(await new Response(input.artifact.open()).arrayBuffer()),
+      );
       return publish();
     },
   };
@@ -982,36 +1165,74 @@ function meta(): Record<string, unknown> {
   return { project: PROJECT, runtimeConfigurable: false };
 }
 
-function blob(): Blob {
-  return new Blob([artifact as BlobPart]);
-}
-
 /* ---- driving the app ---- */
 
 /** Uploads the artifact with `sent` as the whole of its meta part. */
-function upload(
+async function upload(
   token: string | undefined,
   sent: Record<string, unknown> = meta(),
 ): Promise<Response> {
-  const body = new FormData();
-  body.set("meta", JSON.stringify(sent));
-  body.set("artifact", blob(), "artifact.tar.zst");
-  return post("/v1/deploys", token, body);
+  const { project: target = PROJECT, ...metadata } = sent;
+  return await app.request(`/v1/projects/${String(target)}/deploys`, {
+    method: "POST",
+    headers: {
+      ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+      "content-type": "application/octet-stream",
+      [DEPLOY_METADATA_HEADER]: encodeDeployMetadata(metadata as { runtimeConfigurable: boolean }),
+    },
+    body: artifact.open(),
+    duplex: "half",
+  } as RequestInit & { duplex: "half" });
+}
+
+async function streamedUpload(
+  token: string | undefined,
+  project: string,
+  metadata: Record<string, unknown> | string,
+  body: ReadableStream<Uint8Array>,
+): Promise<Response> {
+  const encoded =
+    typeof metadata === "string"
+      ? metadata
+      : encodeDeployMetadata(metadata as { runtimeConfigurable: boolean });
+  return await app.request(`/v1/projects/${project}/deploys`, {
+    method: "POST",
+    headers: {
+      ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+      [DEPLOY_METADATA_HEADER]: encoded,
+    },
+    body,
+    duplex: "half",
+  } as RequestInit & { duplex: "half" });
+}
+
+function unreadBody(read: () => void): ReadableStream<Uint8Array> {
+  let primed = false;
+  return new ReadableStream<Uint8Array>({
+    pull(stream): void {
+      if (!primed) {
+        primed = true;
+        stream.enqueue(new Uint8Array([1]));
+        return;
+      }
+      read();
+      throw new Error("sentinel artifact body was read");
+    },
+  });
 }
 
 async function post(
   path: string,
   token: string | undefined,
-  body: FormData | Record<string, unknown>,
+  body: Record<string, unknown>,
 ): Promise<Response> {
-  const isForm = body instanceof FormData;
   return app.request(path, {
     method: "POST",
     headers: {
       ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
-      ...(isForm ? {} : { "content-type": "application/json" }),
+      "content-type": "application/json",
     },
-    body: isForm ? body : JSON.stringify(body),
+    body: JSON.stringify(body),
   });
 }
 

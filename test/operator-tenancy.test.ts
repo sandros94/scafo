@@ -55,6 +55,8 @@ import { operatorKey } from "../src/core/registry/paths.ts";
 import type { OperatorRecord } from "../src/core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
+import { createFileArtifactStager } from "../src/drivers/artifact/file.ts";
+import { DEPLOY_METADATA_HEADER, encodeDeployMetadata } from "../src/daemon/_intake.ts";
 import { ctxWith, type ManualClock } from "./_helpers.ts";
 
 const NODE_ID = "node-a";
@@ -129,6 +131,7 @@ beforeEach(async () => {
     reconciler: bothProjectsReconciled(),
     coordinator: coordinatorWithUnplaced(),
     deploys,
+    artifactStager: createFileArtifactStager(),
   });
 });
 
@@ -559,14 +562,13 @@ async function stateFor(id: string, keys: Keypair): Promise<DaemonState> {
 
 /** An artifact upload naming `project`, as a deploy client sends one. */
 async function upload(id: string, keys: Keypair, project: string): Promise<Response> {
-  const form = new FormData();
-  form.set("meta", JSON.stringify({ project, runtimeConfigurable: false }));
-  form.set("artifact", new Blob([new Uint8Array([1, 2, 3])]), "artifact.tar.zst");
-
-  return app.request("/v1/deploys", {
+  return app.request(`/v1/projects/${project}/deploys`, {
     method: "POST",
-    headers: { authorization: `Bearer ${await signNodeToken(keys.privateKey, id)}` },
-    body: form,
+    headers: {
+      authorization: `Bearer ${await signNodeToken(keys.privateKey, id)}`,
+      [DEPLOY_METADATA_HEADER]: encodeDeployMetadata({ runtimeConfigurable: false }),
+    },
+    body: new Uint8Array([1, 2, 3]),
   });
 }
 
@@ -712,9 +714,14 @@ function stubDeploys(): StubDeploys {
   return {
     started,
     recordFor: record,
-    start: (meta) => {
+    admit: (meta) => {
       started.push(meta);
-      return Promise.resolve(record(meta.project));
+      return Promise.resolve({
+        start: (artifact) => {
+          void artifact.dispose();
+          return record(meta.project);
+        },
+      });
     },
     get: (id) => byId.get(id) ?? null,
   };

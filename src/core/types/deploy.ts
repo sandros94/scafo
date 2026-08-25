@@ -23,15 +23,47 @@ export interface DeployTarget {
   secretKey: string;
 }
 
+/** Default compressed and expanded artifact limit: one gibibyte. */
+export const DEFAULT_ARTIFACT_BYTES: number = 1_073_741_824;
+
+/** Default number of entries one archive may contain. */
+export const DEFAULT_ARCHIVE_ENTRIES: number = 20_000;
+
 /** One uploaded artifact, and where publishing it should land. */
 export interface DeployRunInput {
   project: string;
   environment: string;
   /** Name the runtime files this application under within the fleet. */
   script: string;
-  /** The uploaded archive, exactly as it arrived. */
-  artifact: Uint8Array;
+  /** The uploaded archive, exactly as it arrived and staged outside memory. */
+  artifact: StagedArtifact;
   target: DeployTarget;
+}
+
+/**
+ * A replayable, bounded artifact held outside the daemon's memory.
+ *
+ * The receiver owns disposal until it hands the artifact to deploy processing;
+ * deploy processing owns it from then on and disposes it after every outcome.
+ */
+export interface StagedArtifact {
+  /** Opens a fresh byte stream from the beginning of the artifact. */
+  open(): ReadableStream<Uint8Array>;
+  /** Removes the artifact's backing storage. Idempotent. */
+  dispose(): Promise<void>;
+}
+
+/** Controls one receive into staged storage. */
+export interface ArtifactStageOptions {
+  /** Maximum bytes accepted, checked before each write. */
+  maxBytes: number;
+  /** Cancels the receive and removes anything already staged. */
+  signal: AbortSignal;
+}
+
+/** Runtime-specific storage behind the runtime-neutral deploy intake. */
+export interface ArtifactStager {
+  stage(source: ReadableStream<Uint8Array>, opts: ArtifactStageOptions): Promise<StagedArtifact>;
 }
 
 /** What publishing an artifact produced. */

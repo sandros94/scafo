@@ -1,127 +1,212 @@
-/*
- * The artifact format a deploy travels in: a tar of a built project, compressed
- * with zstd. Both ends of the upload — the client that packs a directory and the
- * daemon that unpacks it — go through here, so there is one definition of what a
- * `.tar.zst` is.
- */
+/* The streamed tar+zstd artifact format shared by the CLI and deploy runner. */
 
-import { promisify } from "node:util";
-import { gunzip, zstdCompress, zstdDecompress } from "node:zlib";
-import { ScafoError } from "../../core/error.ts";
+import { createWriteStream } from "node:fs";
+import { isAbsolute } from "node:path";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { createGunzip, createZstdCompress, createZstdDecompress } from "node:zlib";
+import { isScafoError, ScafoError } from "../../core/error.ts";
+import {
+  DEFAULT_ARCHIVE_ENTRIES,
+  DEFAULT_ARTIFACT_BYTES,
+  type StagedArtifact,
+} from "../../core/types/deploy.ts";
+import { assertPositiveSafeInteger } from "../../core/utils/number.ts";
+import { createFileStage } from "../artifact/_file-stage.ts";
 
-/** First bytes of a zstd frame (RFC 8878 §3.1.1). */
 const ZSTD_MAGIC: number[] = [0x28, 0xb5, 0x2f, 0xfd];
-
-/** First bytes of a gzip member (RFC 1952 §2.3.1). */
 const GZIP_MAGIC: number[] = [0x1f, 0x8b];
 
-const gunzipAsync = promisify(gunzip);
-const compressAsync = promisify(zstdCompress);
-const decompressAsync = promisify(zstdDecompress);
+interface TarEntry {
+  path: string;
+  linkpath?: string;
+}
 
-/** Minimal surface of the `tar` package this module uses. */
 interface TarModule {
   create(
     opts: { cwd: string; portable: boolean; gzip: false },
     entries: string[],
-  ): AsyncIterable<Buffer>;
-  extract(opts: { cwd: string }): NodeJS.WritableStream;
+  ): NodeJS.ReadableStream;
+  extract(opts: {
+    cwd: string;
+    filter(path: string, entry: TarEntry): boolean;
+  }): NodeJS.WritableStream;
 }
 
-/** The `tar` module once something has asked for it; see {@link loadTar}. */
+export interface PackDirectoryOptions {
+  stagingDir?: string;
+  signal?: AbortSignal;
+}
+
+export interface UnpackArchiveOptions {
+  maxBytes?: number;
+  maxEntries?: number;
+  signal?: AbortSignal;
+}
+
 let loaded: Promise<TarModule> | undefined;
 
-/**
- * Packs everything under `dir` into a `.tar.zst`.
- *
- * Paths inside the archive are relative to `dir`, so unpacking it somewhere else
- * reproduces the directory's contents and not the directory itself.
- */
-export async function packDirectory(dir: string): Promise<Uint8Array> {
+/** Packs a directory into a file-backed `.tar.zst` without aggregating its bytes. */
+export async function packDirectory(
+  dir: string,
+  opts?: PackDirectoryOptions,
+): Promise<StagedArtifact> {
   const tar = await loadTar();
-  const chunks: Buffer[] = [];
+  const stage = await createFileStage(opts?.stagingDir);
+  await stage.file.close();
 
-  /* `portable` drops the uid, gid and device numbers of the machine that packed
-     it: an artifact must not carry the identity of the developer's laptop into
-     the node that unpacks it. */
-  for await (const chunk of tar.create({ cwd: dir, portable: true, gzip: false }, ["."])) {
-    chunks.push(chunk);
-  }
-  return new Uint8Array(await compressAsync(Buffer.concat(chunks)));
-}
-
-/**
- * Unpacks an artifact into `dir`, which must already exist.
- *
- * zstd and gzip are both accepted and told apart by their magic bytes rather
- * than by any name the upload carried, so a client that compressed the archive
- * the other way still deploys. Entries that would escape `dir` — absolute paths,
- * `..` segments — are refused by the reader; nothing is ever written outside it.
- *
- * Throws `ScafoError("invalid-input")` when the bytes are neither compression,
- * or when what they decompress to is not a tar.
- */
-export async function unpackArchive(archive: Uint8Array, dir: string): Promise<void> {
-  const tar = await loadTar();
-  /*
-   * A `Buffer`, and never a bare `Uint8Array`: the tar reader accepts one
-   * without complaint and then reads nothing but zeroes out of it, which
-   * surfaces much later as an archive in no recognizable format.
-   */
-  const bytes = await decompress(archive);
-
-  await new Promise<void>((resolve, reject) => {
-    const unpack = tar.extract({ cwd: dir });
-    unpack.on("error", (error: Error) => {
-      reject(
-        new ScafoError("invalid-input", "Artifact is not a readable archive", {
-          detail: "the decompressed bytes could not be read as a tar",
-          cause: error,
-        }),
-      );
-    });
-    unpack.on("close", () => resolve());
-    unpack.end(bytes);
-  });
-}
-
-/** Decompresses an artifact, choosing the algorithm by its magic bytes. */
-async function decompress(archive: Uint8Array): Promise<Buffer> {
-  const failed = (detail: string, cause?: unknown): ScafoError =>
-    new ScafoError("invalid-input", "Artifact is not a readable archive", { detail, cause });
-
-  const inflate = startsWith(archive, ZSTD_MAGIC)
-    ? decompressAsync
-    : startsWith(archive, GZIP_MAGIC)
-      ? gunzipAsync
-      : null;
-
-  if (inflate === null) {
-    throw failed("the upload begins with neither a zstd frame nor a gzip member");
-  }
   try {
-    return await inflate(archive);
+    await pipeline(
+      tar.create({ cwd: dir, portable: true, gzip: false }, ["."]),
+      createZstdCompress(),
+      createWriteStream(stage.path, { flags: "w", mode: 0o600 }),
+      ...(opts?.signal === undefined ? [] : [{ signal: opts.signal }]),
+    );
+    return stage.artifact;
   } catch (error) {
-    throw failed("the compressed stream is truncated or corrupt", error);
+    await stage.dispose();
+    throw error;
   }
+}
+
+/** Streams a staged zstd or gzip tar into `dir`, enforcing expansion and entry caps. */
+export async function unpackArchive(
+  archive: StagedArtifact,
+  dir: string,
+  opts?: UnpackArchiveOptions,
+): Promise<void> {
+  const maxBytes = opts?.maxBytes === undefined ? DEFAULT_ARTIFACT_BYTES : opts.maxBytes;
+  const maxEntries = opts?.maxEntries === undefined ? DEFAULT_ARCHIVE_ENTRIES : opts.maxEntries;
+  assertPositiveSafeInteger(maxBytes, "maxBytes");
+  assertPositiveSafeInteger(maxEntries, "maxEntries");
+  const signal = opts?.signal;
+  const magic = await readMagic(archive, signal);
+  const kind = startsWith(magic, ZSTD_MAGIC)
+    ? "zstd"
+    : startsWith(magic, GZIP_MAGIC)
+      ? "gzip"
+      : null;
+  if (kind === null) {
+    throw unreadable("the upload begins with neither a zstd frame nor a gzip member");
+  }
+
+  const tar = await loadTar();
+  const decompressor = kind === "zstd" ? createZstdDecompress() : createGunzip();
+  let decompressionFailed = false;
+  decompressor.once("error", () => (decompressionFailed = true));
+  let entries = 0;
+  let extractionFailure: ScafoError | undefined;
+  const extract = tar.extract({
+    cwd: dir,
+    filter(path, entry): boolean {
+      try {
+        assertArchivePath(path, entry.linkpath);
+        entries += 1;
+        if (entries > maxEntries) {
+          throw new ScafoError("resource-limit", "Artifact has too many entries", {
+            detail: `the archive exceeded the ${String(maxEntries)}-entry limit`,
+          });
+        }
+        return true;
+      } catch (error) {
+        if (isScafoError(error)) extractionFailure = error;
+        throw error;
+      }
+    },
+  });
+  let expanded = 0;
+  const meter = new Transform({
+    transform(chunk: Buffer, _encoding, callback): void {
+      const after = expanded + chunk.byteLength;
+      if (after > maxBytes) {
+        callback(
+          new ScafoError("resource-limit", "Artifact expands too large", {
+            detail: `the archive exceeded the ${String(maxBytes)}-byte expanded-artifact limit`,
+          }),
+        );
+        return;
+      }
+      expanded = after;
+      callback(null, chunk);
+    },
+  });
+
+  try {
+    await pipeline(
+      Readable.fromWeb(archive.open() as Parameters<typeof Readable.fromWeb>[0]),
+      decompressor,
+      meter,
+      extract,
+      ...(signal === undefined ? [] : [{ signal }]),
+    );
+  } catch (error) {
+    if (extractionFailure !== undefined) throw extractionFailure;
+    if (isScafoError(error)) throw error;
+    throwIfAborted(signal);
+    throw unreadable(
+      decompressionFailed
+        ? "the compressed stream is truncated or corrupt"
+        : "the decompressed bytes could not be read as a tar",
+      error,
+    );
+  }
+}
+
+async function readMagic(archive: StagedArtifact, signal?: AbortSignal): Promise<Uint8Array> {
+  const reader = archive.open().getReader();
+  const magic = new Uint8Array(4);
+  let offset = 0;
+  const cancel = (): void => {
+    void reader.cancel(signal?.reason).catch(() => {});
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
+  try {
+    while (offset < magic.length) {
+      throwIfAborted(signal);
+      const next = await reader.read();
+      throwIfAborted(signal);
+      if (next.done) break;
+      const take = Math.min(next.value.byteLength, magic.length - offset);
+      magic.set(next.value.subarray(0, take), offset);
+      offset += take;
+    }
+    return magic.subarray(0, offset);
+  } catch (error) {
+    throwIfAborted(signal);
+    throw error;
+  } finally {
+    signal?.removeEventListener("abort", cancel);
+    await reader.cancel(signal?.reason).catch(() => {});
+    reader.releaseLock();
+  }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted !== true) return;
+  throw signal.reason instanceof Error
+    ? signal.reason
+    : new ScafoError("invalid-input", "Artifact processing was cancelled");
+}
+
+function assertArchivePath(path: string, linkpath?: string): void {
+  for (const candidate of linkpath === undefined ? [path] : [path, linkpath]) {
+    const normalized = candidate.replaceAll("\\", "/");
+    if (isAbsolute(normalized) || normalized.split("/").includes("..")) {
+      throw unreadable(
+        `archive entry ${JSON.stringify(candidate)} escapes the extraction directory`,
+      );
+    }
+  }
+}
+
+function unreadable(detail: string, cause?: unknown): ScafoError {
+  return new ScafoError("invalid-input", "Artifact is not a readable archive", { detail, cause });
 }
 
 function startsWith(bytes: Uint8Array, magic: number[]): boolean {
   return bytes.length >= magic.length && magic.every((byte, index) => bytes[index] === byte);
 }
 
-/**
- * The `tar` package, loaded the first time something packs or unpacks and kept
- * for every call after it.
- *
- * A DYNAMIC IMPORT OF A LITERAL SPECIFIER, and it has to be one: it keeps `tar`
- * — which reaches into `node:fs` — out of the eager module graph of a bundle
- * that only wants the pure halves of this package, exactly as the CommonJS
- * `require` it replaced did, while staying something a bundler and
- * `deno compile` can both FOLLOW. A `createRequire(...)("tar")` is invisible to
- * both, and a single-file binary built around one carries no `tar` at all —
- * every deploy then fails at the pack, on the one path no unit test covers.
- */
 function loadTar(): Promise<TarModule> {
   loaded ??= import("tar") as Promise<unknown> as Promise<TarModule>;
   return loaded;

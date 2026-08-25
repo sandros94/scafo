@@ -39,6 +39,8 @@ import { operatorKey } from "../src/core/registry/paths.ts";
 import type { OperatorRecord } from "../src/core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
+import { createFileArtifactStager } from "../src/drivers/artifact/file.ts";
+import { DEPLOY_METADATA_HEADER, encodeDeployMetadata } from "../src/daemon/_intake.ts";
 import { ctxWith, type ManualClock } from "./_helpers.ts";
 
 const NODE_ID = "node-a";
@@ -103,6 +105,7 @@ beforeEach(async () => {
     supervisor: idleSupervisor(),
     version: VERSION,
     deploys,
+    artifactStager: createFileArtifactStager(),
   });
 });
 
@@ -117,6 +120,23 @@ describe("an operator scoped to one project cannot touch another", () => {
     /* And the refusal happened BEFORE anything was published, which is the only
        version of this that is worth anything. */
     expect(deploys.started.map((meta) => meta.project)).toEqual([MINE]);
+  });
+
+  it("refuses the project next door before reading one artifact chunk", async () => {
+    let reads = 0;
+    const response = await app.request(`/v1/projects/${THEIRS}/deploys`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${await signNodeToken(tenant.privateKey, TENANT_ID)}`,
+        [DEPLOY_METADATA_HEADER]: encodeDeployMetadata({ runtimeConfigurable: false }),
+      },
+      body: unreadBody(() => reads++),
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+
+    expect(response.status).toBe(403);
+    expect(reads).toBe(0);
+    expect(deploys.started).toEqual([]);
   });
 
   it.each(environmentCalls())("runs %s on its own project", async (_what, path, init) => {
@@ -441,14 +461,13 @@ async function call(path: string, id: string, keys: Keypair, sent: Call): Promis
 
 /** An artifact upload naming `project`, as a deploy client sends one. */
 async function upload(id: string, keys: Keypair, project: string): Promise<Response> {
-  const form = new FormData();
-  form.set("meta", JSON.stringify({ project, runtimeConfigurable: false }));
-  form.set("artifact", new Blob([new Uint8Array([1, 2, 3])]), "artifact.tar.zst");
-
-  return app.request("/v1/deploys", {
+  return app.request(`/v1/projects/${project}/deploys`, {
     method: "POST",
-    headers: { authorization: `Bearer ${await signNodeToken(keys.privateKey, id)}` },
-    body: form,
+    headers: {
+      authorization: `Bearer ${await signNodeToken(keys.privateKey, id)}`,
+      [DEPLOY_METADATA_HEADER]: encodeDeployMetadata({ runtimeConfigurable: false }),
+    },
+    body: new Uint8Array([1, 2, 3]),
   });
 }
 
@@ -517,9 +536,14 @@ function stubDeploys(): StubDeploys {
   return {
     started,
     recordFor: record,
-    start: (meta) => {
+    admit: (meta) => {
       started.push(meta);
-      return Promise.resolve(record(meta.project));
+      return Promise.resolve({
+        start: (artifact) => {
+          void artifact.dispose();
+          return record(meta.project);
+        },
+      });
     },
     get: (id) => byId.get(id) ?? null,
   };
@@ -548,6 +572,21 @@ function daemonConfig(): DaemonConfig {
     observability: { enabled: false },
     api: { public: true },
   };
+}
+
+function unreadBody(read: () => void): ReadableStream<Uint8Array> {
+  let primed = false;
+  return new ReadableStream<Uint8Array>({
+    pull(stream): void {
+      if (!primed) {
+        primed = true;
+        stream.enqueue(new Uint8Array([1]));
+        return;
+      }
+      read();
+      throw new Error("sentinel artifact body was read");
+    },
+  });
 }
 
 /** Reports nothing and runs nothing; no route here touches a process. */

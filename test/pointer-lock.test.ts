@@ -19,6 +19,7 @@ import type { DaemonContext } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import {
   createDeployService,
+  type DeployMeta,
   type DeployService,
   type DeployStatus,
 } from "../src/daemon/deploys.ts";
@@ -85,7 +86,7 @@ describe("a deploy landing while a rollout is spawning", () => {
        spawns its process, and is given a window to land before that process
        makes its one read. */
     world.supervisor.onSpawn = async (): Promise<void> => {
-      world.deploying = world.deploys.start(deployMeta(), new Uint8Array([1]));
+      world.deploying = startDeploy(world.deploys);
       await sleep(READ_WINDOW_MS);
     };
 
@@ -136,7 +137,7 @@ describe("a rollout starting while a deploy is bundling", () => {
     const world = await seededWorld();
     const bundling = world.holdPublish();
 
-    const deploying = world.deploys.start(deployMeta(), new Uint8Array([1]));
+    const deploying = startDeploy(world.deploys);
     await expect.poll(() => world.events.includes(`publishing ${ENVIRONMENT}`)).toBe(true);
 
     /* The pass runs while the artifact is still being bundled: the deploy has
@@ -166,7 +167,7 @@ describe("a rollout starting while a deploy is bundling", () => {
     const world = await seededWorld({ pointerLock: { timeoutMs: 20 } });
     const bundling = world.holdPublish();
 
-    const deploying = world.deploys.start(deployMeta(), new Uint8Array([1]));
+    const deploying = startDeploy(world.deploys);
     await expect.poll(() => world.events.includes(`publishing ${ENVIRONMENT}`)).toBe(true);
 
     await world.reconciler.runOnce();
@@ -193,7 +194,7 @@ describe("two environments of one project", () => {
     const world = await seededWorld({ environments: [ENVIRONMENT, OTHER], flipped: [OTHER] });
     const bundling = world.holdPublish();
 
-    const deploying = world.deploys.start(deployMeta(), new Uint8Array([1]));
+    const deploying = startDeploy(world.deploys);
     await expect.poll(() => world.events.includes(`publishing ${ENVIRONMENT}`)).toBe(true);
 
     await world.reconciler.runOnce();
@@ -342,7 +343,7 @@ async function lockHolderOf(ctx: RegistryContext, environment: string): Promise<
   return found?.value.holder ?? null;
 }
 
-function deployMeta(): Parameters<DeployService["start"]>[0] {
+function deployMeta(): DeployMeta {
   return {
     project: PROJECT,
     environment: ENVIRONMENT,
@@ -351,6 +352,14 @@ function deployMeta(): Parameters<DeployService["start"]>[0] {
     runtimeConfigurable: true,
     flip: false,
   };
+}
+
+async function startDeploy(deploys: DeployService): Promise<DeployStatus> {
+  const admission = await deploys.admit(deployMeta());
+  return admission.start({
+    open: () => new Blob([new Uint8Array([1])]).stream(),
+    dispose: () => Promise.resolve(),
+  });
 }
 
 /**

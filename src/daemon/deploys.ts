@@ -20,7 +20,7 @@ import {
 } from "../core/registry/pointer-lock.ts";
 import { assertProjectUnblocked, createProject } from "../core/registry/projects.ts";
 import { stampEnvironmentWake } from "../core/registry/wake.ts";
-import type { DeployRunner } from "../core/types/deploy.ts";
+import type { DeployRunner, StagedArtifact } from "../core/types/deploy.ts";
 import type {
   BuildSource,
   NodeSelector,
@@ -116,13 +116,19 @@ export interface DeployServiceOptions {
 
 export interface DeployService {
   /**
-   * Registers a deploy and starts it. Resolves once the deploy is accepted —
-   * which is as far as a caller waits — with everything after that reported
-   * through {@link DeployService.get}.
+   * Validates the project and environment before any artifact bytes are read.
+   * No status exists until the returned admission is started with a complete
+   * staged artifact.
    */
-  start(meta: DeployMeta, artifact: Uint8Array): Promise<DeployStatus>;
+  admit(meta: DeployMeta): Promise<DeployAdmission>;
   /** The deploy's status, or null when this daemon has never heard of it. */
   get(id: string): DeployStatus | null;
+}
+
+/** One validated deploy waiting only for a complete staged artifact. */
+export interface DeployAdmission {
+  /** Transfers artifact ownership to background deploy processing. */
+  start(artifact: StagedArtifact): DeployStatus;
 }
 
 /**
@@ -236,7 +242,7 @@ export function createDeployService(
     }
   }
 
-  async function publish(id: string, meta: DeployMeta, artifact: Uint8Array): Promise<void> {
+  async function publish(id: string, meta: DeployMeta, artifact: StagedArtifact): Promise<void> {
     try {
       update(id, { state: "uploading" });
 
@@ -255,35 +261,38 @@ export function createDeployService(
        * lock — holding it across them would deadlock a deploy against the loop
        * that carries it out.
        */
-      const { celldVersionId } = await withLock(
-        daemon.registry,
-        {
-          space: POINTER_LOCK_SPACE,
-          name: pointerLockName(meta.project, meta.environment),
-          holder,
-          timeoutMs: lockTimeoutMs,
-        },
-        (signal) =>
-          runner.run(
-            {
-              project: meta.project,
-              environment: meta.environment,
-              script: meta.script,
-              artifact,
-              target: {
-                endpoint: bucket.endpoint,
-                region: bucket.region,
-                bucket: bucket.bucket,
-                /* The same prefix a runtime process reads its fleet from, so what
-                 is published is what gets served. */
-                prefix: joinPrefix(bucket.prefix, fleetPrefix(meta.project, meta.environment)),
-                accessKey: bucket.accessKey,
-                secretKey: bucket.secretKey,
+      let celldVersionId: string;
+      try {
+        ({ celldVersionId } = await withLock(
+          daemon.registry,
+          {
+            space: POINTER_LOCK_SPACE,
+            name: pointerLockName(meta.project, meta.environment),
+            holder,
+            timeoutMs: lockTimeoutMs,
+          },
+          (signal) =>
+            runner.run(
+              {
+                project: meta.project,
+                environment: meta.environment,
+                script: meta.script,
+                artifact,
+                target: {
+                  endpoint: bucket.endpoint,
+                  region: bucket.region,
+                  bucket: bucket.bucket,
+                  prefix: joinPrefix(bucket.prefix, fleetPrefix(meta.project, meta.environment)),
+                  accessKey: bucket.accessKey,
+                  secretKey: bucket.secretKey,
+                },
               },
-            },
-            { signal },
-          ),
-      );
+              { signal },
+            ),
+        ));
+      } finally {
+        await artifact.dispose();
+      }
 
       const build = await createBuild(daemon.registry, meta.project, {
         id: meta.buildId ?? celldVersionId,
@@ -318,7 +327,7 @@ export function createDeployService(
   }
 
   return {
-    async start(meta, artifact): Promise<DeployStatus> {
+    async admit(meta): Promise<DeployAdmission> {
       /* Done before the deploy is acknowledged: a project or environment name
          the registry refuses is the caller's mistake and must be answered as
          one, not buried in a status it has to poll for. */
@@ -341,26 +350,22 @@ export function createDeployService(
         ...(meta.nodeSelector === undefined ? {} : { nodeSelector: meta.nodeSelector }),
       });
 
-      const id = randomDeployId();
-      const accepted: DeployStatus = {
-        id,
-        project: meta.project,
-        state: "accepted",
-        warnings: [],
+      return {
+        start(artifact): DeployStatus {
+          const id = randomDeployId();
+          const accepted: DeployStatus = {
+            id,
+            project: meta.project,
+            state: "accepted",
+            warnings: [],
+          };
+          statuses.set(id, accepted);
+          forget(statuses, history);
+          const answer = snapshot(accepted);
+          void publish(id, meta, artifact);
+          return answer;
+        },
       };
-      statuses.set(id, accepted);
-      forget(statuses, history);
-
-      /* Snapshotted before the work starts, so the answer to the request says
-         what the request achieved — accepted — rather than however far the
-         background work happened to get before the response was written. */
-      const answer = snapshot(accepted);
-
-      /* Deliberately not awaited: publishing outlives the request that asked for
-         it, and `publish` reports its own failures rather than raising them. */
-      void publish(id, meta, artifact);
-
-      return answer;
     },
 
     get(id): DeployStatus | null {

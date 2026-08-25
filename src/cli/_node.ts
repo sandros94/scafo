@@ -29,6 +29,8 @@ export function operatorSigner(key: OperatorKeyFile): Authorize {
 export interface NodeCallOptions extends RequestInit {
   /** How the call is made; defaults to the global `fetch`. */
   fetchFn?: typeof fetch;
+  /** Required by Node fetch for a streaming request body. */
+  duplex?: "half";
 }
 
 /** One node, and who is speaking to it: what every group of commands is built on. */

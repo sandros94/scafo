@@ -12,10 +12,66 @@ import {
 import { sha256Hex } from "../src/core/utils/hash.ts";
 import { isHost } from "../src/core/utils/host.ts";
 import { stableStringify } from "../src/core/utils/json.ts";
+import { assertPositiveSafeInteger } from "../src/core/utils/number.ts";
 import { assertSlug, formatHostLabel, isSlug, parseHostLabel } from "../src/core/utils/slug.ts";
 import { randomSlug, rejectsWith, seededRng } from "./_helpers.ts";
 
 const PROPERTY_ITERATIONS = 2000;
+
+describe("positive safe integers", () => {
+  it("rejects objects without invoking their coercion hooks", () => {
+    let coercions = 0;
+    const hostile = {
+      toString(): never {
+        coercions += 1;
+        throw new Error("toString called");
+      },
+      valueOf(): never {
+        coercions += 1;
+        throw new Error("valueOf called");
+      },
+      [Symbol.toPrimitive](): never {
+        coercions += 1;
+        throw new Error("toPrimitive called");
+      },
+    };
+
+    for (const value of [Object.create(null), hostile]) {
+      const error = rejectedInteger(value);
+      expect(error).toMatchObject({
+        code: "invalid-input",
+        detail: '"limit" must be a positive safe integer, got <object>',
+      });
+    }
+    expect(coercions).toBe(0);
+  });
+
+  it.each([
+    [null, "null"],
+    [undefined, "undefined"],
+    [false, "false"],
+    [Number.NaN, "NaN"],
+    [Number.POSITIVE_INFINITY, "Infinity"],
+    ["unlimited", '"unlimited"'],
+    [1n, "1n"],
+    [Symbol.for("limit"), "Symbol(limit)"],
+  ])("keeps the invalid primitive %s precise", (value, displayed) => {
+    expect(rejectedInteger(value).detail).toBe(
+      `"limit" must be a positive safe integer, got ${String(displayed)}`,
+    );
+  });
+});
+
+function rejectedInteger(value: unknown): ScafoError {
+  let rejection: unknown;
+  try {
+    assertPositiveSafeInteger(value, "limit");
+  } catch (error) {
+    rejection = error;
+  }
+  expect(rejection).toBeInstanceOf(ScafoError);
+  return rejection as ScafoError;
+}
 
 describe("host labels", () => {
   it("round-trips every generated label, with and without a ref", () => {

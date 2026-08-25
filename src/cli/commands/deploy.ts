@@ -2,6 +2,12 @@
 
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import type { DeployStatus } from "../../daemon/deploys.ts";
+import {
+  DEPLOY_METADATA_HEADER,
+  encodeDeployMetadata,
+  type DeployMetadata,
+} from "../../daemon/_intake.ts";
+import type { StagedArtifact } from "../../core/types/deploy.ts";
 import { ScafoError } from "../../core/error.ts";
 import { parseReplicas } from "../../core/placement/replicas.ts";
 import { parseLabels } from "../../core/utils/labels.ts";
@@ -107,13 +113,12 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
   const artifact = await packDirectory(dir);
 
   const meta = {
-    project,
     environment,
+    script: text(flags.script) ?? project,
     runtimeConfigurable: flags["runtime-configurable"] === true,
     /* A canary is the opposite of a flip and the two are refused together, so
        this is already false whenever one was asked for. */
     flip: flags.flip === true,
-    ...(text(flags.script) === undefined ? {} : { script: text(flags.script) }),
     /* Only when they were asked for: a deploy that names no replica count and no
        selector must leave whatever the environment already carries exactly as it
        is. Neither flag can lift a constraint — that is `scafo env selector`. */
@@ -121,14 +126,18 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
     ...(nodeSelector === undefined ? {} : { nodeSelector }),
   };
 
-  const body = new FormData();
-  body.set("meta", JSON.stringify(meta));
-  body.set("artifact", new Blob([artifact as BlobPart]), "artifact.tar.zst");
-
-  const accepted = await nodeRequest(`${nodeUrl}/v1/deploys`, await authorize(), {
-    method: "POST",
-    body,
-  });
+  let accepted: Response;
+  try {
+    accepted = await uploadArtifact({
+      nodeUrl,
+      token: await authorize(),
+      project,
+      metadata: meta,
+      artifact,
+    });
+  } finally {
+    await artifact.dispose();
+  }
   const status = (await accepted.json()) as DeployStatus;
   const location = accepted.headers.get("location") ?? `/v1/deploys/${status.id}`;
 
@@ -156,6 +165,33 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
     weight: canary,
   });
   console.log(describeSplitChange(target, record));
+}
+
+export interface DeployUploadOptions {
+  nodeUrl: string;
+  token: string;
+  project: string;
+  metadata: DeployMetadata;
+  artifact: StagedArtifact;
+  fetchFn?: typeof fetch;
+}
+
+/** Sends the file-backed artifact as the raw streaming deploy request body. */
+export function uploadArtifact(opts: DeployUploadOptions): Promise<Response> {
+  return nodeRequest(
+    `${opts.nodeUrl}/v1/projects/${encodeURIComponent(opts.project)}/deploys`,
+    opts.token,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        [DEPLOY_METADATA_HEADER]: encodeDeployMetadata(opts.metadata),
+      },
+      body: opts.artifact.open(),
+      duplex: "half",
+      ...(opts.fetchFn === undefined ? {} : { fetchFn: opts.fetchFn }),
+    },
+  );
 }
 
 /** Polls a deploy, printing each state it moves into, until it settles. */

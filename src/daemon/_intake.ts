@@ -11,6 +11,8 @@ import { assertId } from "../core/registry/paths.ts";
 import { assertProjectScope } from "./_scope.ts";
 import type { BuildSource, NodeSelector, ParkPolicy, SplitEntry } from "../core/types/registry.ts";
 import { assertSlug } from "../core/utils/slug.ts";
+import { fromBase64Url, toBase64Url } from "../core/utils/base64.ts";
+import { stableStringify } from "../core/utils/json.ts";
 import type { DeployMeta } from "./deploys.ts";
 import { bearerToken } from "./middleware.ts";
 
@@ -28,11 +30,15 @@ export interface DeployVerifiers {
   oidc: OidcVerifier;
 }
 
-/** The parts of a deploy upload. */
-export interface DeployRequest {
-  meta: DeployMeta;
-  artifact: Uint8Array;
-}
+/** Header carrying the bounded, canonical deploy metadata document. */
+export const DEPLOY_METADATA_HEADER: string = "x-scafo-deploy";
+
+/** Maximum encoded metadata header length. */
+export const DEPLOY_METADATA_MAX_BYTES: number = 8_192;
+
+/** Metadata accepted beside the project path; the server fills its defaults. */
+export type DeployMetadata = Partial<Omit<DeployMeta, "project" | "oidc" | "runtimeConfigurable">> &
+  Pick<DeployMeta, "runtimeConfigurable">;
 
 /** What `POST /v1/environments/:project/:env/selector` is asked to set. */
 export interface SelectorRequest {
@@ -150,29 +156,39 @@ export async function verifyWorkload(
   }
 }
 
-/**
- * Reads a deploy upload: a `meta` part carrying JSON and an `artifact` part
- * carrying the archive.
- *
- * The body is buffered before the caller is authenticated, because which project
- * a workload token is checked against is stated in `meta`. The node API listener
- * only ever faces a trusted network, which is what makes that acceptable.
- */
-export async function readDeployRequest(event: H3Event): Promise<DeployRequest> {
-  let form: FormData;
-  try {
-    form = await event.req.formData();
-  } catch (error) {
-    throw invalid("the body could not be read as multipart/form-data", error);
+/** Reads canonical base64url JSON metadata without touching the request body. */
+export function readDeployMetadata(event: H3Event, project: string): DeployMeta {
+  const encoded = event.req.headers.get(DEPLOY_METADATA_HEADER);
+  if (encoded === null || encoded.length === 0) {
+    throw invalid(`the "${DEPLOY_METADATA_HEADER}" header is required`);
+  }
+  if (encoded.length > DEPLOY_METADATA_MAX_BYTES) {
+    throw invalid(
+      `the "${DEPLOY_METADATA_HEADER}" header exceeds ${String(DEPLOY_METADATA_MAX_BYTES)} bytes`,
+    );
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(encoded)) {
+    throw invalid(`the "${DEPLOY_METADATA_HEADER}" header is not unpadded base64url`);
   }
 
-  const meta = form.get("meta");
-  if (typeof meta !== "string") throw invalid(`the "meta" part is missing or is not text`);
+  let json: string;
+  let parsed: unknown;
+  try {
+    const bytes = fromBase64Url(encoded);
+    json = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    parsed = JSON.parse(json);
+    if (stableStringify(parsed) !== json || toBase64Url(bytes) !== encoded) {
+      throw new Error("non-canonical metadata");
+    }
+  } catch (error) {
+    throw invalid(`the "${DEPLOY_METADATA_HEADER}" header is malformed or non-canonical`, error);
+  }
+  return parseMeta(parsed, project);
+}
 
-  const artifact = form.get("artifact");
-  if (!(artifact instanceof Blob)) throw invalid(`the "artifact" part is missing or is not a file`);
-
-  return { meta: parseMeta(meta), artifact: new Uint8Array(await artifact.arrayBuffer()) };
+/** Encodes the metadata shape the CLI sends in {@link DEPLOY_METADATA_HEADER}. */
+export function encodeDeployMetadata(meta: DeployMetadata): string {
+  return toBase64Url(new TextEncoder().encode(stableStringify(meta)));
 }
 
 /**
@@ -294,15 +310,17 @@ function readSplitEntry(value: unknown, at: number): SplitEntry {
   return { build, weight: raw.weight };
 }
 
-function parseMeta(raw: string): DeployMeta {
-  const body = asObject(parseJson(raw, `the "meta" part`), `the "meta" part`);
+function parseMeta(parsed: unknown, project: string): DeployMeta {
+  const body = asObject(parsed, `deploy metadata`);
+  if (body.project !== undefined) {
+    throw invalid(`"project" belongs in the request path and is not accepted in deploy metadata`);
+  }
   if (body.oidc !== undefined) {
     throw invalid(
       `"oidc" is not accepted; OIDC provenance is recorded from the verified workload token`,
     );
   }
 
-  const project = text(body, "project", true);
   assertSlug(project);
   const environment = text(body, "environment") ?? DEFAULT_ENVIRONMENT;
   assertSlug(environment);

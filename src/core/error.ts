@@ -18,6 +18,7 @@ export type ScafoErrorCode =
   | "immutable"
   | "lease-lost"
   | "reference-held"
+  | "resource-limit"
   | "invalid-slug"
   | "invalid-varset"
   | "invalid-input";
@@ -60,6 +61,7 @@ const DEFAULT_STATUS: Record<ScafoErrorCode, number> = {
   "immutable": 409,
   "lease-lost": 409,
   "reference-held": 409,
+  "resource-limit": 413,
   "invalid-slug": 400,
   "invalid-varset": 400,
   "invalid-input": 400,

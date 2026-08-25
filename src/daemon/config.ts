@@ -8,6 +8,8 @@
 
 import { type JSONCParseError, parseJSONC } from "confbox";
 import { ScafoError } from "../core/error.ts";
+import { assertPositiveSafeInteger } from "../core/utils/number.ts";
+import { DEFAULT_ARCHIVE_ENTRIES, DEFAULT_ARTIFACT_BYTES } from "../core/types/deploy.ts";
 import { DEFAULT_PORT_RANGE_START } from "../core/placement/ports.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
 import { POINTER_READ_HOLD_MS } from "../core/registry/pointer-lock.ts";
@@ -66,6 +68,8 @@ export interface DaemonConfig {
   platformDomains: string[];
   /** How this node runs and gates the processes that serve its environments. */
   runtime: RuntimeConfig;
+  /** Resource bounds applied independently while receiving and expanding deploys. */
+  deploy?: DeployConfig;
   /** Whether this node reports on itself at all. Off unless it was turned on. */
   observability: ObservabilityConfig;
   /** Whether the fleet's API answers at the platform domains' own apexes. */
@@ -98,6 +102,13 @@ export interface DaemonConfig {
    * here for a node running another transport is ignored.
    */
   wireguard?: WireguardConfig;
+}
+
+export interface DeployConfig {
+  /** Maximum received compressed bytes and, independently, expanded bytes. */
+  artifactBytes: number;
+  /** Maximum entries in one tar archive. */
+  archiveEntries: number;
 }
 
 /**
@@ -499,6 +510,14 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
       pointerHoldMs: resolvePointerHold(sources),
       ...(celldEnv === undefined ? {} : { celldEnv }),
     },
+    deploy: {
+      artifactBytes: resolvePositiveSafeInteger("artifactBytes", sources, DEFAULT_ARTIFACT_BYTES),
+      archiveEntries: resolvePositiveSafeInteger(
+        "archiveEntries",
+        sources,
+        DEFAULT_ARCHIVE_ENTRIES,
+      ),
+    },
     observability: {
       enabled: observing,
       ...(ingressAccessLog === undefined ? {} : { ingressAccessLog }),
@@ -644,6 +663,16 @@ const ORIGINS = {
     env: ["SCAFO_POINTER_HOLD_MS"],
     file: "runtime.pointerHoldMs",
   },
+  artifactBytes: {
+    flag: "artifact-bytes",
+    env: ["SCAFO_ARTIFACT_BYTES"],
+    file: "deploy.artifactBytes",
+  },
+  archiveEntries: {
+    flag: "archive-entries",
+    env: ["SCAFO_ARCHIVE_ENTRIES"],
+    file: "deploy.archiveEntries",
+  },
   observability: {
     flag: "observability",
     env: ["SCAFO_OBSERVABILITY"],
@@ -744,6 +773,15 @@ function resolvePort(setting: Setting, sources: Sources, fallback: number): numb
       detail: `"${origin.file}" must be a port in 1-65535, got ${JSON.stringify(raw)}`,
     });
   }
+  return value;
+}
+
+function resolvePositiveSafeInteger(setting: Setting, sources: Sources, fallback: number): number {
+  const origin: Origin = ORIGINS[setting];
+  const raw = flagOrEnv(origin, sources) ?? fileValue(sources.file, origin.file);
+  if (raw === undefined || raw === "") return fallback;
+  const value = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN;
+  assertPositiveSafeInteger(value, origin.file);
   return value;
 }
 

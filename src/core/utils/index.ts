@@ -10,3 +10,4 @@ export * from "./budget.ts";
 export * from "./concurrency.ts";
 export * from "./labels.ts";
 export * from "./env.ts";
+export * from "./number.ts";
