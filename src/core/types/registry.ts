@@ -87,16 +87,33 @@ export interface NodeWireguard {
 export type OperatorRole = "admin" | "operator";
 
 /**
- * What an operator key IS, as its record carries it.
+ * One key a fleet trusts. Key: `_scafo/operators/<id>.json`.
  *
- * Present on operator records alone, and ABSENT from one written before roles
- * existed — which reads as an `admin`; see `registry/operators.ts`. It is not a
- * discriminator and must never be used as one: the address marker is what tells
- * an operator from a machine, and a record carrying no role is still an
- * operator's.
+ * A NAMESPACE OF ITS OWN, and nothing here says where anybody is: an operator
+ * publishes no address, because nothing ever connects to one. That is the whole
+ * difference from a {@link NodeRecord}, and it used to be spelled the other way
+ * round — an operator was a node record carrying a sentinel address, which made
+ * the absence of a machine into the presence of a fake one. See `operatorKey` in
+ * `registry/paths.ts` for what the split buys.
+ *
+ * The id space is SHARED with the machines even though the keyspaces are not: an
+ * id belongs to one identity or the other, never both, enforced from both sides.
  */
-export interface NodeOperator {
-  role: OperatorRole;
+export interface OperatorRecord {
+  v: 1;
+  id: string;
+  /** Ed25519 public key every token signed by this operator is verified against. */
+  publicKey: { kty: "OKP"; crv: "Ed25519"; x: string };
+  /**
+   * What this key may do to the fleet's trusted set.
+   *
+   * OPTIONAL BECAUSE A READ MUST NEVER BE A SILENT DEMOTION. A record carrying
+   * none reads as an `admin` (`LEGACY_OPERATOR_ROLE`, `registry/operators.ts`),
+   * which is what every key trusted before roles existed is worth. Nothing
+   * writes one without a role any more, so a record carrying none today was
+   * written straight to the bucket by hand.
+   */
+  role?: OperatorRole;
   /**
    * Key this one was registered to replace, recorded by the expand half of a
    * rotation. It is what authorizes the contract half: a key may revoke the one
@@ -150,12 +167,6 @@ export interface NodeRecord {
   drainingAt?: string;
   /** Its place on the tunnel, when the installation runs one. */
   wireguard?: NodeWireguard;
-  /**
-   * What this key may do to the fleet's trusted set, when the record is an
-   * OPERATOR's rather than a machine's. A machine never carries one, and an
-   * operator record written before roles existed does not either.
-   */
-  operator?: NodeOperator;
   capabilities?: Record<string, unknown>;
   /**
    * What an operator said this node IS — its region, its hardware, its provider
@@ -180,6 +191,55 @@ export interface ProjectRecord {
     placement?: PlacementStrategy;
     idleTtlS?: number;
   };
+  /**
+   * When the project came into being, stamped by the create that made it.
+   *
+   * NEVER BACKFILLED. Absent means the record predates the field — the project
+   * is older than this, and nothing in the registry knows how much older. A
+   * stamp written on the first read that noticed it missing would say the
+   * project began the day somebody happened to look, which is a worse answer
+   * than no answer for the one thing this field is for: telling a downstream
+   * platform how long it has been billing for something.
+   */
+  createdAt?: string;
+  /**
+   * Set by an ADMIN of the fleet to take the whole project out of service.
+   *
+   * A FULL STOP AND A REVERSIBLE ONE. A blocked project is served nowhere — no
+   * node runs a process for it, no route names it, no certificate is issued for
+   * its domains — its hosts are not woken, and deploys into it are refused. The
+   * environment, build, alias, domain and placement records are all left exactly
+   * as they stand, which is what makes the way back one call: the next reconcile
+   * pass wants everything it wanted before.
+   *
+   * ABSENT IS NOT BLOCKED, and it has to be: a project comes into being on its
+   * first deploy, and starting to serve must never depend on a field having been
+   * written. `true` is the only value that means anything; `false` is not
+   * written, because a flag with three states is one somebody reads wrong.
+   *
+   * WHY it was blocked is not core's business. The case this exists for is a
+   * downstream platform's unpaid invoice, and core's contract is to MEASURE and
+   * to ACTUATE — the policy that decides when to pull the lever lives with
+   * whoever sends the invoice.
+   */
+  blocked?: true;
+  /**
+   * What somebody said this project IS, for their own purposes.
+   *
+   * FREE-FORM, AND CORE NEVER INTERPRETS THEM. Nothing in scafo reads a key or a
+   * value here, branches on one, or refuses a pair it does not recognise — they
+   * exist so a platform BUILT ON scafo can tag a project with its own billing
+   * account, its client's name or its plan, and read it back through the API it
+   * already talks to. The moment core started reading one, the map would stop
+   * being the caller's and become a configuration surface with undocumented
+   * keys.
+   *
+   * Written wholesale by whoever sets them: a call states the entire map, so a
+   * label dropped downstream is gone here rather than surviving forever. That is
+   * the same rule a node's own labels follow, and for the same reason — the
+   * writer is the authority on what the set now is.
+   */
+  labels?: Record<string, string>;
 }
 
 /** Provenance of a build, as attested by the CI issuer that produced it. */

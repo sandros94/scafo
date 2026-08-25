@@ -22,6 +22,7 @@ import type { Reconciler } from "../src/daemon/reconcile.ts";
 import { OIDC_AUDIENCE, signNodeToken } from "../src/core/auth/index.ts";
 import type { ProblemDetails } from "../src/core/error.ts";
 import {
+  blockProject,
   createEnvironment,
   createProject,
   envWakeKey,
@@ -31,6 +32,7 @@ import {
   readEnvironmentWake,
   registerNode,
   setTrustPolicy,
+  unblockProject,
 } from "../src/core/registry/index.ts";
 import type { DeployRunInput, DeployRunResult, DeployRunner } from "../src/core/types/deploy.ts";
 import type { NodeRecord } from "../src/core/types/registry.ts";
@@ -188,6 +190,56 @@ describe("who may deploy", () => {
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:trust-mismatch" });
     expect(runs).toEqual([]);
+  });
+});
+
+describe("a project an admin has blocked", () => {
+  it("refuses the deploy before a byte is published, and names the block", async () => {
+    await blockProject(clock.ctx, PROJECT);
+
+    const response = await upload(await operatorToken());
+
+    /*
+     * NAMED PLAINLY, because the caller reaches this project: a scoped operator
+     * whose own project has been stopped is owed the reason, or their only
+     * signal is a deploy that fails for no stated cause. What is never named is
+     * a block on a project the caller does NOT reach — that refusal is the
+     * ordinary out-of-scope one and says nothing about the project at all.
+     */
+    expect(response.status).toBe(409);
+    const problem = await problemOf(response);
+    expect(problem.type).toBe("urn:scafo:project-blocked");
+    expect(problem.detail).toContain(PROJECT);
+
+    /* Refused at intake rather than inside the status a caller has to poll for,
+       so nothing was bundled, uploaded or pointed at. */
+    expect(runs).toEqual([]);
+  });
+
+  it("refuses a workload's deploy for it too", async () => {
+    await blockProject(clock.ctx, PROJECT);
+
+    const response = await upload(await workloadToken());
+
+    expect(response.status).toBe(409);
+    expect(runs).toEqual([]);
+  });
+
+  it("accepts one again once the block is lifted", async () => {
+    await blockProject(clock.ctx, PROJECT);
+    await unblockProject(clock.ctx, PROJECT);
+
+    const response = await upload(await operatorToken());
+
+    expect(response.status).toBe(202);
+  });
+
+  it("leaves an unblocked project alone", async () => {
+    await blockProject(clock.ctx, RIVAL);
+
+    const response = await upload(await operatorToken());
+
+    expect(response.status).toBe(202);
   });
 });
 

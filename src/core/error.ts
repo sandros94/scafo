@@ -10,6 +10,7 @@ export type ScafoErrorCode =
   | "capability-missing"
   | "build-not-runtime-configurable"
   | "placement-unavailable"
+  | "project-blocked"
   | "wake-unavailable"
   | "draining"
   | "store-nonconforming"
@@ -45,6 +46,10 @@ const DEFAULT_STATUS: Record<ScafoErrorCode, number> = {
   "capability-missing": 409,
   "build-not-runtime-configurable": 409,
   "placement-unavailable": 409,
+  /* An admin of the fleet has stopped the project. A CONFLICT rather than a
+     forbidden: nothing is wrong with the caller or with its key, and the same
+     request works unchanged the moment the block is lifted. */
+  "project-blocked": 409,
   /* A host that IS wakeable, refused for now: over the node's wake cap, or past
      the deadline the request was held for. Always answered with a `Retry-After`,
      because the very next try may well succeed. */

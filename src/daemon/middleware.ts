@@ -5,13 +5,9 @@ import type { NodeIdentity, NodeVerifier } from "../core/auth/node-token.ts";
 import { isScafoError, type ProblemDetails, ScafoError } from "../core/error.ts";
 import { readJson } from "../core/registry/cas.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
-import {
-  isOperatorRecord,
-  readOperator,
-  type TrustedOperator,
-} from "../core/registry/operators.ts";
-import { nodeKey } from "../core/registry/paths.ts";
-import type { NodeRecord } from "../core/types/registry.ts";
+import { readOperator, type TrustedOperator } from "../core/registry/operators.ts";
+import { operatorKey } from "../core/registry/paths.ts";
+import type { OperatorRecord } from "../core/types/registry.ts";
 
 /** Context key the verified caller is filed under for the rest of the request. */
 const IDENTITY_KEY = "scafoIdentity";
@@ -86,8 +82,14 @@ export function requireOperatorToken(
 }
 
 /**
- * The operator record `id` is filed under, or null when what is filed is a
- * MACHINE of this installation — or nothing at all.
+ * The operator record `id` is filed under, or null when nothing is — which is
+ * what a MACHINE of this installation resolves to, since a machine's record
+ * lives in a keyspace this never reads.
+ *
+ * ONE READ OF ONE KEY, and the namespace split is what makes that true: the
+ * question "is this caller an operator?" used to be "read the record under this
+ * id and look at its address", which meant the answer for a machine came back
+ * carrying the machine's whole record.
  *
  * READ ONCE PER REQUEST and kept on the event, because two different questions
  * are asked of the same record: which tier and lineage a caller of
@@ -103,9 +105,8 @@ export async function callerOperator(
   const cached = event.context[OPERATOR_KEY] as TrustedOperator | null | undefined;
   if (cached !== undefined) return cached;
 
-  const record = await readJson<NodeRecord>(registry, nodeKey(id));
-  const operator =
-    record === null || !isOperatorRecord(record.value) ? null : readOperator(record.value);
+  const record = await readJson<OperatorRecord>(registry, operatorKey(id));
+  const operator = record === null ? null : readOperator(record.value);
 
   event.context[OPERATOR_KEY] = operator;
   return operator;

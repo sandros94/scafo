@@ -1,12 +1,17 @@
 /*
  * The set of operator keys a fleet trusts.
  *
- * An operator key is filed exactly where a node's is — a daemon verifies a
- * bearer token against whatever the registry holds under the token's `kid` — so
- * what separates the two is the record itself: an operator names no address,
- * because nothing ever connects to one. That distinction is what the surface
- * here is about, and what keeps the two kinds of record from being administered
- * through each other.
+ * An operator key is filed in a KEYSPACE OF ITS OWN, `_scafo/operators/<id>.json`,
+ * apart from the machines under `_scafo/nodes/`. A daemon verifies a bearer
+ * token against whatever the registry holds under the token's `kid` and reads
+ * either prefix, so the two are the same caller to a verifier — while remaining
+ * two kinds of thing that are never administered through each other, which is
+ * what the surface here is about.
+ *
+ * The id space is SHARED even though the keyspaces are not: one id belongs to
+ * one identity, refused from both write sides, and the operator-facing half of
+ * that refusal says only that the id is taken. It used to name the colliding
+ * machine's address, which made this surface a probe.
  *
  * The one refusal worth reading twice is the LAST key: a fleet whose trusted set
  * is empty has nobody who can put a key back through a node, and the only way
@@ -24,17 +29,17 @@ import {
   canReachProject,
   canRevoke,
   getOperator,
-  isOperatorRecord,
   listOperators,
-  OPERATOR_ADDRESS,
   type OperatorRole,
   revokeOperator,
   type TrustedOperator,
   trustOperator,
   WILDCARD_PROJECT,
 } from "../src/core/registry/operators.ts";
+import { putJson, readJson } from "../src/core/registry/cas.ts";
 import { getNode, registerNode } from "../src/core/registry/nodes.ts";
-import type { NodeRecord } from "../src/core/types/registry.ts";
+import { nodeKey, operatorKey } from "../src/core/registry/paths.ts";
+import type { NodeRecord, OperatorRecord } from "../src/core/types/registry.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
 
@@ -47,36 +52,37 @@ beforeEach(() => {
 });
 
 describe("what counts as an operator key", () => {
-  it("reads a record naming no address as an operator, and a node's as a node", async () => {
+  it("is what is filed under operators/, and a machine is what is filed under nodes/", async () => {
     await trustOperator(clock.ctx, operator("op-aaaa1111"));
     await registerNode(clock.ctx, machine());
 
-    expect(isOperatorRecord(await getNode(clock.ctx, "op-aaaa1111"))).toBe(true);
-    expect(isOperatorRecord(await getNode(clock.ctx, MACHINE))).toBe(false);
+    /* The kinds are told apart by WHERE they are filed rather than by a marker
+       inside them, which is what makes a prefix listing a filtered view. */
+    expect(await readJson(clock.ctx, operatorKey("op-aaaa1111"))).not.toBeNull();
+    expect(await readJson(clock.ctx, nodeKey("op-aaaa1111"))).toBeNull();
+    expect(await readJson(clock.ctx, nodeKey(MACHINE))).not.toBeNull();
+    expect(await readJson(clock.ctx, operatorKey(MACHINE))).toBeNull();
   });
 
-  it("files the public half where a node's key is filed, which is what verifies a token", async () => {
+  it("files the public half, which is what verifies a token signed with it", async () => {
     const key = operator("op-aaaa1111");
     await trustOperator(clock.ctx, key);
 
-    const record = await getNode(clock.ctx, "op-aaaa1111");
+    const record = await readJson<OperatorRecord>(clock.ctx, operatorKey("op-aaaa1111"));
 
-    expect(record.publicKey).toEqual(key.publicKey);
-    expect(record.addresses).toEqual({ internal: OPERATOR_ADDRESS, apiPort: 0 });
+    expect(record?.value.publicKey).toEqual(key.publicKey);
+    /* And nothing that looks like a machine: an operator publishes no address,
+       because nothing ever connects to one. */
+    expect(record?.value).not.toHaveProperty("addresses");
   });
 });
 
 describe("what tier a key is", () => {
   it("reads a record written before roles existed as an ADMIN, never as an operator", async () => {
-    /* COMPAT: every key trusted by an installation older than this wave is
-       full-power today, so a role-less record cannot quietly become a demotion.
-       Demoting one is an explicit act; reading one is never an upgrade. */
-    await registerNode(clock.ctx, {
-      v: 1,
-      id: "op-aaaa1111",
-      publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-op-aaaa1111" },
-      addresses: { internal: OPERATOR_ADDRESS, apiPort: 0 },
-    });
+    /* COMPAT: a role-less record cannot quietly become a demotion. Nothing
+       writes one, so it is a bucket-side write by hand — and demoting a key is
+       an explicit act, never something a read does. */
+    await fileByHand("op-aaaa1111", {});
 
     await expect(getOperator(clock.ctx, "op-aaaa1111")).resolves.toMatchObject({ role: "admin" });
     expect((await listOperators(clock.ctx)).map((entry) => entry.role)).toEqual(["admin"]);
@@ -191,18 +197,22 @@ describe("trusting a key", () => {
     expect(await listOperators(clock.ctx)).toHaveLength(1);
   });
 
-  it("REFUSES an id a node of this installation already holds", async () => {
+  it("REFUSES an id a machine of this installation already holds", async () => {
     await registerNode(clock.ctx, machine());
 
-    /* Accepting it would replace a node's identity with an operator's, and the
-       node would be refused by every peer until it registered again. */
+    /* Accepting it would replace a machine's identity with an operator's, and
+       the machine would be refused by every peer until it registered again. */
     const error = await rejectsWith(
       () => trustOperator(clock.ctx, operator(MACHINE)),
       "reference-held",
     );
 
     expect(error.detail).toContain(MACHINE);
-    expect(isOperatorRecord(await getNode(clock.ctx, MACHINE))).toBe(false);
+    /* The id is named because the caller named it; nothing about the machine
+       standing in the way is, which is what keeps this from being a probe. */
+    expect(error.detail).not.toContain("10.0.0.4");
+    await expect(getOperator(clock.ctx, MACHINE)).resolves.toBeNull();
+    await expect(getNode(clock.ctx, MACHINE)).resolves.toMatchObject({ id: MACHINE });
   });
 });
 
@@ -265,14 +275,24 @@ describe("revoking a key", () => {
     expect((await listOperators(clock.ctx)).map((entry) => entry.id)).toEqual(["op-bbbb2222"]);
   });
 
-  it("refuses a node's id through this surface, whatever else is trusted", async () => {
+  it("cannot reach a machine's id through this surface, and says nothing about it", async () => {
     await trustOperator(clock.ctx, operator("op-aaaa1111"));
     await trustOperator(clock.ctx, operator("op-bbbb2222"));
     await registerNode(clock.ctx, machine());
 
-    const error = await rejectsWith(() => revokeOperator(clock.ctx, MACHINE), "invalid-input");
+    /*
+     * A MISS, INDISTINGUISHABLE FROM AN ID NOTHING HOLDS. This surface used to
+     * answer "that is a node, at this address" — helpful, and an oracle: any
+     * trusted key could walk the machines' id space and their addresses one
+     * attempt at a time. A revocation could never reach a machine either way,
+     * so nothing a caller could act on was lost.
+     */
+    const error = await rejectsWith(() => revokeOperator(clock.ctx, MACHINE), "not-found");
+    expect(error.detail).not.toContain("10.0.0.4");
 
-    expect(error.detail).toContain(MACHINE);
+    const missing = await rejectsWith(() => revokeOperator(clock.ctx, "op-ffff9999"), "not-found");
+    expect(error.detail?.replace(MACHINE, "X")).toBe(missing.detail?.replace("op-ffff9999", "X"));
+
     await expect(getNode(clock.ctx, MACHINE)).resolves.toBeDefined();
   });
 
@@ -340,12 +360,9 @@ describe("the projects a key is scoped to", () => {
     /* Refused above, so only a bucket-side write produces one — and the narrow
        reading is the safe direction: it reaches a project called "*", which is
        not a project, rather than reaching the fleet. */
-    await registerNode(clock.ctx, {
-      v: 1,
-      id: "op-aaaa1111",
-      publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-op-aaaa1111" },
-      addresses: { internal: OPERATOR_ADDRESS, apiPort: 0 },
-      operator: { role: "operator", projects: [WILDCARD_PROJECT, "acme"] },
+    await fileByHand("op-aaaa1111", {
+      role: "operator",
+      projects: [WILDCARD_PROJECT, "acme"],
     });
 
     const key = (await getOperator(clock.ctx, "op-aaaa1111")) as TrustedOperator;
@@ -355,12 +372,7 @@ describe("the projects a key is scoped to", () => {
   });
 
   it("reads a record written before scopes existed as reaching every project", async () => {
-    await registerNode(clock.ctx, {
-      v: 1,
-      id: "op-aaaa1111",
-      publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-op-aaaa1111" },
-      addresses: { internal: OPERATOR_ADDRESS, apiPort: 0 },
-    });
+    await fileByHand("op-aaaa1111", {});
 
     const key = (await getOperator(clock.ctx, "op-aaaa1111")) as TrustedOperator;
 
@@ -401,13 +413,7 @@ describe("the projects a key is scoped to", () => {
   it("reads a hand-written record that claims BOTH as scoped, which is the safe direction", async () => {
     /* Only reachable by writing to the bucket by hand, since the surface above
        refuses it — and narrowing is the direction to be wrong in. */
-    await registerNode(clock.ctx, {
-      v: 1,
-      id: "op-aaaa1111",
-      publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-op-aaaa1111" },
-      addresses: { internal: OPERATOR_ADDRESS, apiPort: 0 },
-      operator: { role: "admin", projects: ["acme"] },
-    });
+    await fileByHand("op-aaaa1111", { role: "admin", projects: ["acme"] });
 
     const key = (await getOperator(clock.ctx, "op-aaaa1111")) as TrustedOperator;
 
@@ -482,6 +488,25 @@ describe("which scope may be GRANTED at all, as against merely carried over", ()
 /** An operator key with a distinct public half, which is all the registry keeps. */
 function operator(id: string, role: OperatorRole = "admin"): TrustedOperator {
   return { id, publicKey: { kty: "OKP", crv: "Ed25519", x: `x-for-${id}` }, role };
+}
+
+/**
+ * An operator record written STRAIGHT TO THE BUCKET, bypassing every rule
+ * `trustOperator` enforces.
+ *
+ * That is the only way the shapes below exist at all — a record with no role, a
+ * scoped admin, a wildcard mixed with slugs — and it is what the read side has
+ * to be safe against: whoever holds the bucket's credentials holds the fleet and
+ * can write anything, so the reads are asserted against what they might find
+ * rather than only against what this code produces.
+ */
+async function fileByHand(id: string, extra: Partial<OperatorRecord>): Promise<void> {
+  await putJson<OperatorRecord>(clock.ctx, operatorKey(id), {
+    v: 1,
+    id,
+    publicKey: { kty: "OKP", crv: "Ed25519", x: `x-for-${id}` },
+    ...extra,
+  });
 }
 
 /** A machine node: it names an address, because something connects to it. */

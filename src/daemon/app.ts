@@ -7,6 +7,7 @@ import { ScafoError } from "../core/error.ts";
 import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { checkDomain } from "../core/registry/domains.ts";
+import { isProjectBlocked } from "../core/registry/projects.ts";
 import { canarySplit, flipAlias, rollbackAlias, setSplit } from "../core/registry/environments.ts";
 import { isLeaseExpired } from "../core/registry/lease.ts";
 import { setParkPolicy } from "../core/registry/park.ts";
@@ -53,6 +54,7 @@ import {
 } from "./middleware.ts";
 import { assertProjectScope, scopedState } from "./_scope.ts";
 import { registerOperatorRoutes } from "./_operator-routes.ts";
+import { registerProjectRoutes } from "./_project-routes.ts";
 import type { Observability } from "./observe.ts";
 import type { ParkedView, PlacementView, Reconciler, ReconcileStatus } from "./reconcile.ts";
 import { registerStorageRoutes } from "./_storage-routes.ts";
@@ -567,7 +569,15 @@ export function createNodeApp(daemon: DaemonContext): H3 {
    * that has been taken over must not be able to write its installation a new
    * operator, so these ask WHO the verified id is as well as that it signed.
    */
-  registerOperatorRoutes(app, daemon, requireOperatorToken(nodeVerifier, daemon.registry));
+  const operatorGuard = requireOperatorToken(nodeVerifier, daemon.registry);
+  registerOperatorRoutes(app, daemon, operatorGuard);
+
+  /*
+   * THE PROJECTS OF THIS FLEET, behind the same guard and for the same reason
+   * one step over: stopping a tenant is an act of the installation, so a machine
+   * of it cannot take one, and neither can the tenant.
+   */
+  registerProjectRoutes(app, daemon, operatorGuard);
 
   /*
    * TLS STORAGE, AND IT MUST NEVER BE REACHABLE THROUGH A PUBLIC OR
@@ -634,6 +644,14 @@ function coordinatorView(
  * record of a name that answers nothing — with a lifetime outlasting the
  * environment itself. An environment that is gone entirely reads the same way,
  * which also covers the claim a half-finished deletion left behind.
+ *
+ * A BLOCKED PROJECT IS REFUSED ON BOTH ROUTES IN, and for the same reason one
+ * step up: it answers nothing anywhere in the fleet, so a certificate for one of
+ * its names would outlive the block. The check is made as soon as the host has
+ * been resolved to a PROJECT — before the running processes are consulted,
+ * because a pass may not have stopped them yet, and before the wake resolver,
+ * which refuses a blocked project itself and is only reached for the hosts
+ * nothing is running for.
  */
 async function servesHost(daemon: DaemonContext, host: string): Promise<boolean> {
   if (!isHost(host)) return false;
@@ -664,7 +682,10 @@ async function servesHost(daemon: DaemonContext, host: string): Promise<boolean>
     if (!host.endsWith(suffix)) continue;
 
     const label = host.slice(0, -suffix.length);
-    if (parseHostLabel(label) === null) return false;
+    const parsed = parseHostLabel(label);
+    if (parsed === null) return false;
+    if (await isProjectBlocked(daemon.registry, parsed.project)) return false;
+
     if (servedLabel(daemon, label)) return true;
     const target = await resolveWakeTarget(daemon.registry, {
       host,
@@ -676,6 +697,7 @@ async function servesHost(daemon: DaemonContext, host: string): Promise<boolean>
 
   const claim = await checkDomain(daemon.registry, host);
   if (claim === null) return false;
+  if (await isProjectBlocked(daemon.registry, claim.project)) return false;
 
   const environment = await readJson<EnvironmentRecord>(
     daemon.registry,

@@ -50,6 +50,9 @@ import {
   registerNode,
 } from "../src/core/registry/index.ts";
 import { getOperator } from "../src/core/registry/operators.ts";
+import { putJson } from "../src/core/registry/cas.ts";
+import { operatorKey } from "../src/core/registry/paths.ts";
+import type { OperatorRecord } from "../src/core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock } from "./_helpers.ts";
@@ -588,12 +591,11 @@ async function fileKey(
   keys: Keypair,
   operator?: { role: "admin" | "operator"; projects?: string[]; supersedes?: string },
 ): Promise<void> {
-  await registerNode(clock.ctx, {
+  await putJson<OperatorRecord>(clock.ctx, operatorKey(id), {
     v: 1,
     id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: keys.publicKey.x },
-    addresses: { internal: "operator", apiPort: 0 },
-    ...(operator === undefined ? {} : { operator }),
+    ...(operator ?? {}),
   });
 }
 

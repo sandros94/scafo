@@ -97,9 +97,11 @@ export async function signNodeToken(
 }
 
 /**
- * Builds a verifier for node tokens presented to this daemon. Keys come from the
- * registry (`_scafo/nodes/<id>.json`) and are cached, so a deregistered node is
- * rejected at most `keyTtlS` seconds later.
+ * Builds a verifier for the tokens presented to this daemon. Keys come from the
+ * registry — `_scafo/operators/<id>.json` or `_scafo/nodes/<id>.json`, because a
+ * machine and an operator are the same caller to a verifier — and are cached, so
+ * a record deleted from the registry is rejected at most `keyTtlS` seconds
+ * later.
  *
  * Every rejection is `ScafoError("auth-invalid")`, whatever the cause.
  */
@@ -121,7 +123,8 @@ export function createNodeVerifier(ctx: RegistryContext, opts?: NodeVerifierOpti
 
       const kid = stringClaim(header, "kid");
       const key = await keys.get(kid);
-      if (key === null) throw authInvalid(`No node is registered as "${kid}"`);
+      if (key === null)
+        throw authInvalid(`No machine and no operator key is registered as "${kid}"`);
 
       let payload: unknown;
       try {

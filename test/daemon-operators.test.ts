@@ -29,7 +29,10 @@ import {
   type OperatorRole,
   type TrustedOperator,
 } from "../src/core/registry/operators.ts";
+import { putJson } from "../src/core/registry/cas.ts";
 import { registerNode } from "../src/core/registry/nodes.ts";
+import { operatorKey } from "../src/core/registry/paths.ts";
+import type { OperatorRecord } from "../src/core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock } from "./_helpers.ts";
@@ -597,15 +600,13 @@ function scopedHalf(id: string, keys: Keypair): Omit<TrustedOperator, "role"> {
 
 /**
  * Files a key as an operator's, straight into the registry and WITHOUT a role —
- * which is the record every installation older than this wave holds, and which
- * reads as an admin.
+ * a shape nothing writes any more, and which reads as an admin.
  */
 async function trust(id: string, keys: Keypair): Promise<void> {
-  await registerNode(clock.ctx, {
+  await putJson<OperatorRecord>(clock.ctx, operatorKey(id), {
     v: 1,
     id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: keys.publicKey.x },
-    addresses: { internal: "operator", apiPort: 0 },
   });
 }
 
@@ -623,16 +624,13 @@ async function trustAs(
   role: OperatorRole,
   supersedes?: string,
 ): Promise<void> {
-  await registerNode(clock.ctx, {
+  await putJson<OperatorRecord>(clock.ctx, operatorKey(id), {
     v: 1,
     id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: keys.publicKey.x },
-    addresses: { internal: "operator", apiPort: 0 },
-    operator: {
-      role,
-      ...(supersedes === undefined ? {} : { supersedes }),
-      ...(role === "operator" ? { projects: [PROJECT] } : {}),
-    },
+    role,
+    ...(supersedes === undefined ? {} : { supersedes }),
+    ...(role === "operator" ? { projects: [PROJECT] } : {}),
   });
 }
 

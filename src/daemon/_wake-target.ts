@@ -8,6 +8,7 @@ import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { type ResolvedParkPolicy, resolveParkPolicy } from "../core/registry/park.ts";
 import { environmentKey } from "../core/registry/paths.ts";
+import { isProjectBlocked } from "../core/registry/projects.ts";
 import { listBuildWakes } from "../core/registry/wake.ts";
 import type { BuildRecord, EnvironmentRecord } from "../core/types/registry.ts";
 import { parseHostLabel } from "../core/utils/slug.ts";
@@ -33,11 +34,19 @@ export type WakeTarget =
  *
  * NULL IS THE ONLY FAILURE, and it is answered with ONE 404 that says nothing
  * about which of the ways it came about: a name that never existed, an
- * environment that was retired, a build the reaper has taken, a build whose
- * environment no longer says where its code lives, or one whose environment has
- * recall turned off. The bucket is the source of truth and a deleted record is a
- * permanent 404 by design, so there is nothing here for a caller to act on and
- * nothing worth telling one caller about another's project.
+ * environment that was retired, a project an admin has blocked, a build the
+ * reaper has taken, a build whose environment no longer says where its code
+ * lives, or one whose environment has recall turned off. The bucket is the
+ * source of truth and a deleted record is a permanent 404 by design, so there is
+ * nothing here for a caller to act on and nothing worth telling one caller about
+ * another's project.
+ *
+ * THE BLOCK IS CHECKED ON WHAT WAS RESOLVED, not on the host that was asked
+ * about, and that is deliberate: every target this can answer with carries the
+ * project it belongs to, so one question at the end covers the platform labels,
+ * the build-hash recalls and the custom domains at once, and no future way of
+ * resolving a host can be added without meeting it. It costs one read per wake
+ * that would otherwise have been admitted — a refusal never reaches it.
  *
  * THE HOST GRAMMAR IS THE EXACT INVERSE OF WHAT THE ROUTING RENDERS:
  *
@@ -52,6 +61,19 @@ export type WakeTarget =
  * nothing about, and resolves to null.
  */
 export async function resolveWakeTarget(
+  registry: RegistryContext,
+  opts: { host: string; platformDomains: string[]; parked: ParkedEnvironment[] },
+): Promise<WakeTarget | null> {
+  const target = await resolveHost(registry, opts);
+  if (target === null) return null;
+
+  /* A blocked project is served nowhere, so waking one of its hosts would start
+     something the very next reconcile pass stops again. */
+  return (await isProjectBlocked(registry, target.project)) ? null : target;
+}
+
+/** What the host NAMES, before anything is asked about whether it may be served. */
+async function resolveHost(
   registry: RegistryContext,
   opts: { host: string; platformDomains: string[]; parked: ParkedEnvironment[] },
 ): Promise<WakeTarget | null> {

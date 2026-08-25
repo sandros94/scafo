@@ -1,12 +1,25 @@
 /*
  * The operator keys a fleet trusts.
  *
- * They live among the nodes, because that is what makes them work: a node daemon
- * verifies a bearer token against whatever the registry holds under the token's
- * `kid`, and does not care whether that id belongs to a machine or to a person.
- * What tells the two apart is the ADDRESS — an operator names none, because
- * nothing ever connects to one — and that is the whole discriminator, so the
- * surface here is where it is read and written rather than in every caller.
+ * THEY LIVE IN A KEYSPACE OF THEIR OWN — `_scafo/operators/<id>.json` — apart
+ * from the machines under `_scafo/nodes/`. What makes both work at once is that
+ * a node daemon verifies a bearer token against whatever the registry holds
+ * under the token's `kid` and does not care which of the two it came out of: a
+ * node calling a peer and an operator calling a node are the same caller on
+ * every route but the ones that administer this set.
+ *
+ * THE SPLIT IS RECENT AND IT IS STRUCTURAL. An operator used to be a NodeRecord
+ * carrying a sentinel address no machine would publish, so one keyspace did two
+ * jobs: a listing of the machines had to know what an operator looked like — or
+ * show one as a node that never answers, which is what `scafo fleet nodes` did —
+ * a node id and an operator id could collide, and the refusal that kept them
+ * apart had to say what was in the way, which meant handing whoever asked for an
+ * id the INTERNAL ADDRESS of a machine of the installation. That was an
+ * enumeration oracle any operator-tier key could drive through POST
+ * /v1/operators. Split, a prefix listing IS the filtered view, and the only
+ * thing the two namespaces still share is the ID SPACE: one id is one identity,
+ * refused from both sides, and the refusal says nothing but that the id is
+ * taken.
  *
  * The two kinds are never administered through each other: a node is registered
  * by the machine it is, and removed by the coordinator that outlived it, while
@@ -55,30 +68,27 @@
  */
 
 import { ScafoError } from "../error.ts";
-import type { NodeRecord, OperatorRole } from "../types/registry.ts";
+import type { NodeRecord, OperatorRecord, OperatorRole } from "../types/registry.ts";
 import { assertSlug } from "../utils/slug.ts";
-import { deleteKey, readJson } from "./cas.ts";
+import { namesFromKeys } from "./_shared.ts";
+import { deleteKey, putJson, readJson } from "./cas.ts";
 import type { RegistryContext } from "./context.ts";
-import { nodeKey } from "./paths.ts";
-import { listNodeRecords, registerNode } from "./nodes.ts";
+import { nodeKey, operatorKey, operatorsPrefix } from "./paths.ts";
 
-export type { OperatorRole };
-
-/**
- * What an operator record carries where a node carries a host. Nothing resolves
- * or connects to it; it is a marker, and it is the one the record is read by.
- */
-export const OPERATOR_ADDRESS: string = "operator";
+export type { OperatorRecord, OperatorRole };
 
 /**
  * The tier a record carrying none reads as.
  *
- * COMPAT, AND IT IS DELIBERATELY THE HIGH ONE. Every key an installation trusted
- * before roles existed is full-power today, so reading a role-less record as an
- * operator-tier key would silently demote every operator of every fleet that
- * upgrades — locking people out of their own installations at the moment they
- * needed to do something about it. A demotion must be an explicit act; a read is
- * never allowed to be an upgrade surprise in either direction.
+ * COMPAT, AND IT IS DELIBERATELY THE HIGH ONE. Reading a role-less record as an
+ * operator-tier key would be a silent DEMOTION, and a read is never allowed to
+ * be a surprise in either direction — least of all one that locks somebody out
+ * of their own installation at the moment they needed to do something about it.
+ *
+ * Nothing writes a record without a role, and the layout change that moved
+ * operators into their own namespace carried nothing across, so a record
+ * carrying none today was written straight to the bucket by hand rather than
+ * left behind by an older scafo. It is still read the safe way.
  */
 export const LEGACY_OPERATOR_ROLE: OperatorRole = "admin";
 
@@ -135,18 +145,7 @@ export interface TrustedOperator {
 }
 
 /**
- * Whether `record` is an operator key rather than a machine of the fleet.
- *
- * Both halves of the marker are required. A node always publishes the port its
- * daemon answers on, and an operator answers on none, so a record that names
- * neither a reachable address nor a port is the only shape this surface writes.
- */
-export function isOperatorRecord(record: NodeRecord): boolean {
-  return record.addresses.internal === OPERATOR_ADDRESS && record.addresses.apiPort === 0;
-}
-
-/**
- * One operator record as the key it describes, its tier resolved.
+ * One stored record as the key it describes, its tier resolved.
  *
  * The ONE place a role is read out of a record, so the compat default lives here
  * and nowhere else: a record carrying none reads as {@link LEGACY_OPERATOR_ROLE}.
@@ -158,38 +157,53 @@ export function isOperatorRecord(record: NodeRecord): boolean {
  * refusal somebody fixes, and one that reaches more is the thing scoping exists
  * to prevent.
  */
-export function readOperator(record: NodeRecord): TrustedOperator {
-  const operator = record.operator;
+export function readOperator(record: OperatorRecord): TrustedOperator {
   return {
     id: record.id,
     publicKey: record.publicKey,
-    role: operator?.role ?? LEGACY_OPERATOR_ROLE,
-    ...(operator?.supersedes === undefined ? {} : { supersedes: operator.supersedes }),
-    ...(operator?.projects === undefined ? {} : { projects: [...operator.projects] }),
+    role: record.role ?? LEGACY_OPERATOR_ROLE,
+    ...(record.supersedes === undefined ? {} : { supersedes: record.supersedes }),
+    ...(record.projects === undefined ? {} : { projects: [...record.projects] }),
   };
 }
 
-/** Every operator key the fleet trusts, in id order. */
+/**
+ * Every operator key the fleet trusts, in id order.
+ *
+ * ONE PREFIX LISTING AND THE READS UNDER IT, which is the whole dividend of the
+ * namespace split: this used to list every MACHINE of the installation and throw
+ * away the ones that turned out not to be operators, so a fleet of a hundred
+ * nodes paid a hundred reads to answer a question about five keys. A prefix IS
+ * the filtered view now.
+ *
+ * A record that vanished between the listing and the read is left out rather
+ * than raised — a revocation landing mid-listing is ordinary, and the next
+ * listing sees the set as it then is.
+ */
 export async function listOperators(ctx: RegistryContext): Promise<TrustedOperator[]> {
-  const records = await listNodeRecords(ctx);
-  return records.filter((record) => isOperatorRecord(record)).map((record) => readOperator(record));
+  const prefix = operatorsPrefix();
+  const keys = await ctx.store.list(prefix);
+
+  const trusted: TrustedOperator[] = [];
+  for (const id of namesFromKeys(keys, prefix)) {
+    const found = await readJson<OperatorRecord>(ctx, operatorKey(id));
+    if (found !== null) trusted.push(readOperator(found.value));
+  }
+  return trusted;
 }
 
 /**
- * The key filed under `id`, or null when nothing is — or when what is filed is a
- * MACHINE of this installation rather than an operator.
+ * The key filed under `id`, or null when nothing is.
  *
- * Null for both misses on purpose: a caller asking what an operator may do has
- * no use for a node's record, and answering one would invite the crossing this
- * file exists to prevent.
+ * It never reads the machines' keyspace, and never has to: an id belongs to one
+ * identity, so nothing filed under `nodes/` could be an answer to this question.
  */
 export async function getOperator(
   ctx: RegistryContext,
   id: string,
 ): Promise<TrustedOperator | null> {
-  const found = await readJson<NodeRecord>(ctx, nodeKey(id));
-  if (found === null || !isOperatorRecord(found.value)) return null;
-  return readOperator(found.value);
+  const found = await readJson<OperatorRecord>(ctx, operatorKey(id));
+  return found === null ? null : readOperator(found.value);
 }
 
 /**
@@ -427,10 +441,17 @@ export async function bootstrapRole(
  * enters a fleet meet the same rule: a scoped admin is a contradiction and is
  * refused whether it was asked for over the wire or through the bucket ceremony.
  *
- * Throws `ScafoError("reference-held")` when the id already belongs to a MACHINE
- * of this installation: replacing that record would hand the node's identity to
- * a person, and the node would be refused by every peer until it registered
- * again.
+ * ONE ID IS ONE IDENTITY, and this is one of the two sides it is enforced from
+ * ({@link registerNode} is the other). An operator key filed under a machine's
+ * id would take that machine's identity, and the node would be refused by every
+ * peer until it registered again — so it is refused with
+ * `ScafoError("reference-held")`.
+ *
+ * AND THE REFUSAL SAYS ONLY THAT THE ID IS TAKEN. It used to name the colliding
+ * node's internal address, which turned this surface into a probe: post an id,
+ * read back where a machine of the installation answers, repeat. What a caller
+ * needs in order to act is that the id is not available — anything further is a
+ * fact about a machine, told to somebody who asked about a key.
  */
 export async function trustOperator(
   ctx: RegistryContext,
@@ -438,26 +459,28 @@ export async function trustOperator(
 ): Promise<TrustedOperator> {
   assertOperatorScope(key);
 
-  const existing = await readJson<NodeRecord>(ctx, nodeKey(key.id));
-  if (existing !== null && !isOperatorRecord(existing.value)) {
-    throw new ScafoError("reference-held", "Id belongs to a node of this installation", {
+  const machine = await readJson<NodeRecord>(ctx, nodeKey(key.id));
+  if (machine !== null) {
+    throw new ScafoError("reference-held", "Id belongs to a machine of this installation", {
       detail:
-        `"${key.id}" is registered as a node at ${existing.value.addresses.internal}, and an ` +
-        `operator key filed under it would take that node's identity; choose another id`,
+        `"${key.id}" is already a machine of this fleet, and an operator key filed under it ` +
+        `would take that machine's identity; choose another id`,
     });
   }
 
-  await registerNode(ctx, {
+  const record: OperatorRecord = {
     v: 1,
     id: key.id,
     publicKey: key.publicKey,
-    addresses: { internal: OPERATOR_ADDRESS, apiPort: 0 },
-    operator: {
-      role: key.role,
-      ...(key.supersedes === undefined ? {} : { supersedes: key.supersedes }),
-      ...(key.projects === undefined ? {} : { projects: [...key.projects] }),
-    },
-  });
+    role: key.role,
+    ...(key.supersedes === undefined ? {} : { supersedes: key.supersedes }),
+    ...(key.projects === undefined ? {} : { projects: [...key.projects] }),
+  };
+  /* Unconditional: the id addresses the record, so there is no identity here for
+     a conditional write to protect, and re-trusting a trusted key must rewrite
+     the same bytes rather than conflict. That is what lets the expand half of a
+     rotation be retried blindly. */
+  await putJson(ctx, operatorKey(key.id), record);
   return key;
 }
 
@@ -480,10 +503,16 @@ export async function trustOperator(
  * administered through a node again. Counting keys is not enough to see that;
  * counting ADMINS is.
  *
- * Throws `ScafoError("not-found")` when nothing is filed under the id,
- * `ScafoError("invalid-input")` when what is filed is a machine rather than an
- * operator, and `ScafoError("reference-held")` for the last trusted key and for
- * the last admin.
+ * Throws `ScafoError("not-found")` when nothing is filed under the id, and
+ * `ScafoError("reference-held")` for the last trusted key and for the last
+ * admin.
+ *
+ * AN ID THAT BELONGS TO A MACHINE IS SIMPLY NOT FOUND HERE, rather than told
+ * apart from an id nothing holds. This surface used to say "that is a node, at
+ * this address" — helpful, and an oracle: it let anyone holding any trusted key
+ * probe the machines' id space and their addresses one revocation attempt at a
+ * time. A revocation cannot reach a machine either way, so the distinction was
+ * never anything a caller could act on.
  *
  * No lease is taken, unlike `removeNode`. What a lease buys there is a
  * multi-record deletion carried out by one writer at a time; this removes ONE
@@ -493,17 +522,10 @@ export async function trustOperator(
  * registration `scafo operator keygen --register` has always been.
  */
 export async function revokeOperator(ctx: RegistryContext, id: string): Promise<TrustedOperator> {
-  const found = await readJson<NodeRecord>(ctx, nodeKey(id));
+  const found = await readJson<OperatorRecord>(ctx, operatorKey(id));
   if (found === null) {
     throw new ScafoError("not-found", "No such operator key", {
       detail: `"${id}" is not a key this fleet trusts`,
-    });
-  }
-  if (!isOperatorRecord(found.value)) {
-    throw new ScafoError("invalid-input", "Id belongs to a node of this installation", {
-      detail:
-        `"${id}" is a node at ${found.value.addresses.internal}, not an operator key; a node ` +
-        `leaves the fleet by draining, and is removed by the coordinator`,
     });
   }
 
@@ -525,6 +547,6 @@ export async function revokeOperator(ctx: RegistryContext, id: string): Promise<
     });
   }
 
-  await deleteKey(ctx, nodeKey(id));
+  await deleteKey(ctx, operatorKey(id));
   return removed;
 }

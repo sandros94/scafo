@@ -59,7 +59,9 @@ curl -s "$SCAFO_S3_ENDPOINT/scafo/playground/_scafo/coordinator/lease.json"
 ```
 
 **You should see** the whole installation on one screen — a `meta.json`, a record
-under `nodes/` for each node and for the operator key you just registered, a
+under `nodes/` for each node, one under `operators/` for the key you just
+registered (the two are separate keyspaces: a machine publishes an address and an
+operator publishes none, because nothing ever connects to one), a
 `coordinator/lease.json` — then node A's record carrying
 `"addresses":{"internal":"node-a","apiPort":7400}`, then one node named
 coordinator with `"ttlMs":15000` and `"fence":1`.

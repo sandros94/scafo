@@ -42,11 +42,12 @@ import {
   getEnvironment,
   listBuilds,
   nodeKey,
+  operatorKey as operatorRecordKey,
   readJson,
   readMeta,
   type RegistryContext,
 } from "../../src/core/registry/index.ts";
-import type { NodeRecord } from "../../src/core/types/registry.ts";
+import type { NodeRecord, OperatorRecord } from "../../src/core/types/registry.ts";
 import type { TraefikDynamicConfig } from "../../src/drivers/ingress/traefik.ts";
 import {
   NODE_IMAGE,
@@ -298,8 +299,11 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       expectCleanExit(result);
 
       operatorKey = JSON.parse(await readFile(keyPath, "utf8")) as OperatorKeyFile;
-      const record = await readJson<NodeRecord>(registry, nodeKey(operatorKey.id));
+      /* Filed under the OPERATORS prefix, in a keyspace of its own: an operator
+         key is not a machine of the fleet and no longer looks like one. */
+      const record = await readJson<OperatorRecord>(registry, operatorRecordKey(operatorKey.id));
       expect(record?.value.publicKey.x).toBe(operatorKey.publicKey.x);
+      expect(await readJson(registry, nodeKey(operatorKey.id))).toBeNull();
       observed.operatorId = operatorKey.id;
     },
     STEP_TIMEOUT_MS,

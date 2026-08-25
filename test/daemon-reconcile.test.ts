@@ -39,7 +39,7 @@ import { acquireLease } from "../src/core/registry/lease.ts";
 import { LOCK_REFRESH_MS } from "../src/core/registry/locks.ts";
 import { environmentKey, pointerLockKey } from "../src/core/registry/paths.ts";
 import { writePlacement } from "../src/core/registry/placement.ts";
-import { createProject } from "../src/core/registry/projects.ts";
+import { blockProject, createProject, unblockProject } from "../src/core/registry/projects.ts";
 import { importVarsetKey, putVarset, sealVarset } from "../src/core/registry/varsets.ts";
 import type { PlainVarset, SplitEntry } from "../src/core/types/registry.ts";
 import type { IngressDesired, IngressDriver } from "../src/core/types/ingress.ts";
@@ -755,6 +755,70 @@ describe("an environment that is taken out of the registry", () => {
       { id: processIdOf(BUILD_ONE), graceMs: world.driver.stopGraceMs },
     ]);
     expect(world.reconciler.status().processes).toEqual([]);
+  });
+});
+
+describe("a project an admin has blocked", () => {
+  it("STOPS what runs for it, rather than only refusing new traffic", async () => {
+    const world = await seededWorld();
+    await world.reconciler.runOnce();
+    expect(world.reconciler.status().processes).toHaveLength(1);
+
+    await blockProject(world.registry, PROJECT);
+    const plan = await world.reconciler.runOnce();
+
+    /*
+     * A block that only turned callers away at the ingress would leave the
+     * application running, serving anything already routed to it and costing the
+     * fleet exactly what it did before. It leaves by the same door a reassigned
+     * environment leaves by: it is not in the desired state, so the leftover
+     * sweep stops it.
+     */
+    expect(plan).toEqual([
+      {
+        type: "stop",
+        processId: processIdOf(BUILD_ONE),
+        reason: "environment is no longer served by this node",
+      },
+    ]);
+    expect(world.supervisor.stopped).toEqual([
+      { id: processIdOf(BUILD_ONE), graceMs: world.driver.stopGraceMs },
+    ]);
+    expect(world.reconciler.status().processes).toEqual([]);
+  });
+
+  it("takes its routes out of the ingress with them", async () => {
+    const applied: IngressDesired[] = [];
+    const world = await seededWorld({
+      ingress: { apply: (d) => (applied.push(d), Promise.resolve()) },
+    });
+    await world.reconciler.runOnce();
+    expect(applied.at(-1)?.routes.map((route) => route.host)).toContain(
+      `${PROJECT}--${ENVIRONMENT}.apps.test`,
+    );
+
+    await blockProject(world.registry, PROJECT);
+    await world.reconciler.runOnce();
+
+    /* Nothing in the route renderer knows what a block is, and nothing in it
+       needs to: the routing is rendered from what this node serves. Its hosts
+       are not held open for a wake either — a blocked project answers nothing,
+       woken or not. */
+    expect(applied.at(-1)?.routes).toEqual([]);
+    expect(applied.at(-1)?.wake?.hosts ?? []).toEqual([]);
+  });
+
+  it("starts it again on the pass after the block is lifted", async () => {
+    const world = await seededWorld();
+    await world.reconciler.runOnce();
+    await blockProject(world.registry, PROJECT);
+    await world.reconciler.runOnce();
+
+    await unblockProject(world.registry, PROJECT);
+    const plan = await world.reconciler.runOnce();
+
+    expect(plan.map((action) => action.type)).toEqual(["rollout"]);
+    expect(world.reconciler.status().processes.map((entry) => entry.build)).toEqual([BUILD_ONE]);
   });
 });
 

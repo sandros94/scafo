@@ -4,7 +4,7 @@ import { isCasConflict, namesFromKeys } from "./_shared.ts";
 import { createJson, deleteKey, readJson, requireJson, updateJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
 import { type LeaseHandle, verifyLease } from "./lease.ts";
-import { nodeKey, nodesPrefix } from "./paths.ts";
+import { nodeKey, nodesPrefix, operatorKey } from "./paths.ts";
 
 /** How often a running daemon refreshes its own record's `heartbeatAt`. */
 export const NODE_HEARTBEAT_INTERVAL_MS: number = 30_000;
@@ -25,9 +25,31 @@ export const NODE_LIVENESS_WINDOW_MS: number = 3 * NODE_HEARTBEAT_INTERVAL_MS;
  * Replacing it wholesale is also what un-drains a node: a record left behind by
  * a graceful shutdown carries `drainingAt`, and the boot that overwrites it puts
  * the node back in service. A node that has started is a node that serves.
+ *
+ * ONE ID IS ONE IDENTITY, and this is the second of the two sides it is enforced
+ * from ({@link trustOperator} is the other). A machine registered under an id
+ * the fleet trusts as an OPERATOR key would take that key's identity — every
+ * node of the installation would then verify an operator's tokens against a
+ * machine's public key, which is the escalation the two namespaces exist to make
+ * unreachable. Refused with `ScafoError("reference-held")`.
+ *
+ * THE WORDING IS FREE HERE and the check costs one read on a path taken once per
+ * boot. This is the BUCKET PLANE: whoever reaches it holds the bucket's own
+ * credentials, and could write either record by hand — so there is nothing to
+ * withhold from them, unlike the operator-facing side of the same invariant,
+ * which says only that the id is taken.
  */
 export async function registerNode(ctx: RegistryContext, record: NodeRecord): Promise<NodeRecord> {
   const key = nodeKey(record.id);
+
+  if ((await readJson(ctx, operatorKey(record.id))) !== null) {
+    throw new ScafoError("reference-held", "Id belongs to an operator key of this installation", {
+      detail:
+        `"${record.id}" is a key this fleet trusts, and a machine registered under it would ` +
+        `take that key's identity — every node would verify its tokens against this machine's ` +
+        `public key; give the node another id, or revoke the key first`,
+    });
+  }
 
   try {
     await createJson(ctx, key, record);

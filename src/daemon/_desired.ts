@@ -9,7 +9,7 @@ import { listEnvironments } from "../core/registry/environments.ts";
 import { environmentKey } from "../core/registry/paths.ts";
 import { type ResolvedParkPolicy, resolveParkPolicy } from "../core/registry/park.ts";
 import { listPlacements } from "../core/registry/placement.ts";
-import { listProjects } from "../core/registry/projects.ts";
+import { isProjectBlocked, listProjects } from "../core/registry/projects.ts";
 import { getVarsetEnvelope, openVarset } from "../core/registry/varsets.ts";
 import { listBuildWakes, readEnvironmentWake } from "../core/registry/wake.ts";
 import {
@@ -209,6 +209,29 @@ async function readProject(
   nodeId: string,
   gate: ConcurrencyGate,
 ): Promise<DesiredState> {
+  /*
+   * A BLOCKED PROJECT CONTRIBUTES NOTHING, and that emptiness is the whole
+   * enforcement. An environment leaves by exactly the door a retired or a
+   * reassigned one leaves by — it is absent from the desired state, so the next
+   * pass's leftover sweep stops whatever still runs for it, and the routing,
+   * which is rendered from what this node serves, stops naming its hosts. There
+   * is no second mechanism, and nothing downstream of here knows what a block
+   * is.
+   *
+   * NOT REPORTED AS PARKED EITHER. Parked promises that a request wakes it; a
+   * blocked project's hosts are refused rather than held open, so listing them
+   * there would route live traffic at a daemon that will answer 404 and stamp
+   * nothing.
+   *
+   * It is read BEFORE the listings rather than beside them: a blocked project
+   * costs one read and stops, which is what a fleet carrying a suspended tenant
+   * should cost per pass. Absent reads as unblocked — a project deleted between
+   * the listing and this read has no environments to find anyway.
+   */
+  if (await gate.run(() => isProjectBlocked(registry, project))) {
+    return { environments: [], placements: [], parked: [], failures: [] };
+  }
+
   /* One listing of each kind for the whole project, rather than two reads per
      environment: only the environments that HAVE a decision cost a placement
      read at all. */

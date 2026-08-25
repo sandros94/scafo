@@ -31,6 +31,28 @@ export function assertNodeId(id: string): void {
   }
 }
 
+/**
+ * The same charset as a node id, said separately because it is a different
+ * NAME for the same rule.
+ *
+ * ONE ID SPACE, TWO NAMESPACES, and the shared regular expression is what makes
+ * that true rather than nearly true: a machine and an operator key are refused
+ * each other's ids ({@link nodeKey}, {@link operatorKey} and the guards in
+ * `registry/nodes.ts` and `registry/operators.ts`), and a check like that is
+ * only sound while both sides accept exactly the same strings. Were the two
+ * charsets to drift apart, an id one namespace could hold and the other could
+ * not would slip past the guard on the side that refuses it early.
+ *
+ * Throws `ScafoError("invalid-slug")`.
+ */
+export function assertOperatorId(id: string): void {
+  if (!NODE_ID_RE.test(id)) {
+    throw new ScafoError("invalid-slug", "Invalid operator id", {
+      detail: `"${id}" must be 1-128 lowercase alphanumerics, hyphens or underscores`,
+    });
+  }
+}
+
 export function metaKey(): string {
   return `${ROOT}/meta.json`;
 }
@@ -45,6 +67,7 @@ export function probeKey(token: string): string {
   return `${ROOT}/probe/${token}.json`;
 }
 
+/** Prefix the MACHINES of the fleet live under, and nothing else. */
 export function nodesPrefix(): string {
   return `${ROOT}/nodes/`;
 }
@@ -52,6 +75,33 @@ export function nodesPrefix(): string {
 export function nodeKey(id: string): string {
   assertNodeId(id);
   return `${nodesPrefix()}${id}.json`;
+}
+
+/**
+ * Prefix the OPERATOR KEYS the fleet trusts live under.
+ *
+ * A NAMESPACE OF ITS OWN, and it is the structural half of a boundary the code
+ * used to keep by convention. Operator records once lived among the machines
+ * under {@link nodesPrefix}, told apart by an address a machine would never
+ * publish — which made one keyspace do two jobs. Every listing of the machines
+ * had to know what an operator looked like or show one as a node that never
+ * answers; a node id and an operator id could collide; and the refusal that kept
+ * them apart had to say what was in the way, which meant naming a MACHINE's
+ * internal address to whoever asked for the id.
+ *
+ * Split, a prefix listing IS the filtered view, and neither surface reads the
+ * other's keys. What the split does not change is what a VERIFIER does with
+ * them: a token is resolved against whichever namespace holds its `kid`, because
+ * a node calling a peer and an operator calling a node are the same kind of
+ * caller on every route but key administration.
+ */
+export function operatorsPrefix(): string {
+  return `${ROOT}/operators/`;
+}
+
+export function operatorKey(id: string): string {
+  assertOperatorId(id);
+  return `${operatorsPrefix()}${id}.json`;
 }
 
 /**

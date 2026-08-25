@@ -50,9 +50,10 @@ import {
   readMeta,
   type RegistryContext,
   nodeKey,
+  operatorKey as operatorRecordKey,
   trustKey,
 } from "../../src/core/registry/index.ts";
-import type { NodeRecord, TrustPolicy } from "../../src/core/types/registry.ts";
+import type { NodeRecord, OperatorRecord, TrustPolicy } from "../../src/core/types/registry.ts";
 import type { ProcessStatus } from "../../src/core/types/supervisor.ts";
 import {
   NODE_IMAGE,
@@ -283,8 +284,11 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expectCleanExit(result);
 
       operatorKey = JSON.parse(await readFile(keyPath, "utf8")) as OperatorKeyFile;
-      const record = await readJson<NodeRecord>(registry, nodeKey(operatorKey.id));
+      /* Filed under the OPERATORS prefix, in a keyspace of its own: an operator
+         key is not a machine of the fleet and no longer looks like one. */
+      const record = await readJson<OperatorRecord>(registry, operatorRecordKey(operatorKey.id));
       expect(record?.value.publicKey.x).toBe(operatorKey.publicKey.x);
+      expect(await readJson(registry, nodeKey(operatorKey.id))).toBeNull();
       observed.operatorId = operatorKey.id;
     },
     STEP_TIMEOUT_MS,

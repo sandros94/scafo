@@ -18,7 +18,7 @@ import {
   POINTER_LOCK_SPACE,
   pointerLockName,
 } from "../core/registry/pointer-lock.ts";
-import { createProject } from "../core/registry/projects.ts";
+import { assertProjectUnblocked, createProject } from "../core/registry/projects.ts";
 import { stampEnvironmentWake } from "../core/registry/wake.ts";
 import type { DeployRunner } from "../core/types/deploy.ts";
 import type {
@@ -315,7 +315,20 @@ export function createDeployService(
       /* Done before the deploy is acknowledged: a project or environment name
          the registry refuses is the caller's mistake and must be answered as
          one, not buried in a status it has to poll for. */
-      await createProject(daemon.registry, { slug: meta.project });
+      const project = await createProject(daemon.registry, { slug: meta.project });
+      /*
+       * A BLOCKED PROJECT ACCEPTS NOTHING, checked off the record `createProject`
+       * has just handed back rather than with a read of its own — an existing
+       * project is returned as it stands, and a project this call brought into
+       * being cannot be blocked.
+       *
+       * Refused HERE, at intake, so nothing is bundled, uploaded or pointed at,
+       * and the caller is told outright instead of polling a status for a
+       * failure. It names the block because whoever reaches this line has
+       * already been shown to reach the project — a caller outside its scope was
+       * refused before the artifact was read.
+       */
+      assertProjectUnblocked(project);
       await ensureEnvironment(daemon, meta.project, meta.environment, {
         ...(meta.replicas === undefined ? {} : { replicas: meta.replicas }),
         ...(meta.nodeSelector === undefined ? {} : { nodeSelector: meta.nodeSelector }),
