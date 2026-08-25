@@ -7,7 +7,7 @@
 import type { JWK_RSA_Private, JWK_RSA_Public, JWKSet } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { sign as signJws } from "unjwt/jws";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createOidcVerifier, OIDC_AUDIENCE, type OidcVerifier } from "../src/core/auth/index.ts";
 import type { ScafoError } from "../src/core/error.ts";
 import { createProject, setTrustPolicy } from "../src/core/registry/index.ts";
@@ -85,8 +85,7 @@ describe("a token the policy admits", () => {
     const identity = await verifier.verify(await mint(), TRUSTING);
 
     expect(identity).toEqual({
-      iss: ISS,
-      sub: SUBJECT,
+      actor: { issuer: ISS, subject: SUBJECT },
       project: TRUSTING,
       issuer: { iss: ISS, aud: OIDC_AUDIENCE, subjects: [SUBJECT_GLOB] },
     });
@@ -96,7 +95,7 @@ describe("a token the policy admits", () => {
   it("accepts an aud array that names us, and only then", async () => {
     await expect(
       verifier.verify(await mint({ aud: [OIDC_AUDIENCE, "other"] }), TRUSTING),
-    ).resolves.toMatchObject({ sub: SUBJECT });
+    ).resolves.toMatchObject({ actor: { subject: SUBJECT } });
 
     expect(await refusal(await mint({ aud: ["other", "third"] }))).toMatchObject(AUTH_INVALID);
     expect(await refusal(await mint({ aud: [] }))).toMatchObject(AUTH_INVALID);
@@ -105,22 +104,22 @@ describe("a token the policy admits", () => {
   it("accepts an nbf that has already passed", async () => {
     await expect(
       verifier.verify(await mint({ nbf: nowS() - 10 }), TRUSTING),
-    ).resolves.toMatchObject({ sub: SUBJECT });
+    ).resolves.toMatchObject({ actor: { subject: SUBJECT } });
   });
 });
 
 describe("trust is checked before anything is fetched", () => {
   it("refuses a project with no trust policy without a single request", async () => {
-    expect(await refusal(await mint(), UNCONFIGURED)).toMatchObject(TRUST_MISMATCH);
+    expect(await refusal(await mint(), UNCONFIGURED)).toMatchObject(AUTH_INVALID);
     expect(calls).toEqual([]);
   });
 
   it("refuses an issuer the project does not name, without a single request", async () => {
     /* SSRF guard: the token picks the URL, so nothing may be fetched until the
        project's own policy has named that issuer. */
-    expect(await refusal(await mint(), OTHER_ISSUER)).toMatchObject(TRUST_MISMATCH);
+    expect(await refusal(await mint(), OTHER_ISSUER)).toMatchObject(AUTH_INVALID);
     expect(await refusal(await mint({ iss: "http://169.254.169.254" }))).toMatchObject(
-      TRUST_MISMATCH,
+      AUTH_INVALID,
     );
     expect(calls).toEqual([]);
   });
@@ -138,7 +137,7 @@ describe("subject glob semantics", () => {
   it("lets * span a path, but not the segment before it", async () => {
     await expect(
       verifier.verify(await mint({ sub: "repo:acme/app:ref:refs/heads/feat/x" }), TRUSTING),
-    ).resolves.toMatchObject({ sub: "repo:acme/app:ref:refs/heads/feat/x" });
+    ).resolves.toMatchObject({ actor: { subject: "repo:acme/app:ref:refs/heads/feat/x" } });
 
     expect(await refusal(await mint({ sub: "repo:acme/app:ref:refs/tags/v1" }))).toMatchObject(
       TRUST_MISMATCH,
@@ -150,7 +149,7 @@ describe("subject glob semantics", () => {
 
     await expect(
       verifier.verify(await mint({ sub: "repo:a.b/c+d(e)" }), TRUSTING),
-    ).resolves.toMatchObject({ sub: "repo:a.b/c+d(e)" });
+    ).resolves.toMatchObject({ actor: { subject: "repo:a.b/c+d(e)" } });
 
     expect(await refusal(await mint({ sub: "repo:axb/c+d(e)" }))).toMatchObject(TRUST_MISMATCH);
     expect(await refusal(await mint({ sub: "repo:a.b/ccd(e)" }))).toMatchObject(TRUST_MISMATCH);
@@ -213,7 +212,7 @@ describe("a token that does not hold up is just auth-invalid", () => {
     discoveryDoc = { issuer: ISS, jwks_uri: "file:///etc/passwd" };
     expect(await refusal(await mint())).toMatchObject(AUTH_INVALID);
     /* Whatever the discovery document says, nothing but http(s) is fetched. */
-    expect(calls).toEqual([DISCOVERY_URL, DISCOVERY_URL, DISCOVERY_URL]);
+    expect(calls).toEqual([DISCOVERY_URL]);
   });
 
   it("refuses when the key set is not a key set", async () => {
@@ -231,6 +230,20 @@ describe("a token that does not hold up is just auth-invalid", () => {
 });
 
 describe("the JWKS cache", () => {
+  it.each([
+    { jwksCacheEntries: 0 },
+    { jwksCacheEntries: -1 },
+    { jwksCacheEntries: Number.NaN },
+    { jwksCacheEntries: Number.POSITIVE_INFINITY },
+    { jwksFailureTtlS: -1 },
+    { jwksFailureTtlS: Number.NaN },
+    { jwksFailureTtlS: Number.POSITIVE_INFINITY },
+  ])("refuses an invalid public cache option: %o", (options) => {
+    expect(() => createOidcVerifier(clock.ctx, { now, fetchFn, ...options })).toThrowError(
+      expect.objectContaining({ code: "invalid-input" }),
+    );
+  });
+
   it("discovers once per TTL, then refetches", async () => {
     const token = await mint();
 
@@ -241,6 +254,79 @@ describe("the JWKS cache", () => {
     clock.tick((JWKS_TTL_S + 1) * 1000);
     await verifier.verify(token, TRUSTING);
     expect(calls).toEqual([DISCOVERY_URL, JWKS_URL, DISCOVERY_URL, JWKS_URL]);
+  });
+
+  it("coalesces concurrent discovery and key-set requests for one issuer", async () => {
+    const token = await mint();
+
+    await Promise.all(Array.from({ length: 12 }, () => verifier.verify(token, TRUSTING)));
+
+    expect(calls).toEqual([DISCOVERY_URL, JWKS_URL]);
+  });
+
+  it("backs off failed discovery and evicts old negative entries", async () => {
+    const issuers = ["https://issuer-a.test", "https://issuer-b.test", "https://issuer-c.test"];
+    await setTrustPolicy(clock.ctx, TRUSTING, {
+      v: 1,
+      issuers: issuers.map((iss) => ({ iss, aud: OIDC_AUDIENCE, subjects: [SUBJECT_GLOB] })),
+    });
+    discoveryDoc = null;
+    verifier = createOidcVerifier(clock.ctx, {
+      now,
+      fetchFn,
+      jwksCacheEntries: 2,
+      jwksFailureTtlS: 60,
+    });
+
+    const one = await mint({ iss: issuers[0] });
+    await refusal(one);
+    await refusal(one);
+    expect(calls).toEqual([`${issuers[0]}/.well-known/openid-configuration`]);
+
+    await refusal(await mint({ iss: issuers[1] }));
+    await refusal(await mint({ iss: issuers[2] }));
+    await refusal(one);
+    expect(calls).toHaveLength(4);
+  });
+
+  it("refuses a distinct issuer locally while every bounded entry is fetching", async () => {
+    const issuers = ["https://issuer-a.test", "https://issuer-b.test", "https://issuer-c.test"];
+    await setTrustPolicy(clock.ctx, TRUSTING, {
+      v: 1,
+      issuers: issuers.map((iss) => ({ iss, aud: OIDC_AUDIENCE, subjects: [SUBJECT_GLOB] })),
+    });
+
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const started: string[] = [];
+    verifier = createOidcVerifier(clock.ctx, {
+      now,
+      jwksCacheEntries: 2,
+      fetchFn(input) {
+        const url =
+          input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
+        started.push(url);
+        return gate.then(() => {
+          const issuer = url.replace(/\/.well-known\/openid-configuration$/, "");
+          const body = url.endsWith("/.well-known/openid-configuration")
+            ? { issuer, jwks_uri: `${issuer}/keys.json` }
+            : ({ keys: [keys.publicKey] } satisfies JWKSet);
+          return new Response(JSON.stringify(body));
+        });
+      },
+    });
+
+    const first = verifier.verify(await mint({ iss: issuers[0] }), TRUSTING);
+    const second = verifier.verify(await mint({ iss: issuers[1] }), TRUSTING);
+    await vi.waitFor(() => expect(started).toHaveLength(2));
+
+    expect(await refusal(await mint({ iss: issuers[2] }))).toMatchObject(AUTH_INVALID);
+    expect(started).toHaveLength(2);
+
+    release?.();
+    await Promise.all([first, second]);
   });
 });
 

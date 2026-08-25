@@ -257,14 +257,18 @@ export interface ProjectRecord {
   labels?: Record<string, string>;
 }
 
-/** Provenance of a build, as attested by the CI issuer that produced it. */
+/** Self-asserted source metadata stated by the caller that uploaded a build. */
 export interface BuildSource {
   provider: string;
   repo: string;
   ref: string;
   commit: string;
-  /** OIDC `sub` claim of the workload that uploaded the build. */
-  oidcSub?: string;
+}
+
+/** Immutable identity verified from a workload token at deploy intake. */
+export interface OidcActor {
+  issuer: string;
+  subject: string;
 }
 
 /**
@@ -289,6 +293,8 @@ export interface BuildRecord {
    */
   environment?: string;
   source?: BuildSource;
+  /** Present only when a verified workload token uploaded this build. */
+  oidc?: OidcActor;
   createdAt: string;
 }
 
@@ -305,6 +311,8 @@ export interface BuildInput {
   /** Environment the build was published into; see {@link BuildRecord.environment}. */
   environment?: string;
   source?: BuildSource;
+  /** Auth-owned workload identity; deploy intake, not request metadata, sets this. */
+  oidc?: OidcActor;
 }
 
 /** Which build an environment currently points at, plus the previous one for rollback. */

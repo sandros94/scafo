@@ -77,6 +77,7 @@ let app: H3;
 let runs: DeployRunInput[];
 let publish: () => Promise<DeployRunResult>;
 let running: RuntimeProcess[];
+let issuerCalls: string[];
 
 beforeAll(async () => {
   issuerKeys = await generateJWK("RS256", { kid: KID });
@@ -91,6 +92,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   clock = ctxWith(new MemoryCasStore());
   runs = [];
+  issuerCalls = [];
   running = [];
   publish = () => Promise.resolve({ celldVersionId: VERSION_ID });
 
@@ -179,8 +181,8 @@ describe("who may deploy", () => {
        project that does not name its issuer is authorization, and is said so. */
     const response = await upload(await workloadToken(), { ...meta(), project: RIVAL });
 
-    expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:trust-mismatch" });
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual(AUTH_INVALID_PROBLEM);
     expect(runs).toEqual([]);
   });
 
@@ -190,6 +192,67 @@ describe("who may deploy", () => {
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:trust-mismatch" });
     expect(runs).toEqual([]);
+  });
+
+  it("keeps pre-verification failures byte-identical and never fetches an untrusted issuer", async () => {
+    const valid = await workloadToken();
+    const [, payload, signature] = valid.split(".");
+    const noPolicy = await upload(valid, { ...meta(), project: RIVAL });
+    const wrongIssuer = await upload(await workloadToken({ iss: "https://untrusted.test" }));
+    const badSignature = await upload(`${valid.split(".")[0]}.${payload}.${signature}x`);
+
+    const bodies = await Promise.all([noPolicy.text(), wrongIssuer.text(), badSignature.text()]);
+    expect(bodies[0]).toBe(bodies[1]);
+    expect(bodies[1]).toBe(bodies[2]);
+    expect(issuerCalls).toEqual([DISCOVERY_URL, JWKS_URL]);
+  });
+
+  it("persists only the verified workload actor beside self-asserted source metadata", async () => {
+    const response = await upload(await workloadToken(), {
+      ...meta(),
+      source: {
+        provider: "forge",
+        repo: "acme/shop",
+        ref: "refs/heads/main",
+        commit: "abc123",
+      },
+    });
+
+    const status = await settled((await responseId(response)) as string);
+    const build = await getBuild(clock.ctx, PROJECT, status.build as string);
+    expect(build.source).toEqual({
+      provider: "forge",
+      repo: "acme/shop",
+      ref: "refs/heads/main",
+      commit: "abc123",
+    });
+    expect(build.oidc).toEqual({ issuer: ISS, subject: SUBJECT });
+  });
+
+  it("rejects caller-supplied OIDC provenance and leaves node deploys without it", async () => {
+    const rejected = await upload(await operatorToken(), {
+      ...meta(),
+      oidc: { issuer: "https://spoofed.test", subject: "spoof" },
+    });
+    expect(rejected.status).toBe(400);
+    await expect(rejected.json()).resolves.toMatchObject({ type: "urn:scafo:invalid-input" });
+
+    const legacy = await upload(await operatorToken(), {
+      ...meta(),
+      source: {
+        provider: "forge",
+        repo: "acme/shop",
+        ref: "main",
+        commit: "abc",
+        oidcSub: "spoof",
+      },
+    });
+    expect(legacy.status).toBe(400);
+    await expect(legacy.json()).resolves.toMatchObject({ type: "urn:scafo:invalid-input" });
+
+    const accepted = await upload(await operatorToken());
+    const status = await settled((await responseId(accepted)) as string);
+    expect((await getBuild(clock.ctx, PROJECT, status.build as string)).oidc).toBeUndefined();
   });
 });
 
@@ -740,8 +803,8 @@ describe("moving an environment's alias", () => {
       build: VERSION_ID,
     });
 
-    expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:trust-mismatch" });
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual(AUTH_INVALID_PROBLEM);
   });
 
   it("refuses a flip that names no build", async () => {
@@ -1013,6 +1076,7 @@ function workloadToken(overrides?: Record<string, unknown>): Promise<string> {
 /** Serves the issuer's discovery document and key set, and nothing else. */
 function issuerFetch(input: RequestInfo | URL): Promise<Response> {
   const url = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
+  issuerCalls.push(url);
   const body =
     url === DISCOVERY_URL
       ? { issuer: ISS, jwks_uri: JWKS_URL }

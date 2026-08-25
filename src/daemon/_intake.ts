@@ -137,7 +137,7 @@ export async function verifyWorkload(
   verifiers: DeployVerifiers,
   event: H3Event,
   project: string,
-): Promise<DeployCaller> {
+): Promise<Extract<DeployCaller, { kind: "workload" }>> {
   /* Reads the header again rather than being handed the token: it is the same
      header, and the two halves stay independently callable. */
   const token = bearerToken(event);
@@ -296,6 +296,11 @@ function readSplitEntry(value: unknown, at: number): SplitEntry {
 
 function parseMeta(raw: string): DeployMeta {
   const body = asObject(parseJson(raw, `the "meta" part`), `the "meta" part`);
+  if (body.oidc !== undefined) {
+    throw invalid(
+      `"oidc" is not accepted; OIDC provenance is recorded from the verified workload token`,
+    );
+  }
 
   const project = text(body, "project", true);
   assertSlug(project);
@@ -352,14 +357,17 @@ function readSource(value: unknown): BuildSource | undefined {
   if (value === undefined || value === null) return undefined;
 
   const raw = asObject(value, `"source"`);
+  if (raw.oidcSub !== undefined) {
+    throw invalid(
+      `"source.oidcSub" is not accepted; OIDC provenance is recorded from the verified workload token`,
+    );
+  }
   const source: BuildSource = {
     provider: text(raw, "provider", true),
     repo: text(raw, "repo", true),
     ref: text(raw, "ref", true),
     commit: text(raw, "commit", true),
   };
-  const oidcSub = text(raw, "oidcSub");
-  if (oidcSub !== undefined) source.oidcSub = oidcSub;
   return source;
 }
 

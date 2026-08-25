@@ -498,7 +498,8 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     const operator = await tryNodeToken(verifiers, event);
     const request = await readDeployRequest(event);
     if (operator === null) {
-      await verifyWorkload(verifiers, event, request.meta.project);
+      const workload = await verifyWorkload(verifiers, event, request.meta.project);
+      request.meta.oidc = workload.identity.actor;
     } else if (operator.kind === "node") {
       /* The project is in the BODY here, so the scope cannot be checked where
          `verifyCaller` checks it for every other route — but it is still

@@ -29,6 +29,7 @@ export async function createBuild(
   if (input.builtWithVarset !== undefined) record.builtWithVarset = input.builtWithVarset;
   if (input.environment !== undefined) record.environment = input.environment;
   if (input.source !== undefined) record.source = input.source;
+  if (input.oidc !== undefined) record.oidc = input.oidc;
 
   try {
     await createJson(ctx, key, record);

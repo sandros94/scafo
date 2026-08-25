@@ -24,6 +24,7 @@ import type { DeployRunner } from "../core/types/deploy.ts";
 import type {
   BuildSource,
   NodeSelector,
+  OidcActor,
   ReplicaCount,
   ScafoWarning,
 } from "../core/types/registry.ts";
@@ -95,6 +96,8 @@ export interface DeployMeta {
    */
   nodeSelector?: NodeSelector;
   source?: BuildSource;
+  /** Verified workload identity, assigned only by the deploy-auth boundary. */
+  oidc?: OidcActor;
 }
 
 export interface DeployServiceOptions {
@@ -288,6 +291,7 @@ export function createDeployService(
         environment: meta.environment,
         ...(meta.builtWithVarset === undefined ? {} : { builtWithVarset: meta.builtWithVarset }),
         ...(meta.source === undefined ? {} : { source: meta.source }),
+        ...(meta.oidc === undefined ? {} : { oidc: meta.oidc }),
       });
       update(id, { build: build.id });
 

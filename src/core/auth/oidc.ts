@@ -3,7 +3,7 @@
 import type { JWSAlgorithm } from "unjwt/jws";
 import { verify as verifyJws } from "unjwt/jws";
 import { ScafoError } from "../error.ts";
-import type { TrustIssuer, TrustPolicy } from "../types/registry.ts";
+import type { OidcActor, TrustIssuer, TrustPolicy } from "../types/registry.ts";
 import { readJson } from "../registry/cas.ts";
 import type { RegistryContext } from "../registry/context.ts";
 import { trustKey } from "../registry/paths.ts";
@@ -40,6 +40,10 @@ export interface OidcVerifierOptions {
   skewS?: number;
   /** How long an issuer's JWKS is reused, in seconds. Defaults to 300. */
   jwksTtlS?: number;
+  /** How long a failed issuer discovery is backed off, in seconds. Defaults to 30. */
+  jwksFailureTtlS?: number;
+  /** Maximum issuer key and failure entries remembered at once. Defaults to 64. */
+  jwksCacheEntries?: number;
   /** Overrides the global `fetch`, for tests and for proxied deployments. */
   fetchFn?: typeof fetch;
   now?: () => Date;
@@ -47,8 +51,8 @@ export interface OidcVerifierOptions {
 
 /** Who a verified workload token belongs to, and which policy entry admitted it. */
 export interface OidcIdentity {
-  iss: string;
-  sub: string;
+  /** The auth-owned identity persisted with an admitted workload build. */
+  actor: OidcActor;
   project: string;
   issuer: TrustIssuer;
 }
@@ -66,7 +70,9 @@ export interface OidcVerifier {
 /**
  * Builds a verifier for deploy-intake tokens. Trust is checked before anything
  * is fetched: an issuer the project does not name is refused without a request,
- * so a token can never steer the daemon at a URL of its choosing.
+ * so a token can never steer the daemon at a URL of its choosing. An issuer or
+ * policy selected from unsigned claims is not an authorization result: it is
+ * only enough to choose the preconfigured discovery endpoint.
  */
 export function createOidcVerifier(ctx: RegistryContext, opts?: OidcVerifierOptions): OidcVerifier {
   const aud = opts?.aud ?? OIDC_AUDIENCE;
@@ -74,7 +80,13 @@ export function createOidcVerifier(ctx: RegistryContext, opts?: OidcVerifierOpti
   const now = opts?.now ?? ((): Date => new Date());
   const fetchFn: typeof fetch = opts?.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
 
-  const jwks = createJwksCache({ ttlS: opts?.jwksTtlS ?? 300, fetchFn, now });
+  const jwks = createJwksCache({
+    ttlS: cacheDuration(opts?.jwksTtlS ?? 300, "jwksTtlS"),
+    failureTtlS: cacheDuration(opts?.jwksFailureTtlS ?? 30, "jwksFailureTtlS"),
+    maxEntries: cacheEntries(opts?.jwksCacheEntries ?? 64),
+    fetchFn,
+    now,
+  });
 
   return {
     async verify(token, project) {
@@ -82,10 +94,10 @@ export function createOidcVerifier(ctx: RegistryContext, opts?: OidcVerifierOpti
 
       const policy = await readJson<TrustPolicy>(ctx, trustKey(project));
       if (policy === null) {
-        throw trustMismatch(`project "${project}" has no trust policy`);
+        throw authInvalid("Project has no trust policy");
       }
       if (!policy.value.issuers.some((issuer) => issuer.iss === iss)) {
-        throw trustMismatch(`project "${project}" does not trust issuer "${iss}"`);
+        throw authInvalid("Issuer is not configured for this project");
       }
 
       let payload: unknown;
@@ -107,7 +119,7 @@ export function createOidcVerifier(ctx: RegistryContext, opts?: OidcVerifierOpti
       if (issuer === null) {
         throw trustMismatch(`"${sub}" is not a trusted subject of "${iss}" for "${project}"`);
       }
-      return { iss, sub, project, issuer };
+      return { actor: { issuer: iss, subject: sub }, project, issuer };
     },
   };
 }
@@ -130,4 +142,22 @@ function assertWindow(claims: Record<string, unknown>, nowS: number, skewS: numb
 
 function trustMismatch(detail: string): ScafoError {
   return new ScafoError("trust-mismatch", "Trust policy does not admit this token", { detail });
+}
+
+function cacheDuration(value: number, name: string): number {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new ScafoError("invalid-input", `Invalid ${name}`, {
+      detail: `${name} must be a finite number of seconds at least zero`,
+    });
+  }
+  return value;
+}
+
+function cacheEntries(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new ScafoError("invalid-input", "Invalid jwksCacheEntries", {
+      detail: "jwksCacheEntries must be a positive safe integer",
+    });
+  }
+  return value;
 }
