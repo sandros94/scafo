@@ -2,7 +2,7 @@
 
 import { isScafoError } from "../core/error.ts";
 import { platformLabel } from "../core/placement/hosts.ts";
-import { APEX_ENVIRONMENT } from "../core/placement/routes.ts";
+import { APEX_ENVIRONMENT, servingBuilds } from "../core/placement/routes.ts";
 import { getBuild } from "../core/registry/builds.ts";
 import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
@@ -16,7 +16,8 @@ import type { ParkedEnvironment } from "./_desired.ts";
 
 /**
  * What a wakeable host resolves to: an environment to bring back whole, or one
- * superseded build to recall at its own hash host.
+ * build at its own hash host — an active leg during routing propagation, or a
+ * superseded build to recall.
  */
 export type WakeTarget =
   | { kind: "environment"; project: string; env: EnvironmentRecord; policy: ResolvedParkPolicy }
@@ -26,6 +27,8 @@ export type WakeTarget =
       env: EnvironmentRecord;
       build: BuildRecord;
       policy: ResolvedParkPolicy;
+      /** Whether this build currently carries traffic on the environment's own hosts. */
+      active: boolean;
     };
 
 /**
@@ -52,9 +55,9 @@ export type WakeTarget =
  *
  * - `<project>.<domain>` — the project's {@link APEX_ENVIRONMENT}.
  * - `<project>--<env>.<domain>` — that environment of that project.
- * - `<project>--<build>.<domain>` — that build, recalled at its own host. Read
- *   only when nothing of the project answers to `<build>` as an environment
- *   name, because the environment is what the label was rendered from first.
+ * - `<project>--<build>.<domain>` — that build at its own host. Read only when
+ *   nothing of the project answers to `<build>` as an environment name, because
+ *   the environment is what the label was rendered from first.
  * - any custom domain a PARKED environment's record mirrors.
  *
  * Everything else under a platform domain is a name this installation knows
@@ -94,7 +97,7 @@ async function resolveHost(
 
   /* No environment answers to it, so the label's second half is read as the one
      other thing it can be. An apex host has no second half and stops here. */
-  return ref === undefined ? null : recallableBuild(registry, project, ref);
+  return ref === undefined ? null : recallableBuild(registry, { project, id: ref });
 }
 
 /**
@@ -141,17 +144,18 @@ async function wakeableEnvironment(
 /**
  * The build as a target, or null when nothing may recall it.
  *
- * Three ways a build hash is not wakeable, and they read identically from
- * outside: the build is gone, the record predates recall and does not say which
- * environment's fleet holds its code, or that environment has recall turned off
- * (`recallBuilds`, or a `buildIdleS` of zero, which is the same statement made
- * with a clock).
+ * Three ways a SUPERSEDED build hash is not wakeable, and they read identically
+ * from outside: the build is gone, the record predates recall and does not say
+ * which environment's fleet holds its code, or that environment has recall
+ * turned off (`recallBuilds`, or a `buildIdleS` of zero, which is the same
+ * statement made with a clock). An active alias or split leg needs no recall,
+ * so it remains answerable while routing catches up.
  */
 async function recallableBuild(
   registry: RegistryContext,
-  project: string,
-  id: string,
+  opts: { project: string; id: string },
 ): Promise<WakeTarget | null> {
+  const { project, id } = opts;
   let build: BuildRecord;
   try {
     build = await getBuild(registry, project, id);
@@ -169,9 +173,17 @@ async function recallableBuild(
   if (env === null || env.retiredAt !== undefined) return null;
 
   const policy = resolveParkPolicy(env);
-  if (!recalls(policy)) return null;
+  const active = servingBuilds(env).some((leg) => leg.build === build.id);
+  if (!active && !recalls(policy)) return null;
 
-  return { kind: "build", project, env, build, policy };
+  return {
+    kind: "build",
+    project,
+    env,
+    build,
+    policy,
+    active,
+  };
 }
 
 /** Whether the policy recalls superseded builds at all. */

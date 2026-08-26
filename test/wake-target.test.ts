@@ -110,6 +110,30 @@ describe("a host under a platform domain", () => {
       env: preview,
       build: await getBuild(clock.ctx, PROJECT, SUPERSEDED),
       policy: resolveParkPolicy(preview),
+      active: false,
+    });
+  });
+
+  it("marks an active alias build rather than treating it as a recalled one", async () => {
+    const preview = await deployed(PREVIEW);
+
+    await expect(resolve(`${PROJECT}--${BUILD}.${DOMAIN}`)).resolves.toMatchObject({
+      kind: "build",
+      env: preview,
+      build: { id: BUILD },
+      active: true,
+    });
+  });
+
+  it("takes an active build even when superseded-build recall is disabled", async () => {
+    const preview = await deployed(PREVIEW);
+    await setParkPolicy(clock.ctx, PROJECT, PREVIEW, { recallBuilds: false });
+
+    await expect(resolve(`${PROJECT}--${BUILD}.${DOMAIN}`)).resolves.toMatchObject({
+      kind: "build",
+      env: preview,
+      build: { id: BUILD },
+      active: true,
     });
   });
 

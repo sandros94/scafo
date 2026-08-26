@@ -12,6 +12,7 @@ import {
   renderRoutes,
   type RenderRoutesInput,
   type RouteClaim,
+  servingBuilds,
   servingLegs,
 } from "../src/core/placement/routes.ts";
 import type { EnvironmentRecord, SplitEntry } from "../src/core/types/registry.ts";
@@ -692,6 +693,25 @@ describe("the legs one held request is answered from", () => {
     expect(legs.map((leg) => `${leg.backend.build}:${String(leg.weight)}`)).toEqual([
       `${BUILD}:90`,
       `${OLDER}:10`,
+    ]);
+  });
+
+  it("names the active builds once, with duplicate split weights combined", () => {
+    const { env } = environment(
+      PROJECT,
+      APEX_ENVIRONMENT,
+      BUILD,
+      [],
+      [
+        { build: BUILD, weight: 40 },
+        { build: OLDER, weight: 30 },
+        { build: BUILD, weight: 30 },
+      ],
+    );
+
+    expect(servingBuilds(env)).toEqual([
+      { build: BUILD, weight: 70 },
+      { build: OLDER, weight: 30 },
     ]);
   });
 

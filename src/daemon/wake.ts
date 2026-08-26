@@ -151,8 +151,10 @@ type WakeRun =
  * A HOST WHOSE ENVIRONMENT IS ALREADY SERVED NEEDS NO SPECIAL CASE. Such a
  * request only reaches the daemon through routing lag — the ingress has not yet
  * been told the process is ready — and the ordinary path answers it correctly:
- * the stamp is harmless, the ready process is found on the first look, and the
- * request is proxied without ever being held.
+ * the ready process is found on the first look and the request is proxied
+ * without ever being held. A build-hash request for an active leg writes no
+ * recall stamp; it records environment activity, so that leg remains or becomes
+ * desired as the next pass reads it.
  */
 export function createWakeService(daemon: DaemonContext): WakeService {
   let inFlight = 0;
@@ -246,13 +248,20 @@ export function createWakeService(daemon: DaemonContext): WakeService {
   }
 
   /**
-   * Records that this was asked for. Never swallowed: the stamp is the whole of
-   * what makes the loop start anything, so a wake that cannot be written down is
-   * a wake that will not happen, and holding the request until the deadline
-   * would only report it thirty seconds later.
+   * Records a demand the desired state cannot already derive. Never swallowed:
+   * the stamp is the whole of what makes an environment or superseded build
+   * start, so a wake that cannot be written down is a wake that will not happen,
+   * and holding the request until the deadline would only report it thirty
+   * seconds later. An active build always records environment activity rather
+   * than a build recall: a parked environment needs the stamp to become desired,
+   * and a running one has received meaningful traffic.
    */
   async function stamp(registry: RegistryContext, target: WakeTarget): Promise<void> {
     if (target.kind === "build") {
+      if (target.active) {
+        await stampEnvironmentWake(registry, target.project, target.env.name);
+        return;
+      }
       await stampBuildWake(registry, target.project, target.env.name, target.build.id);
       return;
     }

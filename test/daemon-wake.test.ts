@@ -23,6 +23,7 @@ import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { ParkedEnvironment } from "../src/daemon/_desired.ts";
+import { readDesired } from "../src/daemon/_desired.ts";
 import { type DaemonContext, type DaemonState, createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import {
@@ -41,6 +42,7 @@ import {
 import type { CapacityPlan } from "../src/core/capacity/compute.ts";
 import type { ProblemDetails } from "../src/core/error.ts";
 import { signNodeToken } from "../src/core/auth/index.ts";
+import { createPortAllocator, planReconcile, renderRoutes } from "../src/core/placement/index.ts";
 import {
   acquireLease,
   claimDomain,
@@ -52,6 +54,7 @@ import {
   getEnvironment,
   type LeaseHandle,
   listBuildWakes,
+  placementKey,
   readEnvironmentWake,
   registerNode,
   retireEnvironment,
@@ -373,6 +376,152 @@ describe("waking what this node has parked", () => {
        is not woken by it and is not stamped. */
     expect([...(await listBuildWakes(clock.ctx, PROJECT, PREVIEW)).keys()]).toEqual([SUPERSEDED]);
     await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.toBeNull();
+  });
+
+  it.each([
+    [BUILD, "active alias"],
+    [THIRD, "active split leg"],
+  ])("records an %s build host as environment activity, not a %s recall", async (build, role) => {
+    await setSplit(clock.ctx, PROJECT, PREVIEW, [
+      { build: BUILD, weight: 50 },
+      { build: THIRD, weight: 50 },
+    ]);
+    await setParkPolicy(clock.ctx, PROJECT, PREVIEW, { recallBuilds: false });
+    loop.parked = loop.parked.filter((entry) => entry.env.name !== PREVIEW);
+    loop.processes = [ready(PREVIEW, BUILD, 42_004), ready(PREVIEW, THIRD, 42_008)];
+
+    const response = await ask(`${PROJECT}--${build}.${DOMAIN}`, "/");
+
+    expect(response.status, role).toBe(200);
+    expect(dialled(), role).toEqual([build === BUILD ? 42_004 : 42_008]);
+    expect(loop.kicks, role).toBe(1);
+    await expect(listBuildWakes(clock.ctx, PROJECT, PREVIEW), role).resolves.toEqual(new Map());
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW), role).resolves.toEqual(
+      new Date(clock.nowMs()),
+    );
+    expect(
+      observe.snapshot().events.map((event) => event.type),
+      role,
+    ).toContain("wake.stamped");
+  });
+
+  it("wakes a parked active build through its environment, not a recall", async () => {
+    await setParkPolicy(clock.ctx, PROJECT, PREVIEW, { afterS: 1, recallBuilds: false });
+    clock.tick(1_000);
+    loop.onKick = (): void => {
+      loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+    };
+
+    const response = await ask(`${PROJECT}--${BUILD}.${DOMAIN}`, "/");
+
+    expect(response.status).toBe(200);
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.toEqual(
+      new Date(clock.nowMs()),
+    );
+    await expect(listBuildWakes(clock.ctx, PROJECT, PREVIEW)).resolves.toEqual(new Map());
+    expect(observe.snapshot().events.map((event) => event.type)).toContain("wake.stamped");
+    await expect(counters()).resolves.toEqual({
+      inFlight: 0,
+      admitted: 1,
+      refused: 0,
+      forwarded: 0,
+    });
+    expect(
+      (await readDesired(clock.ctx, { nodeId: NODE_ID, mode: "legacy-fallback" })).environments,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          project: PROJECT,
+          env: expect.objectContaining({ name: PREVIEW }),
+          builds: [expect.objectContaining({ build: expect.objectContaining({ id: BUILD }) })],
+        }),
+      ]),
+    );
+  });
+
+  it("wakes an active build after a nonparked snapshot crosses its idle boundary", async () => {
+    await setParkPolicy(clock.ctx, PROJECT, PREVIEW, { afterS: 1, recallBuilds: false });
+    loop.parked = loop.parked.filter((entry) => entry.env.name !== PREVIEW);
+    tickAtPlacementRead();
+    loop.onKick = (): void => {
+      loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+    };
+
+    const response = await ask(`${PROJECT}--${BUILD}.${DOMAIN}`, "/");
+
+    expect(response.status).toBe(200);
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.toEqual(
+      new Date(clock.nowMs()),
+    );
+    await expect(listBuildWakes(clock.ctx, PROJECT, PREVIEW)).resolves.toEqual(new Map());
+    expect(
+      (await readDesired(clock.ctx, { nodeId: NODE_ID, mode: "legacy-fallback" })).environments,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ env: expect.objectContaining({ name: PREVIEW }) }),
+      ]),
+    );
+  });
+
+  it("wakes an active build at the receiver after a stale nonparked snapshot", async () => {
+    await placedOn(PREVIEW, [NODE_ID]);
+    await setParkPolicy(clock.ctx, PROJECT, PREVIEW, { afterS: 1, recallBuilds: false });
+    loop.parked = loop.parked.filter((entry) => entry.env.name !== PREVIEW);
+    tickAtPlacementRead();
+    loop.onKick = (): void => {
+      loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+    };
+
+    const response = await forwardedAsk(`${PROJECT}--${BUILD}.${DOMAIN}`, "/");
+
+    expect(response.status).toBe(200);
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.toEqual(
+      new Date(clock.nowMs()),
+    );
+    await expect(listBuildWakes(clock.ctx, PROJECT, PREVIEW)).resolves.toEqual(new Map());
+    expect(observe.snapshot().events.map((event) => event.type)).toContain("wake.stamped");
+    await expect(counters()).resolves.toEqual({
+      inFlight: 0,
+      admitted: 1,
+      refused: 0,
+      forwarded: 0,
+    });
+  });
+
+  it("stops an old alias after its build host fell through routing lag", async () => {
+    loop.processes = [ready(PREVIEW, BUILD, 42_004)];
+
+    const response = await ask(`${PROJECT}--${BUILD}.${DOMAIN}`, "/");
+    expect(response.status).toBe(200);
+    await flipAlias(clock.ctx, PROJECT, PREVIEW, THIRD);
+
+    const state = await readDesired(clock.ctx, { nodeId: NODE_ID, mode: "legacy-fallback" });
+    const desired = state.environments.find((entry) => entry.env.name === PREVIEW);
+    if (desired === undefined) throw new Error("preview was not desired after its alias flip");
+
+    const plan = planReconcile({
+      desired: [desired],
+      actual: [ready(PREVIEW, BUILD, 42_004), ready(PREVIEW, THIRD, 42_008)],
+      ports: createPortAllocator(),
+    });
+
+    expect(plan).toEqual([
+      {
+        type: "stop",
+        processId: `${PROJECT}--${PREVIEW}--${BUILD}`,
+        reason: `superseded by build "${THIRD}"`,
+      },
+    ]);
+
+    const routes = renderRoutes({
+      platformDomains: [DOMAIN],
+      environments: [{ project: PROJECT, env: desired.env }],
+      processes: [ready(PREVIEW, THIRD, 42_008)],
+      claims: [],
+    });
+    expect(routes.routes.map((route) => route.host)).not.toContain(
+      `${PROJECT}--${BUILD}.${DOMAIN}`,
+    );
   });
 
   it("says to come back when nothing was ready in time", async () => {
@@ -1125,6 +1274,25 @@ function fakeReconciler(): FakeReconciler {
     }),
   };
   return fake;
+}
+
+/** Advances the clock after host resolution and before this node records the wake. */
+function tickAtPlacementRead(): void {
+  const store = clock.ctx.store;
+  let ticked = false;
+  clock.ctx.store = {
+    get: async (key) => {
+      if (!ticked && key === placementKey(PROJECT, PREVIEW)) {
+        ticked = true;
+        clock.tick(1_000);
+      }
+      return store.get(key);
+    },
+    getBytes: (key) => store.getBytes(key),
+    put: (key, body, cas) => store.put(key, body, cas),
+    del: (key) => store.del(key),
+    list: (prefix) => store.list(prefix),
+  };
 }
 
 /** A process that has passed its gate, which is the only kind a wake is handed to. */

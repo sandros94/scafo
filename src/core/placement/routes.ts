@@ -27,6 +27,12 @@ export const APEX_ENVIRONMENT: string = "production";
 /** What the weights of one host sum to, whatever the split says. */
 export const FULL_WEIGHT: number = 100;
 
+/** One build carrying a share of an environment's own traffic. */
+export interface ServingBuild {
+  build: string;
+  weight: number;
+}
+
 /**
  * The parts of the node API that MUST NOT be reachable through a platform
  * apex, whatever else that apex serves. Every ingress driver is handed these in
@@ -216,6 +222,21 @@ export function servingLegs(
 }
 
 /**
+ * The builds an environment's own hosts serve, with their stated weights.
+ *
+ * A split replaces the alias for traffic while it is present; otherwise the
+ * alias is the whole serving set. Consumers that need to know whether a build
+ * is active use this rather than interpreting alias and split themselves.
+ */
+export function servingBuilds(env: EnvironmentRecord): ServingBuild[] {
+  const merged = new Map<string, number>();
+  for (const leg of env.split ?? aliasLeg(env)) {
+    merged.set(leg.build, (merged.get(leg.build) ?? 0) + leg.weight);
+  }
+  return [...merged].map(([build, weight]) => ({ build, weight }));
+}
+
+/**
  * The one leg a single request takes, given a draw in `[0, 1)`, or undefined
  * when there is no leg to take.
  *
@@ -309,15 +330,8 @@ function legsOf(
   env: EnvironmentRecord,
   ready: RuntimeProcess[],
 ): WeightedBackend[] {
-  const legs = env.split ?? aliasLeg(env);
-
-  /* A build named twice would otherwise be dialled twice at part of its weight;
-     the registry does not forbid it, and the two say the same thing. */
-  const merged = new Map<string, number>();
-  for (const leg of legs) merged.set(leg.build, (merged.get(leg.build) ?? 0) + leg.weight);
-
   const serving: Array<{ backend: IngressBackend; weight: number }> = [];
-  for (const [build, weight] of merged) {
+  for (const { build, weight } of servingBuilds(env)) {
     const process = ready.find(
       (candidate) =>
         candidate.project === project && candidate.env === env.name && candidate.build === build,
@@ -331,7 +345,7 @@ function legsOf(
 }
 
 /** The environment's alias as the single leg it is, or nothing when it has none. */
-function aliasLeg(env: EnvironmentRecord): Array<{ build: string; weight: number }> {
+function aliasLeg(env: EnvironmentRecord): ServingBuild[] {
   const build = env.alias?.build;
   return build === undefined ? [] : [{ build, weight: FULL_WEIGHT }];
 }
