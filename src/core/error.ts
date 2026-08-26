@@ -12,6 +12,7 @@ export type ScafoErrorCode =
   | "placement-unavailable"
   | "project-blocked"
   | "wake-unavailable"
+  | "capacity-unavailable"
   | "draining"
   | "deploy-overloaded"
   | "deploy-timeout"
@@ -57,6 +58,7 @@ const DEFAULT_STATUS: Record<ScafoErrorCode, number> = {
      the deadline the request was held for. Always answered with a `Retry-After`,
      because the very next try may well succeed. */
   "wake-unavailable": 503,
+  "capacity-unavailable": 503,
   "draining": 503,
   "deploy-overloaded": 429,
   "deploy-timeout": 408,

@@ -5,6 +5,7 @@
  */
 
 import { ScafoError } from "../../core/error.ts";
+import { assertPositiveSafeInteger } from "../../core/utils/number.ts";
 import { formatProcessId } from "../../core/placement/ids.ts";
 import { readJson } from "../../core/registry/cas.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
@@ -357,10 +358,14 @@ function processEnv(input: RuntimeSpecInput, settings: EnvSettings): Record<stri
   env.CELLD_DURABILITY = settings.durability;
 
   const capacity = input.capacity;
+  if (input.maxRssMb !== undefined) {
+    assertPositiveSafeInteger(input.maxRssMb, "maxRssMb");
+    env.CELLD_MAX_RSS_MB = String(input.maxRssMb);
+  }
   if (capacity !== undefined) {
     /* Zero means "unbounded" to the runtime, so a degenerate budget is left
        to the runtime's own default rather than written as no limit at all. */
-    if (capacity.maxRssMbPerProcess >= 1) {
+    if (input.maxRssMb === undefined && capacity.maxRssMbPerProcess >= 1) {
       env.CELLD_MAX_RSS_MB = String(capacity.maxRssMbPerProcess);
     }
     if (capacity.maxResidentCells >= 1) {

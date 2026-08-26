@@ -416,6 +416,7 @@ describe("deploy scheduler deadlines and cleanup", () => {
       },
       subscribe: (listener) => underlying.subscribe(listener),
       replaceRuntime: (reservations) => underlying.replaceRuntime(reservations),
+      settleTransitions: (holds, reservations) => underlying.settleTransitions(holds, reservations),
       tryReserveTransition: (request) => underlying.tryReserveTransition(request),
       tryReserveDeploy(request) {
         const hold = underlying.tryReserveDeploy(request);
@@ -535,6 +536,7 @@ describe("deploy scheduler deadlines and cleanup", () => {
       },
       subscribe: (listener) => underlying.subscribe(listener),
       replaceRuntime: (reservations) => underlying.replaceRuntime(reservations),
+      settleTransitions: (holds, reservations) => underlying.settleTransitions(holds, reservations),
       tryReserveTransition: (request) => underlying.tryReserveTransition(request),
       tryReserveDeploy(request) {
         const hold = underlying.tryReserveDeploy(request);

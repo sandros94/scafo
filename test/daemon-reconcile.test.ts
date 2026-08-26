@@ -23,6 +23,7 @@ import {
 } from "../src/daemon/reconcile.ts";
 import type { CapacityPlan } from "../src/core/capacity/compute.ts";
 import { ScafoError } from "../src/core/error.ts";
+import { createCreditController, type CreditController } from "../src/daemon/_credit-controller.ts";
 import { formatProcessId } from "../src/core/placement/ids.ts";
 import { servingLegs } from "../src/core/placement/routes.ts";
 import { deleteKey, putJson, readJson } from "../src/core/registry/cas.ts";
@@ -95,6 +96,19 @@ async function placeOn(registry: RegistryContext, nodes: string[]): Promise<void
 }
 
 describe("one pass over a node that runs nothing yet", () => {
+  it("charges actual runtimes before rollout admission", async () => {
+    const world = await seededWorld();
+    const credits = world.daemon.credits as NonNullable<typeof world.daemon.credits>;
+    world.supervisor.adopt(processIdOf(BUILD_ONE));
+
+    await world.reconciler.runOnce();
+
+    expect(credits.account).toMatchObject({ runtimeMb: 512, transitionMb: 0 });
+    expect(world.supervisor.started).toEqual([]);
+    expect(world.reconciler.status().processes).toEqual([
+      expect.objectContaining({ processId: processIdOf(BUILD_ONE), port: 0, ready: false }),
+    ]);
+  });
   it("points the fleet at the aliased build, starts a process for it and gates it", async () => {
     const world = await seededWorld();
 
@@ -165,6 +179,14 @@ describe("one pass over a node that runs nothing yet", () => {
     expect(input.baseEnv).toEqual(BASE_ENV);
   });
 
+  it("hands the configured runtime credit to every process spec", async () => {
+    const world = await seededWorld({ runtimeCreditMb: 768 });
+
+    await world.reconciler.runOnce();
+
+    expect(world.driver.specs[0]?.maxRssMb).toBe(768);
+  });
+
   it("gates the process at the path this node is configured to probe", async () => {
     const world = await seededWorld();
 
@@ -195,6 +217,70 @@ describe("one pass over a node that runs nothing yet", () => {
       processes: [],
       placements: [],
       parked: [],
+    });
+  });
+});
+
+describe("runtime credit across a reconcile pass", () => {
+  it("admits one transition and refuses the next before varset, pointer or supervisor effects", async () => {
+    const credits = createCreditController({ allocatableMb: 1024, surgeMb: 512 });
+    const world = await seededWorld({
+      credits,
+      otherBuild: BUILD_TWO,
+      otherEnvironment: OTHER,
+    });
+    world.supervisor.adopt(processIdOf(BUILD_TWO));
+    const key = await importVarsetKey(crypto.getRandomValues(new Uint8Array(32)));
+    const sealed = await sealVarset(VARSET, key);
+    await putVarset(world.registry, PROJECT, sealed);
+    await setEnvironmentVarset(world.registry, PROJECT, OTHER, sealed.id);
+
+    await world.reconciler.runOnce();
+
+    const refused = formatProcessId({ project: PROJECT, env: OTHER, build: BUILD_ONE });
+    expect(world.supervisor.started.map((spec) => spec.id)).toEqual([processIdOf(BUILD_ONE)]);
+    expect(world.driver.activations).toEqual([
+      { prefix: `fleets/${PROJECT}/${ENVIRONMENT}`, version: `version-${BUILD_ONE}` },
+    ]);
+    expect(world.reconciler.status().failures).toEqual([
+      expect.objectContaining({
+        action: "rollout",
+        subject: refused,
+        code: "capacity-unavailable",
+      }),
+    ]);
+    await expect(readJson(world.registry, pointerLockKey(PROJECT, OTHER))).resolves.toBeNull();
+    expect(credits.account).toMatchObject({ runtimeMb: 1024, transitionMb: 0 });
+  });
+
+  it("releases a transition when activation or pre-spawn setup fails", async () => {
+    const activation = await seededWorld();
+    const activationCredits = activation.daemon.credits as CreditController;
+    activation.driver.activationError = new Error("activation refused");
+
+    await activation.reconciler.runOnce();
+
+    expect(activationCredits.account).toMatchObject({ runtimeMb: 0, transitionMb: 0 });
+
+    const spawn = await seededWorld();
+    const spawnCredits = spawn.daemon.credits as CreditController;
+    spawn.supervisor.start = (): Promise<ProcessStatus> =>
+      Promise.reject(new Error("spawn refused"));
+
+    await spawn.reconciler.runOnce();
+
+    expect(spawnCredits.account).toMatchObject({ runtimeMb: 0, transitionMb: 0 });
+  });
+
+  it("releases a transition after a readiness failure stops the spawned runtime", async () => {
+    const world = await seededWorld();
+    world.driver.gate = (): Promise<boolean> => Promise.resolve(false);
+
+    await world.reconciler.runOnce();
+
+    expect((world.daemon.credits as CreditController).account).toMatchObject({
+      runtimeMb: 0,
+      transitionMb: 0,
     });
   });
 });
@@ -564,6 +650,10 @@ describe("a process that does not pass its gate", () => {
       subject: processIdOf(BUILD_TWO),
     });
     expect(status.failures[0].detail).toContain("readiness gate");
+    expect((world.daemon.credits as CreditController).account).toMatchObject({
+      runtimeMb: 512,
+      transitionMb: 0,
+    });
   });
 
   it("reports a process it did not start rather than probing or stopping it", async () => {
@@ -689,6 +779,10 @@ describe("the hold a rollout keeps the deployment pointer for", () => {
       expect(world.supervisor.started.map((spec) => spec.id)).toEqual([processIdOf(BUILD_ONE)]);
       expect(world.supervisor.status(processIdOf(BUILD_ONE))?.state).toBe("exited");
       expect(status.processes).toEqual([]);
+      expect((world.daemon.credits as CreditController).account).toMatchObject({
+        runtimeMb: 0,
+        transitionMb: 0,
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -725,6 +819,10 @@ describe("the hold a rollout keeps the deployment pointer for", () => {
       const failed = world.reconciler.status();
       expect(failed.failures.map((failure) => failure.action)).toEqual(["stop", "rollout"]);
       expect(world.supervisor.status(processIdOf(BUILD_ONE))?.state).toBe("running");
+      expect((world.daemon.credits as CreditController).account).toMatchObject({
+        runtimeMb: 512,
+        transitionMb: 0,
+      });
       expect(failed.processes).toEqual([
         {
           processId: processIdOf(BUILD_ONE),
@@ -744,6 +842,10 @@ describe("the hold a rollout keeps the deployment pointer for", () => {
       expect(world.driver.probed).toHaveLength(probesAfterLoss);
       expect(world.supervisor.status(processIdOf(BUILD_ONE))?.state).toBe("exited");
       expect(world.reconciler.status().processes).toEqual([]);
+      expect((world.daemon.credits as CreditController).account).toMatchObject({
+        runtimeMb: 0,
+        transitionMb: 0,
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -822,6 +924,30 @@ describe("an environment that is taken out of the registry", () => {
       { id: processIdOf(BUILD_ONE), graceMs: world.driver.stopGraceMs },
     ]);
     expect(world.reconciler.status().processes).toEqual([]);
+  });
+
+  it("keeps its runtime credit until the supervisor confirms the ordinary stop", async () => {
+    const world = await seededWorld();
+    const credits = world.daemon.credits as CreditController;
+    await world.reconciler.runOnce();
+    const stopped = deferred<void>();
+    world.supervisor.stop = async (id, opts): Promise<void> => {
+      world.supervisor.stopped.push({ id, graceMs: opts?.graceMs });
+      await stopped.promise;
+      world.supervisor.crash(id);
+    };
+    await deleteKey(world.registry, environmentKey(PROJECT, ENVIRONMENT));
+
+    const pass = world.reconciler.runOnce();
+    await vi.waitFor(() => {
+      expect(world.supervisor.stopped).toHaveLength(1);
+    });
+    expect(credits.account).toMatchObject({ runtimeMb: 512, transitionMb: 0 });
+
+    stopped.resolve();
+    await pass;
+
+    expect(credits.account).toMatchObject({ runtimeMb: 0, transitionMb: 0 });
   });
 });
 
@@ -1003,7 +1129,7 @@ describe("a pass asked for NOW", () => {
     await vi.waitFor(() => {
       expect(world.reconciler.status().lastRunAt).not.toBeNull();
     });
-    expect(world.supervisor.listCalls).toBe(1);
+    expect(world.supervisor.listCalls).toBe(2);
     expect(world.supervisor.started).toHaveLength(1);
   });
 
@@ -1035,10 +1161,10 @@ describe("a pass asked for NOW", () => {
     });
     /* Three kicks, one follow-up: they all asked for the same thing, which is a
        pass that starts after the state they stamped was written. */
-    expect(world.supervisor.listCalls).toBe(2);
+    expect(world.supervisor.listCalls).toBe(4);
 
     await sleep(50);
-    expect(world.supervisor.listCalls).toBe(2);
+    expect(world.supervisor.listCalls).toBe(4);
     expect(world.driver.activations).toHaveLength(1);
     expect(world.supervisor.started).toHaveLength(1);
   });
@@ -1080,6 +1206,42 @@ describe("the loop on a timer", () => {
     await sleep(50);
 
     expect(world.supervisor.listCalls).toBe(afterStop);
+  });
+
+  it("kicks only on available-credit increases, unsubscribes on stop and resets its restart baseline", async () => {
+    const credits = createCreditController({ allocatableMb: 2_048, surgeMb: 512 });
+    const world = await seededWorld({ credits, intervalMs: 60_000 });
+    world.reconciler.start();
+
+    const held = credits.tryReserveTransition({
+      owner: { namespace: "process", id: "shop/prod/external" },
+      mb: 512,
+    });
+    expect(held).toBeDefined();
+    await Promise.resolve();
+    expect(world.supervisor.listCalls).toBe(0);
+
+    held?.release();
+    await vi.waitFor(() => {
+      expect(world.supervisor.listCalls).toBe(2);
+    });
+    await sleep(25);
+    expect(world.supervisor.listCalls).toBe(2);
+
+    world.reconciler.stop();
+    credits.replaceRuntime([]);
+    await sleep(25);
+    expect(world.supervisor.listCalls).toBe(2);
+
+    credits.replaceRuntime([
+      { owner: { namespace: "process", id: processIdOf(BUILD_ONE) }, mb: 512 },
+    ]);
+    world.reconciler.start();
+    credits.replaceRuntime([]);
+    await vi.waitFor(() => {
+      expect(world.supervisor.listCalls).toBe(4);
+    });
+    world.reconciler.stop();
   });
 });
 
@@ -1278,6 +1440,10 @@ interface WorldOptions {
   /** A traffic split written onto the environment, after the alias is flipped. */
   split?: SplitEntry[];
   capacity?: CapacityPlan;
+  /** The shared node-local credits this world admits work through. */
+  credits?: CreditController;
+  /** Per-runtime transition and steady-state credit. */
+  runtimeCreditMb?: number;
   intervalMs?: number;
   /** Where the node publishes what it serves; absent leaves it publishing nowhere. */
   ingress?: IngressDriver;
@@ -1356,6 +1522,8 @@ async function seededWorld(opts?: WorldOptions): Promise<World> {
     observability: observe,
     ...(varsetKey === undefined ? {} : { varsetKey }),
     ...(opts?.capacity === undefined ? {} : { capacity: opts.capacity }),
+    ...(opts?.credits === undefined ? {} : { credits: opts.credits }),
+    ...(opts?.runtimeCreditMb === undefined ? {} : { runtimeCreditMb: opts.runtimeCreditMb }),
     ...(opts?.ingress === undefined ? {} : { ingress: opts.ingress }),
   });
 
@@ -1383,6 +1551,8 @@ interface NodeOptions {
   capacity?: CapacityPlan;
   ingress?: IngressDriver;
   observability?: Observability;
+  credits?: CreditController;
+  runtimeCreditMb?: number;
 }
 
 /** Everything the loop acts through, with this node's configuration. */
@@ -1410,6 +1580,7 @@ function daemonContext(
       durability: "bucket",
       cellIdleEvictS: 900,
       pointerHoldMs: 3_000,
+      ...(opts?.runtimeCreditMb === undefined ? {} : { creditMb: opts.runtimeCreditMb }),
     },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },
@@ -1421,6 +1592,7 @@ function daemonContext(
     registry,
     supervisor,
     version: "0.0.0-test",
+    credits: opts?.credits ?? createCreditController({ allocatableMb: 10_000, surgeMb: 512 }),
   };
   if (opts?.varsetKey !== undefined) daemon.varsetKey = opts.varsetKey;
   if (opts?.capacity !== undefined) daemon.capacity = opts.capacity;

@@ -389,6 +389,19 @@ describe("the grace a caller must give one of these processes", () => {
   });
 });
 
+describe("per-runtime RSS credit", () => {
+  it("writes the configured override while retaining unrelated capacity limits", () => {
+    const spec = driver().processSpec(specInput({ maxRssMb: 512, capacity: capacityPlan() }));
+    expect(spec.env).toMatchObject({ CELLD_MAX_RSS_MB: "512", CELLD_MAX_RESIDENT_CELLS: "2000" });
+  });
+
+  it.each([0, 1.5])("refuses invalid maxRssMb %p", (maxRssMb) => {
+    expect(() => driver().processSpec(specInput({ maxRssMb }))).toThrow(
+      expect.objectContaining({ code: "invalid-input" }),
+    );
+  });
+});
+
 describe("pointing a fleet at a version", () => {
   it("moves the named pointer before the fleet-wide one", async () => {
     const { store, ctx } = await seededFleet();
@@ -781,6 +794,7 @@ interface SpecOverrides {
   ports?: { public: number; internal: number };
   node?: { keyPrefix?: string; bindHost?: string };
   capacity?: CapacityPlan;
+  maxRssMb?: number;
   baseEnv?: Record<string, string>;
   extraEnv?: Record<string, string>;
 }
@@ -824,6 +838,7 @@ function specInput(overrides?: SpecOverrides): RuntimeSpecInput {
     },
   };
   if (overrides?.capacity !== undefined) input.capacity = overrides.capacity;
+  if (overrides?.maxRssMb !== undefined) input.maxRssMb = overrides.maxRssMb;
   if (overrides?.baseEnv !== undefined) input.baseEnv = overrides.baseEnv;
   if (overrides?.extraEnv !== undefined) input.extraEnv = overrides.extraEnv;
   return input;

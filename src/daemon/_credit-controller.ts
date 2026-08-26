@@ -50,6 +50,10 @@ export interface CreditController {
   /** Runs synchronously after committed credit mutations; returns an idempotent unsubscribe. */
   subscribe(listener: () => void): () => void;
   replaceRuntime(reservations: readonly RuntimeCreditReservation[]): void;
+  settleTransitions(
+    holds: readonly CreditHold[],
+    reservations: readonly RuntimeCreditReservation[],
+  ): void;
   tryReserveTransition(request: CreditReservationRequest): CreditHold | undefined;
   tryReserveDeploy(request: CreditReservationRequest): CreditHold | undefined;
 }
@@ -84,6 +88,7 @@ export function createCreditController(options: CreditControllerOptions): Credit
   let runtime = new Map<string, CreditReservation>();
   const transition = new Map<string, CreditReservation>();
   const deploy = new Map<string, CreditReservation>();
+  const holds = new WeakMap<CreditHold, HoldState>();
   const listeners = new Set<() => void>();
   let current: Readonly<CreditAccount> = freeze(base);
 
@@ -138,11 +143,10 @@ export function createCreditController(options: CreditControllerOptions): Credit
     reservations.set(key, reservation);
     current = candidate;
     notify();
-    let released = false;
-
-    return Object.freeze({
+    const state: HoldState = { kind, reservations, key, reservation, released: false };
+    const hold: CreditHold = Object.freeze({
       release(): void {
-        if (released || reservations.get(key) !== reservation) {
+        if (state.released || reservations.get(key) !== reservation) {
           throw new ScafoError("invalid-input", "Credit hold was already released");
         }
         const candidate = new Map(reservations);
@@ -152,10 +156,12 @@ export function createCreditController(options: CreditControllerOptions): Credit
             ? accountFor(runtime, candidate, deploy)
             : accountFor(runtime, transition, candidate);
         reservations.delete(key);
-        released = true;
+        state.released = true;
         notify();
       },
     });
+    holds.set(hold, state);
+    return hold;
   };
 
   return {
@@ -182,6 +188,44 @@ export function createCreditController(options: CreditControllerOptions): Credit
       current = candidate;
       notify();
     },
+    settleTransitions(
+      held: readonly CreditHold[],
+      reservations: readonly RuntimeCreditReservation[],
+    ): void {
+      if (!Array.isArray(held))
+        throw new ScafoError("invalid-input", "Invalid transition credit holds");
+      const nextRuntime = normalizeRuntime(reservations);
+      const states: HoldState[] = [];
+      const seen = new Set<CreditHold>();
+      for (const hold of held) {
+        const state = holds.get(hold);
+        if (
+          seen.has(hold) ||
+          state === undefined ||
+          state.kind !== "transition" ||
+          state.released
+        ) {
+          throw new ScafoError("invalid-input", "Invalid transition credit hold");
+        }
+        seen.add(hold);
+        if (nextRuntime.get(state.key)?.mb !== state.reservation.mb) {
+          throw new ScafoError("invalid-input", "Transition settlement does not match its hold");
+        }
+        states.push(state);
+      }
+      const nextTransition = new Map(transition);
+      for (const state of states) nextTransition.delete(state.key);
+      assertDistinct(nextRuntime, nextTransition);
+      assertDistinct(nextRuntime, deploy);
+      const candidate = accountFor(nextRuntime, nextTransition, deploy);
+      runtime = nextRuntime;
+      for (const state of states) {
+        transition.delete(state.key);
+        state.released = true;
+      }
+      current = candidate;
+      notify();
+    },
     tryReserveTransition(request: CreditReservationRequest): CreditHold | undefined {
       return reserve("transition", request);
     },
@@ -193,4 +237,12 @@ export function createCreditController(options: CreditControllerOptions): Credit
 
 function freeze(account: CreditAccount): Readonly<CreditAccount> {
   return Object.freeze(account);
+}
+
+interface HoldState {
+  kind: "transition" | "deploy";
+  reservations: Map<string, CreditReservation>;
+  key: string;
+  reservation: CreditReservation;
+  released: boolean;
 }

@@ -67,6 +67,8 @@ export interface RuntimeSpecInput {
   node: RuntimeNodeInput;
   /** Node capacity the process is bounded by; omitted leaves the runtime's own defaults. */
   capacity?: CapacityPlan;
+  /** RSS pressure limit reserved for this one runtime process. */
+  maxRssMb?: number;
   /**
    * Environment the process starts from, before the driver adds its own settings.
    *

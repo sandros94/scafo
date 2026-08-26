@@ -11,6 +11,71 @@ const process = (id: string): CreditOwner => ({ namespace: "process", id });
 const build = (id: string): CreditOwner => ({ namespace: "build", id });
 
 describe("node-local credit controller", () => {
+  it("settles a matching transition into runtime before synchronous listeners run", () => {
+    const credits = controller();
+    const hold = credits.tryReserveTransition({ owner: process("shop/prod/next"), mb: 20 });
+    expect(hold).toBeDefined();
+    let seen = false;
+    credits.subscribe(() => {
+      seen = true;
+      expect(credits.account).toMatchObject({ runtimeMb: 20, transitionMb: 0 });
+      expect(credits.tryReserveDeploy({ owner: build("shop/prod/deploy"), mb: 60 })).toBeDefined();
+    });
+
+    credits.settleTransitions(
+      [hold as NonNullable<typeof hold>],
+      [{ owner: process("shop/prod/next"), mb: 20 }],
+    );
+    expect(seen).toBe(true);
+  });
+
+  it("settles multiple matching holds atomically and rolls back malformed settlement", () => {
+    const credits = controller();
+    const first = credits.tryReserveTransition({ owner: process("shop/prod/a"), mb: 10 });
+    const second = credits.tryReserveTransition({ owner: process("shop/prod/b"), mb: 10 });
+    const before = credits.account;
+    expect(() =>
+      credits.settleTransitions(
+        [first as NonNullable<typeof first>],
+        [{ owner: process("shop/prod/a"), mb: 9 }],
+      ),
+    ).toThrow(expect.objectContaining({ code: "invalid-input" }));
+    expect(credits.account).toEqual(before);
+
+    credits.settleTransitions(
+      [first as NonNullable<typeof first>, second as NonNullable<typeof second>],
+      [
+        { owner: process("shop/prod/a"), mb: 10 },
+        { owner: process("shop/prod/b"), mb: 10 },
+      ],
+    );
+    expect(credits.account).toMatchObject({ runtimeMb: 20, transitionMb: 0 });
+  });
+
+  it("rejects duplicate, stale, foreign and deploy-colliding settlement without mutation", () => {
+    const credits = controller();
+    const hold = credits.tryReserveTransition({ owner: process("shop/prod/a"), mb: 10 });
+    const foreign = controller().tryReserveTransition({ owner: process("shop/prod/a"), mb: 10 });
+    const stale = credits.tryReserveTransition({ owner: process("shop/prod/stale"), mb: 10 });
+    stale?.release();
+    const deploy = credits.tryReserveDeploy({ owner: build("shop/prod/deploy"), mb: 10 });
+    const before = credits.account;
+    const runtime = [{ owner: process("shop/prod/a"), mb: 10 }];
+    for (const held of [[hold, hold], [stale], [foreign]]) {
+      expect(() => credits.settleTransitions(held as NonNullable<typeof hold>[], runtime)).toThrow(
+        expect.objectContaining({ code: "invalid-input" }),
+      );
+      expect(credits.account).toEqual(before);
+    }
+    expect(() =>
+      credits.settleTransitions(
+        [hold as NonNullable<typeof hold>],
+        [...runtime, { owner: build("shop/prod/deploy"), mb: 10 }],
+      ),
+    ).toThrow(expect.objectContaining({ code: "invalid-input" }));
+    expect(credits.account).toEqual(before);
+    deploy?.release();
+  });
   it("refuses a node credit pool that cannot admit protected runtime and deploy work", () => {
     const insufficient = createCreditController({ allocatableMb: 1_535, surgeMb: 512 });
     expect(() => assertCreditAdmission(insufficient, 512, 1024)).toThrow(

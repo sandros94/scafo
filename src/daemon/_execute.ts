@@ -21,6 +21,7 @@ import type {
 import { openEnvironmentVars } from "./_desired.ts";
 import type { DaemonContext } from "./app.ts";
 import { advertisedAddress } from "./config.ts";
+import { DEFAULT_RUNTIME_CREDIT_MB } from "./_credit-controller.ts";
 
 /** Stands in for the listeners of a process this daemon did not start itself. */
 const UNKNOWN_PORT = 0;
@@ -33,6 +34,7 @@ export interface ReconcileFailure {
   action?: ReconcileAction["type"];
   /** What it concerned: a process id, or a `project/environment` pair. */
   subject?: string;
+  code?: ScafoError["code"];
   detail: string;
 }
 
@@ -92,9 +94,18 @@ export function createExecutor(deps: ExecutorDeps): Executor {
   const lockTimeoutMs = deps.pointerLock?.timeoutMs ?? ROLLOUT_LOCK_TIMEOUT_MS;
   const holder = lockHolder(daemon.nodeId);
   const observe = daemon.observability;
+  if (daemon.credits === undefined) {
+    throw new ScafoError("invalid-input", "Missing node credit controller");
+  }
+  const credits = daemon.credits;
   /* A runtime whose teardown failed stays exactly known but can never be
      routed or gated. A later pass retries the stop through this set. */
   const quarantined = new Set<string>();
+  const transitions: {
+    hold: import("./_credit-controller.ts").CreditHold;
+    processId: string;
+    mb: number;
+  }[] = [];
 
   /**
    * Brings one build into service, as one uninterrupted sequence.
@@ -148,6 +159,22 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     const leg = entry.builds.find((candidate) => candidate.build.id === action.build);
     if (leg === undefined) return;
 
+    const processId = formatProcessId({
+      project: action.project,
+      env: action.env,
+      build: action.build,
+    });
+    const creditMb = daemon.config.runtime.creditMb ?? DEFAULT_RUNTIME_CREDIT_MB;
+    const transition = credits.tryReserveTransition({
+      owner: { namespace: "process", id: processId },
+      mb: creditMb,
+    });
+    if (transition === undefined) {
+      throw new ScafoError("capacity-unavailable", "Runtime credit is unavailable", {
+        detail: `this node cannot admit ${String(creditMb)}MiB for "${processId}" yet`,
+      });
+    }
+    transitions.push({ hold: transition, processId, mb: creditMb });
     const version = leg.build.celldVersionId;
     if (version === undefined) {
       throw new ScafoError("invalid-input", "Build has no runtime version", {
@@ -179,6 +206,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
         bindHost: daemon.config.runtime.bindHost,
       },
       capacity: daemon.capacity,
+      maxRssMb: creditMb,
       baseEnv,
     };
 
@@ -186,6 +214,9 @@ export function createExecutor(deps: ExecutorDeps): Executor {
        bucket read that may refuse the whole rollout, and the section below is
        only the three steps that must not be interleaved with another writer. */
     const spec = driver.processSpec(input);
+    if (spec.id !== processId) {
+      throw new ScafoError("invalid-input", "Runtime process id does not match credit owner");
+    }
     const started: RuntimeProcess = {
       processId: spec.id,
       project: entry.project,
@@ -272,7 +303,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       /* Both off the lock, and both the moment the spawn returned: this is what
          the wake surface holding a request for this process is waiting to see. */
       known.set(spec.id, started);
-      gating = gateStarted(started, pending, () => cancelled);
+      gating = gateStarted(started, pending, () => cancelled, stopStarted);
       /* Awaited in every path below; this only keeps a gate that fails while the
          hold is still running from being read as unhandled. */
       gating.catch(() => {});
@@ -312,6 +343,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     started: RuntimeProcess,
     pending: ReconcileFailure[],
     cancelled: () => boolean,
+    stop: () => Promise<void>,
   ): Promise<void> {
     if (await gate(started)) {
       if (cancelled()) return;
@@ -330,8 +362,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
      * TODO: a build that never passes its gate is started and stopped once per
      * pass. Backing that off belongs with the failure accounting that reports it.
      */
-    await daemon.supervisor.stop(started.processId, { graceMs: driver.stopGraceMs });
-    known.delete(started.processId);
+    await stop();
   }
 
   /**
@@ -446,6 +477,21 @@ export function createExecutor(deps: ExecutorDeps): Executor {
           pending.push(failureOf(error, { action: action.type, subject: subjectOf(action) }));
         }
       }
+      const actual = this.currentProcesses();
+      const running = new Set(actual.map((process) => process.processId));
+      const live = transitions.filter((entry) => running.has(entry.processId));
+      const snapshot = actual.map((process) => ({
+        owner: { namespace: "process", id: process.processId },
+        mb: daemon.config.runtime.creditMb ?? DEFAULT_RUNTIME_CREDIT_MB,
+      }));
+      if (live.length > 0) {
+        credits.settleTransitions(
+          live.map((entry) => entry.hold),
+          snapshot,
+        );
+      } else credits.replaceRuntime(snapshot);
+      for (const entry of transitions) if (!running.has(entry.processId)) entry.hold.release();
+      transitions.length = 0;
     },
 
     currentProcesses(): RuntimeProcess[] {
@@ -522,7 +568,14 @@ export function failureOf(
   error: unknown,
   about: { action?: ReconcileAction["type"]; subject?: string },
 ): ReconcileFailure {
-  return { at: new Date().toISOString(), ...about, detail: describeError(error) };
+  return {
+    at: new Date().toISOString(),
+    ...about,
+    detail: describeError(error),
+    ...(error instanceof ScafoError && error.code === "capacity-unavailable"
+      ? { code: error.code }
+      : {}),
+  };
 }
 
 function placement(project: string, env: string): string {
