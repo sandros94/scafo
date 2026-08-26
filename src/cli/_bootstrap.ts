@@ -10,16 +10,24 @@
 import { S3Client } from "uns3";
 import type { DaemonConfig } from "../daemon/config.ts";
 import { advertisedAddress, parseHostPort } from "../daemon/config.ts";
-import type { CapacityPlan } from "../core/capacity/compute.ts";
+import {
+  DEFAULT_DAEMON_OVERHEAD_MB,
+  DEFAULT_MEMORY_FRACTION,
+  type CapacityPlan,
+} from "../core/capacity/compute.ts";
+import { assertCreditProfile } from "../core/capacity/profile.ts";
+import { type HostReader, probeCapacity } from "../core/capacity/reader.ts";
 import { isScafoError, ScafoError } from "../core/error.ts";
-import { readJson, updateJson } from "../core/registry/cas.ts";
+import { updateJson } from "../core/registry/cas.ts";
 import { nowIso, type RegistryContext } from "../core/registry/context.ts";
-import { drainNode, registerNode } from "../core/registry/nodes.ts";
+import { drainNode, registerNode, registerNodeIfAbsent } from "../core/registry/nodes.ts";
 import { nodeKey } from "../core/registry/paths.ts";
 import type { NodeRecord, NodeWireguard } from "../core/types/registry.ts";
 import { withRetry } from "../core/utils/backoff.ts";
 import { isLoopbackHost } from "../core/utils/host.ts";
 import { createUns3Store } from "../drivers/store/uns3.ts";
+import { DEFAULT_RUNTIME_CREDIT_MB } from "../daemon/_credit-controller.ts";
+import { DEFAULT_DEPLOY_CREDIT_MB } from "../daemon/_deploy-scheduler.ts";
 import { loadOrCreateNodeState, type NodeState } from "./_node-state.ts";
 import { loadOrCreateStorageToken, writeStorageToken } from "./_storage-token.ts";
 import { resolveDefaultStateDir } from "./_utils.ts";
@@ -51,6 +59,23 @@ export function createRegistry(config: DaemonConfig): RegistryContext {
       { bucket: config.bucket.bucket, prefix: config.bucket.prefix },
     ),
   };
+}
+
+/** Probes this node and derives the sole profile both boot paths publish. */
+export async function probeNodeCredits(
+  config: DaemonConfig,
+  reader: HostReader,
+): Promise<{ capacity: CapacityPlan; credits: NonNullable<NodeRecord["credits"]> }> {
+  const capacity = await probeCapacity(reader, {
+    rssFraction: config.capacity?.memoryFraction ?? DEFAULT_MEMORY_FRACTION,
+    daemonOverheadMb: config.capacity?.daemonOverheadMb ?? DEFAULT_DAEMON_OVERHEAD_MB,
+  });
+  const credits = assertCreditProfile({
+    allocatableMb: capacity.rssBudgetMb,
+    runtimeMb: config.runtime.creditMb ?? DEFAULT_RUNTIME_CREDIT_MB,
+    deployMb: config.deploy?.creditMb ?? DEFAULT_DEPLOY_CREDIT_MB,
+  });
+  return { capacity, credits };
 }
 
 /**
@@ -188,6 +213,8 @@ export interface RegisterNodeOptions {
   config: DaemonConfig;
   state: NodeState;
   capacity?: CapacityPlan;
+  /** Credit denominations derived from this node's resolved boot configuration. */
+  credits?: NodeRecord["credits"];
   /**
    * Where this node sits on the tunnel, when it runs one. It is published here
    * because a peer cannot build a route to a node it has not been told the key,
@@ -221,8 +248,14 @@ export async function registerThisNode(
   registry: RegistryContext,
   opts: RegisterNodeOptions,
 ): Promise<NodeRecord> {
+  const record = nodeRecord(registry, opts);
+  await registerNode(registry, record);
+  return record;
+}
+
+function nodeRecord(registry: RegistryContext, opts: RegisterNodeOptions): NodeRecord {
   const reachable = advertisedAddress(opts.config.node);
-  const record: NodeRecord = {
+  return {
     v: 1,
     id: opts.state.id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: opts.state.publicKey.x },
@@ -238,12 +271,10 @@ export async function registerThisNode(
             probedAt: opts.capacity.probedAt,
           },
         }),
+    ...(opts.credits === undefined ? {} : { credits: assertCreditProfile(opts.credits) }),
     ...(opts.wireguard === undefined ? {} : { wireguard: opts.wireguard }),
     ...(opts.config.node.labels === undefined ? {} : { labels: { ...opts.config.node.labels } }),
   };
-
-  await registerNode(registry, record);
-  return record;
 }
 
 export interface DrainOptions {
@@ -324,9 +355,9 @@ export async function publishWireguard(
   opts: RegisterNodeOptions & { wireguard: NodeWireguard },
 ): Promise<NodeRecord> {
   const key = nodeKey(opts.state.id);
-  if ((await readJson<NodeRecord>(registry, key)) === null) {
-    return registerThisNode(registry, opts);
-  }
+  const record = nodeRecord(registry, opts);
+  const existing = await registerNodeIfAbsent(registry, record);
+  if (existing === null) return record;
 
   const updated = await updateJson<NodeRecord>(registry, key, (current) => ({
     ...current,

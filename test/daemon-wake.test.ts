@@ -640,19 +640,17 @@ describe("which node a wake runs on", () => {
     await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.not.toBeNull();
   });
 
-  it("wakes it here when no coordinator has placed it at all", async () => {
+  it("holds an unplaced wake here until an assigned process appears", async () => {
     loop.onKick = (): void => {
       loop.processes = [ready(PREVIEW, BUILD, 42_004)];
     };
 
     const response = await ask(PARKED_HOST, "/");
 
-    /*
-     * THE FALLBACK THE WHOLE FEATURE HANGS FROM, and the reason a single-node
-     * installation never leaves this line: a missing placement record means
-     * nothing has been decided, which is what a bootstrap, a lone node and every
-     * rolling upgrade from a build that predates placement all look like.
-     */
+    /* Missing placement chooses only the local waiting venue: stamp demand and
+       kick reconciliation. The harness then simulates the coordinator assigning
+       this node and its production reconciler making the process ready; absence
+       itself is not permission to start or serve the environment. */
     expect(response.status).toBe(200);
     expect(upstream.map((call) => call.url)).toEqual(["http://127.0.0.1:42004/"]);
     expect(loop.kicks).toBe(1);

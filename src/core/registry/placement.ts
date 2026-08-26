@@ -4,9 +4,10 @@
  * and which nodes the coordinator gave it (the placement records).
  *
  * A placement record is written by the coordinator alone and read by every node.
- * Its ABSENCE is a meaningful state and never an error: it says nothing has been
- * decided for that environment yet, and readers fall back to serving it
- * everywhere.
+ * Its ABSENCE is a meaningful pending state and never an error: production
+ * daemons require a decision and start nothing until one exists. Only an
+ * explicitly selected legacy rolling-upgrade reader retains the old
+ * unconstrained fallback.
  */
 
 import { ScafoError } from "../error.ts";
@@ -120,11 +121,11 @@ export async function writePlacement(
   const decided = [...nodes].sort();
 
   if (current !== null) {
-    if (deepEqual(current.value.nodes, decided)) {
-      return { outcome: "unchanged", record: current.value };
-    }
     if (current.value.fence > lease.lease.fence) {
       return { outcome: "stale", record: current.value };
+    }
+    if (deepEqual(current.value.nodes, decided)) {
+      return { outcome: "unchanged", record: current.value };
     }
   }
 
@@ -216,8 +217,8 @@ export async function setNodeSelector(
     environmentKey(project, env),
     (current) => {
       /* Cleared by REMOVING the field rather than by storing an empty one: the
-         readers ask whether an environment carries a selector at all, and the
-         run-everywhere fallback turns on that question. */
+         selector's presence is semantic, including for the explicit legacy
+         fallback, which never runs selector-bearing work without a decision. */
       const { nodeSelector: _cleared, ...rest } = current;
       return selector === null ? rest : { ...rest, nodeSelector: { ...selector } };
     },

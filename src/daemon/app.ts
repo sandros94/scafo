@@ -12,6 +12,8 @@ import { canarySplit, flipAlias, rollbackAlias, setSplit } from "../core/registr
 import { isLeaseExpired } from "../core/registry/lease.ts";
 import { setParkPolicy } from "../core/registry/park.ts";
 import { APEX_ENVIRONMENT } from "../core/placement/routes.ts";
+import type { CreditAccount } from "../core/capacity/credits.ts";
+import type { CreditPlacementAccount } from "../core/placement/credits.ts";
 import { resolveWakeTarget } from "./_wake-target.ts";
 import { coordinatorKey, environmentKey, nodeKey } from "../core/registry/paths.ts";
 import { setNodeSelector } from "../core/registry/placement.ts";
@@ -168,6 +170,8 @@ export interface CoordinatorView {
    * take a serving environment down over an unsatisfiable constraint.
    */
   unplaced?: AssignmentFailure[];
+  accounts?: CreditPlacementAccount[];
+  overcommitted?: boolean;
 }
 
 /** Body of `GET /v1/state`: what this node believes about itself right now. */
@@ -183,13 +187,13 @@ export interface DaemonState {
    * it still means.
    */
   coordinator: CoordinatorView | null;
+  credits?: CreditAccount;
   processes: ProcessStatus[];
   /**
    * Which nodes serve each environment this node has read a decision for, and
    * whether this node is one of them. Empty on a node that runs no reconcile
-   * loop, and — the case worth reading carefully — on an installation where no
-   * coordinator has decided anything yet, which is when every node serves
-   * everything.
+   * loop. A missing environment is pending, not assigned everywhere: production
+   * daemons deliberately start nothing until placement is explicit.
    */
   placements: PlacementView[];
   /**
@@ -365,6 +369,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
         node: node?.value ?? null,
         lease: lease?.value ?? null,
         coordinator: coordinatorView(daemon, lease?.value ?? null),
+        ...(daemon.credits === undefined ? {} : { credits: { ...daemon.credits.account } }),
         processes: daemon.supervisor.list(),
         /* From the reads the reconcile pass already made, rather than a second
            trip to the bucket for state this node has just been told. */
@@ -624,13 +629,31 @@ function coordinatorView(
   const self = status?.holding === true && lease.node === daemon.nodeId;
   /* Only from the node that made them, and only while there are any: a settled
      installation says nothing here rather than saying "nothing went wrong". */
-  const unplaced = self ? (status?.lastAssignment?.unplaced ?? []) : [];
+  const assignment = self ? (status?.lastAssignment ?? undefined) : undefined;
+  const unplaced = assignment?.unplaced ?? [];
 
   return {
     node: lease.node,
     fence: lease.fence,
     self,
-    ...(unplaced.length === 0 ? {} : { unplaced: unplaced.map((entry) => ({ ...entry })) }),
+    ...(unplaced.length === 0
+      ? {}
+      : {
+          unplaced: unplaced.map((entry) => ({
+            ...entry,
+            ...(entry.pending === undefined ? {} : { pending: { ...entry.pending } }),
+          })),
+        }),
+    ...(assignment === undefined
+      ? {}
+      : {
+          accounts: assignment.accounts.map((account) => ({
+            id: account.id,
+            transient: { ...account.transient },
+            steady: { ...account.steady },
+          })),
+          overcommitted: assignment.overcommitted,
+        }),
   };
 }
 

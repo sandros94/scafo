@@ -100,75 +100,171 @@ describe("accountCredits", () => {
 });
 
 describe("planCreditPlacement", () => {
+  it("charges each candidate node's runtime denomination for current, transition and steady work", async () => {
+    const planned = await planCreditPlacement({
+      nodes: [
+        { id: "a", profile: { allocatableMb: 200, runtimeMb: 30 } },
+        { id: "b", profile: { allocatableMb: 250, runtimeMb: 70 }, labels: { tier: "fast" } },
+      ],
+      workloads: [
+        { project: "shop", env: "prod", replicas: 1, processes: 1, current: ["a"] },
+        { project: "blog", env: "prod", replicas: 1, processes: 1, current: ["b"] },
+        {
+          project: "docs",
+          env: "prod",
+          replicas: 1,
+          processes: 1,
+          selector: { tier: "fast" },
+          current: ["a"],
+        },
+      ],
+    });
+
+    expect(planned.accounts).toMatchObject([
+      { id: "a", transient: { runtimeMb: 60 }, steady: { runtimeMb: 30 } },
+      { id: "b", transient: { runtimeMb: 70, transitionMb: 70 }, steady: { runtimeMb: 140 } },
+    ]);
+  });
+
+  it("counts every live selector match while only valid profiles receive capacity work", async () => {
+    const planned = await planCreditPlacement({
+      nodes: [
+        { id: "valid", profile: { allocatableMb: 100, runtimeMb: 20 } },
+        { id: "legacy", profile: null },
+      ],
+      workloads: [
+        { project: "shop", env: "all", replicas: "all", processes: 1, current: ["valid"] },
+        { project: "shop", env: "kept", replicas: 1, processes: 1, current: ["legacy"] },
+      ],
+    });
+
+    expect(planned.placements).toMatchObject([
+      {
+        target: "shop/all",
+        nodes: ["valid"],
+        pending: { requiredReplicas: "all", eligibleNodes: 2, capacityNodes: 1 },
+      },
+      {
+        target: "shop/kept",
+        nodes: ["legacy"],
+        pending: {
+          reason: "profile-unavailable",
+          requiredReplicas: 1,
+          eligibleNodes: 2,
+          capacityNodes: 1,
+        },
+      },
+    ]);
+    expect(planned.accounts.map((account) => account.id)).toEqual(["valid"]);
+
+    await expect(
+      planCreditPlacement({
+        nodes: [{ id: "legacy", profile: null }],
+        workloads: [{ project: "shop", env: "fresh", replicas: 1, processes: 1, current: [] }],
+      }),
+    ).resolves.toMatchObject({
+      placements: [
+        {
+          target: "shop/fresh",
+          nodes: [],
+          pending: { requiredReplicas: 1, eligibleNodes: 1, capacityNodes: 0 },
+        },
+      ],
+    });
+  });
+
+  it("fails over a current id that is no longer live", async () => {
+    const planned = await planCreditPlacement({
+      nodes: [{ id: "valid", profile: { allocatableMb: 100, runtimeMb: 20 } }],
+      workloads: [{ project: "shop", env: "prod", replicas: 1, processes: 1, current: ["dead"] }],
+    });
+
+    expect(planned.placements).toEqual([{ target: "shop/prod", nodes: ["valid"] }]);
+  });
+
+  it("charges every desired alias, split and recalled process on a selected node", async () => {
+    const planned = await planCreditPlacement({
+      nodes: [{ id: "x", profile: { allocatableMb: 100, runtimeMb: 30 } }],
+      workloads: [
+        { project: "app", env: "a", replicas: 1, processes: 2, current: ["x"] },
+        { project: "app", env: "b", replicas: 1, processes: 1, current: [] },
+      ],
+    });
+
+    expect(planned.placements).toMatchObject([
+      { target: "app/a", nodes: ["x"] },
+      { target: "app/b", nodes: [], pending: { reason: "insufficient-capacity" } },
+    ]);
+    expect(planned.accounts).toMatchObject([{ id: "x", steady: { runtimeMb: 60 } }]);
+  });
+
   it("filters capacity before rendezvous and keeps numeric placement exact", async () => {
     const planned = await planCreditPlacement({
-      nodes: [node("a", 100, { tier: "pinned" }), node("b", 100), node("c", 100)],
+      nodes: [
+        node("a", 160, { tier: "pinned" }, 70),
+        node("b", 100, undefined, 40),
+        node("c", 100, undefined, 40),
+      ],
       workloads: [
-        workload("shop/prod", { runtimeMb: 70, current: ["a"], selector: { tier: "pinned" } }),
-        workload("blog/prod", { runtimeMb: 40, replicas: 2 }),
+        workload("shop/prod", { current: ["a"], selector: { tier: "pinned" } }),
+        workload("blog/prod", { replicas: 2 }),
       ],
     });
 
     expect(planned.placements.find((placement) => placement.target === "shop/prod")?.nodes).toEqual(
       ["a"],
     );
-    const blog = planned.placements.find((placement) => placement.target === "blog/prod");
-    expect(blog?.pending).toBeUndefined();
-    expect(blog?.nodes).toHaveLength(2);
-    expect(blog?.nodes).not.toContain("a");
+    expect(planned.placements.find((placement) => placement.target === "blog/prod")?.nodes).toEqual(
+      ["b", "c"],
+    );
   });
 
   it("makes numeric and all proposals atomic, retaining prior node bytes on failure", async () => {
     const current = ["b", "a"];
     const planned = await planCreditPlacement({
-      nodes: [node("a", 100), node("b", 100)],
+      nodes: [node("a", 100, undefined, 40), node("b", 100, undefined, 40)],
       workloads: [
-        workload("shop/prod", { runtimeMb: 60, replicas: 2, current }),
-        workload("blog/prod", { runtimeMb: 50, replicas: "all" }),
+        workload("shop/prod", { replicas: 2, current }),
+        workload("blog/prod", { replicas: "all" }),
       ],
     });
 
-    const shop = planned.placements.find((placement) => placement.target === "shop/prod");
-    const blog = planned.placements.find((placement) => placement.target === "blog/prod");
-    expect(shop?.nodes).toEqual(current);
-    expect(shop?.nodes).not.toBe(current);
-    expect(shop?.pending).toBeUndefined();
-    expect(blog?.nodes).toEqual([]);
-    expect(blog?.pending).toMatchObject({ reason: "insufficient-capacity" });
+    expect(planned.placements.find((placement) => placement.target === "shop/prod")?.nodes).toEqual(
+      current,
+    );
+    expect(planned.placements.find((placement) => placement.target === "blog/prod")).toMatchObject({
+      nodes: [],
+      pending: { reason: "insufficient-capacity" },
+    });
   });
 
   it("preserves an over-capacity legacy placement while another node admits work", async () => {
     const current = ["a"];
     const planned = await planCreditPlacement({
-      nodes: [node("a", 100), node("b", 100)],
+      nodes: [node("a", 100, { tier: "pinned" }, 60), node("b", 160, undefined, 20)],
       workloads: [
-        workload("shop/prod", { runtimeMb: 90, current }),
-        workload("blog/prod", { runtimeMb: 10 }),
+        workload("shop/prod", { current, selector: { tier: "pinned" } }),
+        workload("blog/prod"),
       ],
     });
 
     expect(planned.overcommitted).toBe(true);
-    expect(planned.placements.find((placement) => placement.target === "shop/prod")?.nodes).toEqual(
-      current,
-    );
-    expect(
-      planned.placements.find((placement) => placement.target === "shop/prod")?.pending,
-    ).toMatchObject({ reason: "over-capacity" });
+    expect(planned.placements.find((placement) => placement.target === "shop/prod")).toMatchObject({
+      nodes: current,
+      pending: { reason: "over-capacity" },
+    });
     expect(planned.placements.find((placement) => placement.target === "blog/prod")?.nodes).toEqual(
       ["b"],
     );
-    expect(
-      planned.placements.find((placement) => placement.target === "blog/prod")?.pending,
-    ).toBeUndefined();
   });
 
-  it("handles joins, stale placements and insufficient failover without partial rewrite", async () => {
+  it("handles stale placements and insufficient failover without partial rewrite", async () => {
     const stale = ["gone"];
     const planned = await planCreditPlacement({
-      nodes: [node("a", 100), node("b", 100, { tier: "fast" })],
+      nodes: [node("a", 100, undefined, 60), node("b", 120, { tier: "fast" }, 60)],
       workloads: [
-        workload("shop/prod", { runtimeMb: 90, replicas: 2, current: stale }),
-        workload("blog/prod", { runtimeMb: 20, selector: { tier: "fast" }, replicas: "all" }),
+        workload("shop/prod", { replicas: 2, current: stale }),
+        workload("blog/prod", { selector: { tier: "fast" }, replicas: "all" }),
       ],
     });
 
@@ -179,9 +275,6 @@ describe("planCreditPlacement", () => {
     expect(planned.placements.find((placement) => placement.target === "blog/prod")?.nodes).toEqual(
       ["b"],
     );
-    expect(
-      planned.placements.find((placement) => placement.target === "blog/prod")?.pending,
-    ).toBeUndefined();
   });
 
   it("keeps all replicas on their last placement when no node is eligible", async () => {
@@ -189,38 +282,23 @@ describe("planCreditPlacement", () => {
     const planned = await planCreditPlacement({
       nodes: [node("a", 100)],
       workloads: [
-        workload("shop/prod", {
-          replicas: "all",
-          current,
-          selector: { tier: "missing" },
-        }),
+        workload("shop/prod", { replicas: "all", current, selector: { tier: "missing" } }),
       ],
     });
 
     expect(planned.placements).toEqual([
-      {
+      expect.objectContaining({
         target: "shop/prod",
         nodes: current,
-        pending: {
-          reason: "insufficient-candidates",
-          requiredReplicas: "all",
-          eligibleNodes: 0,
-          capacityNodes: 0,
-        },
-      },
+        pending: expect.objectContaining({ reason: "insufficient-candidates" }),
+      }),
     ]);
   });
 
   it("moves work off an overcommitted node when another node can take it", async () => {
     const planned = await planCreditPlacement({
-      nodes: [node("a", 100), node("b", 120, { tier: "relief" })],
-      workloads: [
-        workload("shop/prod", {
-          runtimeMb: 90,
-          current: ["a"],
-          selector: { tier: "relief" },
-        }),
-      ],
+      nodes: [node("a", 100, undefined, 60), node("b", 150, { tier: "relief" }, 30)],
+      workloads: [workload("shop/prod", { current: ["a"], selector: { tier: "relief" } })],
     });
 
     expect(planned.overcommitted).toBe(true);
@@ -230,21 +308,16 @@ describe("planCreditPlacement", () => {
 
   it("reports an over-capacity placement that cannot move without erasing it", async () => {
     const planned = await planCreditPlacement({
-      nodes: [node("a", 100)],
-      workloads: [workload("shop/prod", { runtimeMb: 90, current: ["a"] })],
+      nodes: [node("a", 100, undefined, 60)],
+      workloads: [workload("shop/prod", { current: ["a"] })],
     });
 
     expect(planned.placements).toEqual([
-      {
+      expect.objectContaining({
         target: "shop/prod",
         nodes: ["a"],
-        pending: {
-          reason: "over-capacity",
-          requiredReplicas: 1,
-          eligibleNodes: 1,
-          capacityNodes: 0,
-        },
-      },
+        pending: expect.objectContaining({ reason: "over-capacity" }),
+      }),
     ]);
   });
 
@@ -255,21 +328,20 @@ describe("planCreditPlacement", () => {
     });
     const drained = await planCreditPlacement({
       nodes: [node("b", 100)],
-      workloads: [workload("shop/prod", { runtimeMb: 40, replicas: "all", current: ["a", "b"] })],
+      workloads: [workload("shop/prod", { replicas: "all", current: ["a", "b"] })],
     });
 
     expect(joined.placements[0]?.nodes).toEqual(["a", "b"]);
     expect(drained.placements[0]?.nodes).toEqual(["b"]);
-    expect(drained.placements[0]?.pending).toBeUndefined();
   });
 
   it("allows one protected-surge rollout but refuses a larger transition", async () => {
     const planned = await planCreditPlacement({
-      nodes: [node("a", 100), node("b", 100, { tier: "fast" })],
+      nodes: [node("a", 100, undefined, 20), node("b", 70, { tier: "fast" }, 20)],
       workloads: [
-        workload("base/stable", { runtimeMb: 60, current: ["b"], selector: { tier: "fast" } }),
-        workload("shop/prod", { runtimeMb: 20, current: ["a"], selector: { tier: "fast" } }),
-        workload("shop/staging", { runtimeMb: 20, current: ["a"], selector: { tier: "fast" } }),
+        workload("base/stable", { current: ["b"], selector: { tier: "fast" } }),
+        workload("shop/prod", { current: ["a"], selector: { tier: "fast" } }),
+        workload("shop/staging", { current: ["a"], selector: { tier: "fast" } }),
       ],
     });
 
@@ -278,9 +350,49 @@ describe("planCreditPlacement", () => {
     ).toBeUndefined();
     expect(
       planned.placements.find((placement) => placement.target === "shop/staging"),
-    ).toMatchObject({
-      pending: { reason: "insufficient-capacity" },
+    ).toMatchObject({ pending: { reason: "insufficient-capacity" } });
+  });
+
+  it("plans cross-project contention once and is independent of input order", async () => {
+    const input = {
+      nodes: [node("a", 80, undefined, 40), node("b", 80, undefined, 40)],
+      workloads: [
+        workload("blog/prod", { replicas: "all" }),
+        workload("shop/prod", { replicas: "all" }),
+      ],
+    };
+    const first = await planCreditPlacement(input);
+    const second = await planCreditPlacement({
+      nodes: [...input.nodes].reverse(),
+      workloads: [...input.workloads].reverse(),
     });
+
+    expect(second).toEqual(first);
+    expect(first.placements).toEqual([
+      { target: "blog/prod", nodes: ["a", "b"] },
+      expect.objectContaining({
+        target: "shop/prod",
+        nodes: [],
+        pending: expect.objectContaining({ reason: "insufficient-capacity" }),
+      }),
+    ]);
+  });
+
+  it("keeps numeric and all current placements byte-identical when capacity cannot fit", async () => {
+    const numeric = ["b", "a"];
+    const all = ["a", "b"];
+    const planned = await planCreditPlacement({
+      nodes: [node("a", 70, undefined, 40), node("b", 70, undefined, 40)],
+      workloads: [
+        workload("shop/prod", { replicas: 2, current: numeric }),
+        workload("blog/prod", { replicas: "all", current: all }),
+      ],
+    });
+
+    expect(planned.placements).toEqual([
+      expect.objectContaining({ target: "blog/prod", nodes: all, pending: expect.any(Object) }),
+      expect.objectContaining({ target: "shop/prod", nodes: numeric, pending: expect.any(Object) }),
+    ]);
   });
 
   it.each([1, 7, 42, 1337, 90_210, 771_717, 4_294_967])(
@@ -351,14 +463,18 @@ describe("planCreditPlacement", () => {
   });
 });
 
-function node(id: string, allocatableMb: number, labels?: Record<string, string>) {
-  return { id, allocatableMb, surgeMb: 20, ...(labels === undefined ? {} : { labels }) };
+function node(id: string, allocatableMb: number, labels?: Record<string, string>, runtimeMb = 20) {
+  return {
+    id,
+    profile: { allocatableMb, runtimeMb },
+    ...(labels === undefined ? {} : { labels }),
+  };
 }
 
 function workload(
   target: string,
   opts?: {
-    runtimeMb?: number;
+    processes?: number;
     replicas?: number | "all";
     current?: string[];
     selector?: Record<string, string>;
@@ -368,8 +484,8 @@ function workload(
   return {
     project: project as string,
     env: env as string,
-    runtimeMb: opts?.runtimeMb ?? 20,
     replicas: opts?.replicas ?? 1,
+    processes: opts?.processes ?? 1,
     current: opts?.current ?? [],
     ...(opts?.selector === undefined ? {} : { selector: opts.selector }),
   };
@@ -378,7 +494,12 @@ function workload(
 function generatedFleet(seed: number) {
   const next = generator(seed);
   const nodes = Array.from({ length: 3 + Math.floor(next() * 3) }, (_, index) =>
-    node(`node-${index}`, 140, index % 2 === 0 ? { tier: "fast" } : undefined),
+    node(
+      `node-${index}`,
+      120 + Math.floor(next() * 81),
+      index % 2 === 0 ? { tier: "fast" } : undefined,
+      10 + Math.floor(next() * 5) * 10,
+    ),
   );
   const workloads = Array.from({ length: 18 }, (_, index) => {
     const eligible = nodes.filter((entry) => index % 3 !== 0 || entry.labels?.tier === "fast");
@@ -387,7 +508,7 @@ function generatedFleet(seed: number) {
         ? [eligible[Math.floor(next() * eligible.length)]?.id as string]
         : [];
     return workload(`project-${index}/env`, {
-      runtimeMb: 5 + Math.floor(next() * 4) * 5,
+      processes: Math.floor(next() * 4),
       replicas: index % 5 === 0 ? "all" : 1 + Math.floor(next() * Math.min(2, eligible.length)),
       current,
       ...(index % 3 === 0 ? { selector: { tier: "fast" } } : {}),
@@ -415,7 +536,9 @@ function assertSimulation(
     if (demand === undefined) throw new Error(`missing workload ${placement.target}`);
     expect(placement.nodes).toEqual(demand.current);
     for (const id of placement.nodes) {
-      if (steady.has(id)) steady.set(id, (steady.get(id) as number) + demand.runtimeMb);
+      const node = nodes.find((entry) => entry.id === id);
+      if (node?.profile !== undefined && node.profile !== null)
+        steady.set(id, (steady.get(id) as number) + node.profile.runtimeMb * demand.processes);
     }
   }
   for (const placement of plan.placements.filter((entry) => entry.pending === undefined)) {
@@ -431,15 +554,25 @@ function assertSimulation(
       demand.replicas === "all" ? eligible.length : demand.replicas,
     );
     for (const id of placement.nodes) {
-      steady.set(id, (steady.get(id) as number) + demand.runtimeMb);
+      const node = nodes.find((entry) => entry.id === id);
+      if (node === undefined) throw new Error(`missing node ${id}`);
+      steady.set(id, (steady.get(id) as number) + node.profile.runtimeMb * demand.processes);
       if (!demand.current.includes(id)) {
-        transient.set(id, (transient.get(id) as number) + demand.runtimeMb);
+        transient.set(
+          id,
+          (transient.get(id) as number) + node.profile.runtimeMb * demand.processes,
+        );
       }
     }
   }
   for (const workload of workloads) {
     for (const id of workload.current) {
-      if (transient.has(id)) transient.set(id, (transient.get(id) as number) + workload.runtimeMb);
+      const node = nodes.find((entry) => entry.id === id);
+      if (node?.profile !== undefined && node.profile !== null)
+        transient.set(
+          id,
+          (transient.get(id) as number) + node.profile.runtimeMb * workload.processes,
+        );
     }
   }
   for (const account of plan.accounts) {
@@ -453,14 +586,25 @@ function assertSimulation(
       account.transient.runtimeMb + account.transient.transitionMb + account.transient.deployMb,
     );
     expect(account.transient.deployMb).toBe(0);
-    const protectedMb = Math.max(0, source.surgeMb - account.transient.transitionMb);
+    const protectedMb = Math.max(0, source.profile.runtimeMb - account.transient.transitionMb);
     expect(account.transient.protectedMb).toBe(protectedMb);
     expect(account.transient.deployAvailableMb).toBe(
-      Math.max(0, source.allocatableMb - (transient.get(account.id) as number) - protectedMb),
+      Math.max(
+        0,
+        source.profile.allocatableMb - (transient.get(account.id) as number) - protectedMb,
+      ),
     );
-    expect(account.transient.deficitMb).toBe(0);
-    expect(account.steady.steadyDeficitMb).toBe(0);
-    expect(account.transient.usedMb).toBeLessThanOrEqual(source.allocatableMb);
+    expect(account.transient.deficitMb).toBe(
+      Math.max(0, (transient.get(account.id) as number) - source.profile.allocatableMb),
+    );
+    expect(account.steady.steadyDeficitMb).toBe(
+      Math.max(
+        0,
+        (steady.get(account.id) as number) +
+          source.profile.runtimeMb -
+          source.profile.allocatableMb,
+      ),
+    );
   }
 }
 

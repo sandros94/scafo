@@ -264,19 +264,18 @@ export function createWakeService(daemon: DaemonContext): WakeService {
    * started — the node that boots must be one the placement chose, and this is
    * the whole of what says whether that is this one.
    *
-   * A MISSING PLACEMENT RECORD IS SERVED HERE, which is the same fallback the
-   * reconcile loop reads it with (see `_desired.ts`): nothing has been decided,
-   * so every node serves everything, and a single-node installation never leaves
-   * this line.
+   * A MISSING PLACEMENT RECORD IS HELD HERE, not served here. This node may
+   * admit the wake, stamp its demand and kick its reconcile loop, but a
+   * production reconcile requires the coordinator's explicit placement before
+   * it starts anything. Returning `local` only chooses where the held request
+   * waits; it is not permission to run the environment.
    *
-   * An environment carrying a NODE SELECTOR gets no branch of its own here, and
-   * deliberately so. Nothing has been placed, so nobody is serving it — and
-   * holding the request HERE under its own deadline is exactly right: the stamp
-   * this writes is what the coordinator's next pass has to place, the node it
-   * lands on brings it up, and this node hands over whatever it can see is ready
-   * before the deadline. When that does not happen inside the deadline the
-   * request gets the same `503` every wake that was not ready in time gets, and
-   * the retry lands on a settled placement.
+   * A NODE SELECTOR needs no separate branch: missing placement means nobody is
+   * serving either constrained or unconstrained work. Holding the request HERE
+   * under its deadline is still right: the stamp is what the coordinator's next
+   * pass places, the assigned node brings it up, and this node hands over what it
+   * can see ready. If that does not happen in time, the request gets the same
+   * `503` every unready wake gets and the retry lands on a settled placement.
    *
    * A FORWARDED REQUEST IS NEVER FORWARDED AGAIN. Reaching a node that reads
    * itself as unassigned means the decision moved while the request was in

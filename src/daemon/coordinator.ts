@@ -121,6 +121,7 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
   let lastAssignAt: string | null = null;
   let lastAssignment: AssignmentResult | null = null;
   let lastAssignFailure: string | null = null;
+  let rememberedPending = new Map<string, string>();
 
   /** Drops to candidate. Nothing lease-gated may run again until it is retaken. */
   function drop(lease: LeaseHandle): void {
@@ -167,6 +168,7 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
   async function assign(lease: LeaseHandle): Promise<void> {
     try {
       lastAssignment = await runAssignment(daemon.registry, lease, assignOptions);
+      observePending(lastAssignment);
       lastAssignFailure = null;
     } catch (error) {
       if (isScafoError(error) && error.code === "lease-lost") drop(lease);
@@ -175,6 +177,29 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
     } finally {
       lastAssignAt = new Date().toISOString();
     }
+  }
+
+  /** Emits an operational transition once, not a five-second heartbeat forever. */
+  function observePending(assignment: AssignmentResult): void {
+    const observe = daemon.observability;
+    if (observe === undefined) return;
+    const next = new Map<string, string>();
+    for (const failure of assignment.unplaced) {
+      if (failure.pending === undefined) continue;
+      const fingerprint = JSON.stringify(failure.pending);
+      next.set(failure.target, fingerprint);
+      if (rememberedPending.get(failure.target) === fingerprint) continue;
+      const [project, env] = failure.target.split("/");
+      if (project === undefined || env === undefined) continue;
+      observe.emit({
+        type: "placement.pending",
+        project,
+        env,
+        reason: failure.pending.reason,
+      });
+    }
+    /* A resolution must forget the old state: recurrence is another real event. */
+    rememberedPending = next;
   }
 
   async function reap(lease: LeaseHandle): Promise<void> {

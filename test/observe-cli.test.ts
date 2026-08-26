@@ -685,6 +685,23 @@ describe("what the traces come to", () => {
     expect(selection.events.every((record) => record.type !== "reconcile.pass.start")).toBe(true);
   });
 
+  it("keeps only the selected project's placement pending events", () => {
+    const own = event("node-a", CLOCK_START_MS - 2 * MINUTE_MS, {
+      type: "placement.pending",
+      project: "shop",
+      env: "production",
+      reason: "profile-unavailable",
+    });
+    const other = event("node-a", CLOCK_START_MS - MINUTE_MS, {
+      type: "placement.pending",
+      project: "blog",
+      env: "production",
+      reason: "insufficient-capacity",
+    });
+
+    expect(selectTraces([own, other], { project: "shop" }).events).toEqual([own]);
+  });
+
   it("lays one request out against the moment it started", () => {
     const timeline = wakeTimeline("8f3a", CLOCK_START_MS - 10 * MINUTE_MS);
 

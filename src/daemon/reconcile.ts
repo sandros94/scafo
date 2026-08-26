@@ -197,7 +197,10 @@ export function createReconciler(
     try {
       /* Filtered to this node: an environment placed on other nodes is not
          desired here, and what still runs for it is planned for a stop. */
-      const state = await readDesired(registry, { nodeId: daemon.nodeId });
+      const state = await readDesired(registry, {
+        nodeId: daemon.nodeId,
+        mode: "required",
+      });
       const desired = state.environments;
       placements = state.placements;
       parked = state.parked;

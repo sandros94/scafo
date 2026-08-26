@@ -15,6 +15,7 @@ import { type DaemonState, createNodeApp, type EnvironmentResult } from "../src/
 import type { AssignmentFailure } from "../src/daemon/_assign.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { renderProblem } from "../src/daemon/middleware.ts";
+import { createCreditController } from "../src/daemon/_credit-controller.ts";
 import { signNodeToken } from "../src/core/auth/index.ts";
 import type { ProblemDetails } from "../src/core/error.ts";
 import { ScafoError } from "../src/core/error.ts";
@@ -112,8 +113,7 @@ describe("GET /v1/state", () => {
       /* The same fact read as an election: no lease, so nobody coordinates. */
       coordinator: null,
       processes: PROCESSES,
-      /* No coordinator has placed anything, which is exactly the state in which
-         every node serves every environment. */
+      /* No reconcile loop has read any explicit coordinator decision. */
       placements: [],
       /* No reconcile loop here, so nothing has been read as parked. */
       parked: [],
@@ -132,6 +132,25 @@ describe("GET /v1/state", () => {
     expect(response.status).toBe(200);
     expect(state.lease).toEqual(handle?.lease);
     expect(state.lease?.node).toBe("node-elsewhere");
+  });
+
+  it("reports a detached local credit account", async () => {
+    const credits = createCreditController({ allocatableMb: 2048, surgeMb: 512 });
+    const credited = createNodeApp({
+      config: daemonConfig(),
+      nodeId: NODE_ID,
+      registry: clock.ctx,
+      supervisor: fakeSupervisor(),
+      version: VERSION,
+      credits,
+    });
+
+    const state = (await (
+      await credited.request("/v1/state", { headers: await bearer() })
+    ).json()) as DaemonState;
+    expect(state.credits).toMatchObject({ allocatableMb: 2048, surgeMb: 512, usedMb: 0 });
+    state.credits!.allocatableMb = 1;
+    expect(credits.account.allocatableMb).toBe(2048);
   });
 
   it("refuses a caller without a token, telling it nothing beyond the status", async () => {
@@ -575,7 +594,17 @@ describe("GET /v1/state, on the node that is coordinating", () => {
   };
 
   it("reports what the last assignment pass could not place", async () => {
-    const coordinating = await appCoordinating([UNPLACED]);
+    const pending = {
+      ...UNPLACED,
+      reason: "capacity-unavailable" as const,
+      pending: {
+        reason: "profile-unavailable" as const,
+        requiredReplicas: 1,
+        eligibleNodes: 2,
+        capacityNodes: 1,
+      },
+    };
+    const coordinating = await appCoordinating([pending]);
 
     const state = (await (
       await coordinating.request("/v1/state", { headers: await bearer() })
@@ -588,7 +617,58 @@ describe("GET /v1/state, on the node that is coordinating", () => {
      * nothing anywhere telling them why.
      */
     expect(state.coordinator?.self).toBe(true);
-    expect(state.coordinator?.unplaced).toEqual([UNPLACED]);
+    expect(state.coordinator?.unplaced).toEqual([pending]);
+    state.coordinator!.unplaced![0]!.pending!.eligibleNodes = 99;
+    expect(pending.pending.eligibleNodes).toBe(2);
+  });
+
+  it("reports detached fleet accounts only from the self coordinator", async () => {
+    const accounts = [
+      {
+        id: NODE_ID,
+        transient: {
+          allocatableMb: 2048,
+          surgeMb: 512,
+          runtimeMb: 0,
+          transitionMb: 0,
+          deployMb: 0,
+          usedMb: 0,
+          availableMb: 2048,
+          deficitMb: 0,
+          protectedMb: 512,
+          deployAvailableMb: 1536,
+          runtimeAvailableMb: 2048,
+          steadyAvailableMb: 1536,
+          steadyDeficitMb: 0,
+          fits: true,
+          steadyFits: true,
+        },
+        steady: {
+          allocatableMb: 2048,
+          surgeMb: 512,
+          runtimeMb: 0,
+          transitionMb: 0,
+          deployMb: 0,
+          usedMb: 0,
+          availableMb: 2048,
+          deficitMb: 0,
+          protectedMb: 512,
+          deployAvailableMb: 1536,
+          runtimeAvailableMb: 2048,
+          steadyAvailableMb: 1536,
+          steadyDeficitMb: 0,
+          fits: true,
+          steadyFits: true,
+        },
+      },
+    ];
+    const coordinating = await appCoordinating([], accounts);
+    const state = (await (
+      await coordinating.request("/v1/state", { headers: await bearer() })
+    ).json()) as DaemonState;
+    expect(state.coordinator?.accounts).toEqual(accounts);
+    state.coordinator!.accounts![0]!.transient.usedMb = 99;
+    expect(accounts[0]!.transient.usedMb).toBe(0);
   });
 
   it("says nothing at all when the pass placed everything", async () => {
@@ -609,14 +689,46 @@ describe("GET /v1/state, on the node that is coordinating", () => {
        node's account of work it did, and a node that is not coordinating did
        none of it. */
     await acquireLease(clock.ctx, "node-elsewhere");
+    const foreign = createNodeApp({
+      config: daemonConfig(),
+      nodeId: NODE_ID,
+      registry: clock.ctx,
+      supervisor: fakeSupervisor(),
+      version: VERSION,
+      coordinator: {
+        start: () => {},
+        stop: () => Promise.resolve(),
+        runOnce: () => Promise.resolve(),
+        handle: () => null,
+        status: () => ({
+          holding: false,
+          lease: null,
+          lastReapAt: null,
+          lastReapFailure: null,
+          lastAssignAt: new Date(clock.nowMs()).toISOString(),
+          lastAssignment: {
+            live: [NODE_ID],
+            changed: [],
+            removed: [],
+            skipped: [],
+            unplaced: [UNPLACED],
+            accounts: [],
+            overcommitted: true,
+          },
+          lastAssignFailure: null,
+        }),
+      },
+    });
 
     const state = (await (
-      await app.request("/v1/state", { headers: await bearer() })
+      await foreign.request("/v1/state", { headers: await bearer() })
     ).json()) as DaemonState;
 
     expect(state.coordinator?.node).toBe("node-elsewhere");
     expect(state.coordinator?.self).toBe(false);
     expect(state.coordinator?.unplaced).toBeUndefined();
+    expect(state.coordinator?.accounts).toBeUndefined();
+    expect(state.coordinator?.overcommitted).toBeUndefined();
   });
 });
 
@@ -998,7 +1110,10 @@ async function selectorBody(sent: Record<string, unknown>): Promise<EnvironmentR
  * account of its last assignment pass. The lease is a real one, because that is
  * what the state route reads the election from.
  */
-async function appCoordinating(unplaced: AssignmentFailure[]): Promise<H3> {
+async function appCoordinating(
+  unplaced: AssignmentFailure[],
+  accounts: NonNullable<DaemonState["coordinator"]>["accounts"] = [],
+): Promise<H3> {
   const held = await acquireLease(clock.ctx, NODE_ID);
   if (held === null) throw new Error("the fixture could not take the lease");
 
@@ -1019,7 +1134,15 @@ async function appCoordinating(unplaced: AssignmentFailure[]): Promise<H3> {
         lastReapAt: null,
         lastReapFailure: null,
         lastAssignAt: new Date(clock.nowMs()).toISOString(),
-        lastAssignment: { live: [NODE_ID], changed: [], removed: [], skipped: [], unplaced },
+        lastAssignment: {
+          live: [NODE_ID],
+          changed: [],
+          removed: [],
+          skipped: [],
+          unplaced,
+          accounts,
+          overcommitted: false,
+        },
         lastAssignFailure: null,
       }),
     },

@@ -17,6 +17,7 @@
 import type { RegistryContext } from "../core/registry/context.ts";
 import { isNodeLive, listNodeRecords, NODE_LIVENESS_WINDOW_MS } from "../core/registry/nodes.ts";
 import type { NodeRecord } from "../core/types/registry.ts";
+import { readCreditProfile } from "../core/capacity/profile.ts";
 import { formatLabels } from "../core/utils/labels.ts";
 
 /**
@@ -41,6 +42,8 @@ export interface NodeListing {
   labels: Record<string, string>;
   /** When it said it was leaving. Only ever set on a `draining` node. */
   drainingAt?: string;
+  /** Advertised fleet-placement denominations; absent on pre-credit records. */
+  credits?: NodeRecord["credits"];
 }
 
 /** Every registered node, in id order, judged against `now`. */
@@ -63,6 +66,7 @@ export function readNode(record: NodeRecord, now: Date): NodeListing {
     internal: record.addresses.internal,
     apiPort: record.addresses.apiPort,
     labels: record.labels ?? {},
+    ...(record.credits === undefined ? {} : { credits: { ...record.credits } }),
     ...(record.drainingAt === undefined ? {} : { drainingAt: record.drainingAt }),
   };
 }
@@ -89,9 +93,10 @@ export function formatNodeTable(nodes: NodeListing[], now: Date = new Date()): s
     node.state,
     describeSeen(node.seenAt, now),
     `${node.internal}:${String(node.apiPort)}`,
+    describeCredits(node.credits),
     formatLabels(node.labels),
   ]);
-  const head = ["NODE", "STATE", "SEEN", "API", "LABELS"];
+  const head = ["NODE", "STATE", "SEEN", "API", "CREDITS", "LABELS"];
   const width = head.map((_, column) =>
     Math.max(...[head, ...rows].map((row) => (row[column] as string).length)),
   );
@@ -104,6 +109,12 @@ export function formatNodeTable(nodes: NodeListing[], now: Date = new Date()): s
     ...[head, ...rows].map((row) => `  ${row.map(pad(width)).join("  ").trimEnd()}`),
   ];
   return lines.join("\n");
+}
+
+function describeCredits(credits: NodeListing["credits"]): string {
+  const profile = readCreditProfile(credits);
+  if (profile === null) return credits === undefined ? "absent" : "invalid";
+  return `${String(profile.allocatableMb)}/${String(profile.runtimeMb)}/${String(profile.deployMb)} MiB`;
 }
 
 /* ---------------------------------------------------------------- internals */

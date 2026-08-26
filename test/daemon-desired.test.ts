@@ -1,10 +1,10 @@
 /*
  * What one node reads out of the registry as its own work.
  *
- * The case that matters most here is the one that looks like an omission: an
- * environment nobody has placed yet is served by every node. That fallback is
- * what keeps a bootstrap, a single-node installation and a rolling upgrade
- * running, and it is asserted first.
+ * Missing placement is an explicit compatibility choice: production requires a
+ * decision and starts nothing, while the legacy reader retains the old
+ * unconstrained fallback for rolling upgrades. Both contracts are asserted
+ * first so no caller can select one by omission.
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
@@ -74,14 +74,20 @@ beforeEach(async () => {
 });
 
 describe("an environment nobody has placed", () => {
-  it("is served here, because no coordinator has decided anything yet", async () => {
+  it("is not served by a credit-capable daemon until placement is explicit", async () => {
+    const state = await readDesired(registry, { nodeId: SELF, mode: "required" });
+
+    expect(state.environments).toEqual([]);
+    expect(state.placements).toEqual([]);
+  });
+
+  it("is served only when the caller explicitly selects legacy fallback", async () => {
     /*
-     * THE FALLBACK THE WHOLE FEATURE HANGS FROM. A missing placement record is
-     * the ordinary state of a bootstrap, of a single-node installation, and of
-     * every node running a build that predates placement. Reading it as "not
-     * mine" would take an installation off the air the first time it upgraded.
+     * The compatibility seam for a daemon that predates required placement.
+     * Production never selects this mode; an explicit rolling-upgrade reader
+     * retains the former unconstrained behaviour until it is replaced.
      */
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
     /* And it is reported as undecided rather than as placed on nobody. */
@@ -90,7 +96,7 @@ describe("an environment nobody has placed", () => {
 
   it("is served by every node at once, which is what it did before placement existed", async () => {
     for (const nodeId of [SELF, PEER, "node-c"]) {
-      const state = await readDesired(registry, { nodeId });
+      const state = await readDesired(registry, { nodeId, mode: "legacy-fallback" });
       expect(state.environments, nodeId).toHaveLength(1);
     }
   });
@@ -100,7 +106,7 @@ describe("an environment that has been placed", () => {
   it("is served here when the decision names this node", async () => {
     await writePlacement(registry, PROJECT, "prod", [SELF, PEER], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
     expect(state.placements).toEqual([
@@ -111,7 +117,7 @@ describe("an environment that has been placed", () => {
   it("is NOT served here when the decision names other nodes", async () => {
     await writePlacement(registry, PROJECT, "prod", [PEER], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     /* The environment drops out of this node's desired state, which is what
        makes the reconcile loop stop whatever it still runs for it. The nodes
@@ -127,7 +133,7 @@ describe("an environment that has been placed", () => {
     await writePlacement(registry, PROJECT, "prod", [SELF], lease);
     await writePlacement(registry, PROJECT, "staging", [PEER], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
     expect(state.placements).toEqual([
@@ -141,7 +147,7 @@ describe("an environment that has been placed", () => {
        one that must be obeyed rather than second-guessed if it appears. */
     await writePlacement(registry, PROJECT, "prod", [], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     expect(state.environments).toEqual([]);
     expect(state.placements[0]).toMatchObject({ nodes: [], self: false });
@@ -152,7 +158,7 @@ describe("an environment that has been placed", () => {
     await writePlacement(registry, PROJECT, "prod", [PEER], lease);
     await writePlacement(registry, OTHER_PROJECT, "prod", [SELF], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     expect(state.environments.map((entry) => entry.project)).toEqual([OTHER_PROJECT]);
     expect(
@@ -176,7 +182,7 @@ describe("an environment that carries a node selector", () => {
     await setNodeSelector(registry, PROJECT, "prod", FAST);
 
     for (const nodeId of [SELF, PEER, "node-c"]) {
-      const state = await readDesired(registry, { nodeId });
+      const state = await readDesired(registry, { nodeId, mode: "legacy-fallback" });
       expect(state.environments, nodeId).toEqual([]);
       /* And it is reported as undecided rather than as placed on nobody: there
          is no decision to report, which is the state it is waiting out. */
@@ -194,7 +200,7 @@ describe("an environment that carries a node selector", () => {
     await setNodeSelector(registry, PROJECT, "prod", FAST);
     await writePlacement(registry, PROJECT, "prod", [SELF], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
     expect(state.placements).toEqual([
@@ -206,7 +212,7 @@ describe("an environment that carries a node selector", () => {
     await setNodeSelector(registry, PROJECT, "prod", FAST);
     await writePlacement(registry, PROJECT, "prod", [PEER], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     expect(state.environments).toEqual([]);
     expect(state.placements[0]).toMatchObject({ self: false, selector: FAST });
@@ -220,7 +226,7 @@ describe("an environment that carries a node selector", () => {
     await writePlacement(registry, PROJECT, "prod", [SELF], lease);
     await writePlacement(registry, PROJECT, "staging", [SELF, PEER], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     expect(state.placements).toEqual([
       { project: PROJECT, env: "prod", nodes: [SELF], self: true, selector: FAST },
@@ -229,16 +235,18 @@ describe("an environment that carries a node selector", () => {
     ]);
   });
 
-  it("goes back to being served everywhere the moment the selector is cleared", async () => {
+  it("returns to the legacy run-everywhere fallback when the selector is cleared", async () => {
     await setNodeSelector(registry, PROJECT, "prod", FAST);
-    expect((await readDesired(registry, { nodeId: SELF })).environments).toEqual([]);
+    expect(
+      (await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" })).environments,
+    ).toEqual([]);
 
     await setNodeSelector(registry, PROJECT, "prod", null);
 
     /* Undecided AND unconstrained is the fallback's case again, so the node
        takes it straight back rather than waiting for a coordinator. */
     for (const nodeId of [SELF, PEER]) {
-      const state = await readDesired(registry, { nodeId });
+      const state = await readDesired(registry, { nodeId, mode: "legacy-fallback" });
       expect(
         state.environments.map((entry) => entry.env.name),
         nodeId,
@@ -250,7 +258,7 @@ describe("an environment that carries a node selector", () => {
     await deployed(PROJECT, "staging");
     await setNodeSelector(registry, PROJECT, "prod", FAST);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     /* One constrained environment waiting on a coordinator must not hold up the
        unconstrained ones this node is already meant to be serving. */
@@ -263,7 +271,7 @@ describe("what is left out for reasons other than placement", () => {
     await createEnvironment(registry, PROJECT, { name: "fresh" });
     await writePlacement(registry, PROJECT, "fresh", [SELF], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     /* "prod" is undecided and served here by the fallback; "fresh" is decided
        ONTO this node and still contributes nothing, because it has no build. */
@@ -275,7 +283,7 @@ describe("what is left out for reasons other than placement", () => {
     await writePlacement(registry, PROJECT, "prod", [SELF], lease);
     await retireEnvironment(registry, PROJECT, "prod");
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     /*
      * It leaves by the same door a reassignment uses: it drops out of the
@@ -294,13 +302,15 @@ describe("what is left out for reasons other than placement", () => {
 
   it("takes it straight back the moment it is unretired", async () => {
     await retireEnvironment(registry, PROJECT, "prod");
-    expect((await readDesired(registry, { nodeId: SELF })).environments).toEqual([]);
+    expect(
+      (await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" })).environments,
+    ).toEqual([]);
 
     await unretireEnvironment(registry, PROJECT, "prod");
 
     /* Reversibility, seen from the node: nothing was taken away from the
        environment, so nothing has to be rebuilt to serve it again. */
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
     expect(state.environments[0].builds.map((leg) => leg.build.id)).toEqual([BUILD]);
   });
@@ -309,25 +319,26 @@ describe("what is left out for reasons other than placement", () => {
     await retireEnvironment(registry, PROJECT, "prod");
 
     for (const nodeId of [SELF, PEER, "node-c"]) {
-      expect((await readDesired(registry, { nodeId })).environments, nodeId).toEqual([]);
+      expect(
+        (await readDesired(registry, { nodeId, mode: "legacy-fallback" })).environments,
+        nodeId,
+      ).toEqual([]);
     }
   });
 
   it("keeps it out once the coordinator has dropped its placement record too", async () => {
     /*
      * The state a retired environment actually settles in, and the one that
-     * reads backwards: the coordinator DELETES the placement of an environment
-     * nothing should serve, and a missing placement record is the fallback that
-     * means "served everywhere". The two together would start a retired
-     * environment on every node in the installation if the retirement check
-     * were not what decides this.
+     * reads backwards for this explicit LEGACY reader: the coordinator DELETES
+     * the placement of an environment nothing should serve, and legacy fallback
+     * treats that absence as unconstrained. The retirement check must still win.
      */
     await writePlacement(registry, PROJECT, "prod", [SELF, PEER], lease);
     await retireEnvironment(registry, PROJECT, "prod");
     await deletePlacement(registry, PROJECT, "prod", lease);
 
     for (const nodeId of [SELF, PEER, "node-c"]) {
-      const state = await readDesired(registry, { nodeId });
+      const state = await readDesired(registry, { nodeId, mode: "legacy-fallback" });
       expect(state.environments, nodeId).toEqual([]);
       expect(state.placements, nodeId).toEqual([]);
     }
@@ -336,7 +347,7 @@ describe("what is left out for reasons other than placement", () => {
   it("reads nothing at all out of an empty registry", async () => {
     const empty = ctxWith(new MemoryCasStore()).ctx;
 
-    expect(await readDesired(empty, { nodeId: SELF })).toEqual({
+    expect(await readDesired(empty, { nodeId: SELF, mode: "legacy-fallback" })).toEqual({
       environments: [],
       placements: [],
       parked: [],
@@ -356,7 +367,7 @@ describe("an environment whose traffic is split", () => {
       { build: BUILD, weight: 10 },
     ]);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     /* Alias FIRST, whatever the split says, because the alias is the primary
        pointer whether or not it is also a leg — and then the split in its own
@@ -374,7 +385,7 @@ describe("an environment whose traffic is split", () => {
       { build: OTHER_BUILD, weight: 50 },
     ]);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     expect(state.environments[0].builds.map((leg) => leg.build.id)).toEqual([BUILD, OTHER_BUILD]);
     expect(state.environments[0].builds[0].role).toBe("alias");
@@ -394,7 +405,7 @@ describe("an environment whose traffic is split", () => {
     ]);
     await deleteKey(registry, buildKey(PROJECT, OTHER_BUILD));
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
     expect(state.environments[0].builds.map((leg) => leg.build.id)).toEqual([BUILD]);
@@ -410,7 +421,7 @@ describe("an environment whose traffic is split", () => {
       { build: OTHER_BUILD, weight: 10 },
     ]);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     /* No field rather than an empty one: an environment with nothing missing
        says nothing here, exactly as an unconstrained one says no selector. */
@@ -424,7 +435,7 @@ describe("an environment whose traffic is split", () => {
     ]);
     await setSplit(registry, PROJECT, "prod", null);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     expect(state.environments[0].builds.map((leg) => leg.build.id)).toEqual([BUILD]);
   });
@@ -436,7 +447,9 @@ describe("an environment whose traffic is split", () => {
     ]);
     await retireEnvironment(registry, PROJECT, "prod");
 
-    expect((await readDesired(registry, { nodeId: SELF })).environments).toEqual([]);
+    expect(
+      (await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" })).environments,
+    ).toEqual([]);
   });
 });
 
@@ -452,7 +465,7 @@ describe("an ephemeral environment that has gone quiet", () => {
     await stampEnvironmentWake(registry, PROJECT, PREVIEW);
     clock.tick(PARK_AFTER_MS - 1);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     expect(state.environments.map((entry) => entry.env.name)).toEqual([PREVIEW, "prod"]);
     expect(state.parked).toEqual([]);
@@ -467,7 +480,7 @@ describe("an ephemeral environment that has gone quiet", () => {
     await stampEnvironmentWake(registry, PROJECT, PREVIEW);
     clock.tick(PARK_AFTER_MS);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     /*
      * Its alias AND every leg of its split go together: parking is about the
@@ -491,12 +504,14 @@ describe("an ephemeral environment that has gone quiet", () => {
     /* Created long ago, deployed a moment ago. An environment that predates
        wake stamps must not read as parked the instant a node that knows about
        parking picks it up. */
-    expect((await readDesired(registry, { nodeId: SELF })).parked).toEqual([]);
+    expect((await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" })).parked).toEqual(
+      [],
+    );
 
     clock.tick(PARK_AFTER_MS);
-    expect(parkedNames(await readDesired(registry, { nodeId: SELF }))).toEqual([
-      { project: PROJECT, env: PREVIEW },
-    ]);
+    expect(
+      parkedNames(await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" })),
+    ).toEqual([{ project: PROJECT, env: PREVIEW }]);
   });
 
   it("counts the wait from its creation when it has neither a stamp nor a flip", async () => {
@@ -507,7 +522,7 @@ describe("an ephemeral environment that has gone quiet", () => {
     clock.tick(PARK_AFTER_MS);
     await stampBuildWake(registry, PROJECT, PREVIEW, THIRD_BUILD);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     expect(await legsOf(PREVIEW)).toEqual([{ id: THIRD_BUILD, role: "recalled" }]);
     /* And it is NOT called parked: an environment whose alias was never flipped
@@ -534,7 +549,7 @@ describe("an ephemeral environment that has gone quiet", () => {
     await damageFlip(PREVIEW);
     clock.tick(PARK_AFTER_MS * 100);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     expect(state.environments.map((entry) => entry.env.name)).toEqual([PREVIEW, "prod"]);
     expect(state.parked).toEqual([]);
@@ -545,7 +560,7 @@ describe("an ephemeral environment that has gone quiet", () => {
     await setParkPolicy(registry, PROJECT, PREVIEW, { afterS: 0 });
     clock.tick(PARK_AFTER_MS * 100);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     expect(await legsOf(PREVIEW)).toEqual([{ id: BUILD, role: "alias" }]);
     expect(state.parked).toEqual([]);
@@ -563,7 +578,7 @@ describe("an ephemeral environment that has gone quiet", () => {
     await stampEnvironmentWake(registry, PROJECT, "prod");
     clock.tick(HOUR_MS);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
     expect(state.parked).toEqual([]);
@@ -575,7 +590,7 @@ describe("an ephemeral environment that has gone quiet", () => {
     clock.tick(PARK_AFTER_MS);
     await stampBuildWake(registry, PROJECT, PREVIEW, THIRD_BUILD);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     /* Its own hosts stay unserved — that is what parked means — while the one
        host somebody actually asked for comes back. Parked and desired at once,
@@ -630,7 +645,7 @@ describe("the builds a wake has recalled", () => {
      */
     await stampBuildWake(registry, PROJECT, PREVIEW, "deadbeef");
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
     const wanted = state.environments.find((entry) => entry.env.name === PREVIEW);
 
     expect(await legsOf(PREVIEW)).toEqual([{ id: BUILD, role: "alias" }]);
@@ -694,7 +709,7 @@ describe("how a pass reads all of that", () => {
     const { ctx, observing } = await watchedInstallation();
     observing.reset();
 
-    await readDesired(ctx, { nodeId: SELF });
+    await readDesired(ctx, { nodeId: SELF, mode: "legacy-fallback" });
 
     expect(observing.peakReads).toBeGreaterThan(1);
     expect(observing.peakReads).toBeLessThanOrEqual(DEFAULT_CONCURRENCY);
@@ -705,7 +720,7 @@ describe("how a pass reads all of that", () => {
 
     for (const concurrency of [1, 3]) {
       observing.reset();
-      await readDesired(ctx, { nodeId: SELF, concurrency });
+      await readDesired(ctx, { nodeId: SELF, mode: "legacy-fallback", concurrency });
       expect(observing.peakReads, `bounded to ${String(concurrency)}`).toBe(concurrency);
     }
   });
@@ -716,8 +731,12 @@ describe("how a pass reads all of that", () => {
        as the reads came back would be in another order than the one below. */
     observing.delays.set(environmentKey(PROJECT, names[0]), 20);
 
-    const overlapped = await readDesired(ctx, { nodeId: SELF });
-    const sequential = await readDesired(ctx, { nodeId: SELF, concurrency: 1 });
+    const overlapped = await readDesired(ctx, { nodeId: SELF, mode: "legacy-fallback" });
+    const sequential = await readDesired(ctx, {
+      nodeId: SELF,
+      mode: "legacy-fallback",
+      concurrency: 1,
+    });
 
     expect(overlapped).toEqual(sequential);
     expect(overlapped.environments.map((entry) => entry.env.name)).toEqual(names);
@@ -732,9 +751,13 @@ describe("how a pass reads all of that", () => {
     observing.faults.set(environmentKey(PROJECT, names[1]), new Error("the second"));
     observing.faults.set(environmentKey(PROJECT, names[5]), new Error("the sixth"));
 
-    await expect(readDesired(ctx, { nodeId: SELF })).rejects.toThrow("the second");
+    await expect(readDesired(ctx, { nodeId: SELF, mode: "legacy-fallback" })).rejects.toThrow(
+      "the second",
+    );
     /* And it is the same failure the pass raised before any of this overlapped. */
-    await expect(readDesired(ctx, { nodeId: SELF, concurrency: 1 })).rejects.toThrow("the second");
+    await expect(
+      readDesired(ctx, { nodeId: SELF, mode: "legacy-fallback", concurrency: 1 }),
+    ).rejects.toThrow("the second");
   });
 });
 
@@ -757,7 +780,7 @@ function parkedNames(state: DesiredState): Array<{ project: string; env: string 
 
 /** The builds this node would run for `name`, in the order it would roll them out. */
 async function legsOf(name: string): Promise<Array<{ id: string; role: string }>> {
-  const state = await readDesired(registry, { nodeId: SELF });
+  const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
   const wanted = state.environments.find((entry) => entry.env.name === name);
   return (wanted?.builds ?? []).map((leg) => ({ id: leg.build.id, role: leg.role }));
 }

@@ -76,6 +76,13 @@ export interface NodeWireguard {
   address: string;
 }
 
+/** The credit denominations one node makes available to fleet placement. */
+export interface NodeCreditProfile {
+  allocatableMb: number;
+  runtimeMb: number;
+  deployMb: number;
+}
+
 /**
  * What an operator key is allowed to do to the set of keys the fleet trusts.
  *
@@ -163,6 +170,8 @@ export interface NodeRecord {
   addresses: { internal: string; apiPort: number };
   /** Filled in by the node itself once it has probed its own hardware. */
   capacity?: { cores: number; memMb: number; cgroup: boolean; probedAt: string };
+  /** Optional so records written before fleet credit placement remain readable. */
+  credits?: NodeCreditProfile;
   /**
    * Last time the node's daemon said it is still there, refreshed on its own
    * timer. This is the liveness signal placement decides from; a record without
@@ -408,8 +417,9 @@ export interface EnvironmentRecord {
  * Key: `_scafo/placement/<project>/<env>.json`.
  *
  * The ABSENCE of this record is meaningful and is not an error: it says no
- * coordinator has decided yet, and every node then serves the environment. See
- * the node-side reader for why that fallback is the safe one.
+ * coordinator has decided yet. Unified-credit daemons require the record and
+ * start nothing until one exists; legacy readers retain their explicit rolling-
+ * upgrade fallback for unconstrained environments.
  */
 export interface PlacementRecord {
   v: 1;

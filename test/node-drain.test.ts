@@ -241,5 +241,6 @@ async function register(id: string): Promise<NodeRecord> {
     publicKey: { kty: "OKP", crv: "Ed25519", x: `key-${id}` },
     addresses: { internal: `10.0.0.${id === NODE_A ? "1" : "2"}`, apiPort: 7400 },
     heartbeatAt: new Date(clock.nowMs()).toISOString(),
+    credits: { allocatableMb: 10_000, runtimeMb: 512, deployMb: 1024 },
   });
 }

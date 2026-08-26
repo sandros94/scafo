@@ -138,8 +138,8 @@ describe.each([
 
     const environment = await build().setSelector(PROD, null);
 
-    /* The field is gone rather than emptied: an environment with no selector is
-       served everywhere again, and an empty one would wait on a coordinator. */
+    /* The field is gone rather than emptied: the next assignment may use every
+       live node again, while an empty object would remain a stated selector. */
     expect("nodeSelector" in environment).toBe(false);
     expect((await getEnvironment(clock.ctx, PROJECT, "prod")).nodeSelector).toBeUndefined();
   });

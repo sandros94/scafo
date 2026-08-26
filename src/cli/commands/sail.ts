@@ -26,21 +26,11 @@ import { observeNodePrefix } from "../../core/registry/paths.ts";
 import { createReconciler, runtimeBaseEnv } from "../../daemon/reconcile.ts";
 import { startDaemon } from "../../daemon/serve.ts";
 import { createStorageService } from "../../daemon/storage.ts";
-import {
-  DEFAULT_DAEMON_OVERHEAD_MB,
-  DEFAULT_MEMORY_FRACTION,
-} from "../../core/capacity/compute.ts";
-import { probeCapacity } from "../../core/capacity/reader.ts";
 import { DEFAULT_ARCHIVE_ENTRIES, DEFAULT_ARTIFACT_BYTES } from "../../core/types/deploy.ts";
 import { initRegistry, readMeta } from "../../core/registry/meta.ts";
 import { wakeActivity } from "../../core/registry/wake.ts";
 import { createDeployService } from "../../daemon/deploys.ts";
-import {
-  assertCreditAdmission,
-  createCreditController,
-  DEFAULT_RUNTIME_CREDIT_MB,
-} from "../../daemon/_credit-controller.ts";
-import { DEFAULT_DEPLOY_CREDIT_MB } from "../../daemon/_deploy-scheduler.ts";
+import { assertCreditAdmission, createCreditController } from "../../daemon/_credit-controller.ts";
 import { createCelldDeployRunner } from "../../drivers/deploy/celld.ts";
 import { createFileArtifactStager } from "../../drivers/artifact/file.ts";
 import { createNodeHostReader } from "../../drivers/host/node.ts";
@@ -58,13 +48,15 @@ import {
   loadVarsetKey,
   loadWireguardRecord,
   nodeStateDir,
+  probeNodeCredits,
   registerThisNode,
 } from "../_bootstrap.ts";
+import { creditArgs } from "../_credit-args.ts";
 import { STORAGE_TOKEN_FILE, storageTokenNotice } from "../_storage-token.ts";
 import { deprecatedAlias, readPackageVersion, readTextFile, reportFailure } from "../_utils.ts";
 
 /* Flag names are kebab-case, matching the keys `loadDaemonConfig` reads them under. */
-const sailArgs: ArgsDef = {
+export const sailArgs: ArgsDef = {
   "config": { type: "string", description: "Path to scafo.config.jsonc" },
   "endpoint": { type: "string", description: "S3-compatible endpoint URL" },
   "region": { type: "string", description: "Signing region of the bucket" },
@@ -123,22 +115,7 @@ const sailArgs: ArgsDef = {
       "Milliseconds a rollout holds the deployment pointer past the spawn; " +
       "size it to the store's worst request stall (0 = release at the spawn)",
   },
-  "memory-fraction": {
-    type: "string",
-    description: "Share of node memory allocatable to runtime and deploy credit (default 0.8)",
-  },
-  "daemon-overhead-mb": {
-    type: "string",
-    description: "MiB reserved for the node daemon before credit allocation (default 128)",
-  },
-  "runtime-credit-mb": {
-    type: "string",
-    description: "MiB reserved by one serving runtime and its protected surge (default 512)",
-  },
-  "deploy-credit-mb": {
-    type: "string",
-    description: "MiB reserved by one active deploy until artifact cleanup (default 1024)",
-  },
+  ...creditArgs,
   "artifact-bytes": {
     type: "string",
     description: "Maximum compressed and expanded bytes per deploy artifact",
@@ -238,16 +215,16 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
 
   /* Capacity is local boot configuration. Refuse an unusable node before the
      registry bootstrap can mutate the shared bucket. */
-  const capacity = await probeCapacity(createNodeHostReader(), {
-    rssFraction: config.capacity?.memoryFraction ?? DEFAULT_MEMORY_FRACTION,
-    daemonOverheadMb: config.capacity?.daemonOverheadMb ?? DEFAULT_DAEMON_OVERHEAD_MB,
-  });
-  const runtimeCreditMb = config.runtime.creditMb ?? DEFAULT_RUNTIME_CREDIT_MB;
+  const { capacity, credits: creditProfile } = await probeNodeCredits(
+    config,
+    createNodeHostReader(),
+  );
+  const runtimeCreditMb = creditProfile.runtimeMb;
   const credits = createCreditController({
-    allocatableMb: capacity.rssBudgetMb,
+    allocatableMb: creditProfile.allocatableMb,
     surgeMb: runtimeCreditMb,
   });
-  const deployCreditMb = config.deploy?.creditMb ?? DEFAULT_DEPLOY_CREDIT_MB;
+  const deployCreditMb = creditProfile.deployMb;
   assertCreditAdmission(credits, runtimeCreditMb, deployCreditMb);
 
   const state = await loadNodeIdentity(config);
@@ -265,6 +242,7 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
     config,
     state,
     capacity,
+    credits: creditProfile,
     ...(wireguard === undefined ? {} : { wireguard }),
   });
 

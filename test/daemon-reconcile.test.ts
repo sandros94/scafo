@@ -1510,6 +1510,14 @@ async function seededWorld(opts?: WorldOptions): Promise<World> {
     await createEnvironment(ctx, PROJECT, { name: opts.otherEnvironment });
     await flipAlias(ctx, PROJECT, opts.otherEnvironment, build);
   }
+  const lease = await acquireLease(ctx, "coordinator");
+  if (lease === null) throw new Error("the fixture could not take the coordinator lease");
+  for (const env of [
+    ENVIRONMENT,
+    ...(opts?.otherEnvironment === undefined ? [] : [opts.otherEnvironment]),
+  ]) {
+    await writePlacement(ctx, PROJECT, env, [THIS_NODE], lease);
+  }
 
   const events: string[] = [];
   const supervisor = fakeSupervisor(events);

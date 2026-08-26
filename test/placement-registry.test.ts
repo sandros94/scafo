@@ -374,9 +374,9 @@ describe("setNodeSelector", () => {
 
     const cleared = await setNodeSelector(clock.ctx, PROJECT, ENV, null);
 
-    /* The readers ask whether an environment carries a selector AT ALL — the
-       run-everywhere fallback turns on that question — so an empty object left
-       behind would keep the environment waiting on a coordinator forever. */
+    /* The selector's presence is semantic. In particular, the explicit legacy
+       fallback never runs selector-bearing work without a coordinator decision,
+       so an empty object left behind would still constrain that read. */
     expect("nodeSelector" in cleared).toBe(false);
     expect(await getEnvironment(clock.ctx, PROJECT, ENV)).toEqual(cleared);
   });

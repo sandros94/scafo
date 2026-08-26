@@ -85,7 +85,10 @@ describe("what a node reads as its work", () => {
   it("drops every environment of a blocked project, and nobody else's", async () => {
     await blockProject(registry, PROJECT);
 
-    const state = await readDesired(registry, { nodeId: NODE_ID });
+    const state = await readDesired(registry, {
+      nodeId: NODE_ID,
+      mode: "legacy-fallback",
+    });
 
     expect(state.environments.map((entry) => entry.project)).toEqual([NEIGHBOUR]);
     /*
@@ -100,17 +103,23 @@ describe("what a node reads as its work", () => {
   it("reports no placement view for it, so its rows leave the node's state too", async () => {
     await blockProject(registry, PROJECT);
 
-    const state = await readDesired(registry, { nodeId: NODE_ID });
+    const state = await readDesired(registry, {
+      nodeId: NODE_ID,
+      mode: "legacy-fallback",
+    });
 
     expect(state.placements.map((entry) => entry.project)).not.toContain(PROJECT);
   });
 
   it("brings it all back on the next pass, from records nothing touched", async () => {
     await blockProject(registry, PROJECT);
-    await readDesired(registry, { nodeId: NODE_ID });
+    await readDesired(registry, { nodeId: NODE_ID, mode: "legacy-fallback" });
 
     await unblockProject(registry, PROJECT);
-    const state = await readDesired(registry, { nodeId: NODE_ID });
+    const state = await readDesired(registry, {
+      nodeId: NODE_ID,
+      mode: "legacy-fallback",
+    });
 
     /* THE WHOLE POINT OF THE VERB. Nothing was deleted, so nothing has to be
        rebuilt: the alias still names the build and the pass simply wants it

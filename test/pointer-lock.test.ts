@@ -37,6 +37,8 @@ import { LOCK_POLL_MS } from "../src/core/registry/locks.ts";
 import { fleetPrefix, pointerLockKey } from "../src/core/registry/paths.ts";
 import { POINTER_READ_HOLD_MS } from "../src/core/registry/pointer-lock.ts";
 import { createProject } from "../src/core/registry/projects.ts";
+import { acquireLease } from "../src/core/registry/lease.ts";
+import { writePlacement } from "../src/core/registry/placement.ts";
 import type { DeployRunInput, DeployRunner } from "../src/core/types/deploy.ts";
 import type { ProcessSpec, ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import { createCelldDriver } from "../src/drivers/runtime/celld.ts";
@@ -263,6 +265,10 @@ async function seededWorld(opts?: WorldOptions): Promise<World> {
     if (flipped.includes(environment)) await flipAlias(ctx, PROJECT, environment, BUILD_X);
     await seedFleet(ctx, environment);
   }
+  const lease = await acquireLease(ctx, NODE);
+  if (lease === null) throw new Error("the fixture could not take the coordinator lease");
+  for (const environment of environments)
+    await writePlacement(ctx, PROJECT, environment, [NODE], lease);
 
   const events: string[] = [];
   let bundling: Deferred<void> | null = null;

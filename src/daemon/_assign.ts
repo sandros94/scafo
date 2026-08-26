@@ -9,9 +9,10 @@
  */
 
 import { ScafoError } from "../core/error.ts";
-import { assignNodes } from "../core/placement/rendezvous.ts";
+import { planCreditPlacement, type CreditPlacementPending } from "../core/placement/credits.ts";
 import { resolveReplicas } from "../core/placement/replicas.ts";
 import { describeSelector, eligibleNodes } from "../core/placement/selector.ts";
+import { readCreditProfile } from "../core/capacity/profile.ts";
 import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { listEnvironments } from "../core/registry/environments.ts";
@@ -24,8 +25,14 @@ import {
   type PlacementOutcome,
   writePlacement,
 } from "../core/registry/placement.ts";
-import { listProjects } from "../core/registry/projects.ts";
-import type { EnvironmentRecord, NodeRecord, NodeSelector } from "../core/types/registry.ts";
+import { isProjectBlocked, listProjects } from "../core/registry/projects.ts";
+import type {
+  EnvironmentRecord,
+  NodeRecord,
+  NodeSelector,
+  ReplicaCount,
+} from "../core/types/registry.ts";
+import { resolveEnvironmentBuilds, type DesiredState } from "./_desired.ts";
 
 /**
  * Why one environment could not be placed on a pass, as a stable code.
@@ -34,7 +41,7 @@ import type { EnvironmentRecord, NodeRecord, NodeSelector } from "../core/types/
  * always a selector no live node satisfies: an empty FLEET refuses the whole
  * pass instead, before any environment is considered.
  */
-export type AssignmentFailureReason = "placement-unavailable";
+export type AssignmentFailureReason = "placement-unavailable" | "capacity-unavailable";
 
 /** One environment a pass could decide nothing for, and why. */
 export interface AssignmentFailure {
@@ -43,6 +50,7 @@ export interface AssignmentFailure {
   reason: AssignmentFailureReason;
   /** What an operator has to act on, naming the constraint that went unsatisfied. */
   detail: string;
+  pending?: CreditPlacementPending;
 }
 
 /** What one assignment pass decided. */
@@ -64,6 +72,8 @@ export interface AssignmentResult {
    * a constraint has gone unsatisfiable, so it is reported rather than logged.
    */
   unplaced: AssignmentFailure[];
+  accounts: Awaited<ReturnType<typeof planCreditPlacement>>["accounts"];
+  overcommitted: boolean;
 }
 
 export interface AssignmentOptions {
@@ -122,129 +132,143 @@ export async function runAssignment(
     removed: [],
     skipped: [],
     unplaced: [],
+    accounts: [],
+    overcommitted: false,
   };
 
-  for (const project of await listProjects(ctx)) {
+  return runCreditAssignment(ctx, lease, fleet, result);
+}
+
+async function runCreditAssignment(
+  ctx: RegistryContext,
+  lease: LeaseHandle,
+  fleet: NodeRecord[],
+  result: AssignmentResult,
+): Promise<AssignmentResult> {
+  const projects = await listProjects(ctx);
+  const current = new Map<string, string[]>();
+  const active: Array<{
+    project: string;
+    env: string;
+    replicas: ReplicaCount;
+    selector?: NodeSelector;
+    processes: number;
+  }> = [];
+  const removals: Array<{ project: string; env: string }> = [];
+
+  for (const project of projects) {
+    /* Blocking is the canonical reversible full stop. Runtime desired state
+       omits this project, so it consumes no credit here either; skip before the
+       placement listing as well, because every nested record must survive for
+       unblocking rather than being mistaken for orphaned state. */
+    if (await isProjectBlocked(ctx, project)) continue;
+
     const [names, placements] = await Promise.all([
       listEnvironments(ctx, project),
       listPlacements(ctx, project),
     ]);
-
-    /* The environments that still ask to be served somewhere. What is NOT in
-       here by the end of the loop has its placement removed below, whether it
-       was never in the listing or dropped out of contention while reading it. */
     const served = new Set<string>();
-
-    for (const name of names) {
-      const found = await readJson<EnvironmentRecord>(ctx, environmentKey(project, name));
-      /* Deleted between the listing and the read: the pass that deleted it takes
-         its placement with it, and the next tick sees neither. */
+    for (const env of names) {
+      const found = await readJson<EnvironmentRecord>(ctx, environmentKey(project, env));
       if (found === null) continue;
-
-      /* Retired: an environment on its way out is served by no node, so it is
-         given none. Its placement record goes with it — a record naming nodes
-         that have all stopped running it is a decision nothing acts on, and
-         leaving it behind would have every node re-read it every pass until the
-         reap. Unretiring restores it on the next tick, from the same inputs. */
       if (found.value.retiredAt !== undefined) continue;
-      served.add(name);
-
-      const target = `${project}/${name}`;
-      const selector = found.value.nodeSelector;
-      /* The selector narrows the CANDIDATES, and rendezvous then picks replicas
-         of those — in that order, so the two compose instead of competing:
-         `replicas: "all"` under a selector means every MATCHING node, and a
-         count means that many OF the matching ones. */
-      const candidates = eligibleNodes(fleet, selector).map((record) => record.id);
-
-      if (candidates.length === 0) {
-        /*
-         * ZERO ELIGIBLE CANDIDATES: WRITE NOTHING, DELETE NOTHING.
-         *
-         * The environment stays in `served` above, so the sweep at the end of
-         * this project leaves its placement exactly where it is, and no empty
-         * decision is written over it either. A STALE-BUT-SERVING placement
-         * beats an outage: the two alternatives are an empty node list, which
-         * stops the environment on every node still running it, and no record at
-         * all, which — because a selector-bearing environment has no
-         * run-everywhere fallback — stops it just as dead. Neither is a decision
-         * an unsatisfiable constraint has earned the right to make.
-         *
-         * The far likelier causes are a node that has not come back yet, a
-         * typo'd label and a fleet mid-relabelling, none of which should take an
-         * application down. So the failure is REPORTED instead: it reaches the
-         * operator through the coordinator's status and `/v1/state`, naming the
-         * environment and the selector nothing satisfied.
-         */
-        result.unplaced.push({
-          target,
-          reason: "placement-unavailable",
-          detail:
-            `${describeWhy(target, selector)}, so its last placement is left exactly as it ` +
-            `stands: writing an empty decision — or removing the record — would stop the ` +
-            `environment on every node still serving it, over what is far more likely a node ` +
-            `that is missing or mislabelled than an environment that should stop`,
-        });
-        continue;
-      }
-
-      const nodes = await assignNodes({
+      served.add(env);
+      const target = `${project}/${env}`;
+      current.set(target, [...(placements.get(env)?.nodes ?? [])]);
+      const desired: DesiredState = { environments: [], placements: [], parked: [], failures: [] };
+      const wanted = await resolveEnvironmentBuilds(ctx, project, found.value, desired);
+      active.push({
         project,
-        env: name,
-        nodes: candidates,
+        env,
         replicas: resolveReplicas(found.value),
+        processes: wanted === null ? 0 : wanted.builds.length + (wanted.unresolved?.length ?? 0),
+        ...(found.value.nodeSelector === undefined ? {} : { selector: found.value.nodeSelector }),
       });
-
-      /* Answered from the listing above rather than by reading the object
-         again. This is the settled case — every environment, every tick, on an
-         installation where nothing has changed — and a coordinator that re-read
-         each placement to conclude it was already right would double the reads
-         of its most frequent pass. A listing that has since gone stale costs
-         nothing: the write below re-reads before it conditions on anything. */
-      if (equalNodes(placements.get(name)?.nodes, nodes)) {
-        result.skipped.push({ target, reason: "unchanged" });
-        continue;
-      }
-
-      const write = await writePlacement(ctx, project, name, nodes, lease);
-      if (write.outcome === "written") result.changed.push({ target, nodes });
-      else result.skipped.push({ target, reason: write.outcome });
     }
-
-    /* What is left in the map has no environment left to serve. Deleting it here
-       covers the environment that went away without anyone asking — a reap this
-       coordinator did not run, an operator deleting through another node — and
-       the retired one above, while an explicit deletion has already cleaned up
-       after itself. */
-    for (const env of [...placements.keys()].sort()) {
-      if (served.has(env)) continue;
-      const removed = await deletePlacement(ctx, project, env, lease);
-      if (removed !== null) result.removed.push(removed);
-    }
+    for (const env of placements.keys()) if (!served.has(env)) removals.push({ project, env });
   }
 
+  const nodes = fleet.map((record) => {
+    const credits = readCreditProfile(record.credits);
+    return {
+      id: record.id,
+      labels: record.labels,
+      profile:
+        credits === null
+          ? null
+          : { allocatableMb: credits.allocatableMb, runtimeMb: credits.runtimeMb },
+    };
+  });
+  const byTarget = new Map(active.map((entry) => [`${entry.project}/${entry.env}`, entry]));
+  const plan = await planCreditPlacement({
+    nodes,
+    workloads: active.map((entry) => ({
+      project: entry.project,
+      env: entry.env,
+      replicas: entry.replicas,
+      processes: entry.processes,
+      ...(entry.selector === undefined ? {} : { selector: entry.selector }),
+      current: current.get(`${entry.project}/${entry.env}`) ?? [],
+    })),
+  });
+  for (const decision of plan.placements) {
+    const [project, env] = decision.target.split("/") as [string, string];
+    const previous = current.get(decision.target) ?? [];
+    const entry = byTarget.get(decision.target);
+    if (entry === undefined) throw new Error(`missing active placement target ${decision.target}`);
+    const selectorUnavailable = eligibleNodes(fleet, entry.selector).length === 0;
+    if (decision.pending !== undefined) {
+      result.unplaced.push({
+        target: decision.target,
+        reason: selectorUnavailable ? "placement-unavailable" : "capacity-unavailable",
+        ...(selectorUnavailable
+          ? {}
+          : {
+              pending: decision.pending,
+            }),
+        detail: selectorUnavailable
+          ? `no live node carries every label of "${describeSelector(entry.selector as NodeSelector)}", ` +
+            `which "${decision.target}" selects`
+          : `"${decision.target}" cannot be given its requested replicas while preserving its ` +
+            `current placement: give every live candidate a valid credit profile or add capacity`,
+      });
+      continue;
+    }
+    if (sameNodes(previous, decision.nodes)) {
+      result.skipped.push({ target: decision.target, reason: "unchanged" });
+      continue;
+    }
+    const write = await writePlacement(ctx, project, env, decision.nodes, lease);
+    if (write.outcome === "written")
+      result.changed.push({ target: decision.target, nodes: decision.nodes });
+    else if (write.outcome === "unchanged")
+      result.skipped.push({ target: decision.target, reason: write.outcome });
+    else if (write.outcome === "stale") {
+      throw new ScafoError("lease-lost", "Coordinator placement fence is stale", {
+        detail: `refusing later placement writes after "${decision.target}" was decided at a higher fence`,
+      });
+    } else {
+      throw new ScafoError("cas-conflict", "Coordinator placement changed during assignment", {
+        detail: `refusing later placement writes after "${decision.target}" changed during this plan`,
+      });
+    }
+  }
+  for (const entry of removals.sort((left, right) =>
+    compare(`${left.project}/${left.env}`, `${right.project}/${right.env}`),
+  )) {
+    const removed = await deletePlacement(ctx, entry.project, entry.env, lease);
+    if (removed !== null) result.removed.push(removed);
+  }
+  result.accounts = plan.accounts;
+  result.overcommitted = plan.overcommitted;
   return result;
 }
 
-/**
- * Why nothing could be given an environment, named so the operator can act on
- * it. A selector is the only way to get here — an empty FLEET refuses the whole
- * pass long before — but the unconstrained wording is kept honest rather than
- * assumed away.
- */
-function describeWhy(target: string, selector: NodeSelector | undefined): string {
-  if (selector === undefined) return `no live node can serve "${target}"`;
-  return (
-    `no live node carries every label of "${describeSelector(selector)}", ` +
-    `which "${target}" selects`
-  );
+function sameNodes(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
-/** Both are sorted — `assignNodes` sorts what it chooses and the record stores it sorted. */
-function equalNodes(recorded: string[] | undefined, decided: string[]): boolean {
-  return (
-    recorded !== undefined &&
-    recorded.length === decided.length &&
-    recorded.every((id, index) => id === decided[index])
-  );
+function compare(left: string, right: string): number {
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
 }

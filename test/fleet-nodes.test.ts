@@ -52,6 +52,46 @@ describe("what the listing reads", () => {
     expect(outside[0]?.state).toBe("lost");
   });
 
+  it("preserves each node's advertised credit profile for table and JSON callers", async () => {
+    const clock = ctxWith(new MemoryCasStore());
+    await register(clock, "node-a", {
+      credits: { allocatableMb: 4096, runtimeMb: 512, deployMb: 1024 },
+    });
+
+    const [node] = await listFleetNodes(clock.ctx, { now: new Date(clock.nowMs()) });
+    expect(node?.credits).toEqual({ allocatableMb: 4096, runtimeMb: 512, deployMb: 1024 });
+    expect(formatNodeTable([node!], new Date(clock.nowMs()))).toContain("4096/512/1024 MiB");
+  });
+
+  it("distinguishes absent and invalid credit profiles in the table", async () => {
+    const clock = ctxWith(new MemoryCasStore());
+    await register(clock, "node-a", {});
+    await register(clock, "node-b", {
+      credits: { allocatableMb: 100, runtimeMb: 80, deployMb: 40 },
+    });
+
+    const printed = formatNodeTable(
+      await listFleetNodes(clock.ctx, { now: new Date(clock.nowMs()) }),
+      new Date(clock.nowMs()),
+    );
+    expect(printed).toContain("absent");
+    expect(printed).toContain("invalid");
+  });
+
+  it("keeps credits intact when a node refreshes its heartbeat", async () => {
+    const clock = ctxWith(new MemoryCasStore());
+    await register(clock, "node-a", {
+      credits: { allocatableMb: 4096, runtimeMb: 512, deployMb: 1024 },
+    });
+    await heartbeatNode(clock.ctx, "node-a");
+
+    expect((await listFleetNodes(clock.ctx))[0]?.credits).toEqual({
+      allocatableMb: 4096,
+      runtimeMb: 512,
+      deployMb: 1024,
+    });
+  });
+
   it("says draining rather than lost for a node that announced it was leaving", async () => {
     const clock = ctxWith(new MemoryCasStore());
     await register(clock, "node-a", {});

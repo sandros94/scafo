@@ -119,6 +119,12 @@ const EVERY_EVENT: ObserveEventRecord[] = [
   event({ type: "wake.failed", id: "w3", reason: "deadline" }),
   event({ type: "reconcile.pass.start", kicked: true }),
   event({
+    type: "placement.pending",
+    project: "shop",
+    env: "production",
+    reason: "insufficient-capacity",
+  }),
+  event({
     type: "reconcile.pass.end",
     actions: 2,
     failures: 0,
@@ -351,6 +357,7 @@ describe("what one record becomes", () => {
         "wake.served",
         "wake.failed",
         "reconcile.pass.start",
+        "placement.pending",
         "reconcile.pass.end",
         "rollout.spawned",
         "rollout.holdEnded",
@@ -401,12 +408,12 @@ describe("the file a flush encodes to", () => {
     const records: ObserveRecord[] = [flush(), ...EVERY_EVENT, counters()];
     const { bytes } = PARQUET_CODEC.encode(records);
 
-    /* A footer for 47 columns is the floor whatever the rows say, and 19 rows of
+    /* A footer for 47 columns is the floor whatever the rows say, and 20 rows of
        mostly-null columns cannot reach 64 KiB. Loose on purpose: this is a sanity
        bound on the encoder, not a golden size to be updated on every change. */
     expect(bytes.length).toBeGreaterThan(1000);
     expect(bytes.length).toBeLessThan(65_536);
-    expect(records).toHaveLength(19);
+    expect(records).toHaveLength(20);
   });
 
   it("compresses every data page, and says in the file which codec it used", () => {
@@ -597,13 +604,13 @@ describe.skipIf(DUCKDB === undefined)("what DuckDB makes of a flush", () => {
        query names them quoted — the column is the record's own field name and
        stays that, because a schema that renamed fields to please one reader would
        stop matching the records it encodes. */
-    expect(query(file, "SELECT count(*) FROM read_parquet('$FILE')")).toBe("19");
+    expect(query(file, "SELECT count(*) FROM read_parquet('$FILE')")).toBe("20");
     expect(
       query(
         file,
         `SELECT "record", count(*) FROM read_parquet('$FILE') GROUP BY "record" ORDER BY "record"`,
       ),
-    ).toBe(["counters,1", "event,17", "flush,1"].join("\n"));
+    ).toBe(["counters,1", "event,18", "flush,1"].join("\n"));
 
     /* A counter snapshot reads as the numbers it was written from, timestamp
        included — which is what makes these files answerable without scafo. */
@@ -628,7 +635,7 @@ describe.skipIf(DUCKDB === undefined)("what DuckDB makes of a flush", () => {
         `SELECT count(*) FROM read_parquet('$FILE') WHERE "record" = 'event' ` +
           `AND "requests" IS NULL`,
       ),
-    ).toBe("17");
+    ).toBe("18");
     expect(
       query(file, `SELECT "status" FROM read_parquet('$FILE') WHERE "type" = 'wake.served'`),
     ).toBe("200");

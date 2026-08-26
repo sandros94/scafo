@@ -48,9 +48,8 @@ export interface RoutedWatch {
   routed(): Promise<boolean>;
   /**
    * The nodes the LAST look asked, in the order it asked them. Empty while the
-   * answer came from this node's own processes, which is every look on a
-   * single-node installation and every look before a coordinator has decided
-   * anything.
+   * answer came from this node's own processes, or no placement yet names peers
+   * to ask. Missing placement keeps the watch local; it does not start work.
    */
   asked(): string[];
 }
@@ -89,8 +88,8 @@ export function createRoutedWatch(daemon: DaemonContext, target: RoutedTarget): 
 
       try {
         const placement = await readPlacement(daemon.registry, target.project, target.env);
-        /* No decision yet, or one that names this node: what this node runs IS
-           the answer, and it has just been given. */
+        /* No decision yet, or one that names this node: no peer can answer more
+           truthfully than the local reconciler, which has just been checked. */
         if (placement === null || placement.nodes.includes(daemon.nodeId)) {
           asked = [];
           return false;

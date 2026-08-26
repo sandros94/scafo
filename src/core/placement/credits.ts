@@ -11,12 +11,16 @@ import { assignNodes } from "./rendezvous.ts";
 import { assertReplicas } from "./replicas.ts";
 import { assertSelector, matchesSelector } from "./selector.ts";
 
-/** The capacity facts the planner needs from one live, non-draining node. */
+/** One live node, including an explicit statement when its local credit profile is unavailable. */
 export interface CreditPlacementNode {
   id: string;
   labels?: Record<string, string>;
-  allocatableMb: number;
-  surgeMb: number;
+  /** Null is live but cannot receive new placement until it advertises a valid profile. */
+  profile: {
+    allocatableMb: number;
+    /** Runtime credit charged for every process this node is asked to serve. */
+    runtimeMb: number;
+  } | null;
 }
 
 /** One environment/build demand, its desired replica count and last placement. */
@@ -24,9 +28,9 @@ export interface CreditPlacementWorkload {
   project: string;
   env: string;
   replicas: ReplicaCount;
+  /** Processes each selected node must keep for this environment (alias, split and recalls). */
+  processes: number;
   selector?: NodeSelector;
-  /** Steady runtime demand per selected node, in MiB. */
-  runtimeMb: number;
   /** Last committed node ids. Preserved in the same order if this proposal cannot fit. */
   current: string[];
 }
@@ -35,7 +39,8 @@ export interface CreditPlacementWorkload {
 export type CreditPlacementFailureReason =
   | "over-capacity"
   | "insufficient-capacity"
-  | "insufficient-candidates";
+  | "insufficient-candidates"
+  | "profile-unavailable";
 
 /** Ordinary capacity failure data, safe for later state/API rendering without parsing text. */
 export interface CreditPlacementPending {
@@ -91,7 +96,7 @@ export async function planCreditPlacement(
   }
   const nodes = validateNodes(input.nodes);
   const workloads = validateWorkloads(input.workloads);
-  const ids = new Set(nodes.map((node) => node.id));
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
   const current = new Map<string, number>();
   const future = new Map<string, number>();
   const transition = new Map<string, number>();
@@ -103,9 +108,10 @@ export async function planCreditPlacement(
   }
   for (const workload of workloads) {
     for (const id of workload.current) {
-      if (!ids.has(id)) continue;
-      change(current, id, workload.runtimeMb);
-      change(future, id, workload.runtimeMb);
+      const node = nodeById.get(id);
+      if (node?.profile === undefined || node.profile === null) continue;
+      change(current, id, demand(node, workload));
+      change(future, id, demand(node, workload));
     }
   }
 
@@ -124,17 +130,23 @@ export async function planCreditPlacement(
     });
 
     const eligible = nodes.filter((node) => matchesSelector(node.labels, workload.selector));
-    const viable = eligible.filter((node) =>
+    const capacity = eligible.filter(hasProfile);
+    const currentUnavailable = workload.current.some((id) => nodeById.get(id)?.profile === null);
+    const viable = capacity.filter((node) =>
       canPlace(node, workload, currentIds, current, future, transition),
     );
-    const candidates = workload.replicas === "all" ? eligible : viable;
+    const candidates = workload.replicas === "all" ? capacity : viable;
     const wanted = workload.replicas === "all" ? eligible.length : workload.replicas;
 
     if (eligible.length === 0 || eligible.length < wanted) {
       placements.push(pending(workload, "insufficient-candidates", eligible.length, viable.length));
       continue;
     }
-    if (viable.length < wanted) {
+    if (currentUnavailable) {
+      placements.push(pending(workload, "profile-unavailable", eligible.length, viable.length));
+      continue;
+    }
+    if (viable.length < wanted || capacity.length < wanted) {
       placements.push(
         pending(
           workload,
@@ -163,7 +175,7 @@ export async function planCreditPlacement(
       continue;
     }
 
-    apply(workload, currentIds, new Set(selected), future, transition);
+    apply(workload, currentIds, new Set(selected), nodeById, future, transition);
     placements.push({ target: target(workload), nodes: selected });
   }
 
@@ -197,7 +209,17 @@ function validateNodes(input: CreditPlacementNode[]): CreditPlacementNode[] {
     }
     seen.add(node.id);
     if (node.labels !== undefined) assertLabels(node.labels, `labels for "${node.id}"`);
-    accountCredits({ allocatableMb: node.allocatableMb, surgeMb: node.surgeMb });
+    if (node.profile !== null && (typeof node.profile !== "object" || node.profile === null)) {
+      throw new ScafoError("invalid-input", "Invalid placement node", {
+        detail: `"node.profile" must be an object or null`,
+      });
+    }
+    if (node.profile !== null) {
+      accountCredits({
+        allocatableMb: node.profile.allocatableMb,
+        surgeMb: node.profile.runtimeMb,
+      });
+    }
   }
   return [...input].sort((left, right) => compare(left.id, right.id));
 }
@@ -234,9 +256,13 @@ function validateWorkloads(input: CreditPlacementWorkload[]): CreditPlacementWor
       });
     }
     seen.add(name);
-    assertPositiveSafeInteger(workload.runtimeMb, "runtimeMb");
     assertReplicas(workload.replicas);
     if (workload.replicas !== "all") assertPositiveSafeInteger(workload.replicas, "replicas");
+    if (!Number.isSafeInteger(workload.processes) || workload.processes < 0) {
+      throw new ScafoError("invalid-input", "Invalid placement processes", {
+        detail: `"processes" must be a non-negative safe integer`,
+      });
+    }
     if (workload.selector !== undefined) assertSelector(workload.selector);
     if (!Array.isArray(workload.current)) {
       throw new ScafoError("invalid-input", "Invalid current placement", {
@@ -264,39 +290,53 @@ function canPlace(
   future: Map<string, number>,
   transition: Map<string, number>,
 ): boolean {
+  if (node.profile === null) return false;
+  const { allocatableMb, runtimeMb } = node.profile;
+  const mb = demand(node, workload);
   const hasCurrent = currentIds.has(node.id);
-  const nextTransition = add(transition.get(node.id) ?? 0, hasCurrent ? 0 : workload.runtimeMb);
-  const nextFuture = add(future.get(node.id) ?? 0, hasCurrent ? 0 : workload.runtimeMb);
+  const nextTransition = add(transition.get(node.id) ?? 0, hasCurrent ? 0 : mb);
+  const nextFuture = add(future.get(node.id) ?? 0, hasCurrent ? 0 : mb);
 
   const transient = accountCredits({
-    allocatableMb: node.allocatableMb,
-    surgeMb: node.surgeMb,
+    allocatableMb,
+    surgeMb: runtimeMb,
     runtime: aggregate(node.id, "runtime", current.get(node.id) ?? 0),
     transition: aggregate(node.id, "transition", nextTransition),
   });
   const steady = accountCredits({
-    allocatableMb: node.allocatableMb,
-    surgeMb: node.surgeMb,
+    allocatableMb,
+    surgeMb: runtimeMb,
     runtime: aggregate(node.id, "steady", nextFuture),
   });
   return transient.fits && steady.steadyFits;
+}
+
+function hasProfile(
+  node: CreditPlacementNode,
+): node is CreditPlacementNode & { profile: NonNullable<CreditPlacementNode["profile"]> } {
+  return node.profile !== null;
 }
 
 function apply(
   workload: CreditPlacementWorkload,
   currentIds: ReadonlySet<string>,
   selected: ReadonlySet<string>,
+  nodes: ReadonlyMap<string, CreditPlacementNode>,
   future: Map<string, number>,
   transition: Map<string, number>,
 ): void {
   for (const id of workload.current) {
     if (!future.has(id) || selected.has(id)) continue;
-    change(future, id, -workload.runtimeMb);
+    const node = nodes.get(id);
+    if (node?.profile === undefined || node.profile === null) continue;
+    change(future, id, -demand(node, workload));
   }
   for (const id of selected) {
     if (currentIds.has(id)) continue;
-    change(future, id, workload.runtimeMb);
-    change(transition, id, workload.runtimeMb);
+    const node = nodes.get(id);
+    if (node?.profile === undefined || node.profile === null) continue;
+    change(future, id, demand(node, workload));
+    change(transition, id, demand(node, workload));
   }
 }
 
@@ -306,17 +346,17 @@ function accounts(
   transition: Map<string, number>,
   future: Map<string, number>,
 ): CreditPlacementAccount[] {
-  return nodes.map((node) => ({
+  return nodes.filter(hasProfile).map((node) => ({
     id: node.id,
     transient: accountCredits({
-      allocatableMb: node.allocatableMb,
-      surgeMb: node.surgeMb,
+      allocatableMb: node.profile.allocatableMb,
+      surgeMb: node.profile.runtimeMb,
       runtime: aggregate(node.id, "runtime", current.get(node.id) ?? 0),
       transition: aggregate(node.id, "transition", transition.get(node.id) ?? 0),
     }),
     steady: accountCredits({
-      allocatableMb: node.allocatableMb,
-      surgeMb: node.surgeMb,
+      allocatableMb: node.profile.allocatableMb,
+      surgeMb: node.profile.runtimeMb,
       runtime: aggregate(node.id, "steady", future.get(node.id) ?? 0),
     }),
   }));
@@ -341,6 +381,15 @@ function add(left: number, right: number): number {
   if (Number.isSafeInteger(total)) return total;
   throw new ScafoError("invalid-input", "Credit arithmetic overflow", {
     detail: `placement credit demand exceeds the largest safe integer MiB value`,
+  });
+}
+
+function demand(node: CreditPlacementNode, workload: CreditPlacementWorkload): number {
+  if (node.profile === null) return 0;
+  const total = node.profile.runtimeMb * workload.processes;
+  if (Number.isSafeInteger(total)) return total;
+  throw new ScafoError("invalid-input", "Credit arithmetic overflow", {
+    detail: `placement runtime demand exceeds the largest safe integer MiB value`,
   });
 }
 

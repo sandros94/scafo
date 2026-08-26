@@ -40,6 +40,30 @@ export const NODE_LIVENESS_WINDOW_MS: number = 3 * NODE_HEARTBEAT_INTERVAL_MS;
  */
 export async function registerNode(ctx: RegistryContext, record: NodeRecord): Promise<NodeRecord> {
   const key = nodeKey(record.id);
+  const existing = await registerNodeIfAbsent(ctx, record);
+  if (existing === null) return record;
+
+  const updated = await updateJson<NodeRecord>(ctx, key, (current) => {
+    if (current.id !== record.id) {
+      throw new ScafoError("immutable", "Node id cannot be changed", {
+        detail: `"${key}" holds node "${current.id}"`,
+      });
+    }
+    return record;
+  });
+  return updated.value;
+}
+
+/**
+ * Claims and creates a node only when it is absent. An existing compatible
+ * record is returned unchanged, so a narrow caller can update only its field
+ * without racing a daemon's wholesale registration.
+ */
+export async function registerNodeIfAbsent(
+  ctx: RegistryContext,
+  record: NodeRecord,
+): Promise<NodeRecord | null> {
+  const key = nodeKey(record.id);
 
   const existing = await readJson<NodeRecord>(ctx, key);
   if (existing !== null && !deepEqual(existing.value.publicKey, record.publicKey)) {
@@ -58,22 +82,24 @@ export async function registerNode(ctx: RegistryContext, record: NodeRecord): Pr
   }
 
   await claimIdentity(ctx, record.id, identityReservation("node", record.publicKey));
+  if (existing !== null) return existing.value;
 
   try {
     await createJson(ctx, key, record);
-    return record;
+    return null;
   } catch (error) {
     if (!isCasConflict(error)) throw error;
-
-    const updated = await updateJson<NodeRecord>(ctx, key, (current) => {
-      if (current.id !== record.id) {
-        throw new ScafoError("immutable", "Node id cannot be changed", {
-          detail: `"${key}" holds node "${current.id}"`,
-        });
-      }
-      return record;
-    });
-    return updated.value;
+    const winner = await requireJson<NodeRecord>(ctx, key);
+    if (!deepEqual(winner.value.publicKey, record.publicKey)) {
+      throw new ScafoError(
+        "reference-held",
+        "Id belongs to another identity of this installation",
+        {
+          detail: `"${record.id}" is already reserved by another identity; choose another id`,
+        },
+      );
+    }
+    return winner.value;
   }
 }
 

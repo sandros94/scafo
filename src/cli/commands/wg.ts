@@ -13,11 +13,16 @@ import { join } from "node:path";
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import type { DaemonConfig } from "../../daemon/config.ts";
 import { loadDaemonConfig } from "../../daemon/config.ts";
-import { probeCapacity } from "../../core/capacity/reader.ts";
 import { ScafoError } from "../../core/error.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
 import { createNodeHostReader } from "../../drivers/host/node.ts";
-import { createRegistry, loadNodeIdentity, publishWireguard } from "../_bootstrap.ts";
+import {
+  createRegistry,
+  loadNodeIdentity,
+  probeNodeCredits,
+  publishWireguard,
+} from "../_bootstrap.ts";
+import { creditArgs } from "../_credit-args.ts";
 import type { NodeState } from "../_node-state.ts";
 import { readTextFile, reportFailure, writeSecretFile } from "../_utils.ts";
 import { collectWireguardPeers, renderWireguardConf } from "../_wg-conf.ts";
@@ -52,6 +57,7 @@ const tunnelArgs: ArgsDef = {
   "listen": { type: "string", description: "host:port the node API binds to" },
   "internal-listen": { type: "string", description: "host:port for node-to-node traffic" },
   "advertise": { type: "string", description: "host:port other nodes reach this one at" },
+  ...creditArgs,
   "wg-address": {
     type: "string",
     description: "This node's tunnel address with its prefix length (10.83.0.1/24)",
@@ -110,11 +116,12 @@ async function runInit(flags: Record<string, unknown>): Promise<void> {
    * only for the case where there is no record at all — a node set up before it
    * has ever been started.
    */
-  const capacity = await probeCapacity(createNodeHostReader());
+  const { capacity, credits } = await probeNodeCredits(tunnel.config, createNodeHostReader());
   await publishWireguard(tunnel.registry, {
     config: tunnel.config,
     state: tunnel.state,
     capacity,
+    credits,
     wireguard: {
       publicKey: keys.publicKey,
       endpoint: tunnel.settings.endpoint,

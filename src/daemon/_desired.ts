@@ -69,8 +69,8 @@ export interface DesiredState {
    * The placement decisions this node read, one per environment that HAS one.
    *
    * An environment missing from this list has not been placed by any coordinator
-   * yet — which means it is served everywhere, unless it carries a node selector
-   * and is therefore waiting to be placed. See {@link readDesired}.
+   * yet. Legacy reads serve an unconstrained environment everywhere; production
+   * reconciles require placement and leave it pending. See {@link readDesired}.
    */
   placements: PlacementView[];
   /**
@@ -95,6 +95,9 @@ export interface DesiredState {
   failures: DesiredFailure[];
 }
 
+/** The caller states whether it is a new daemon or the rolling-upgrade reader. */
+export type PlacementReadMode = "required" | "legacy-fallback";
+
 /**
  * Every environment this node has something to serve for, with the builds it
  * should run already resolved: the one its alias points at, plus every leg of
@@ -117,19 +120,18 @@ export interface DesiredState {
  * it is otherwise indistinguishable from an environment nothing was ever
  * deployed to.
  *
- * MISSING PLACEMENT RECORD → THE ENVIRONMENT IS INCLUDED, UNLESS IT CARRIES A
- * NODE SELECTOR. Both halves of that are deliberate, and they point in opposite
- * directions on purpose.
+ * MISSING PLACEMENT RECORD → LEGACY READS include an unconstrained environment;
+ * production reads opt into `mode: "required"` and include none. The explicit
+ * option keeps rolling upgrades compatible without making a new daemon infer
+ * service from an absent coordinator decision.
  *
- * The FALLBACK is the safety line the whole feature hangs from. No coordinator
- * has decided anything yet during a bootstrap, on a single-node installation, or
- * throughout a rolling upgrade from a build that never wrote these records — and
- * in every one of those the right answer is the one scafo gave before placement
- * existed: serve it here. Reading a missing record as "not mine" instead would
- * take an entire installation off the air the first time it upgraded, and would
- * leave a fresh one serving nothing at all until its first coordinator tick.
+ * Legacy fallback is solely a rolling-upgrade contract: an old daemon does not
+ * understand that a missing record is pending, so it retains the behaviour it
+ * shipped with. New daemons state `mode: "required"` and wait for the
+ * coordinator's explicit decision; that is what makes capacity-pending work
+ * start nowhere without turning absence into a distributed reservation.
  *
- * The EXCEPTION is what a selector means. A selector is an explicit constraint —
+ * The LEGACY EXCEPTION is what a selector means. A selector is an explicit constraint —
  * the operator has said which nodes may run this — and the fallback exists to
  * preserve behaviour nobody ever stated. Running a selector-bearing environment
  * on an arbitrary node just because no coordinator has decided yet would violate
@@ -151,7 +153,7 @@ export interface DesiredState {
  */
 export async function readDesired(
   registry: RegistryContext,
-  opts: { nodeId: string; concurrency?: number },
+  opts: { nodeId: string; mode: PlacementReadMode; concurrency?: number },
 ): Promise<DesiredState> {
   const projects = await listProjects(registry);
   const gate = createConcurrencyGate(opts.concurrency);
@@ -160,7 +162,9 @@ export async function readDesired(
      on the gate, and a fan-out holding slots while its own work asks for them is
      the one way to deadlock this. Slots are taken at the reads alone. */
   const perProject = await Promise.all(
-    projects.map(async (project) => readProject(registry, project, opts.nodeId, gate)),
+    projects.map(async (project) =>
+      readProject(registry, project, opts.nodeId, gate, opts.mode === "required"),
+    ),
   );
   return {
     environments: perProject.flatMap((entry) => entry.environments),
@@ -208,6 +212,7 @@ async function readProject(
   project: string,
   nodeId: string,
   gate: ConcurrencyGate,
+  requirePlacement: boolean,
 ): Promise<DesiredState> {
   /*
    * A BLOCKED PROJECT CONTRIBUTES NOTHING, and that emptiness is the whole
@@ -245,7 +250,7 @@ async function readProject(
      do not and overlap. Each answers with its own part, merged below in the
      order the listing gave rather than the order the store answered in. */
   const parts = await mapConcurrent(names, gate, async (name) =>
-    readEnvironment(registry, project, name, nodeId, placements.get(name)),
+    readEnvironment(registry, project, name, nodeId, placements.get(name), requirePlacement),
   );
 
   const state: DesiredState = { environments: [], placements: [], parked: [], failures: [] };
@@ -265,6 +270,7 @@ async function readEnvironment(
   name: string,
   nodeId: string,
   placement: PlacementRecord | undefined,
+  requirePlacement: boolean,
 ): Promise<DesiredState> {
   const state: DesiredState = { environments: [], placements: [], parked: [], failures: [] };
 
@@ -288,25 +294,26 @@ async function readEnvironment(
         : { selector: { ...environment.nodeSelector } }),
     });
   }
-  if (!servedHere(placement, environment, nodeId)) return state;
+  if (!servedHere(placement, environment, nodeId, requirePlacement)) return state;
 
-  const wanted = await resolveEnvironment(registry, project, environment, state);
+  const wanted = await resolveEnvironmentBuilds(registry, project, environment, state);
   if (wanted !== null) state.environments.push(wanted);
   return state;
 }
 
 /**
  * See {@link readDesired}. A decision, once there is one, is the whole answer.
- * Without one the environment runs everywhere — UNLESS it carries a selector, in
- * which case running it here before the coordinator has chosen would break the
- * one thing the operator asked for.
+ * Production callers select `"required"`; the explicit legacy mode retains the old
+ * unconstrained fallback while nodes are upgraded one at a time.
  */
 function servedHere(
   placement: PlacementRecord | undefined,
   environment: EnvironmentRecord,
   nodeId: string,
+  requirePlacement: boolean,
 ): boolean {
   if (placement !== undefined) return placement.nodes.includes(nodeId);
+  if (requirePlacement) return false;
   return environment.nodeSelector === undefined;
 }
 
@@ -353,7 +360,7 @@ function servedHere(
  * on the ids the record names. They are also few, while the environments beside
  * them are many, which is the axis {@link readDesired} overlaps instead.
  */
-async function resolveEnvironment(
+export async function resolveEnvironmentBuilds(
   registry: RegistryContext,
   project: string,
   env: EnvironmentRecord,
@@ -365,11 +372,11 @@ async function resolveEnvironment(
    * unretiring it must bring it straight back — so what stops it is this line
    * rather than anything having been taken away from it.
    *
-   * LOAD-BEARING, and in the opposite direction to how it reads. The coordinator
-   * DELETES the placement record of a retired environment, and a missing
-   * placement record means "served everywhere" (see {@link readDesired}). Drop
-   * this check and retiring an environment would not stop it — it would start it
-   * on every node in the installation.
+   * LOAD-BEARING independently of placement. The coordinator DELETES the
+   * placement record of a retired environment, but a production read already
+   * treats that absence as pending. This check states the retirement contract
+   * directly and also protects the explicit legacy rolling-upgrade reader from
+   * bringing the environment back through its unconstrained fallback.
    */
   if (env.retiredAt !== undefined) return null;
 

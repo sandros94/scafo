@@ -30,6 +30,7 @@
  */
 
 import type { OperatorRole } from "../core/types/registry.ts";
+import type { CreditPlacementFailureReason } from "../core/placement/credits.ts";
 
 /** Events the ring holds before the oldest are dropped to make room. */
 export const OBSERVED_RING_SIZE: number = 512;
@@ -82,6 +83,14 @@ export type ObservedEvent =
      came round to, which is the difference between a wake's latency and the
      interval's. */
   | { at: string; type: "reconcile.pass.start"; kicked: boolean }
+  /** A coordinator newly could not admit an environment under its credit plan. */
+  | {
+      at: string;
+      type: "placement.pending";
+      project: string;
+      env: string;
+      reason: CreditPlacementFailureReason;
+    }
   | {
       at: string;
       type: "reconcile.pass.end";
