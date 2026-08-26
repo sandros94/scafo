@@ -44,8 +44,8 @@ When a task involves design decisions, ambiguity, or changes to the project visi
 - `scafo` — barrel: `ScafoError` and friends, the registry types, plus the `utils`, `registry`, `auth`, `capacity` and `placement` namespaces
 - `scafo/registry` — registry operations: keys, CAS document helpers, coordinator lease, named locks, projects, builds, environments, retirement, varsets, nodes, operator keys, trust, domains, reaper
 - `scafo/auth` — node/operator EdDSA tokens and workload OIDC verification
-- `scafo/capacity` — cgroup v2 parsing and the capacity planning formulas
-- `scafo/placement` — the pure reconcile planner, the pure route renderer, the process-id convention, the port allocator, and the rules that decide which nodes serve an environment: the node-selector match that narrows the candidates, then the rendezvous hashing and replica count that choose among them
+- `scafo/capacity` — cgroup v2 parsing, capacity planning formulas and pure integer-MiB credit accounting across runtime transitions and deploys
+- `scafo/placement` — the pure reconcile and credit-aware placement planners, the pure route renderer, the process-id convention, the port allocator, and the rules that decide which nodes serve an environment: the node-selector and available credits narrow the candidates, then rendezvous hashing and the replica count choose among them
 - `scafo/daemon` — the node daemon: configuration loading, the HTTP API and its listener, the reconcile loop, deploy intake, and the seam it reports what it did through
 - `scafo/drivers/store/uns3` — `CasStore` backed by an S3-compatible bucket via [`uns3`](https://github.com/sandros94/uns3)
 - `scafo/drivers/store/memory` — in-process `CasStore` with identical CAS semantics, for tests and local development
@@ -128,6 +128,7 @@ src/
     capacity/
       cgroup.ts           # cgroup v2 memory.max / cpu.max parsing
       compute.ts          # capacity formulas: cores, memMb, rss budget, cells
+      credits.ts          # pure integer-MiB runtime, transition and deploy credit accounting
       reader.ts           # HostReader seam + probeCapacity(reader)
       index.ts            # barrel
     placement/
@@ -135,6 +136,7 @@ src/
       ids.ts              # `project--env--build` process-id convention (format/parse)
       ports.ts            # loopback port-pair allocator over a configured range
       reconcile.ts        # planReconcile: desired + actual -> ordered actions, one rollout per build (pure)
+      credits.ts          # pure capacity-aware exact placement over selectors and rendezvous
       rendezvous.ts       # assignNodes: environment + live nodes -> the nodes serving it (pure)
       replicas.ts         # how many nodes an environment asks for, and the defaults (pure)
       selector.ts         # eligibleNodes: which nodes an environment may use at all (pure)
