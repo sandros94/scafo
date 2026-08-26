@@ -657,6 +657,7 @@ function bothProjectsReconciled(): Reconciler {
     runOnce: () => Promise.resolve([]),
     kick: () => {},
     start: () => {},
+    shutdown: () => Promise.resolve(),
     stop: () => {},
     status: (): ReconcileStatus => status,
     parkedRecords: () => [],

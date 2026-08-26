@@ -83,6 +83,7 @@ export interface Executor {
     plan: ReconcileAction[],
     desired: DesiredEnvironment[],
     pending: ReconcileFailure[],
+    signal?: AbortSignal,
   ): Promise<void>;
   /** This node's running runtime processes, as the planner needs to see them. */
   currentProcesses(): RuntimeProcess[];
@@ -151,7 +152,9 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     action: Extract<ReconcileAction, { type: "rollout" }>,
     wanted: Map<string, DesiredEnvironment>,
     pending: ReconcileFailure[],
+    signal?: AbortSignal,
   ): Promise<void> {
+    signal?.throwIfAborted();
     const key = placement(action.project, action.env);
     const entry = wanted.get(key);
     if (entry === undefined) return;
@@ -234,10 +237,12 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     spawned.promise.catch(() => {});
 
     let cancelled = false;
+    let processStarted = false;
     let cleanup: Promise<void> | undefined;
     const stopStarted = (): Promise<void> => {
       cancelled = true;
       if (cleanup !== undefined) return cleanup;
+      if (!processStarted) return Promise.resolve();
       /* Unroute synchronously, before a stop that may take the whole grace. */
       known.set(spec.id, started);
       cleanup = (async (): Promise<void> => {
@@ -254,83 +259,108 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       return cleanup;
     };
 
-    const section = withLock(
-      registry,
-      {
-        space: POINTER_LOCK_SPACE,
-        name: pointerLockName(action.project, action.env),
-        holder,
-        timeoutMs: lockTimeoutMs,
-      },
-      async (signal) => {
-        let processStarted = false;
-        try {
-          await driver.activateVersion(fleetPrefix(action.project, action.env), version);
-          signal.throwIfAborted();
-          await daemon.supervisor.start(spec);
-          processStarted = true;
-          signal.throwIfAborted();
-          /* THE MOMENT THE PROCESS EXISTS, and the one a held wake is waiting on:
+    /* The lock owns cancellation while its section runs. The rollout still owns
+       it after the lock returns, because readiness may still be waiting when a
+       terminal daemon shutdown arrives. */
+    const cancelStarted = (): void => {
+      void stopStarted();
+    };
+    signal?.addEventListener("abort", cancelStarted, { once: true });
+    if (signal?.aborted === true) cancelStarted();
+
+    try {
+      const section = withLock(
+        registry,
+        {
+          space: POINTER_LOCK_SPACE,
+          name: pointerLockName(action.project, action.env),
+          holder,
+          timeoutMs: lockTimeoutMs,
+          ...(signal === undefined ? {} : { signal }),
+        },
+        async (lockSignal) => {
+          try {
+            await driver.activateVersion(fleetPrefix(action.project, action.env), version);
+            lockSignal.throwIfAborted();
+            await daemon.supervisor.start(spec);
+            processStarted = true;
+            lockSignal.throwIfAborted();
+            /* THE MOMENT THE PROCESS EXISTS, and the one a held wake is waiting on:
              everything past here — the bookkeeping, the gate, the rest of the hold
              — runs beside it rather than in front of it. */
-          observe?.emit({ type: "rollout.spawned", processId: spec.id, build: leg.build.id });
-          spawned.resolve();
-          /* The process is running and has not read the pointer yet. Held for it,
+            observe?.emit({ type: "rollout.spawned", processId: spec.id, build: leg.build.id });
+            spawned.resolve();
+            /* The process is running and has not read the pointer yet. Held for it,
              because nothing here can observe the read itself. */
-          await delay(holdMs, signal);
-          signal.throwIfAborted();
-        } catch (error) {
-          if (processStarted) await stopStarted();
-          throw error;
-        }
-      },
-    );
-    /* A section that failed BEFORE the spawn — a lock it could not take, an
+            await delay(holdMs, lockSignal);
+            lockSignal.throwIfAborted();
+          } catch (error) {
+            if (processStarted) await stopStarted();
+            throw error;
+          }
+        },
+      );
+      /* A section that failed BEFORE the spawn — a lock it could not take, an
        activation that raised, a spawn that did not happen — fails the wait below,
        so nothing is registered and nothing is gated. One that failed after finds
        this already settled, and is raised by the await further down instead. */
-    section.catch((error: unknown) => {
-      spawned.reject(error);
-    });
+      section.catch((error: unknown) => {
+        spawned.reject(error);
+      });
 
-    let gating: Promise<void> | undefined;
-    let spawnFailed = false;
-    await spawned.promise.catch(() => {
-      spawnFailed = true;
-    });
+      let gating: Promise<void> | undefined;
+      let spawnFailed = false;
+      await spawned.promise.catch(() => {
+        spawnFailed = true;
+      });
 
-    if (!spawnFailed) {
-      /* Both off the lock, and both the moment the spawn returned: this is what
+      if (!spawnFailed && signal?.aborted !== true) {
+        /* Both off the lock, and both the moment the spawn returned: this is what
          the wake surface holding a request for this process is waiting to see. */
-      known.set(spec.id, started);
-      gating = gateStarted(started, pending, () => cancelled, stopStarted);
-      /* Awaited in every path below; this only keeps a gate that fails while the
+        known.set(spec.id, started);
+        gating = gateStarted(started, pending, () => cancelled, stopStarted);
+        /* Awaited in every path below; this only keeps a gate that fails while the
          hold is still running from being read as unhandled. */
-      gating.catch(() => {});
-    }
+        gating.catch(() => {});
+      }
 
-    try {
-      /* The rollout is not done until the hold it owes the spawned process has
+      try {
+        /* The rollout is not done until the hold it owes the spawned process has
          run out, and a lock lost during it is this rollout's failure exactly as
          it was when nothing overlapped it. */
-      await section;
-    } catch (error) {
-      if (gating !== undefined) {
-        /* A process that may have read a superseded pointer cannot survive this
+        await section;
+      } catch (error) {
+        if (signal?.aborted === true) {
+          await stopStarted();
+          return;
+        }
+        if (gating !== undefined) {
+          /* A process that may have read a superseded pointer cannot survive this
            rollout. Stop is idempotent, so this also closes the narrow loss after
            the callback's final signal check. */
-        await stopStarted();
-        await gating.catch((failed: unknown) => {
-          pending.push(failureOf(failed, { action: "await-ready", subject: spec.id }));
-        });
+          await stopStarted();
+          await gating.catch((failed: unknown) => {
+            pending.push(failureOf(failed, { action: "await-ready", subject: spec.id }));
+          });
+        }
+        throw error;
       }
-      throw error;
-    }
-    /* The hold is over and the environment's pointer lock is back. It may well
+      /* The hold is over and the environment's pointer lock is back. It may well
        land AFTER the gate below has already reported: the hold guards the
        POINTER, not the gate, and the two overlap on purpose. */
-    observe?.emit({ type: "rollout.holdEnded", processId: spec.id });
-    await gating;
+      observe?.emit({ type: "rollout.holdEnded", processId: spec.id });
+      try {
+        await untilSettled(gating, signal);
+      } catch (error) {
+        if (signal?.aborted === true) {
+          await stopStarted();
+          return;
+        }
+        throw error;
+      }
+    } finally {
+      signal?.removeEventListener("abort", cancelStarted);
+    }
   }
 
   /**
@@ -376,7 +406,9 @@ export function createExecutor(deps: ExecutorDeps): Executor {
   async function runGate(
     action: Extract<ReconcileAction, { type: "await-ready" }>,
     pending: ReconcileFailure[],
+    signal?: AbortSignal,
   ): Promise<void> {
+    signal?.throwIfAborted();
     const process = known.get(action.processId);
     if (process === undefined) return;
 
@@ -406,9 +438,11 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     }
 
     if (await gate(process)) {
+      signal?.throwIfAborted();
       known.set(action.processId, { ...process, ready: true });
       return;
     }
+    signal?.throwIfAborted();
     pending.push(noted(action.processId, "the process did not pass its readiness gate"));
   }
 
@@ -450,20 +484,21 @@ export function createExecutor(deps: ExecutorDeps): Executor {
   }
 
   return {
-    async execute(plan, desired, pending): Promise<void> {
+    async execute(plan, desired, pending, signal): Promise<void> {
       const wanted = new Map(
         desired.map((entry) => [placement(entry.project, entry.env.name), entry]),
       );
 
       for (const action of plan) {
+        if (signal?.aborted === true) break;
         try {
           switch (action.type) {
             case "rollout": {
-              await runRollout(action, wanted, pending);
+              await runRollout(action, wanted, pending, signal);
               break;
             }
             case "await-ready": {
-              await runGate(action, pending);
+              await runGate(action, pending, signal);
               break;
             }
             case "stop": {
@@ -556,6 +591,34 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
       resolve();
     }, ms);
     signal.addEventListener("abort", aborted, { once: true });
+  });
+}
+
+/** Waits for work unless terminal shutdown has already made its result irrelevant. */
+function untilSettled<T>(
+  work: Promise<T> | undefined,
+  signal?: AbortSignal,
+): Promise<T | undefined> {
+  if (work === undefined) return Promise.resolve(undefined);
+  if (signal === undefined) return work;
+  if (signal.aborted) return Promise.reject(signal.reason);
+
+  return new Promise<T>((resolve, reject) => {
+    const abort = (): void => {
+      signal.removeEventListener("abort", abort);
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
   });
 }
 

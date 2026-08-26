@@ -1283,6 +1283,7 @@ function fakeReconciler(processes: () => RuntimeProcess[] = () => running): Reco
     kick: () => {},
     parkedRecords: () => [],
     start: () => {},
+    shutdown: () => Promise.resolve(),
     stop: () => {},
     status: () => ({
       lastRunAt: null,

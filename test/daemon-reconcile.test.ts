@@ -1170,6 +1170,76 @@ describe("a pass asked for NOW", () => {
   });
 });
 
+describe("terminal reconciler shutdown", () => {
+  it("closes deferred kicks and joins the active readiness rollout", async () => {
+    const credits = createCreditController({ allocatableMb: 10_000, surgeMb: 512 });
+    const world = await seededWorld({ credits, intervalMs: 60_000 });
+    const gate = deferred<boolean>();
+    world.driver.gate = (): Promise<boolean> => gate.promise;
+    world.reconciler.start();
+
+    /* A released reservation is the credit retry that asks for one deferred
+       pass while this rollout is still waiting for readiness. */
+    const retry = credits.tryReserveTransition({
+      owner: { namespace: "process", id: "shop/prod/another" },
+      mb: 512,
+    });
+    expect(retry).toBeDefined();
+
+    const pass = world.reconciler.runOnce();
+    await vi.waitFor(() => {
+      expect(world.driver.probed).toHaveLength(1);
+    });
+    retry?.release();
+
+    const shutdown = world.reconciler.shutdown();
+    let joined = false;
+    void shutdown.then(() => {
+      joined = true;
+    });
+    await Promise.resolve();
+    expect(joined).toBe(false);
+
+    gate.resolve(true);
+    await Promise.all([pass, shutdown]);
+    await sleep(25);
+
+    expect(world.driver.activations).toHaveLength(1);
+    expect(world.supervisor.started).toHaveLength(1);
+    expect(world.supervisor.listCalls).toBe(2);
+    expect(world.supervisor.stopped).toEqual([
+      { id: processIdOf(BUILD_ONE), graceMs: world.driver.stopGraceMs },
+    ]);
+
+    world.reconciler.kick();
+    await expect(world.reconciler.runOnce()).resolves.toEqual([]);
+    expect(world.supervisor.listCalls).toBe(2);
+  });
+
+  it("stops a process whose spawn completes across cancellation", async () => {
+    const world = await seededWorld();
+    const returned = deferred<void>();
+    const start = world.supervisor.start.bind(world.supervisor);
+    world.supervisor.start = async (spec): Promise<ProcessStatus> => {
+      const status = await start(spec);
+      await returned.promise;
+      return status;
+    };
+
+    const pass = world.reconciler.runOnce();
+    await vi.waitFor(() => {
+      expect(world.supervisor.started).toHaveLength(1);
+    });
+    const shutdown = world.reconciler.shutdown();
+    returned.resolve();
+
+    await Promise.all([pass, shutdown]);
+
+    expect(world.supervisor.status(processIdOf(BUILD_ONE))?.state).toBe("exited");
+    expect(world.reconciler.status().processes).toEqual([]);
+  });
+});
+
 describe("the loop on a timer", () => {
   it("keeps running passes until it is stopped", async () => {
     const world = await seededWorld({ intervalMs: 5 });

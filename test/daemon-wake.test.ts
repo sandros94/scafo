@@ -1260,6 +1260,7 @@ function fakeReconciler(): FakeReconciler {
     },
 
     start: (): void => {},
+    shutdown: (): Promise<void> => Promise.resolve(),
     stop: (): void => {},
     parkedRecords: (): ParkedEnvironment[] => fake.parked.map((entry) => ({ ...entry })),
 

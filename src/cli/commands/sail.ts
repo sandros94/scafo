@@ -432,6 +432,10 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   flusher?.start();
 
   await untilSignalled(async () => {
+    /* CLOSED SYNCHRONOUSLY, before the first shutdown await below. The bucket
+       and lease work can take time, and no timer, wake or credit release may
+       start a process while this node is already leaving. */
+    const reconcilerShutdown = reconciler.shutdown();
     /*
      * Written FIRST, before anything is stopped: this is what tells placement
      * the node is leaving rather than dying, and every millisecond it is late is
@@ -457,9 +461,10 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
        it at once instead of waiting out the TTL, and a coordinator still running
        would keep deleting on behalf of a node that is leaving. */
     await coordinator.stop();
-    /* Stopped next: a pass that started while the node was shutting down would
-       start processes this shutdown is about to leave behind. */
-    reconciler.stop();
+    /* A pass that was active when shutdown closed intake may still be between
+       activation and spawn, so it must quiesce before the final supervisor
+       snapshot drains every runtime. */
+    await reconcilerShutdown;
     /* Read to the end and closed before the listener goes, so the requests the
        ingress served while this node was shutting down are still counted. */
     await accessLog?.stop();

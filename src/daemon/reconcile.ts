@@ -80,6 +80,8 @@ export interface Reconciler {
    */
   kick(): void;
   start(): void;
+  /** Closes the loop permanently, cancels its pass and waits for it to quiesce. */
+  shutdown(): Promise<void>;
   stop(): void;
   status(): ReconcileStatus;
   /**
@@ -165,6 +167,10 @@ export function createReconciler(
   let unsubscribeCredits: (() => void) | undefined;
   let runtimeAvailableMb = credits.account.runtimeAvailableMb;
   let inFlight = false;
+  let terminal = false;
+  let activePass: Promise<ReconcileAction[]> | undefined;
+  let activeAbort: AbortController | undefined;
+  let shutdown: Promise<void> | undefined;
   /* A pass was asked for while one was running: see `runOnce`. */
   let kicked = false;
   let lastRunAt: string | null = null;
@@ -185,6 +191,8 @@ export function createReconciler(
        caller awaiting one pass — goes through this one gate. */
     if (inFlight) return [];
     inFlight = true;
+    const abort = new AbortController();
+    activeAbort = abort;
 
     observe?.emit({ type: "reconcile.pass.start", kicked: fromKick });
     const startedMs = observe === undefined ? 0 : observe.nowMs();
@@ -226,22 +234,24 @@ export function createReconciler(
           start: daemon.config.runtime.portRangeStart,
         }),
       });
-      await executor.execute(plan, desired, pending);
+      await executor.execute(plan, desired, pending, abort.signal);
 
-      try {
-        /* Routing is published from what the pass ended with, not from what it
+      if (!abort.signal.aborted) {
+        try {
+          /* Routing is published from what the pass ended with, not from what it
            planned: only a process that came out of it ready may take traffic.
            The parked environments travel with it, because their hosts are routed
            to this daemon to be woken rather than to a process. */
-        await applyIngress(daemon, { desired, processes: [...known.values()], parked });
-      } catch (error) {
-        /*
-         * An ingress that cannot be reached is recorded and nothing more. The
-         * processes this pass started are running either way, the next pass
-         * states the same routing again, and a pass that gave up here would stop
-         * reconciling the node over a failure outside it.
-         */
-        pending.push(failureOf(error, { subject: INGRESS_SUBJECT }));
+          await applyIngress(daemon, { desired, processes: [...known.values()], parked });
+        } catch (error) {
+          /*
+           * An ingress that cannot be reached is recorded and nothing more. The
+           * processes this pass started are running either way, the next pass
+           * states the same routing again, and a pass that gave up here would stop
+           * reconciling the node over a failure outside it.
+           */
+          pending.push(failureOf(error, { subject: INGRESS_SUBJECT }));
+        }
       }
     } catch (error) {
       /*
@@ -260,6 +270,7 @@ export function createReconciler(
       lastParked = parked;
       lastRunAt = new Date().toISOString();
       inFlight = false;
+      if (activeAbort === abort) activeAbort = undefined;
 
       /* The three are made together and are undefined together; a pass reports
          what it cost against the baseline it took at its own start. */
@@ -278,24 +289,35 @@ export function createReconciler(
       /* Exactly one more pass for however many kicks arrived while this one was
          running: they all asked for the same thing, which is a pass that starts
          after the state they stamped was written. */
-      if (kicked) {
+      if (!terminal && kicked) {
         kicked = false;
-        void runPass(true);
+        void startPass(true);
       }
     }
     return plan;
   }
 
+  function startPass(fromKick: boolean): Promise<ReconcileAction[]> {
+    if (terminal || inFlight) return Promise.resolve([]);
+    const pass = runPass(fromKick);
+    activePass = pass;
+    void pass.finally(() => {
+      if (activePass === pass) activePass = undefined;
+    });
+    return pass;
+  }
+
   const kick = (): void => {
+    if (terminal) return;
     if (inFlight) {
       kicked = true;
       return;
     }
-    void runPass(true);
+    void startPass(true);
   };
 
   return {
-    runOnce: (): Promise<ReconcileAction[]> => runPass(false),
+    runOnce: (): Promise<ReconcileAction[]> => startPass(false),
 
     kick,
 
@@ -304,7 +326,7 @@ export function createReconciler(
     },
 
     start(): void {
-      if (timer !== null) return;
+      if (terminal || timer !== null) return;
 
       runtimeAvailableMb = credits.account.runtimeAvailableMb;
       unsubscribeCredits = credits.subscribe((): void => {
@@ -313,7 +335,7 @@ export function createReconciler(
         runtimeAvailableMb = next;
         if (increased) kick();
       });
-      timer = setInterval(() => void runPass(false), intervalMs);
+      timer = setInterval(() => void startPass(false), intervalMs);
       /* The loop must never be the reason the process stays alive. */
       const handle = timer as { unref?: () => void };
       handle.unref?.();
@@ -325,6 +347,24 @@ export function createReconciler(
       timer = null;
       unsubscribeCredits?.();
       unsubscribeCredits = undefined;
+    },
+
+    shutdown(): Promise<void> {
+      if (shutdown !== undefined) return shutdown;
+      /* Synchronous closure matters: Sail awaits bucket and lease work before
+         this call, and neither a timer, a wake nor a credit release may start
+         runtime work in that gap or after it. */
+      terminal = true;
+      kicked = false;
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+      unsubscribeCredits?.();
+      unsubscribeCredits = undefined;
+      activeAbort?.abort(new Error("Reconciler is shutting down"));
+      shutdown = (activePass ?? Promise.resolve()).then(() => {});
+      return shutdown;
     },
 
     status(): ReconcileStatus {
