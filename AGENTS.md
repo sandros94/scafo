@@ -164,6 +164,8 @@ src/
     _peer.ts              # internal: the peer-hop convention: the loop guard, a node's URL, the live nodes a placement names
     _routed.ts            # internal: whether a build is being served, asked of the node the placement gave it to
     _assign.ts            # internal: the coordinator deciding which nodes serve what
+    _credit-controller.ts # internal: the synchronous node-local owner of runtime, transition and deploy MiB reservations
+    _credit-controller-input.ts # internal: validation and collision-free owner names for node-local credits
     _execute.ts           # internal: carries out one plan (rollout = activate+start+gate, stop)
     _desired.ts           # internal: desired state read out of the registry, filtered to this node
     _ingress.ts           # internal: renders the routing after a pass and applies it
