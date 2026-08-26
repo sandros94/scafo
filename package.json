@@ -107,7 +107,7 @@
     "esbuild": "^0.28.2",
     "h3": "2.0.1-rc.26",
     "tar": "^7.5.22",
-    "tavolato": "https://pkg.pr.new/sandros94/tavolato@dba2283",
+    "tavolato": "^0.0.1",
     "unjwt": "^0.7.3",
     "uns3": "^0.0.8"
   },

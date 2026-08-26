@@ -226,8 +226,8 @@ importers:
         specifier: ^7.5.22
         version: 7.5.22
       tavolato:
-        specifier: https://pkg.pr.new/sandros94/tavolato@dba2283
-        version: https://pkg.pr.new/sandros94/tavolato@dba2283(uns3@0.0.8)
+        specifier: ^0.0.1
+        version: 0.0.1(uns3@0.0.8)
       unjwt:
         specifier: ^0.7.3
         version: 0.7.3(h3@2.0.1-rc.26(crossws@0.4.10(srvx@0.12.5)))
@@ -2181,11 +2181,10 @@ packages:
     resolution: {integrity: sha512-MFO/QzvtAOmJbkhOaCTvbGcFN9L9b+JunIsDwaKljSOdcLMea3NJ1k9Usz/rjdfSXTq4dfzfeS7W4p4YOAAHeA==}
     engines: {node: '>=18'}
 
-  tavolato@https://pkg.pr.new/sandros94/tavolato@dba2283:
-    resolution: {integrity: sha512-mbnNVu4OPGxCdOJuCCSBd8kC49JkJTDAP2qIbpUWru4ezg8bSHzfTGyIiI+qSBHCX/cgaHtCMkMzq4nimdQ16g==, tarball: https://pkg.pr.new/sandros94/tavolato@dba2283}
-    version: 0.0.0
+  tavolato@0.0.1:
+    resolution: {integrity: sha512-h+XkCQFpoNjuyHA+MKMqAIpavwCSg9ea0krZEJ52lT15z36cU4PfiFMrFa4nPDimBlksA6gl43To7Bp/GUPcGg==}
     peerDependencies:
-      uns3: '>=0.0.7'
+      uns3: ^0.0.8
     peerDependenciesMeta:
       uns3:
         optional: true
@@ -3990,7 +3989,7 @@ snapshots:
       minizlib: 3.1.0
       yallist: 5.0.0
 
-  tavolato@https://pkg.pr.new/sandros94/tavolato@dba2283(uns3@0.0.8):
+  tavolato@0.0.1(uns3@0.0.8):
     optionalDependencies:
       uns3: 0.0.8
 
