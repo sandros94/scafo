@@ -61,6 +61,7 @@ import type { Observability } from "./observe.ts";
 import type { ParkedView, PlacementView, Reconciler, ReconcileStatus } from "./reconcile.ts";
 import { registerStorageRoutes } from "./_storage-routes.ts";
 import type { StorageService } from "./storage.ts";
+import type { CreditController } from "./_credit-controller.ts";
 import { createWakeService, requestHost, type WakeCounters } from "./wake.ts";
 
 /** Everything the HTTP layer serves from; assembled once while the node boots. */
@@ -85,6 +86,8 @@ export interface DaemonContext {
   varsetKey?: CryptoKey;
   /** What this node probed about its own hardware; bounds the processes it starts. */
   capacity?: CapacityPlan;
+  /** The node-wide memory-credit owner shared by local admission consumers. */
+  credits?: CreditController;
   /** The reconcile loop, when this node runs one. */
   reconciler?: Reconciler;
   /**

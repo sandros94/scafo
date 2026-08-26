@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ScafoError } from "../src/core/error.ts";
 import {
   createCreditController,
+  assertCreditAdmission,
   type CreditController,
   type CreditOwner,
 } from "../src/daemon/_credit-controller.ts";
@@ -10,6 +11,37 @@ const process = (id: string): CreditOwner => ({ namespace: "process", id });
 const build = (id: string): CreditOwner => ({ namespace: "build", id });
 
 describe("node-local credit controller", () => {
+  it("refuses a node credit pool that cannot admit protected runtime and deploy work", () => {
+    const insufficient = createCreditController({ allocatableMb: 1_535, surgeMb: 512 });
+    expect(() => assertCreditAdmission(insufficient, 512, 1024)).toThrow(
+      expect.objectContaining({ code: "invalid-input" }),
+    );
+
+    const sufficient = createCreditController({ allocatableMb: 1_536, surgeMb: 512 });
+    expect(() => assertCreditAdmission(sufficient, 512, 1024)).not.toThrow();
+  });
+
+  it("notifies safely after committed changes and tolerates reentrant listener mutation", () => {
+    const credits = controller();
+    const calls: string[] = [];
+    const unsubscribe = credits.subscribe(() => {
+      calls.push(`first:${String(credits.account.deployMb)}`);
+      unsubscribe();
+      credits.subscribe(() => calls.push(`late:${String(credits.account.deployMb)}`));
+      throw new Error("observer failed");
+    });
+    credits.subscribe(() => calls.push(`second:${String(credits.account.deployMb)}`));
+
+    const hold = credits.tryReserveDeploy({ owner: build("shop/prod/next"), mb: 20 });
+    expect(hold).toBeDefined();
+    expect(calls).toEqual(["first:20", "second:20"]);
+
+    hold?.release();
+    unsubscribe();
+    unsubscribe();
+    expect(calls).toEqual(["first:20", "second:20", "second:0", "late:0"]);
+  });
+
   it("conserves reservations across runtime, transition and deploy work", () => {
     const credits = controller();
     credits.replaceRuntime([{ owner: process("shop/prod/current"), mb: 50 }]);

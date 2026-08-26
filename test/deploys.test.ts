@@ -18,6 +18,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { type DaemonContext, type AliasResult, createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { createDeployService, type DeployStatus } from "../src/daemon/deploys.ts";
+import { createCreditController } from "../src/daemon/_credit-controller.ts";
 import {
   DEPLOY_METADATA_HEADER,
   DEPLOY_METADATA_MAX_BYTES,
@@ -134,6 +135,7 @@ beforeEach(async () => {
     supervisor: fakeSupervisor(),
     version: "0.0.0-test",
     reconciler: fakeReconciler(),
+    credits: createCreditController({ allocatableMb: 10_000, surgeMb: 512 }),
   };
   daemon.deploys = createDeployService(daemon, fakeRunner(), {
     routedTimeoutMs: 300,

@@ -153,11 +153,15 @@ describe("the capacity formulas", () => {
     expect(planFor(4 * GIB).maxResidentCells).toBe(500);
   });
 
-  it("budgets 70% of memory minus the daemon's own overhead", () => {
+  it("budgets 80% of memory minus the daemon's own overhead in whole MiB", () => {
     const plan = planFor(8 * GIB);
 
-    expect(plan.rssBudgetMb).toBeCloseTo(0.7 * 8192 - 128, 6);
-    expect(plan.maxRssMbPerProcess).toBe(5606);
+    expect(plan.rssBudgetMb).toBe(6425);
+    expect(plan.maxRssMbPerProcess).toBe(6425);
+  });
+
+  it("derives the 4 GiB default pool used by node-local credit admission", () => {
+    expect(planFor(4 * GIB).rssBudgetMb).toBe(3148);
   });
 
   it("takes the fraction and the overhead from the overrides", () => {
@@ -178,8 +182,8 @@ describe("the capacity formulas", () => {
     const four = planFor(8 * GIB, { plannedProcesses: 4 });
 
     expect(two.rssBudgetMb).toBe(one.rssBudgetMb);
-    expect(two.maxRssMbPerProcess).toBe(2803);
-    expect(four.maxRssMbPerProcess).toBe(1401);
+    expect(two.maxRssMbPerProcess).toBe(3212);
+    expect(four.maxRssMbPerProcess).toBe(1606);
   });
 
   it("floors at zero budget and one cell on a tiny host", () => {
@@ -296,7 +300,7 @@ describe("probeCapacity", () => {
     const reader = readerFor({ cgroup: NO_CGROUP, host: { cores: 4, memBytes: 8 * GIB } });
 
     await expect(probeCapacity(reader, { plannedProcesses: 2 })).resolves.toMatchObject({
-      maxRssMbPerProcess: 2803,
+      maxRssMbPerProcess: 3212,
     });
   });
 

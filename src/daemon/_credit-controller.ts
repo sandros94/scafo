@@ -4,6 +4,7 @@ import {
   type CreditReservation,
 } from "../core/capacity/credits.ts";
 import { ScafoError } from "../core/error.ts";
+import { assertPositiveSafeInteger } from "../core/utils/number.ts";
 import {
   assertDistinct,
   creditOptions,
@@ -11,6 +12,8 @@ import {
   normalizeRequest,
   normalizeRuntime,
 } from "./_credit-controller-input.ts";
+
+export const DEFAULT_RUNTIME_CREDIT_MB: number = 512;
 
 /** The node-local credits available to runtime transitions and deploy work. */
 export interface CreditControllerOptions {
@@ -44,9 +47,30 @@ export interface CreditHold {
 /** A replaceable node-local credit-accounting implementation. */
 export interface CreditController {
   readonly account: Readonly<CreditAccount>;
+  /** Runs synchronously after committed credit mutations; returns an idempotent unsubscribe. */
+  subscribe(listener: () => void): () => void;
   replaceRuntime(reservations: readonly RuntimeCreditReservation[]): void;
   tryReserveTransition(request: CreditReservationRequest): CreditHold | undefined;
   tryReserveDeploy(request: CreditReservationRequest): CreditHold | undefined;
+}
+
+/** Refuses a pool that cannot separately admit protected runtime and deploy work. */
+export function assertCreditAdmission(
+  credits: CreditController,
+  runtimeCreditMb: number,
+  deployCreditMb: number,
+): void {
+  assertPositiveSafeInteger(runtimeCreditMb, "runtimeCreditMb");
+  assertPositiveSafeInteger(deployCreditMb, "deployCreditMb");
+  const account = credits.account;
+  if (account.steadyAvailableMb < runtimeCreditMb || account.deployAvailableMb < deployCreditMb) {
+    throw new ScafoError("invalid-input", "Insufficient node credit", {
+      detail:
+        `the ${String(account.allocatableMb)}MiB credit pool cannot separately admit one ` +
+        `${String(runtimeCreditMb)}MiB runtime or one ${String(deployCreditMb)}MiB deploy ` +
+        `while preserving the ${String(account.surgeMb)}MiB runtime surge`,
+    });
+  }
 }
 
 /**
@@ -60,7 +84,22 @@ export function createCreditController(options: CreditControllerOptions): Credit
   let runtime = new Map<string, CreditReservation>();
   const transition = new Map<string, CreditReservation>();
   const deploy = new Map<string, CreditReservation>();
+  const listeners = new Set<() => void>();
   let current: Readonly<CreditAccount> = freeze(base);
+
+  const notify = (): void => {
+    /* A snapshot makes subscription changes and nested reservations independent
+       from this committed mutation. Observers are advisory: accounting is never
+       rolled back or reported as failed after it has committed. */
+    const snapshot = new Set(listeners);
+    for (const listener of snapshot) {
+      try {
+        listener();
+      } catch {
+        /* A consumer retry hook cannot invalidate a committed reservation. */
+      }
+    }
+  };
 
   const accountFor = (
     nextRuntime: ReadonlyMap<string, CreditReservation> = runtime,
@@ -98,6 +137,7 @@ export function createCreditController(options: CreditControllerOptions): Credit
     const reservations = kind === "transition" ? transition : deploy;
     reservations.set(key, reservation);
     current = candidate;
+    notify();
     let released = false;
 
     return Object.freeze({
@@ -113,6 +153,7 @@ export function createCreditController(options: CreditControllerOptions): Credit
             : accountFor(runtime, transition, candidate);
         reservations.delete(key);
         released = true;
+        notify();
       },
     });
   };
@@ -121,6 +162,17 @@ export function createCreditController(options: CreditControllerOptions): Credit
     get account(): Readonly<CreditAccount> {
       return current;
     },
+    subscribe(listener: () => void): () => void {
+      if (typeof listener !== "function") {
+        throw new ScafoError("invalid-input", "Invalid credit listener", {
+          detail: "credit listeners must be functions",
+        });
+      }
+      listeners.add(listener);
+      return (): void => {
+        listeners.delete(listener);
+      };
+    },
     replaceRuntime(reservations: readonly RuntimeCreditReservation[]): void {
       const nextRuntime = normalizeRuntime(reservations);
       assertDistinct(nextRuntime, transition);
@@ -128,6 +180,7 @@ export function createCreditController(options: CreditControllerOptions): Credit
       const candidate = accountFor(nextRuntime);
       runtime = nextRuntime;
       current = candidate;
+      notify();
     },
     tryReserveTransition(request: CreditReservationRequest): CreditHold | undefined {
       return reserve("transition", request);

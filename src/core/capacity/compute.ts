@@ -12,7 +12,7 @@ export interface CapacityInputs {
 
 /** Tunables of the capacity formulas. Every field has a sensible default. */
 export interface CapacityOverrides {
-  /** Share of memory the runtime may hold resident. Default `0.7`. */
+  /** Share of memory the runtime may hold resident. Default `0.8`. */
   rssFraction?: number;
   /** Memory reserved for the daemon itself, in MiB. Default `128`. */
   daemonOverheadMb?: number;
@@ -57,6 +57,9 @@ export interface CapacityPlan {
 
 const MIB = 1024 * 1024;
 
+export const DEFAULT_MEMORY_FRACTION: number = 0.8;
+export const DEFAULT_DAEMON_OVERHEAD_MB: number = 128;
+
 /* Bounds of {@link CapacityPlan.maxConcurrentWakes}, whatever the thread count is. */
 const MIN_CONCURRENT_WAKES = 1;
 const MAX_CONCURRENT_WAKES = 8;
@@ -76,8 +79,11 @@ export function computeCapacity(
   const hostCores = positive(inputs.host.cores, "host.cores");
   const hostMemBytes = positive(inputs.host.memBytes, "host.memBytes");
 
-  const rssFraction = fraction(opts?.rssFraction ?? 0.7, "rssFraction");
-  const daemonOverheadMb = nonNegative(opts?.daemonOverheadMb ?? 128, "daemonOverheadMb");
+  const rssFraction = fraction(opts?.rssFraction ?? DEFAULT_MEMORY_FRACTION, "rssFraction");
+  const daemonOverheadMb = nonNegative(
+    opts?.daemonOverheadMb ?? DEFAULT_DAEMON_OVERHEAD_MB,
+    "daemonOverheadMb",
+  );
   const plannedProcesses = positive(opts?.plannedProcesses ?? 1, "plannedProcesses");
   const residentCellsPer8Gb = positive(opts?.residentCellsPer8Gb ?? 1000, "residentCellsPer8Gb");
 
@@ -90,7 +96,7 @@ export function computeCapacity(
   const memMb = Math.floor((memLimited ? cgroupMemBytes : hostMemBytes) / MIB);
   const cores = cpuLimited ? Math.max(1, Math.ceil(cgroupCpus)) : hostCores;
 
-  const rssBudgetMb = Math.max(0, rssFraction * memMb - daemonOverheadMb);
+  const rssBudgetMb = Math.max(0, Math.floor(rssFraction * memMb - daemonOverheadMb));
   const threads = cores;
 
   return {

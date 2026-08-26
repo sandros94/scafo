@@ -38,6 +38,7 @@ import type { DaemonContext } from "./app.ts";
 import {
   createDeployScheduler,
   DEFAULT_ACTIVE_TASKS,
+  DEFAULT_DEPLOY_CREDIT_MB,
   DEFAULT_PROJECT_ACTIVE_TASKS,
   DEFAULT_PROJECT_QUEUED_TASKS,
   DEFAULT_PROJECT_STAGED_BYTES,
@@ -130,7 +131,8 @@ export interface DeployServiceOptions {
    * fails. Defaults to {@link DEPLOY_LOCK_TIMEOUT_MS}.
    */
   lockTimeoutMs?: number;
-  scheduler?: DeploySchedulerOptions;
+  scheduler?: Omit<DeploySchedulerOptions, "credits" | "creditMb"> &
+    Partial<Pick<DeploySchedulerOptions, "credits" | "creditMb">>;
 }
 
 export interface DeployService {
@@ -174,20 +176,28 @@ export function createDeployService(
   const lockTimeoutMs = opts?.lockTimeoutMs ?? DEPLOY_LOCK_TIMEOUT_MS;
   const holder = lockHolder(daemon.nodeId);
   const deploy = daemon.config.deploy;
-  const scheduler = createDeployScheduler(
-    opts?.scheduler ?? {
-      artifactBytes: deploy?.artifactBytes ?? DEFAULT_ARTIFACT_BYTES,
-      activeTasks: deploy?.activeTasks ?? DEFAULT_ACTIVE_TASKS,
-      projectActiveTasks: deploy?.projectActiveTasks ?? DEFAULT_PROJECT_ACTIVE_TASKS,
-      queuedTasks: deploy?.queuedTasks ?? DEFAULT_QUEUED_TASKS,
-      projectQueuedTasks: deploy?.projectQueuedTasks ?? DEFAULT_PROJECT_QUEUED_TASKS,
-      stagedBytes: deploy?.stagedBytes ?? DEFAULT_STAGED_BYTES,
-      projectStagedBytes: deploy?.projectStagedBytes ?? DEFAULT_PROJECT_STAGED_BYTES,
-      receiveTimeoutMs: deploy?.receiveTimeoutMs ?? DEFAULT_RECEIVE_TIMEOUT_MS,
-      queueTimeoutMs: deploy?.queueTimeoutMs ?? DEFAULT_QUEUE_TIMEOUT_MS,
-      taskTimeoutMs: deploy?.taskTimeoutMs ?? DEFAULT_TASK_TIMEOUT_MS,
-    },
-  );
+  const schedulerOptions = opts?.scheduler;
+  const credits = schedulerOptions?.credits ?? daemon.credits;
+  if (credits === undefined) {
+    throw new ScafoError("invalid-input", "Missing deploy credit controller", {
+      detail: "deploy admission requires the node-wide credit controller",
+    });
+  }
+  const scheduler = createDeployScheduler({
+    credits,
+    creditMb: schedulerOptions?.creditMb ?? deploy?.creditMb ?? DEFAULT_DEPLOY_CREDIT_MB,
+    artifactBytes: deploy?.artifactBytes ?? DEFAULT_ARTIFACT_BYTES,
+    activeTasks: deploy?.activeTasks ?? DEFAULT_ACTIVE_TASKS,
+    projectActiveTasks: deploy?.projectActiveTasks ?? DEFAULT_PROJECT_ACTIVE_TASKS,
+    queuedTasks: deploy?.queuedTasks ?? DEFAULT_QUEUED_TASKS,
+    projectQueuedTasks: deploy?.projectQueuedTasks ?? DEFAULT_PROJECT_QUEUED_TASKS,
+    stagedBytes: deploy?.stagedBytes ?? DEFAULT_STAGED_BYTES,
+    projectStagedBytes: deploy?.projectStagedBytes ?? DEFAULT_PROJECT_STAGED_BYTES,
+    receiveTimeoutMs: deploy?.receiveTimeoutMs ?? DEFAULT_RECEIVE_TIMEOUT_MS,
+    queueTimeoutMs: deploy?.queueTimeoutMs ?? DEFAULT_QUEUE_TIMEOUT_MS,
+    taskTimeoutMs: deploy?.taskTimeoutMs ?? DEFAULT_TASK_TIMEOUT_MS,
+    ...schedulerOptions,
+  });
   const stopping = new AbortController();
   const continuations = new Set<Promise<void>>();
 

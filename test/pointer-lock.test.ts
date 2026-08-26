@@ -23,6 +23,7 @@ import {
   type DeployService,
   type DeployStatus,
 } from "../src/daemon/deploys.ts";
+import { createCreditController } from "../src/daemon/_credit-controller.ts";
 import {
   createReconciler,
   type PointerLockOptions,
@@ -273,6 +274,7 @@ async function seededWorld(opts?: WorldOptions): Promise<World> {
     registry: ctx,
     supervisor,
     version: "0.0.0-test",
+    credits: createCreditController({ allocatableMb: 10_000, surgeMb: 512 }),
   };
   const reconciler = createReconciler(daemon, createCelldDriver({ store }), {
     baseEnv: { PATH: "/usr/bin:/bin" },
