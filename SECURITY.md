@@ -53,13 +53,18 @@ buckets and host or VM security boundaries.
   those credentials as isolated from trusted workload code. Celld documents the
   bucket as its fleet authority in its
   [security guidance](https://github.com/denoland/celld/blob/main/docs/security.md).
-- Deploy intake, archive expansion, build, log, and concurrency resource
-  safeguards are incomplete. Apply external host or container limits.
-- Manual `scafo sail` is development-only for abrupt-death containment. Normal
-  shutdown tears down supervised runtime process groups; it does not currently
-  cancel an in-flight Celld deploy builder. An uncatchable bare-host daemon death
-  can orphan Celld or esbuild descendants that hold fleet credentials. Production
-  bare hosts must use the installer's systemd unit or an equivalent cgroup-owning
+- Deploy admission bounds compressed and expanded artifact bytes, archive
+  entries, retained builder output, node and project concurrency and queue
+  depth, node and project staged bytes, receive, queue, and task deadlines, and
+  node-wide deploy-memory credits. These configurable application-level limits
+  are not OS isolation; apply external host or container limits for CPU, memory,
+  processes, filesystem use, and networking.
+- On `SIGINT` or `SIGTERM`, `scafo sail` closes deploy admission, cancels staged,
+  queued, and active deploy work, joins builder process-group cleanup, then
+  drains supervised runtimes. Manual `scafo sail` remains development-only for
+  abrupt-death containment: an uncatchable bare-host daemon death can orphan
+  Celld or esbuild descendants that hold fleet credentials. Production bare
+  hosts must use the installer's systemd unit or an equivalent cgroup-owning
   supervisor: it must TERM the daemon first, hard-kill remaining members of its
   one non-delegated cgroup, including builders, on daemon exit or timeout, and
   allow the node's 35-second drain window.
