@@ -103,6 +103,11 @@ USER scafo
 # this image ships neither.
 EXPOSE 7400
 
+# Docker can ask the daemon without adding a second binary to the image: Node
+# already carries fetch, and the fixed loopback/default port is the image's own
+# contract. Deployments that change the listener carry their probes explicitly.
+HEALTHCHECK --interval=5s --timeout=3s --start-period=30s --retries=3 CMD ["node", "-e", "fetch(\"http://127.0.0.1:7400/v1/health\").then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+
 # STOP GRACE MUST BE AT LEAST 35 SECONDS. This is not a tuning preference.
 #
 # On SIGTERM the daemon marks itself draining, releases the coordinator lease,

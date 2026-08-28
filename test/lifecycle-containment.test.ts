@@ -43,6 +43,26 @@ describe("lifecycle containment artifacts", () => {
     });
     expect(pod?.terminationGracePeriodSeconds).toBeGreaterThanOrEqual(35);
   });
+
+  it("uses the daemon health endpoint for startup, readiness and liveness", async () => {
+    const deployment = await deploymentManifest();
+    const node = deployment.spec?.template?.spec?.containers?.find(
+      (container) => container.name === "node",
+    );
+
+    expect(node?.startupProbe).toMatchObject({
+      httpGet: { path: "/v1/health", port: "api" },
+    });
+    expect(node?.readinessProbe).toMatchObject({
+      httpGet: { path: "/v1/health", port: "api" },
+      periodSeconds: 5,
+    });
+    expect(node?.livenessProbe).toMatchObject({
+      httpGet: { path: "/v1/health", port: "api" },
+      periodSeconds: 20,
+      failureThreshold: 3,
+    });
+  });
 });
 
 /** Renders the installer's node unit without fetching or installing anything. */
@@ -95,7 +115,24 @@ interface KubernetesDeployment extends KubernetesDocument {
         hostPID?: boolean;
         shareProcessNamespace?: boolean;
         terminationGracePeriodSeconds?: number;
+        containers?: KubernetesContainer[];
       };
     };
   };
+}
+
+interface KubernetesContainer {
+  name?: string;
+  startupProbe?: KubernetesHealthProbe;
+  readinessProbe?: KubernetesHealthProbe;
+  livenessProbe?: KubernetesHealthProbe;
+}
+
+interface KubernetesHealthProbe {
+  httpGet?: {
+    path?: string;
+    port?: string | number;
+  };
+  periodSeconds?: number;
+  failureThreshold?: number;
 }

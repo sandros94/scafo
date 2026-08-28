@@ -112,6 +112,8 @@
     "uns3": "^0.0.8"
   },
   "devDependencies": {
+    "@kubernetes/client-node": "^2.0.0",
+    "@testcontainers/k3s": "12.1.0",
     "@types/node": "^24",
     "@vitest/coverage-v8": "^4.1.10",
     "automd": "^0.4.3",

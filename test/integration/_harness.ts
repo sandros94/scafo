@@ -56,6 +56,8 @@ export const DEADLINE_MS: number = 120_000;
 export const BOOT_DEADLINE_MS: number = 60_000;
 /** SeaweedFS is the slowest thing here to become useful, by a wide margin. */
 export const STORE_DEADLINE_MS: number = 120_000;
+/** A blocked local tunnel must not consume the whole store readiness budget. */
+export const STORE_ATTEMPT_TIMEOUT_MS: number = 10_000;
 export const POLL_MS: number = 500;
 
 /** The bucket credentials the suites and the nodes they start both use. */
@@ -131,17 +133,45 @@ export function storeEnv(endpoint: string, settings: BucketSettings): Record<str
  * Creates the bucket with an anonymous PUT, retrying because SeaweedFS answers
  * on its S3 port before it is willing to serve bucket operations on it.
  */
-export async function createBucket(endpoint: string, bucket: string): Promise<void> {
-  const giveUp = Date.now() + STORE_DEADLINE_MS;
+export interface CreateBucketOptions {
+  /** Test seam; production callers use the platform fetch. */
+  fetchFn?: typeof fetch;
+  /** Whole readiness budget; only tests should make it shorter. */
+  deadlineMs?: number;
+  /** One blocked connection's share of the readiness budget. */
+  attemptTimeoutMs?: number;
+}
+
+export async function createBucket(
+  endpoint: string,
+  bucket: string,
+  opts: CreateBucketOptions = {},
+): Promise<void> {
+  const giveUp = Date.now() + (opts.deadlineMs ?? STORE_DEADLINE_MS);
+  const fetchFn = opts.fetchFn ?? fetch;
+  const attemptTimeoutMs = opts.attemptTimeoutMs ?? STORE_ATTEMPT_TIMEOUT_MS;
   let last = "no attempt was made";
 
   for (;;) {
+    const remainingMs = giveUp - Date.now();
+    if (remainingMs <= 0)
+      throw new Error(`could not create bucket "${bucket}" at ${endpoint}; last: ${last}`);
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(new Error("bucket request timed out")),
+      Math.min(attemptTimeoutMs, remainingMs),
+    );
     try {
-      const response = await fetch(`${endpoint}/${bucket}`, { method: "PUT" });
+      const response = await fetchFn(`${endpoint}/${bucket}`, {
+        method: "PUT",
+        signal: controller.signal,
+      });
       if (response.ok || response.status === 409) return;
       last = `answered ${String(response.status)}: ${(await response.text()).slice(0, 200)}`;
     } catch (error) {
       last = describeFailure(error);
+    } finally {
+      clearTimeout(timeout);
     }
     if (Date.now() >= giveUp) {
       throw new Error(`could not create bucket "${bucket}" at ${endpoint}; last: ${last}`);
@@ -347,13 +377,28 @@ export interface CommandResult {
   output: string;
 }
 
+export interface CommandOptions {
+  /** Bounds one host command so an end-to-end assertion can report its next state. */
+  timeoutMs?: number;
+}
+
 /** Runs the built CLI the way an operator would, with a deliberately clean environment. */
-export function runCli(args: string[], extraEnv: Record<string, string>): Promise<CommandResult> {
-  return run(process.execPath, [CLI, ...args], REPO_ROOT, {
-    PATH: process.env.PATH ?? "",
-    HOME: process.env.HOME ?? "",
-    ...extraEnv,
-  });
+export function runCli(
+  args: string[],
+  extraEnv: Record<string, string>,
+  opts: CommandOptions = {},
+): Promise<CommandResult> {
+  return run(
+    process.execPath,
+    [CLI, ...args],
+    REPO_ROOT,
+    {
+      PATH: process.env.PATH ?? "",
+      HOME: process.env.HOME ?? "",
+      ...extraEnv,
+    },
+    opts,
+  );
 }
 
 export function run(
@@ -361,18 +406,43 @@ export function run(
   args: string[],
   cwd: string,
   childEnv: Record<string, string>,
+  opts: CommandOptions = {},
 ): Promise<CommandResult> {
   return new Promise<CommandResult>((settle, fail) => {
     const child = spawn(command, args, { cwd, env: childEnv, stdio: ["ignore", "pipe", "pipe"] });
 
     let output = "";
+    let settled = false;
+    const timeoutMs = opts.timeoutMs;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const finish = (result: CommandResult): void => {
+      if (settled) return;
+      settled = true;
+      if (timeout !== undefined) clearTimeout(timeout);
+      settle(result);
+    };
+    const failOnce = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      if (timeout !== undefined) clearTimeout(timeout);
+      fail(error);
+    };
+    if (timeoutMs !== undefined) {
+      timeout = setTimeout(() => {
+        child.kill("SIGKILL");
+        finish({
+          code: -1,
+          output: `${output}${output === "" || output.endsWith("\n") ? "" : "\n"}command timed out after ${String(timeoutMs)}ms`,
+        });
+      }, timeoutMs);
+    }
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => (output += chunk));
     child.stderr.on("data", (chunk: string) => (output += chunk));
 
-    child.on("error", fail);
-    child.on("close", (code) => settle({ code: code ?? -1, output }));
+    child.on("error", failOnce);
+    child.on("close", (code) => finish({ code: code ?? -1, output }));
   });
 }
 

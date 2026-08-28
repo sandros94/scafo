@@ -243,6 +243,12 @@ spec:
               mountPath: /var/log/scafo-ingress
               readOnly: true
           # Answered before the node is doing anything else useful, and cheap.
+          startupProbe:
+            httpGet:
+              path: /v1/health
+              port: api
+            periodSeconds: 5
+            failureThreshold: 24
           readinessProbe:
             httpGet:
               path: /v1/health

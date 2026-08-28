@@ -217,7 +217,7 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
   );
 
   it(
-    "answers its health endpoint and has registered itself out of the image alone",
+    "declares and reaches a healthy fixed-loopback image healthcheck",
     async () => {
       const health = await until("the node to answer /v1/health", BOOT_DEADLINE_MS, async () => {
         const answer = await httpGet(apiPort, "/v1/health", {});
@@ -225,9 +225,46 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
       });
       expect(JSON.parse(health.body)).toMatchObject({ ok: true, node: NODE_ID });
 
+      const inspected = await docker([
+        "inspect",
+        "--format",
+        "{{json .Config.Healthcheck}}",
+        IMAGE_TAG,
+      ]);
+      expect(inspected.code, inspected.output).toBe(0);
+      const healthcheck = JSON.parse(inspected.output) as {
+        Test?: string[];
+        Interval?: number;
+        Timeout?: number;
+        StartPeriod?: number;
+        Retries?: number;
+      };
+      expect(healthcheck).toMatchObject({
+        Test: [
+          "CMD",
+          "node",
+          "-e",
+          'fetch("http://127.0.0.1:7400/v1/health").then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))',
+        ],
+        Interval: 5_000_000_000,
+        Timeout: 3_000_000_000,
+        StartPeriod: 30_000_000_000,
+        Retries: 3,
+      });
+
+      const healthy = await until("the image healthcheck to pass", BOOT_DEADLINE_MS, async () => {
+        const state = await docker([
+          "inspect",
+          "--format",
+          "{{if .State.Health}}{{.State.Health.Status}}{{end}}",
+          node.getId(),
+        ]);
+        return state.code === 0 && state.output.trim() === "healthy" ? state : null;
+      });
+
       const record = await readJson<NodeRecord>(registry, nodeKey(NODE_ID));
       expect(record?.value.addresses).toMatchObject({ apiPort: NODE_PORT });
-      observed.health = JSON.parse(health.body);
+      observed.health = { ...JSON.parse(health.body), imageHealth: healthy.output.trim() };
     },
     STEP_TIMEOUT_MS,
   );

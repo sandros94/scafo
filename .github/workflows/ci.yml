@@ -62,8 +62,68 @@ jobs:
       - name: Typecheck code
         run: pnpm typecheck
 
-  test:
+  test-pure:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.17.0
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare development build
+        run: pnpm dev:prepare
+
+      - name: Test pure code
+        run: >-
+          pnpm vitest run
+          --config vitest.no-store.config.ts
+          --exclude "test/integration/**"
+          --slowTestThreshold=1000
+
+      - name: Build packages
+        run: pnpm build
+
+  test-container-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.17.0
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test container limits
+        run: >-
+          pnpm vitest run
+          test/integration/capacity-cgroup.test.ts
+          --slowTestThreshold=1000
+
+  test-store-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     strategy:
       fail-fast: false
@@ -89,22 +149,106 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Prepare development build
-        run: pnpm dev:prepare
+      - name: Test store compatibility
+        run: >-
+          pnpm vitest run
+          test/integration/store.test.ts
+          --slowTestThreshold=1000
 
-      # The integration store (matrix: seaweedfs, rustfs) is started by the test
-      # suite itself via testcontainers; S3_ENDPOINT/S3_* target an external
-      # store instead when set.
-      - name: Test code
-        run: pnpm test
+  test-docker-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: product-image
+            files: >-
+              test/integration/e2e.test.ts
+              test/integration/e2e-image.test.ts
+          - shard: traefik-tls
+            files: >-
+              test/integration/e2e-traefik.test.ts
+              test/integration/e2e-tls.test.ts
+          - shard: multinode-durability
+            files: >-
+              test/integration/e2e-multinode.test.ts
+              test/integration/e2e-durability.test.ts
+
+    name: test-docker-e2e (${{ matrix.shard }})
+
+    env:
+      SCAFO_E2E: "1"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.17.0
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Build packages
         run: pnpm build
 
+      - name: Test Docker end to end
+        run: >-
+          pnpm vitest run
+          --config vitest.no-store.config.ts
+          --no-file-parallelism
+          --slowTestThreshold=1000
+          ${{ matrix.files }}
+
+  test-k3s-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      SCAFO_K3S_E2E: "1"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.17.0
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test K3s end to end
+        run: >-
+          pnpm vitest run
+          --config vitest.no-store.config.ts
+          test/integration/e2e-k3s.test.ts
+          --slowTestThreshold=1000
+
   preview:
     # Continuous preview packages via pkg.pr.new — published only once the same
     # commit has passed everything above, so a preview is never ahead of CI.
-    needs: [lint, typecheck, test]
+    needs:
+      - lint
+      - typecheck
+      - test-pure
+      - test-container-integration
+      - test-store-integration
+      - test-docker-e2e
+      - test-k3s-e2e
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
