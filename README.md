@@ -8,6 +8,14 @@ Its state is a registry of JSON objects in an S3-compatible bucket, mutated only
 through conditional writes. There is no database and no consensus protocol, and
 a single binary is both the node daemon and the CLI.
 
+## Vocabulary
+
+A **scafo fleet** is one installation: one registry and the **scafo nodes**
+(machines running its daemon) joined to it. Each scafo node may supervise
+multiple **celld nodes** (application processes); celld groups those processes
+by application deployment into its own **celld fleets**. Unqualified `fleet`
+and `node` in these docs mean the scafo layer.
+
 ## Quickstart
 
 A whole installation on one host — a bucket, one node, and the Caddy it routes
