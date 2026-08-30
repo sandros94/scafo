@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import * as buildsModule from "../src/core/registry/builds.ts";
 import { createBuild, createProject, getBuild, listBuilds } from "../src/core/registry/index.ts";
-import { artifactKey, buildKey } from "../src/core/registry/paths.ts";
+import { buildKey } from "../src/core/registry/paths.ts";
 import type { BuildInput } from "../src/core/types/registry.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
@@ -24,7 +24,6 @@ const BUILD: BuildInput = {
 /** Every field two records of one build may NOT disagree about. */
 const DIFFERENT_IN: Array<{ field: string; patch: Partial<BuildInput> }> = [
   { field: "runtimeConfigurable", patch: { runtimeConfigurable: false } },
-  { field: "artifact", patch: { artifact: "artifacts/elsewhere.tar.zst" } },
   { field: "celldVersionId", patch: { celldVersionId: "version-1" } },
   { field: "builtWithVarset", patch: { builtWithVarset: "bbbbbbbb" } },
   {
@@ -48,28 +47,18 @@ async function seeded(): Promise<{ store: MemoryCasStore; clock: ManualClock }> 
 }
 
 describe("createBuild", () => {
-  it("stamps the record and defaults the artifact key", async () => {
+  it("stamps the immutable deployment history record", async () => {
     const { clock } = await seeded();
 
     const record = await createBuild(clock.ctx, PROJECT, BUILD);
     expect(record).toMatchObject({
       v: 1,
       id: BUILD.id,
-      artifact: artifactKey(PROJECT, BUILD.id),
       runtimeConfigurable: true,
       builtWithVarset: "aaaaaaaa",
     });
     expect(Date.parse(record.createdAt)).toBe(clock.nowMs());
     await expect(getBuild(clock.ctx, PROJECT, BUILD.id)).resolves.toEqual(record);
-  });
-
-  it("keeps a caller-supplied artifact key", async () => {
-    const { clock } = await seeded();
-    const record = await createBuild(clock.ctx, PROJECT, {
-      ...BUILD,
-      artifact: "artifacts/custom",
-    });
-    expect(record.artifact).toBe("artifacts/custom");
   });
 
   it("is idempotent and keeps the original createdAt", async () => {
@@ -84,45 +73,14 @@ describe("createBuild", () => {
     expect(Date.parse(second.createdAt)).toBeLessThan(clock.nowMs());
   });
 
-  it("re-records the same build in ANOTHER environment, keeping the first one", async () => {
-    const { clock } = await seeded();
-    const first = await createBuild(clock.ctx, PROJECT, { ...BUILD, environment: "prod" });
-
-    clock.tick(60_000);
-    const second = await createBuild(clock.ctx, PROJECT, { ...BUILD, environment: "preview" });
-
-    /* Build ids are content stable, so deploying the same commit into a SECOND
-       environment re-creates the same id against a different fleet — an ordinary
-       flow, not a conflict. The first record stands, and recall wakes the build
-       against that fleet, which is one of the fleets really holding its code. */
-    expect(second).toEqual(first);
-    expect(second.environment).toBe("prod");
-    await expect(getBuild(clock.ctx, PROJECT, BUILD.id)).resolves.toEqual(first);
-  });
-
-  it("does not gain an environment from a later record that names one", async () => {
-    const { clock } = await seeded();
-    const first = await createBuild(clock.ctx, PROJECT, BUILD);
-
-    const second = await createBuild(clock.ctx, PROJECT, { ...BUILD, environment: "preview" });
-
-    /* A record written before builds carried a fleet stays exactly as it is —
-       its build-hash host is not wakeable, and re-recording it does not quietly
-       make it so. */
-    expect(second).toEqual(first);
-    expect("environment" in second).toBe(false);
-  });
-
   it.each(DIFFERENT_IN)("still refuses a second record differing in $field", async ({ patch }) => {
     const { store, clock } = await seeded();
-    const seedInput = { ...BUILD, environment: "prod" };
+    const seedInput = { ...BUILD };
     await createBuild(clock.ctx, PROJECT, seedInput);
     const before = await store.get(buildKey(PROJECT, BUILD.id));
 
-    /* The environment is the ONE field two records of a build may disagree
-         about; everything else is the build's identity. */
     const error = await rejectsWith(
-      () => createBuild(clock.ctx, PROJECT, { ...seedInput, environment: "preview", ...patch }),
+      () => createBuild(clock.ctx, PROJECT, { ...seedInput, ...patch }),
       "immutable",
     );
 

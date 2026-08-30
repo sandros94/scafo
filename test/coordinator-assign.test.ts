@@ -8,6 +8,7 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import type { DaemonContext } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { type Coordinator, createCoordinator } from "../src/daemon/coordinator.ts";
@@ -18,7 +19,6 @@ import {
   createBuild,
   createEnvironment,
   createProject,
-  flipAlias,
   getEnvironment,
   heartbeatNode,
   NODE_LIVENESS_WINDOW_MS,
@@ -28,12 +28,10 @@ import {
   setNodeSelector,
   setParkPolicy,
   setReplicas,
-  setSplit,
-  stampBuildWake,
   unretireEnvironment,
 } from "../src/core/registry/index.ts";
 import { deleteKey } from "../src/core/registry/cas.ts";
-import { buildKey, environmentKey, placementKey } from "../src/core/registry/paths.ts";
+import { environmentKey, placementKey } from "../src/core/registry/paths.ts";
 import type { NodeRecord, NodeSelector, PlacementRecord } from "../src/core/types/registry.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
@@ -549,43 +547,6 @@ describe("credit demand follows resolved process multiplicity", () => {
     await heartbeatNode(clock.ctx, NODE_A);
   });
 
-  it("counts one alias plus one distinct split leg and blocks an extra environment", async () => {
-    await environmentNamed("a");
-    await setSplit(clock.ctx, PROJECT, "a", [
-      { build: BUILD, weight: 50 },
-      { build: BUILD_TWO, weight: 50 },
-    ]);
-    await environmentNamed("b");
-    await setReplicas(clock.ctx, PROJECT, "a", 1);
-    await setReplicas(clock.ctx, PROJECT, "b", 1);
-
-    const coordinator = coordinatorFor(NODE_A);
-    await coordinator.runOnce();
-
-    expect((await readPlacement(clock.ctx, PROJECT, "a"))?.nodes).toEqual([NODE_A]);
-    expect(await readPlacement(clock.ctx, PROJECT, "b")).toBeNull();
-    expect(coordinator.status().lastAssignment?.accounts[0]?.steady.runtimeMb).toBe(40);
-  });
-
-  it("charges a recalled build as another runtime", async () => {
-    await environmentNamed("a");
-    await setParkPolicy(clock.ctx, PROJECT, "a", {
-      recallBuilds: true,
-      buildIdleS: 3600,
-    });
-    await stampBuildWake(clock.ctx, PROJECT, "a", BUILD_TWO);
-    await environmentNamed("b");
-    await setReplicas(clock.ctx, PROJECT, "a", 1);
-    await setReplicas(clock.ctx, PROJECT, "b", 1);
-
-    const coordinator = coordinatorFor(NODE_A);
-    await coordinator.runOnce();
-
-    expect((await readPlacement(clock.ctx, PROJECT, "a"))?.nodes).toEqual([NODE_A]);
-    expect(await readPlacement(clock.ctx, PROJECT, "b")).toBeNull();
-    expect(coordinator.status().lastAssignment?.accounts[0]?.steady.runtimeMb).toBe(40);
-  });
-
   it("charges parked and no-build environments zero", async () => {
     await register(NODE_A, undefined, { allocatableMb: 40, runtimeMb: 20, deployMb: 1 });
     await environmentNamed("a", { ephemeral: true });
@@ -604,25 +565,6 @@ describe("credit demand follows resolved process multiplicity", () => {
     }
     expect(coordinator.status().lastAssignment?.accounts[0]?.steady.runtimeMb).toBe(20);
   });
-
-  it("charges an unresolved split leg conservatively", async () => {
-    await environmentNamed("a");
-    await setSplit(clock.ctx, PROJECT, "a", [
-      { build: BUILD, weight: 50 },
-      { build: BUILD_TWO, weight: 50 },
-    ]);
-    await deleteKey(clock.ctx, buildKey(PROJECT, BUILD_TWO));
-    await environmentNamed("b");
-    await setReplicas(clock.ctx, PROJECT, "a", 1);
-    await setReplicas(clock.ctx, PROJECT, "b", 1);
-
-    const coordinator = coordinatorFor(NODE_A);
-    await coordinator.runOnce();
-
-    expect((await readPlacement(clock.ctx, PROJECT, "a"))?.nodes).toEqual([NODE_A]);
-    expect(await readPlacement(clock.ctx, PROJECT, "b")).toBeNull();
-    expect(coordinator.status().lastAssignment?.accounts[0]?.steady.runtimeMb).toBe(40);
-  });
 });
 
 describe("one fleet-wide credit plan", () => {
@@ -633,7 +575,7 @@ describe("one fleet-wide credit plan", () => {
     await createProject(clock.ctx, { slug: other });
     await createBuild(clock.ctx, other, { id: BUILD, runtimeConfigurable: true });
     await createEnvironment(clock.ctx, other, { name: "prod" });
-    await flipAlias(clock.ctx, other, "prod", BUILD);
+    await setCurrentBuild(clock.ctx, other, "prod", BUILD);
     await setReplicas(clock.ctx, other, "prod", 1);
     await registerNode(clock.ctx, {
       v: 1,
@@ -666,7 +608,7 @@ describe("one fleet-wide credit plan", () => {
       await createProject(clock.ctx, { slug: project });
       await createBuild(clock.ctx, project, { id: BUILD, runtimeConfigurable: true });
       await createEnvironment(clock.ctx, project, { name: "prod" });
-      await flipAlias(clock.ctx, project, "prod", BUILD);
+      await setCurrentBuild(clock.ctx, project, "prod", BUILD);
       await setReplicas(clock.ctx, project, "prod", 1);
     }
     await register(NODE_A, undefined, {
@@ -941,7 +883,7 @@ async function environmentNamed(
     ...(opts?.idleTtlS === undefined ? {} : { idleTtlS: opts.idleTtlS }),
     ...(opts?.nodeSelector === undefined ? {} : { nodeSelector: opts.nodeSelector }),
   });
-  await flipAlias(clock.ctx, PROJECT, name, BUILD);
+  await setCurrentBuild(clock.ctx, PROJECT, name, BUILD);
 }
 
 /** Registers `id` as a node that has just beaten, carrying `labels` if any. */

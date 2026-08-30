@@ -7,8 +7,7 @@
  * and the deploy service (`celld deploy` bundles, uploads, and moves the same
  * pointer). Unserialized, a deploy landing between an activation and the spawned
  * process's read hands that process the WRONG version under the RIGHT process
- * id — a build-hash host serving another build's code, with the registry, the
- * routing and the process ids all still saying otherwise.
+ * id, with the registry, routing and process id all still saying otherwise.
  *
  * So both writers take this lock, and neither may write the pointer without it.
  */

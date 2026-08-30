@@ -1,6 +1,5 @@
 /*
- * Wake stamps: when an environment, or one of its superseded builds, was last
- * asked for.
+ * Wake stamps: when an environment was last asked for.
  *
  * Parked-ness itself is never stored — every reader derives it from a stamp's
  * age — so there is no state machine here to get out of step, and the only
@@ -11,24 +10,19 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  listBuildWakes,
   putJson,
   readEnvironmentWake,
-  stampBuildWake,
   stampEnvironmentWake,
   wakeActivity,
   type WakeStamp,
 } from "../src/core/registry/index.ts";
-import { buildWakeKey, envWakeKey } from "../src/core/registry/paths.ts";
+import { envWakeKey } from "../src/core/registry/paths.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock } from "./_helpers.ts";
 
 const PROJECT = "app";
 const PREVIEW = "preview";
 const OTHER_ENV = "prod";
-const B1 = "b1b1b1b1";
-const B2 = "b2b2b2b2";
-const B3 = "b3b3b3b3";
 const MINUTE_MS = 60_000;
 
 let clock: ManualClock;
@@ -80,65 +74,6 @@ describe("an environment's wake", () => {
   });
 });
 
-describe("the wakes of an environment's builds", () => {
-  it("reads each build back at the moment it was stamped", async () => {
-    await stampBuildWake(clock.ctx, PROJECT, PREVIEW, B1);
-    clock.tick(MINUTE_MS);
-    await stampBuildWake(clock.ctx, PROJECT, PREVIEW, B2);
-
-    const wakes = await listBuildWakes(clock.ctx, PROJECT, PREVIEW);
-
-    expect(wakes.get(B1)).toEqual(new Date(clock.nowMs() - MINUTE_MS));
-    expect(wakes.get(B2)).toEqual(new Date(clock.nowMs()));
-  });
-
-  it("answers the freshest first, whatever order they were stamped in", async () => {
-    await stampBuildWake(clock.ctx, PROJECT, PREVIEW, B3);
-    clock.tick(MINUTE_MS);
-    await stampBuildWake(clock.ctx, PROJECT, PREVIEW, B1);
-    clock.tick(MINUTE_MS);
-    await stampBuildWake(clock.ctx, PROJECT, PREVIEW, B2);
-
-    /* The order the caller rolls them out in: the build somebody asked for most
-       recently is the one likeliest to be asked for again. */
-    expect([...(await listBuildWakes(clock.ctx, PROJECT, PREVIEW)).keys()]).toEqual([B2, B1, B3]);
-  });
-
-  it("skips a stamp that cannot say when, keeping every stamp that can", async () => {
-    await stampBuildWake(clock.ctx, PROJECT, PREVIEW, B1);
-    await putJson<WakeStamp>(clock.ctx, buildWakeKey(PROJECT, PREVIEW, B2), { at: "whenever" });
-    await putJson(clock.ctx, buildWakeKey(PROJECT, PREVIEW, B3), {});
-
-    const wakes = await listBuildWakes(clock.ctx, PROJECT, PREVIEW);
-
-    /* A stamp keeps a build awake by saying when it was asked for; one that
-       says nothing keeps nothing awake, and dropping it costs a build that was
-       going to park anyway one wake. */
-    expect([...wakes.keys()]).toEqual([B1]);
-  });
-
-  it("answers an empty map for an environment nothing has woken", async () => {
-    await expect(listBuildWakes(clock.ctx, PROJECT, PREVIEW)).resolves.toEqual(new Map());
-  });
-
-  it("keeps one environment's build wakes out of another's", async () => {
-    await stampBuildWake(clock.ctx, PROJECT, PREVIEW, B1);
-    await stampBuildWake(clock.ctx, PROJECT, OTHER_ENV, B2);
-
-    expect([...(await listBuildWakes(clock.ctx, PROJECT, PREVIEW)).keys()]).toEqual([B1]);
-    expect([...(await listBuildWakes(clock.ctx, PROJECT, OTHER_ENV)).keys()]).toEqual([B2]);
-  });
-
-  it("never reads the environment's own stamp as one of its builds", async () => {
-    /* The two share the environment's segment — `<env>.json` beside
-       `<env>/builds/…` — so one listing under the project finds both, and this
-       listing must find only one of them. */
-    await stampEnvironmentWake(clock.ctx, PROJECT, PREVIEW);
-
-    await expect(listBuildWakes(clock.ctx, PROJECT, PREVIEW)).resolves.toEqual(new Map());
-  });
-});
-
 describe("wakeActivity", () => {
   it("reports the environment's own stamp as its last activity", async () => {
     await stampEnvironmentWake(clock.ctx, PROJECT, PREVIEW);
@@ -149,7 +84,7 @@ describe("wakeActivity", () => {
   });
 
   it("reports nothing for one that was never woken, leaving the fallback to the reaper", async () => {
-    /* The fallback for an environment with no stamp — its alias flip, then its
+    /* The fallback for an environment with no stamp — its current deployment, then its
        creation — stays where it always was, in the reaper itself, so an
        installation that has never stamped anything reaps exactly as it did. */
     await expect(wakeActivity(clock.ctx).lastActiveAt(PROJECT, PREVIEW)).resolves.toBeNull();

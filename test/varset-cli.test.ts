@@ -11,6 +11,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import { loadDaemonConfig } from "../src/daemon/config.ts";
 import { decodeVarsetKey, readVarsetKeyFile, VARSET_KEY_BYTES } from "../src/cli/_varset-key.ts";
 import {
@@ -23,7 +24,7 @@ import {
 } from "../src/cli/_varset.ts";
 import { createBuild } from "../src/core/registry/builds.ts";
 import type { RegistryContext } from "../src/core/registry/context.ts";
-import { createEnvironment, flipAlias, getEnvironment } from "../src/core/registry/environments.ts";
+import { createEnvironment, getEnvironment } from "../src/core/registry/environments.ts";
 import { createProject } from "../src/core/registry/projects.ts";
 import { importVarsetKey } from "../src/core/registry/varsets.ts";
 import { toBase64Url } from "../src/core/utils/base64.ts";
@@ -376,7 +377,7 @@ async function seededRegistry(opts?: { runtimeConfigurable?: boolean }): Promise
     runtimeConfigurable: opts?.runtimeConfigurable ?? true,
     celldVersionId: `version-${BUILD}`,
   });
-  await flipAlias(ctx, PROJECT, ENVIRONMENT, BUILD);
+  await setCurrentBuild(ctx, PROJECT, ENVIRONMENT, BUILD);
 
   const raw = crypto.getRandomValues(new Uint8Array(VARSET_KEY_BYTES));
   return { registry: ctx, key: await importVarsetKey(raw), raw };

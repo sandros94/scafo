@@ -115,8 +115,8 @@ const FAST_LABEL = "tier=fast";
 /**
  * Deployed THROUGH the node that cannot run it, under the same selector.
  *
- * The point is the deploy's own watch rather than the placement: a flipped
- * deploy is held open until a process serving the build is ready, and the node
+ * The point is the deploy's own watch rather than the placement: a deploy is
+ * held open until a process serving the build is ready, and the node
  * holding it open is not the node that starts it.
  */
 const AWAITED = "awaited";
@@ -491,7 +491,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       const plain = nodes.find((node) => node.id === NODE_A) as Node;
 
       /* Deployed through the labelled node, which is the shortest path to a
-         running build and no longer the constraint it once was: a flipped deploy
+         running build and no longer the constraint it once was: a deploy
          now watches the node its placement named, wherever the upload landed.
          The case below is about exactly that; this one is about the selector. */
       const deployedAt = Date.now();
@@ -1226,7 +1226,6 @@ function deployArgs(
     PROJECT,
     "--env",
     environment,
-    "--flip",
     "--runtime-configurable",
     "--key",
     keyPath,

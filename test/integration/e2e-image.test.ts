@@ -295,7 +295,6 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
           PROJECT,
           "--env",
           ENVIRONMENT,
-          "--flip",
           "--runtime-configurable",
           "--key",
           keyPath,

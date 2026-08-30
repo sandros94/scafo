@@ -16,7 +16,6 @@ import { listEnvironments } from "./environments.ts";
 import { type LeaseHandle, verifyLease } from "./lease.ts";
 import {
   buildKey,
-  buildWakesPrefix,
   domainKey,
   environmentKey,
   envWakeKey,
@@ -76,9 +75,8 @@ export interface DeleteEnvironmentOptions extends RetirementOptions {
  * decommission and the grace is the whole of the wait it asked for. Or it is
  * ephemeral, has an `idleTtlS`, and has been idle for longer. A non-ephemeral
  * environment nobody retired is never a candidate. A build qualifies only when
- * no environment of its project references it — through an alias, the alias's
- * previous build, or any split leg — and it is older than the configured
- * retention.
+ * no environment of its project names it as current and it is older than the
+ * configured retention.
  */
 export async function planReap(ctx: RegistryContext, opts?: ReapOptions): Promise<ReapPlan> {
   const plan: ReapPlan = { environments: [], builds: [] };
@@ -189,8 +187,6 @@ export async function executeReap(
 
     await deleteKey(ctx, key);
     result.deleted.push(key);
-    await deleteKey(ctx, found.value.artifact);
-    result.deleted.push(found.value.artifact);
   }
 
   /* TODO: varsets are shared by builds and environments, so reaping them needs
@@ -237,7 +233,7 @@ export async function deleteEnvironment(
 
 /**
  * Deletes one environment's records in the only safe order: the domain claims
- * that name it, then its fleet state, then its wake stamps, then its placement
+ * that name it, then its fleet state, then its wake stamp, then its placement
  * decision, then the environment record itself. `guard` runs before every
  * destructive step and aborts the rest by throwing.
  *
@@ -273,23 +269,13 @@ async function purgeEnvironment(
     deleted.push(fleetKey);
   }
 
-  /* Wake stamps, on the same reading as the fleet keys: they are named after an
-     environment nothing will iterate again, so one left behind is one nothing
-     ever deletes — and a stale stamp would recall a build for an environment
-     that no longer exists. The environment's own stamp first, then every build
-     it ever woke. */
+  /* A wake stamp is named after an environment nothing will iterate again. */
   const wake = envWakeKey(project, environment.name);
   if ((await readJson<WakeStamp>(ctx, wake)) !== null) {
     await guard();
     await deleteKey(ctx, wake);
     deleted.push(wake);
   }
-  for (const stamp of await ctx.store.list(buildWakesPrefix(project, environment.name))) {
-    await guard();
-    await deleteKey(ctx, stamp);
-    deleted.push(stamp);
-  }
-
   /* Before the record, because it points AT the record: a placement left behind
      names an environment that is gone, and the only thing that would ever have
      cleaned it up is the coordinator noticing the same absence a tick later. */
@@ -324,9 +310,7 @@ function referencedBuilds(environments: EnvironmentRecord[]): Set<string> {
   for (const environment of environments) {
     if (environment.alias !== null) {
       referenced.add(environment.alias.build);
-      if (environment.alias.previous !== undefined) referenced.add(environment.alias.previous);
     }
-    for (const entry of environment.split ?? []) referenced.add(entry.build);
   }
   return referenced;
 }

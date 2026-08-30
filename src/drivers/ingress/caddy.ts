@@ -8,7 +8,7 @@
  */
 
 import { ScafoError } from "../../core/error.ts";
-import type { IngressDesired, IngressDriver, WeightedBackend } from "../../core/types/ingress.ts";
+import type { IngressBackend, IngressDesired, IngressDriver } from "../../core/types/ingress.ts";
 import { stableStringify } from "../../core/utils/json.ts";
 
 /** Where Caddy listens for admin commands when the operator has not moved it. */
@@ -81,21 +81,6 @@ export interface CaddyDriverOptions {
 }
 
 /**
- * How Caddy is told to divide a host's traffic between several upstreams.
- *
- * `weights` is POSITIONAL: the nth weight belongs to the nth upstream, so the
- * two arrays are written together and must stay the same length. Caddy accepts a
- * mismatch without complaint, which is exactly why nothing here may produce one.
- *
- * Pinned empirically against `caddy:2` (v2.11.4) through the admin API rather
- * than taken from the documentation: the config is stored and read back
- * verbatim, and 200 requests over a two-upstream `[90, 10]` split arrived 180/20.
- */
-export interface CaddyLoadBalancing {
-  selection_policy: { policy: "weighted_round_robin"; weights: number[] };
-}
-
-/**
  * One matcher set: every matcher in it must agree for the route to match.
  *
  * `not` holds matcher sets the request must match NONE of, which is Caddy's own
@@ -110,12 +95,10 @@ export interface CaddyMatch {
   not?: Array<{ path: string[] }>;
 }
 
-/** What a routed host is served by: the upstreams, and how they are chosen. */
+/** What a routed host is served by. */
 export interface CaddyProxyHandler {
   handler: "reverse_proxy";
   upstreams: Array<{ dial: string }>;
-  /** Absent for a single upstream: there is nothing to balance. */
-  load_balancing?: CaddyLoadBalancing;
 }
 
 /** What Caddy answers with itself, dialling nothing: the API apex denials. */
@@ -373,7 +356,7 @@ export function renderCaddyRoutes(
   desired: IngressDesired,
   upstreamHost = "127.0.0.1",
 ): CaddyRoute[] {
-  const routes = desired.routes.map(({ host, backends }) => routeFor(host, backends, upstreamHost));
+  const routes = desired.routes.map(({ host, backend }) => routeFor(host, backend, upstreamHost));
 
   const wake = desired.wake;
   const wakeDial = wake === undefined ? "" : `127.0.0.1:${String(wake.port)}`;
@@ -415,16 +398,8 @@ export function renderCaddyRoutes(
   return routes;
 }
 
-/**
- * One route, with as many upstreams as the host has backends.
- *
- * A host with ONE backend is rendered without a load-balancing policy at all:
- * there is nothing to choose between, and saying so would rewrite every route on
- * this node's next pass for no gain. A host with several carries
- * `weighted_round_robin` and the backends' weights in the SAME ORDER the
- * upstreams are written in — see {@link CaddyLoadBalancing}.
- */
-function routeFor(host: string, backends: WeightedBackend[], upstreamHost: string): CaddyRoute {
+/** One route to the environment's current backend. */
+function routeFor(host: string, backend: IngressBackend, upstreamHost: string): CaddyRoute {
   return {
     "@id": routeId(host),
     "match": [{ host: [host] }],
@@ -434,19 +409,7 @@ function routeFor(host: string, backends: WeightedBackend[], upstreamHost: strin
         /* Dialled at the address the processes actually bound: loopback on a
            single node, the tunnel address on a fleet. The ingress is on this
            node either way; which interface it dials is the node's decision. */
-        upstreams: backends.map((leg) => ({
-          dial: `${upstreamHost}:${String(leg.backend.port)}`,
-        })),
-        ...(backends.length < 2
-          ? {}
-          : {
-              load_balancing: {
-                selection_policy: {
-                  policy: "weighted_round_robin" as const,
-                  weights: backends.map((leg) => leg.weight),
-                },
-              },
-            }),
+        upstreams: [{ dial: `${upstreamHost}:${String(backend.port)}` }],
       },
     ],
     "terminal": true,

@@ -12,6 +12,7 @@
 import { generateJWK } from "unjwt/jwk";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { beforeEach, describe, expect, it } from "vitest";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import { createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import {
@@ -20,13 +21,11 @@ import {
   describeParkChange,
   describeRetirement,
   describeSelectorChange,
-  describeSplitChange,
   directOps,
   type EnvironmentOps,
   type ParkFlags,
   readParkFlags,
   readSelectorFlags,
-  readSplitFlags,
 } from "../src/cli/_environments.ts";
 import { signNodeToken } from "../src/core/auth/index.ts";
 import {
@@ -35,7 +34,6 @@ import {
   createEnvironment,
   createProject,
   DEFAULT_RETIREMENT_GRACE_MS,
-  flipAlias,
   getEnvironment,
   readJson,
   registerNode,
@@ -50,7 +48,6 @@ import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
 const NODE_ID = "node-a";
 const PROJECT = "app";
 const BUILD = "b1b1b1b1";
-/** A second build, so a split has two legs to weigh against each other. */
 const OTHER_BUILD = "b2b2b2b2";
 const NODE_URL = "http://10.0.0.4:7400";
 const HOUR_MS = 3_600_000;
@@ -83,7 +80,7 @@ beforeEach(async () => {
   }
   await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
   await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true });
-  await flipAlias(clock.ctx, PROJECT, "prod", BUILD);
+  await setCurrentBuild(clock.ctx, PROJECT, "prod", BUILD);
 });
 
 /* Both transports must answer the same questions the same way, so the retire and
@@ -216,178 +213,6 @@ describe("what --set and --clear are read as", () => {
   });
 });
 
-/* Weighting an environment's traffic is a plain record update too, so it goes
-   the same two ways and must answer identically on both. */
-describe.each([
-  ["through a node daemon", (): EnvironmentOps => throughNode()],
-  ["straight through the bucket", (): EnvironmentOps => throughBucket()],
-])("splitting traffic %s", (_name, build) => {
-  it("states the legs and their weights, in the order they were written", async () => {
-    const environment = await build().setSplit(PROD, [
-      { build: OTHER_BUILD, weight: 90 },
-      { build: BUILD, weight: 10 },
-    ]);
-
-    /* Order is kept, not sorted: it is what the planner rolls the legs out in
-       and what both ingresses weight them in. */
-    expect(environment.split).toEqual([
-      { build: OTHER_BUILD, weight: 90 },
-      { build: BUILD, weight: 10 },
-    ]);
-    expect(await getEnvironment(clock.ctx, PROJECT, "prod")).toEqual(environment);
-  });
-
-  it("leaves the alias exactly where it was", async () => {
-    await build().setSplit(PROD, [
-      { build: BUILD, weight: 50 },
-      { build: OTHER_BUILD, weight: 50 },
-    ]);
-
-    /* The alias is the primary pointer and the rollback target; a split weights
-       traffic and says nothing about it. */
-    expect((await getEnvironment(clock.ctx, PROJECT, "prod")).alias).toMatchObject({
-      build: BUILD,
-    });
-  });
-
-  it("clears the split when it is cleared", async () => {
-    await build().setSplit(PROD, [
-      { build: BUILD, weight: 50 },
-      { build: OTHER_BUILD, weight: 50 },
-    ]);
-
-    const environment = await build().setSplit(PROD, null);
-
-    expect(environment.split).toBeNull();
-  });
-
-  it("relays the registry's own refusal when the weights do not add up", async () => {
-    const error = await rejectsWith(
-      () =>
-        build().setSplit(PROD, [
-          { build: BUILD, weight: 90 },
-          { build: OTHER_BUILD, weight: 20 },
-        ]),
-      "invalid-input",
-    );
-
-    /* Verbatim, whichever way the operator reached the installation: the rule is
-       the registry's and the wording must not depend on the transport. */
-    expect(error.detail).toContain("110");
-    expect(error.detail).toContain("sum to 100");
-  });
-
-  it("refuses a leg whose build does not exist, changing nothing", async () => {
-    await rejectsWith(
-      () =>
-        build().setSplit(PROD, [
-          { build: BUILD, weight: 90 },
-          { build: "deadbeef", weight: 10 },
-        ]),
-      "not-found",
-    );
-
-    expect((await getEnvironment(clock.ctx, PROJECT, "prod")).split).toBeNull();
-  });
-
-  it("weighs a canary against whatever the alias points at", async () => {
-    const environment = await build().canary(PROD, { build: OTHER_BUILD, weight: 10 });
-
-    expect(environment.split).toEqual([
-      { build: BUILD, weight: 90 },
-      { build: OTHER_BUILD, weight: 10 },
-    ]);
-  });
-
-  it("refuses a canary on an environment that was never flipped, naming --flip", async () => {
-    const error = await rejectsWith(
-      () => build().canary(PREVIEW, { build: BUILD, weight: 10 }),
-      "invalid-input",
-    );
-
-    expect(error.detail).toContain("--flip");
-  });
-
-  it("reports an environment that is not there rather than inventing one", async () => {
-    await rejectsWith(
-      () => build().setSplit({ project: PROJECT, env: "ghost" }, null),
-      "not-found",
-    );
-  });
-
-  it("takes no coordinator lease to do it", async () => {
-    await build().setSplit(PROD, [
-      { build: BUILD, weight: 50 },
-      { build: OTHER_BUILD, weight: 50 },
-    ]);
-
-    const lease = await readJson<CoordinatorLease>(clock.ctx, coordinatorKey());
-    expect(lease?.value.node).not.toBe(CLI_NODE_ID);
-  });
-});
-
-describe("what --set and --clear are read as, for a split", () => {
-  it("reads the legs of --set, keeping their order", () => {
-    expect(readSplitFlags({ set: "bbbb2222=90,aaaa1111=10", clear: false })).toEqual([
-      { build: "bbbb2222", weight: 90 },
-      { build: "aaaa1111", weight: 10 },
-    ]);
-  });
-
-  it("reads --clear as the null that ends the split", () => {
-    expect(readSplitFlags({ set: undefined, clear: true })).toBeNull();
-  });
-
-  it("refuses both at once, which say opposite things", async () => {
-    const error = await rejectsWith(
-      () => Promise.resolve(readSplitFlags({ set: "a=50,b=50", clear: true })),
-      "invalid-input",
-    );
-
-    expect(error.detail).toContain("opposite");
-  });
-
-  it("refuses NEITHER rather than reading it as a clear", async () => {
-    /* An accidental `scafo env split` that collapsed a canary onto the alias
-       would move an application's whole traffic without anyone having asked. */
-    const error = await rejectsWith(
-      () => Promise.resolve(readSplitFlags({ set: undefined, clear: false })),
-      "invalid-input",
-    );
-
-    expect(error.detail).toContain("--set");
-    expect(error.detail).toContain("--clear");
-  });
-
-  it("refuses a weight that is not a whole number of percent", async () => {
-    for (const stated of ["a=90,b=ten", "a=90,b=1.5", "a=90,b=-10"]) {
-      const error = await rejectsWith(
-        () => Promise.resolve(readSplitFlags({ set: stated, clear: false })),
-        "invalid-input",
-      );
-      expect(error.detail, stated).toContain("--set");
-    }
-  });
-
-  it("refuses a pair it cannot read at all", async () => {
-    for (const stated of ["a90,b10", "=90", ""]) {
-      await rejectsWith(
-        () => Promise.resolve(readSplitFlags({ set: stated, clear: false })),
-        "invalid-input",
-      );
-    }
-  });
-
-  it("leaves what the weights must add up to to the registry", () => {
-    /* Read here, refused there: an operator gets the same wording however they
-       reached the installation, and the rule lives in one place. */
-    expect(readSplitFlags({ set: "aaaa1111=90,bbbb2222=90", clear: false })).toEqual([
-      { build: "aaaa1111", weight: 90 },
-      { build: "bbbb2222", weight: 90 },
-    ]);
-  });
-});
-
 /* Saying how an environment scales to zero is a plain record update too, so it
    goes the same two ways and must answer identically on both. */
 describe.each([
@@ -395,12 +220,12 @@ describe.each([
   ["straight through the bucket", (): EnvironmentOps => throughBucket()],
 ])("stating a park policy %s", (_name, build) => {
   it("stores the fields it was given, and answers with the record", async () => {
-    const environment = await build().setPark(PREVIEW, { afterS: 60, recallBuilds: false });
+    const environment = await build().setPark(PREVIEW, { afterS: 60, wakeDeadlineS: 5 });
 
     /* Only what the operator decided: every blank falls back to what the
        environment's kind implies, and writing a resolved default into the
        record would freeze today's default into an environment that never asked. */
-    expect(environment.park).toEqual({ afterS: 60, recallBuilds: false });
+    expect(environment.park).toEqual({ afterS: 60, wakeDeadlineS: 5 });
     expect(await getEnvironment(clock.ctx, PROJECT, "preview")).toEqual(environment);
   });
 
@@ -422,14 +247,7 @@ describe.each([
     /* Verbatim, whichever way the operator reached the installation: the rule is
        the registry's and the wording must not depend on the transport. */
     expect(error.detail).toContain("live traffic");
-    expect(error.detail).toContain("recallBuilds");
     expect((await getEnvironment(clock.ctx, PROJECT, "prod")).park).toBeUndefined();
-  });
-
-  it("sets the recall fields on a long-lived environment, which do work on one", async () => {
-    const environment = await build().setPark(PROD, { buildIdleS: 45 });
-
-    expect(environment.park).toEqual({ buildIdleS: 45 });
   });
 
   it("reports an environment that is not there rather than inventing one", async () => {
@@ -452,12 +270,10 @@ describe("what the park flags are read as", () => {
     expect(
       readParkFlags({
         after: "60",
-        buildIdle: "30",
         wakeDeadline: "5",
-        recallBuilds: "false",
         clear: false,
       }),
-    ).toEqual({ afterS: 60, buildIdleS: 30, wakeDeadlineS: 5, recallBuilds: false });
+    ).toEqual({ afterS: 60, wakeDeadlineS: 5 });
 
     expect(parkFlags({ after: "0" })).toEqual({ afterS: 0 });
   });
@@ -466,14 +282,11 @@ describe("what the park flags are read as", () => {
     expect(parkFlags({ clear: true })).toBeNull();
   });
 
-  it.each(["after", "buildIdle", "wakeDeadline", "recallBuilds"] as const)(
+  it.each(["after", "wakeDeadline"] as const)(
     "refuses --clear beside %s, which say opposite things",
     async (field) => {
       const error = await rejectsWith(
-        () =>
-          Promise.resolve(
-            parkFlags({ [field]: field === "recallBuilds" ? "true" : "60", clear: true }),
-          ),
+        () => Promise.resolve(parkFlags({ [field]: "60", clear: true })),
         "invalid-input",
       );
 
@@ -496,7 +309,6 @@ describe("what the park flags are read as", () => {
       ["after", "1.5"],
       ["after", "-60"],
       ["after", "a while"],
-      ["buildIdle", "30s"],
       ["wakeDeadline", "-1"],
     ] as const) {
       const error = await rejectsWith(
@@ -504,21 +316,6 @@ describe("what the park flags are read as", () => {
         "invalid-input",
       );
       expect(error.detail, `${flag} "${stated}"`).toContain("whole number of seconds");
-    }
-  });
-
-  it("reads --recall-builds as true or false and nothing else", async () => {
-    expect(parkFlags({ recallBuilds: "true" })).toEqual({ recallBuilds: true });
-    expect(parkFlags({ recallBuilds: "false" })).toEqual({ recallBuilds: false });
-
-    for (const stated of ["yes", "1", "TRUE", "off"]) {
-      /* A flag that guesses what "1" meant is a flag that reads a typo as an
-         instruction. */
-      const error = await rejectsWith(
-        () => Promise.resolve(parkFlags({ recallBuilds: stated })),
-        "invalid-input",
-      );
-      expect(error.detail, stated).toContain("--recall-builds");
     }
   });
 });
@@ -665,23 +462,8 @@ describe("what the command puts on the terminal", () => {
     expect(describeSelectorChange(PROD, environment)).toContain("no nodes any more");
   });
 
-  it("names the legs a split now weights, and what has to happen before it takes", async () => {
-    const environment = await throughBucket().setSplit(PROD, [
-      { build: BUILD, weight: 90 },
-      { build: OTHER_BUILD, weight: 10 },
-    ]);
-
-    const printed = describeSplitChange(PROD, environment);
-
-    expect(printed).toContain(`"${BUILD}" 90%`);
-    expect(printed).toContain(`"${OTHER_BUILD}" 10%`);
-    /* A leg takes its share once it is ready, and until then its share goes to
-       the legs that are — which is not obvious and is the thing to say. */
-    expect(printed).toContain("readiness gate");
-  });
-
   it("names the WHOLE resolved policy, not only the field that just changed", async () => {
-    const environment = await throughBucket().setPark(PREVIEW, { buildIdleS: 45 });
+    const environment = await throughBucket().setPark(PREVIEW, { wakeDeadlineS: 45 });
 
     const printed = describeParkChange(PREVIEW, environment);
 
@@ -689,11 +471,10 @@ describe("what the command puts on the terminal", () => {
        to, because that is what the environment will actually do. */
     expect(printed).toContain("parks 900s after its last wake");
     expect(printed).toContain("45s");
-    expect(printed).toContain("30s");
   });
 
   it("says a long-lived environment never parks on a clock, whatever was just set", async () => {
-    const environment = await throughBucket().setPark(PROD, { buildIdleS: 45 });
+    const environment = await getEnvironment(clock.ctx, PROJECT, "prod");
 
     /* The case that surprises people most, and the reason the printed line is
        the resolved policy rather than the fields that were written. */
@@ -708,25 +489,6 @@ describe("what the command puts on the terminal", () => {
     expect(printed).toContain("no park policy of its own");
     expect(printed).toContain("parks 900s after its last wake");
   });
-
-  it("says plainly when superseded builds are to stay stopped", async () => {
-    const environment = await throughBucket().setPark(PREVIEW, { recallBuilds: false });
-
-    expect(describeParkChange(PREVIEW, environment)).toContain("superseded builds stay stopped");
-  });
-
-  it("says which build a cleared split leaves serving on its own", async () => {
-    await throughBucket().setSplit(PROD, [
-      { build: BUILD, weight: 90 },
-      { build: OTHER_BUILD, weight: 10 },
-    ]);
-    const environment = await throughBucket().setSplit(PROD, null);
-
-    const printed = describeSplitChange(PROD, environment);
-
-    expect(printed).toContain(`build "${BUILD}"`);
-    expect(printed).toContain("stop every other leg");
-  });
 });
 
 /* ------------------------------------------------------------------ helpers */
@@ -735,9 +497,7 @@ describe("what the command puts on the terminal", () => {
 function parkFlags(given: Partial<ParkFlags>): ParkPolicy | null {
   return readParkFlags({
     after: undefined,
-    buildIdle: undefined,
     wakeDeadline: undefined,
-    recallBuilds: undefined,
     clear: false,
     ...given,
   });

@@ -21,6 +21,7 @@ import type { H3 } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it } from "vitest";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import { createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import type { DeployMeta, DeployService, DeployStatus } from "../src/daemon/deploys.ts";
@@ -29,7 +30,6 @@ import {
   createBuild,
   createEnvironment,
   createProject,
-  flipAlias,
   getEnvironment,
   getProject,
   registerNode,
@@ -95,7 +95,7 @@ beforeEach(async () => {
     for (const id of [BUILD, OTHER_BUILD]) {
       await createBuild(clock.ctx, project, { id, runtimeConfigurable: true });
     }
-    await flipAlias(clock.ctx, project, ENVIRONMENT, BUILD);
+    await setCurrentBuild(clock.ctx, project, ENVIRONMENT, BUILD);
   }
 
   deploys = stubDeploys();
@@ -208,38 +208,6 @@ describe("an operator scoped to one project cannot touch another", () => {
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
   });
-
-  it("is refused a flip on another project's environment", async () => {
-    const response = await call(aliasPath(THEIRS), TENANT_ID, tenant, {
-      method: "POST",
-      body: { build: OTHER_BUILD },
-    });
-
-    expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
-  });
-
-  it("refuses an out-of-scope alias before reading its body", async () => {
-    let reads = 0;
-    const response = await app.request(aliasPath(THEIRS), {
-      method: "POST",
-      headers: { authorization: `Bearer ${await signNodeToken(tenant.privateKey, TENANT_ID)}` },
-      body: unreadBody(() => reads++),
-      duplex: "half",
-    } as RequestInit & { duplex: "half" });
-
-    expect(response.status).toBe(403);
-    expect(reads).toBe(0);
-  });
-
-  it("flips its own project's environment, which is the same call one project over", async () => {
-    const response = await call(aliasPath(MINE), TENANT_ID, tenant, {
-      method: "POST",
-      body: { build: OTHER_BUILD },
-    });
-
-    expect(response.status).toBe(200);
-  });
 });
 
 describe("what a scoped operator is told about the refusal", () => {
@@ -269,7 +237,7 @@ describe("what a scoped operator is told about the refusal", () => {
 });
 
 describe("every JSON control route is bounded", () => {
-  it.each(["selector", "park", "split", "alias", "operator", "labels"] as const)(
+  it.each(["selector", "park", "operator", "labels"] as const)(
     "%s accepts the exact cap and rejects every over-cap or malformed body without mutating",
     async (name) => {
       const spec = await jsonRoute(name);
@@ -483,9 +451,7 @@ interface JsonRoute {
   snapshot(): Promise<string>;
 }
 
-async function jsonRoute(
-  name: "selector" | "park" | "split" | "alias" | "operator" | "labels",
-): Promise<JsonRoute> {
+async function jsonRoute(name: "selector" | "park" | "operator" | "labels"): Promise<JsonRoute> {
   const environment = (): Promise<string> =>
     getEnvironment(clock.ctx, MINE, ENVIRONMENT).then((record) => JSON.stringify(record));
   if (name === "selector") {
@@ -501,27 +467,6 @@ async function jsonRoute(
       path: pathIn(MINE, "/park"),
       accepted: { policy: null },
       rejected: { policy: { afterS: 1 } },
-      snapshot: environment,
-    };
-  }
-  if (name === "split") {
-    return {
-      path: pathIn(MINE, "/split"),
-      accepted: {
-        split: [
-          { build: BUILD, weight: 50 },
-          { build: OTHER_BUILD, weight: 50 },
-        ],
-      },
-      rejected: { split: null },
-      snapshot: environment,
-    };
-  }
-  if (name === "alias") {
-    return {
-      path: aliasPath(MINE),
-      accepted: { build: OTHER_BUILD },
-      rejected: { build: BUILD },
       snapshot: environment,
     };
   }
@@ -585,7 +530,6 @@ function environmentCalls(): Array<[string, string, Call]> {
     ["unretire", "/unretire", { method: "POST" }],
     ["selector", "/selector", { method: "POST", body: { selector: { tier: "fast" } } }],
     ["park", "/park", { method: "POST", body: { policy: null } }],
-    ["split", "/split", { method: "POST", body: { split: null } }],
     /* The deletion is lease-gated and this app coordinates nothing, so what an
        allowed caller gets here is the coordinator's absence — which is exactly
        the point: it is not a 403, and it was decided AFTER the scope check. */
@@ -596,10 +540,6 @@ function environmentCalls(): Array<[string, string, Call]> {
 /** The environment route `suffix` names, inside `project`. */
 function pathIn(project: string, suffix: string): string {
   return `/v1/environments/${project}/${ENVIRONMENT}${suffix}`;
-}
-
-function aliasPath(project: string): string {
-  return `/v1/projects/${project}/environments/${ENVIRONMENT}/alias`;
 }
 
 /** One call to the node, signed by `keys` for exactly this request. */

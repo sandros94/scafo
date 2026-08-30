@@ -85,8 +85,8 @@ export async function applyIngress(daemon: DaemonContext, input: IngressInput): 
 
   /* WHAT THE INGRESS IS ABOUT TO BE TOLD IS ALSO WHAT SAYS WHOSE HOST IS WHOSE.
      The counters read the ingress's access log, and only this knows that a
-     custom domain belongs to an environment and which environment a build's own
-     hash host is a leg of — a second reading of that would be a second routing.
+     custom domain belongs to an environment — a second reading of that would
+     be a second routing.
      Handed over BEFORE the ingress call, so a pass whose ingress cannot be
      reached still attributes the traffic that ingress is still serving. */
   daemon.ingressCounters?.observeRouting({ routes: routing.routes, claims });

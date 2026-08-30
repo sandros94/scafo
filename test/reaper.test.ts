@@ -1,6 +1,7 @@
 /* The reaper only ever deletes what nothing points at, and re-checks that under fault. */
 
 import { beforeEach, describe, expect, it } from "vitest";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import {
   acquireLease,
   type ActivitySource,
@@ -11,24 +12,18 @@ import {
   createProject,
   DEFAULT_RETIREMENT_GRACE_MS,
   executeReap,
-  flipAlias,
   getEnvironment,
   type LeaseHandle,
-  listBuildWakes,
   planReap,
   readEnvironmentWake,
   type ReapOptions,
   retireEnvironment,
-  setSplit,
-  stampBuildWake,
   stampEnvironmentWake,
   unretireEnvironment,
   wakeActivity,
 } from "../src/core/registry/index.ts";
 import {
-  artifactKey,
   buildKey,
-  buildWakeKey,
   domainKey,
   environmentKey,
   envWakeKey,
@@ -39,8 +34,6 @@ import { ctxWith, FaultStore, invariants, type ManualClock, rejectsWith } from "
 
 const PROJECT = "app";
 const B1 = "b1b1b1b1";
-const B2 = "b2b2b2b2";
-const B3 = "b3b3b3b3";
 const B4 = "b4b4b4b4";
 const HOUR_MS = 3_600_000;
 const RETENTION_MS = 1_800_000;
@@ -88,21 +81,14 @@ beforeEach(async () => {
     ephemeral: true,
     idleTtlS: 900,
   });
-  for (const id of [B1, B2, B3, B4]) {
+  for (const id of [B1, B4]) {
     await createBuild(clock.ctx, PROJECT, { id, runtimeConfigurable: true });
   }
 
-  /* prod serves b1 and can roll back to b2; preview serves b1 with b3 taking a slice. */
-  await flipAlias(clock.ctx, PROJECT, "prod", B2);
-  await flipAlias(clock.ctx, PROJECT, "prod", B1);
-  await flipAlias(clock.ctx, PROJECT, "preview", B1);
-  await setSplit(clock.ctx, PROJECT, "preview", [
-    { build: B3, weight: 70 },
-    { build: B1, weight: 30 },
-  ]);
+  await setCurrentBuild(clock.ctx, PROJECT, "prod", B1);
+  await setCurrentBuild(clock.ctx, PROJECT, "preview", B1);
 
   for (const key of [...FLEET_KEYS, ...SURVIVORS]) await store.put(key, "{}");
-  await store.put(artifactKey(PROJECT, B4), "artifact-bytes");
 
   clock.tick(HOUR_MS);
   activity.set(PROJECT, "prod", new Date(clock.nowMs() - HOUR_MS));
@@ -125,11 +111,11 @@ describe("planReap", () => {
     expect(plan.builds[0].reason).toContain("unreferenced");
   });
 
-  it("never proposes a build an alias, its previous or a split leg points at", async () => {
+  it("never proposes an environment's current build", async () => {
     const plan = await planReap(clock.ctx, opts);
     const proposed = plan.builds.map((target) => target.id);
 
-    for (const referenced of [B1, B2, B3]) expect(proposed).not.toContain(referenced);
+    expect(proposed).not.toContain(B1);
   });
 
   it("proposes no build at all without a retention window", async () => {
@@ -155,7 +141,7 @@ describe("planReap", () => {
 });
 
 describe("executeReap", () => {
-  it("deletes the environment, its fleet keys and the build with its artifact", async () => {
+  it("deletes the environment, its fleet keys and the unreferenced build record", async () => {
     const plan = await planReap(clock.ctx, opts);
     const result = await executeReap(clock.ctx, plan, lease, opts);
 
@@ -165,22 +151,20 @@ describe("executeReap", () => {
       ...FLEET_KEYS,
       environmentKey(PROJECT, "preview"),
       buildKey(PROJECT, B4),
-      artifactKey(PROJECT, B4),
     ]);
     expect(result.skipped).toEqual([]);
 
     await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, "preview"), "not-found");
-    await expect(store.get(artifactKey(PROJECT, B4))).resolves.toBeNull();
     for (const key of SURVIVORS) await expect(store.get(key)).resolves.not.toBeNull();
     await expect(getEnvironment(clock.ctx, PROJECT, "prod")).resolves.toMatchObject({
-      alias: { build: B1, previous: B2 },
+      alias: { build: B1 },
     });
     await invariants(store);
   });
 
   it("skips a build that picked up a reference between planning and deleting", async () => {
     const plan = await planReap(clock.ctx, opts);
-    await flipAlias(clock.ctx, PROJECT, "prod", B4);
+    await setCurrentBuild(clock.ctx, PROJECT, "prod", B4);
 
     const result = await executeReap(clock.ctx, plan, lease, opts);
 
@@ -189,7 +173,7 @@ describe("executeReap", () => {
       target: buildKey(PROJECT, B4),
       reason: expect.stringContaining("referenced"),
     });
-    await expect(store.get(artifactKey(PROJECT, B4))).resolves.not.toBeNull();
+    await expect(store.get(buildKey(PROJECT, B4))).resolves.not.toBeNull();
     await invariants(store);
   });
 
@@ -276,11 +260,9 @@ describe("executeReap", () => {
 });
 
 describe("the wake stamps an environment leaves behind", () => {
-  it("deletes its own stamp and every build it ever woke", async () => {
+  it("deletes its own stamp", async () => {
     await stampEnvironmentWake(clock.ctx, PROJECT, "preview");
-    for (const id of [B1, B3]) await stampBuildWake(clock.ctx, PROJECT, "preview", id);
-    /* Another environment's stamp, which must survive the run. */
-    await stampBuildWake(clock.ctx, PROJECT, "prod", B2);
+    await stampEnvironmentWake(clock.ctx, PROJECT, "prod");
 
     const plan = await planReap(clock.ctx, opts);
     const result = await executeReap(clock.ctx, plan, lease, opts);
@@ -288,17 +270,13 @@ describe("the wake stamps an environment leaves behind", () => {
     /*
      * On the same reading as the fleet keys: they are named after an environment
      * nothing will ever iterate again, so one left behind is one nothing ever
-     * deletes — and a stale stamp would recall a build for an environment that
-     * is gone.
+     * deletes.
      */
     expect(result.deleted).toEqual([
       ...FLEET_KEYS,
       envWakeKey(PROJECT, "preview"),
-      buildWakeKey(PROJECT, "preview", B1),
-      buildWakeKey(PROJECT, "preview", B3),
       environmentKey(PROJECT, "preview"),
       buildKey(PROJECT, B4),
-      artifactKey(PROJECT, B4),
     ]);
     /* Before the record, like everything else that names it: a run cut short
        leaves the environment for the next plan to find again. */
@@ -306,8 +284,7 @@ describe("the wake stamps an environment leaves behind", () => {
       result.deleted.indexOf(environmentKey(PROJECT, "preview")),
     );
     await expect(readEnvironmentWake(clock.ctx, PROJECT, "preview")).resolves.toBeNull();
-    await expect(listBuildWakes(clock.ctx, PROJECT, "preview")).resolves.toEqual(new Map());
-    await expect(store.get(buildWakeKey(PROJECT, "prod", B2))).resolves.not.toBeNull();
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, "prod")).resolves.not.toBeNull();
     await invariants(store);
   });
 

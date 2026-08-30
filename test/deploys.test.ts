@@ -15,7 +15,7 @@ import type { JWK_RSA_Private, JWK_RSA_Public, JWKSet } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { sign as signJws } from "unjwt/jws";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { type DaemonContext, type AliasResult, createNodeApp } from "../src/daemon/app.ts";
+import { type DaemonContext, createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { createDeployService, type DeployStatus } from "../src/daemon/deploys.ts";
 import { createCreditController } from "../src/daemon/_credit-controller.ts";
@@ -32,9 +32,11 @@ import {
   createEnvironment,
   createProject,
   envWakeKey,
+  environmentKey,
   getBuild,
   getEnvironment,
   placementKey,
+  pointerLockKey,
   readEnvironmentWake,
   registerNode,
   setTrustPolicy,
@@ -307,6 +309,7 @@ describe("who may deploy", () => {
         taskTimeoutMs: 300_000,
       },
     });
+    running = [readyProcess(VERSION_ID)];
     const retained = (await responseId(await upload(await operatorToken()))) as string;
     await settled(retained);
     runs = [];
@@ -690,7 +693,6 @@ describe("what an upload must carry", () => {
       { project: "Not A Slug" },
       { environment: "UPPER" },
       { buildId: "nothex" },
-      { flip: "yes" },
       { replicas: 0 },
       { replicas: "every" },
       { nodeSelector: "tier=fast" },
@@ -708,10 +710,11 @@ describe("what an upload must carry", () => {
 });
 
 describe("what happens to an accepted deploy", () => {
-  it("publishes the artifact into the environment's fleet and records the build", async () => {
+  it("publishes the artifact, records the build and makes it current", async () => {
+    running = [readyProcess(VERSION_ID)];
     const id = (await responseId(await upload(await operatorToken()))) as string;
 
-    await expect(settled(id)).resolves.toMatchObject({ state: "deployed", build: VERSION_ID });
+    await expect(settled(id)).resolves.toMatchObject({ state: "routed", build: VERSION_ID });
     expect(runs).toHaveLength(1);
     expect(runs[0]).toMatchObject({
       project: PROJECT,
@@ -726,9 +729,117 @@ describe("what happens to an accepted deploy", () => {
     const build = await getBuild(clock.ctx, PROJECT, VERSION_ID);
     expect(build).toMatchObject({ celldVersionId: VERSION_ID, runtimeConfigurable: false });
 
-    /* Nothing was flipped: this upload did not ask for it. */
     const environment = await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
-    expect(environment.alias).toBeNull();
+    expect(environment.alias?.build).toBe(VERSION_ID);
+  });
+
+  it("serializes Celld publication and the current marker across concurrent deploys", async () => {
+    const buildA = "aaaa1111";
+    const buildB = "bbbb2222";
+    const markerStarted = Promise.withResolvers<void>();
+    const releaseMarker = Promise.withResolvers<void>();
+    const inner = clock.ctx.store;
+    clock.ctx.store = {
+      get: (key) => inner.get(key),
+      getBytes: (key) => inner.getBytes(key),
+      put: async (key, body, cas) => {
+        if (
+          key === environmentKey(PROJECT, ENVIRONMENT) &&
+          typeof body === "string" &&
+          (JSON.parse(body) as { alias?: { build?: string } }).alias?.build === buildA
+        ) {
+          markerStarted.resolve();
+          await releaseMarker.promise;
+        }
+        return inner.put(key, body, cas);
+      },
+      del: (key) => inner.del(key),
+      list: (prefix) => inner.list(prefix),
+    };
+
+    const versions = [buildA, buildB];
+    publish = () => Promise.resolve({ celldVersionId: versions.shift() as string });
+    running = [readyProcess(buildA), readyProcess(buildB)];
+    daemon.deploys = createDeployService(daemon, fakeRunner(), {
+      scheduler: {
+        artifactBytes: artifactBytes.byteLength,
+        activeTasks: 2,
+        projectActiveTasks: 2,
+        queuedTasks: 2,
+        projectQueuedTasks: 2,
+        stagedBytes: artifactBytes.byteLength * 2,
+        projectStagedBytes: artifactBytes.byteLength * 2,
+        receiveTimeoutMs: 60_000,
+        queueTimeoutMs: 60_000,
+        taskTimeoutMs: 60_000,
+      },
+      routedTimeoutMs: 100,
+      pollMs: 1,
+    });
+
+    const first = (await responseId(await upload(await operatorToken()))) as string;
+    await markerStarted.promise;
+    const second = (await responseId(await upload(await operatorToken()))) as string;
+    await Promise.resolve();
+
+    /* The second Celld publish cannot begin while the first one's registry
+       marker is held: both effects are one serialized current-build change. */
+    expect(runs).toHaveLength(1);
+
+    releaseMarker.resolve();
+    await expect(settled(first)).resolves.toMatchObject({ state: "routed", build: buildA });
+    await expect(settled(second)).resolves.toMatchObject({ state: "routed", build: buildB });
+    await expect(getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toMatchObject({
+      alias: { build: buildB },
+    });
+  });
+
+  it("reports possible publication when cancellation races with releasing the pointer lock", async () => {
+    const releaseReadStarted = Promise.withResolvers<void>();
+    const releaseRead = Promise.withResolvers<void>();
+    const inner = clock.ctx.store;
+    const lockKey = pointerLockKey(PROJECT, ENVIRONMENT);
+    let markerLanded = false;
+    clock.ctx.store = {
+      get: async (key) => {
+        if (key === lockKey && markerLanded) {
+          releaseReadStarted.resolve();
+          await releaseRead.promise;
+        }
+        return inner.get(key);
+      },
+      getBytes: (key) => inner.getBytes(key),
+      put: async (key, body, cas) => {
+        const result = await inner.put(key, body, cas);
+        if (
+          key === environmentKey(PROJECT, ENVIRONMENT) &&
+          typeof body === "string" &&
+          (JSON.parse(body) as { alias?: { build?: string } }).alias?.build === VERSION_ID
+        ) {
+          markerLanded = true;
+        }
+        return result;
+      },
+      del: (key) => inner.del(key),
+      list: (prefix) => inner.list(prefix),
+    };
+
+    const service = daemon.deploys!;
+    const id = (await responseId(await upload(await operatorToken()))) as string;
+    await releaseReadStarted.promise;
+    const stopping = service.stop(new Error("node stopping"));
+    releaseRead.resolve();
+    await stopping;
+
+    expect(service.get(id)).toMatchObject({
+      state: "failed",
+      build: VERSION_ID,
+      detail: expect.stringContaining(`celld published version "${VERSION_ID}"`),
+    });
+    expect(service.get(id)?.detail).toContain("could not confirm or finish recording");
+    await expect(getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toMatchObject({
+      alias: { build: VERSION_ID },
+    });
   });
 
   it("deploys into an ephemeral environment somebody else created", async () => {
@@ -865,9 +976,7 @@ describe("what happens to an accepted deploy", () => {
   it("reaches routed once the reconcile loop reports the build serving traffic", async () => {
     running = [readyProcess(VERSION_ID)];
 
-    const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), flip: true }),
-    )) as string;
+    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
 
     await expect(settled(id)).resolves.toMatchObject({ state: "routed", build: VERSION_ID });
     const environment = await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
@@ -875,9 +984,7 @@ describe("what happens to an accepted deploy", () => {
   });
 
   it("stops at deployed with a warning when nothing becomes ready in time", async () => {
-    const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), flip: true }),
-    )) as string;
+    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
 
     const status = await settled(id);
     /* Never an error: the build exists and the alias points at it, so the loop
@@ -886,13 +993,11 @@ describe("what happens to an accepted deploy", () => {
     expect(status.warnings.map((warning) => warning.code)).toEqual(["deploy-not-routed"]);
   });
 
-  it("carries a flip's own warnings through to the status", async () => {
+  it("carries current-build warnings through to the status", async () => {
     running = [readyProcess(VERSION_ID)];
     await createEnvironment(clock.ctx, PROJECT, { name: ENVIRONMENT, varset: "a1b2c3d4" });
 
-    const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), flip: true }),
-    )) as string;
+    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
 
     const status = await settled(id);
     expect(status.state).toBe("routed");
@@ -949,7 +1054,6 @@ describe("what happens to an accepted deploy", () => {
       environment: ENVIRONMENT,
       script: PROJECT,
       runtimeConfigurable: false,
-      flip: false,
     });
     const status = admission?.start(
       {
@@ -979,9 +1083,7 @@ describe("watching a build the coordinator placed somewhere else", () => {
     peer.processes.push(readyProcess(VERSION_ID));
     await placeOn(NODE_B);
 
-    const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), flip: true }),
-    )) as string;
+    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
 
     /* This node's own reconcile loop reports nothing at all, and the deploy is
        routed all the same, because the node the placement named does. */
@@ -993,9 +1095,7 @@ describe("watching a build the coordinator placed somewhere else", () => {
     await standUpPeer();
     await placeOn(NODE_B);
 
-    const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), flip: true }),
-    )) as string;
+    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
 
     const status = await settled(id);
     expect(status.state).toBe("deployed");
@@ -1008,9 +1108,7 @@ describe("watching a build the coordinator placed somewhere else", () => {
     running = [readyProcess(VERSION_ID)];
     await placeOn(OPERATOR);
 
-    const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), flip: true }),
-    )) as string;
+    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
 
     await expect(settled(id)).resolves.toMatchObject({ state: "routed" });
     /* The local processes are the whole answer, so the hop is never made. */
@@ -1022,9 +1120,7 @@ describe("watching a build the coordinator placed somewhere else", () => {
     await placeOn(NODE_B);
     daemon.fetchFn = () => Promise.reject(new Error("connect ECONNREFUSED"));
 
-    const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), flip: true }),
-    )) as string;
+    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
 
     const status = await settled(id);
     /* The build exists and the alias points at it; an unreachable peer says
@@ -1038,9 +1134,7 @@ describe("watching a build the coordinator placed somewhere else", () => {
     peer.processes.push(readyProcess(VERSION_ID));
     await placeOn(NODE_B);
 
-    const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), flip: true }),
-    )) as string;
+    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
 
     /* A decision outlives the node it names; a node that stopped beating is
        counted out here exactly as it is everywhere else. */
@@ -1054,9 +1148,7 @@ describe("the wake a deploy is", () => {
     running = [readyProcess(VERSION_ID)];
     await expect(readEnvironmentWake(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toBeNull();
 
-    const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), flip: true }),
-    )) as string;
+    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
 
     /* A deploy IS a wake: what has just been brought into service must not park
        for having had no request of its own yet. */
@@ -1066,7 +1158,7 @@ describe("the wake a deploy is", () => {
     );
   });
 
-  it("stamps it awake when the deploy was not asked to flip either", async () => {
+  it("stamps it awake when it becomes current", async () => {
     /* The build exists and is startable, which is the whole of what this deploy
        asked for; the environment is no less freshly deployed for it. */
     const id = (await responseId(await upload(await operatorToken()))) as string;
@@ -1081,9 +1173,7 @@ describe("the wake a deploy is", () => {
     /* Missing the deadline is a warning and never a failure — the alias points
        at the build and the loop keeps trying — so the environment it is trying
        for must not park out from under it in the meantime. */
-    const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), flip: true }),
-    )) as string;
+    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
 
     const status = await settled(id);
     expect(status.warnings.map((warning) => warning.code)).toEqual(["deploy-not-routed"]);
@@ -1102,9 +1192,7 @@ describe("the wake a deploy is", () => {
     running = [readyProcess(VERSION_ID)];
     daemon.registry = { ...clock.ctx, store: refusingWakeStamps(clock.ctx.store) };
 
-    const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), flip: true }),
-    )) as string;
+    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
 
     await expect(settled(id)).resolves.toMatchObject({ state: "routed", build: VERSION_ID });
     await expect(getBuild(clock.ctx, PROJECT, VERSION_ID)).resolves.toMatchObject({
@@ -1142,99 +1230,13 @@ describe("polling a deploy", () => {
   });
 });
 
-describe("moving an environment's alias", () => {
-  beforeEach(async () => {
-    const id = (await responseId(await upload(await operatorToken()))) as string;
-    await settled(id);
-  });
-
-  it("flips to a build and reports the environment as it now stands", async () => {
-    const response = await post(aliasPath(), await operatorToken(), { build: VERSION_ID });
-    const result = (await response.json()) as AliasResult;
-
-    expect(response.status).toBe(200);
-    expect(result.environment.alias?.build).toBe(VERSION_ID);
-    expect(result.warnings).toEqual([]);
-  });
-
-  it("rolls back to the build the environment served before", async () => {
-    await createBuildViaDeploy("0f0f0f0f");
-    for (const build of [VERSION_ID, "0f0f0f0f"]) {
-      await post(aliasPath(), await operatorToken(), { build });
-    }
-
-    const response = await post(aliasPath(), await operatorToken(), { rollback: true });
-    const result = (await response.json()) as AliasResult;
-
-    expect(response.status).toBe(200);
-    expect(result.environment.alias).toMatchObject({ build: VERSION_ID, previous: "0f0f0f0f" });
-  });
-
-  it("refuses a workload token from a project that is not the one being flipped", async () => {
-    await createEnvironment(clock.ctx, RIVAL, { name: ENVIRONMENT });
-
-    const response = await post(aliasPath(RIVAL), await workloadToken(), { build: VERSION_ID });
-
-    expect(response.status).toBe(401);
-    await expect(response.json()).resolves.toEqual(AUTH_INVALID_PROBLEM);
-  });
-
-  it("refuses a flip that names no build", async () => {
-    const response = await post(aliasPath(), await operatorToken(), {});
-
-    await expect(problemOf(response)).resolves.toMatchObject({ status: 400 });
-  });
-
-  it("does not retain the body-selected alias route", async () => {
-    const response = await post("/v1/aliases", await operatorToken(), {
-      project: PROJECT,
-      environment: ENVIRONMENT,
-      build: VERSION_ID,
-    });
-
-    expect(response.status).toBe(404);
-  });
-
-  it("refuses targets repeated in the body", async () => {
-    const response = await post(aliasPath(), await operatorToken(), {
-      project: PROJECT,
-      environment: ENVIRONMENT,
-      build: VERSION_ID,
-    });
-
-    await expect(problemOf(response)).resolves.toMatchObject({ status: 400 });
-  });
-
+describe("removed deployment-selection routes", () => {
   it.each([
-    [
-      "invalid node",
-      async () => {
-        const stranger = await generateJWK("EdDSA", { kid: OPERATOR });
-        return signNodeToken(stranger.privateKey, OPERATOR);
-      },
-      401,
-    ],
-    [
-      "invalid workload",
-      async () => {
-        const valid = await workloadToken();
-        const [header, payload, signature] = valid.split(".") as [string, string, string];
-        return `${header}.${payload}.${signature.startsWith("A") ? "B" : "A"}${signature.slice(1)}`;
-      },
-      401,
-    ],
-    ["trust-mismatched workload", () => workloadToken({ sub: "repo:evil/app" }), 403],
-  ] as const)("does not read an %s token's alias body", async (_what, token, status) => {
-    let reads = 0;
-    const response = await app.request(aliasPath(), {
-      method: "POST",
-      headers: { authorization: `Bearer ${await token()}` },
-      body: unreadBody(() => reads++),
-      duplex: "half",
-    } as RequestInit & { duplex: "half" });
-
-    expect(response.status).toBe(status);
-    expect(reads).toBe(0);
+    ["alias", aliasPath()],
+    ["split", `/v1/environments/${PROJECT}/${ENVIRONMENT}/split`],
+  ])("answers %s changes with an ordinary 404", async (_name, path) => {
+    const response = await post(path, await operatorToken(), { build: VERSION_ID });
+    expect(response.status).toBe(404);
   });
 });
 
@@ -1404,7 +1406,7 @@ function readyProcess(build: string): RuntimeProcess {
 }
 
 function meta(): Record<string, unknown> {
-  return { project: PROJECT, runtimeConfigurable: false };
+  return { project: PROJECT, environment: ENVIRONMENT, runtimeConfigurable: false };
 }
 
 /* ---- driving the app ---- */
@@ -1504,14 +1506,6 @@ async function settled(id: string): Promise<DeployStatus> {
     },
     { timeout: 5000, interval: 5 },
   );
-}
-
-/** Records a second build, so a rollback has somewhere to go. */
-async function createBuildViaDeploy(buildId: string): Promise<void> {
-  const id = (await responseId(
-    await upload(await operatorToken(), { ...meta(), buildId }),
-  )) as string;
-  await settled(id);
 }
 
 async function problemOf(response: Response): Promise<ProblemDetails> {

@@ -12,17 +12,12 @@ import { environmentKey } from "./paths.ts";
 /** Seconds an ephemeral environment runs past its last wake before it parks. */
 export const DEFAULT_EPHEMERAL_PARK_AFTER_S: number = 900;
 
-/** Seconds a woken superseded build runs past its last wake before it parks again. */
-export const DEFAULT_BUILD_IDLE_S: number = 300;
-
 /** Seconds a request held for a wake may wait before it is answered `503`. */
 export const DEFAULT_WAKE_DEADLINE_S: number = 30;
 
 /** {@link ParkPolicy} with every blank filled in; what readers act on. */
 export interface ResolvedParkPolicy {
   afterS: number;
-  recallBuilds: boolean;
-  buildIdleS: number;
   wakeDeadlineS: number;
 }
 
@@ -41,8 +36,6 @@ export function resolveParkPolicy(env: EnvironmentRecord): ResolvedParkPolicy {
   const park = env.park ?? {};
   return {
     afterS: env.ephemeral ? (park.afterS ?? DEFAULT_EPHEMERAL_PARK_AFTER_S) : 0,
-    recallBuilds: park.recallBuilds ?? true,
-    buildIdleS: park.buildIdleS ?? DEFAULT_BUILD_IDLE_S,
     wakeDeadlineS: park.wakeDeadlineS ?? DEFAULT_WAKE_DEADLINE_S,
   };
 }
@@ -68,8 +61,7 @@ export async function setParkPolicy(
         throw new ScafoError("invalid-input", "Long-lived environments do not park", {
           detail:
             `"${project}/${env}" is not ephemeral: parking it on a clock would stop it ` +
-            `under live traffic, so "afterS" is refused until scafo can measure traffic. ` +
-            `Superseded-build recall ("recallBuilds", "buildIdleS") works on any environment`,
+            `under live traffic, so "afterS" is refused until scafo can measure traffic`,
         });
       }
       const { park: _cleared, ...rest } = current;
@@ -82,7 +74,6 @@ export async function setParkPolicy(
 function assertPolicy(policy: ParkPolicy): void {
   const seconds: Array<[string, number | undefined]> = [
     ["afterS", policy.afterS],
-    ["buildIdleS", policy.buildIdleS],
     ["wakeDeadlineS", policy.wakeDeadlineS],
   ];
   for (const [name, value] of seconds) {
@@ -96,11 +87,6 @@ function assertPolicy(policy: ParkPolicy): void {
   if (policy.wakeDeadlineS === 0) {
     throw new ScafoError("invalid-input", "Invalid park policy", {
       detail: `"wakeDeadlineS" cannot be 0: a wake nothing may wait for can never succeed`,
-    });
-  }
-  if (policy.recallBuilds !== undefined && typeof policy.recallBuilds !== "boolean") {
-    throw new ScafoError("invalid-input", "Invalid park policy", {
-      detail: `"recallBuilds" must be true or false, got ${JSON.stringify(policy.recallBuilds)}`,
     });
   }
 }

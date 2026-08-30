@@ -806,7 +806,6 @@ function specInput(overrides?: SpecOverrides): RuntimeSpecInput {
     name: ENVIRONMENT,
     prefix: FLEET,
     alias: { build: BUILD_ID, flippedAt: "2026-01-02T00:00:00.000Z" },
-    split: null,
     domains: [],
     placement: "auto",
     ephemeral: false,
@@ -815,7 +814,6 @@ function specInput(overrides?: SpecOverrides): RuntimeSpecInput {
   const build: BuildRecord = {
     v: 1,
     id: BUILD_ID,
-    artifact: `artifacts/${PROJECT}/${BUILD_ID}.tar.zst`,
     celldVersionId: NEXT_VERSION,
     runtimeConfigurable: true,
     createdAt: "2026-01-01T00:00:00.000Z",

@@ -1,7 +1,7 @@
 /*
  * The Kubernetes contract: the operator manifest, K3s's default Traefik, and
  * a locally built node image meet in one disposable cluster. Product-specific
- * canary and TLS behaviour stay in their focused Docker suites.
+ * TLS behaviour stays in its focused Docker suite.
  */
 
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -307,7 +307,6 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
           PROJECT,
           "--env",
           "production",
-          "--flip",
           "--runtime-configurable",
           "--replicas",
           "all",
@@ -394,7 +393,6 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
           PROJECT,
           "--env",
           "single",
-          "--flip",
           "--runtime-configurable",
           "--replicas",
           "1",

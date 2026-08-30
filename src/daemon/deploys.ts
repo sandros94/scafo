@@ -9,7 +9,8 @@
 
 import { describeError, isScafoError, ScafoError } from "../core/error.ts";
 import { createBuild } from "../core/registry/builds.ts";
-import { createEnvironment, flipAlias, getEnvironment } from "../core/registry/environments.ts";
+import { setCurrentBuild } from "../core/registry/_current.ts";
+import { createEnvironment, getEnvironment } from "../core/registry/environments.ts";
 import { lockHolder, withLock } from "../core/registry/locks.ts";
 import { fleetPrefix } from "../core/registry/paths.ts";
 import { setNodeSelector, setReplicas } from "../core/registry/placement.ts";
@@ -26,6 +27,7 @@ import {
   type StagedArtifact,
 } from "../core/types/deploy.ts";
 import type {
+  BuildRecord,
   BuildSource,
   NodeSelector,
   OidcActor,
@@ -51,7 +53,7 @@ import {
   type DeploySchedulerOptions,
 } from "./_deploy-scheduler.ts";
 
-/** How long a flipped deploy waits to be observed serving traffic. */
+/** How long a deploy waits to be observed serving traffic. */
 export const DEFAULT_ROUTED_TIMEOUT_MS: number = 120_000;
 
 /** Time between two looks at what the reconcile loop reports. */
@@ -70,12 +72,11 @@ export const DEFAULT_HISTORY: number = 256;
  *
  * - `accepted` — the project and environment exist and the artifact is in hand.
  * - `uploading` — work is under way: the artifact is being published, and when
- *   the deploy asked to flip, brought into service afterwards.
- * - `deployed` — the build exists and can be started, but nothing on this node
- *   was seen serving it. A deploy that asked to flip and reached this carries
- *   the warning saying why.
+ *   brought into service afterwards.
+ * - `deployed` — the build is current, but no assigned node was seen serving it.
  * - `routed` — a process serving that build has passed its readiness gate.
- * - `failed` — nothing changed about what the environment is serving.
+ * - `failed` — the deploy did not complete. Its detail states when celld already
+ *   moved current before Scafo could record the matching registry marker.
  */
 export type DeployState = "accepted" | "uploading" | "deployed" | "routed" | "failed";
 
@@ -101,8 +102,6 @@ export interface DeployMeta {
   buildId?: string;
   runtimeConfigurable: boolean;
   builtWithVarset?: string;
-  /** Whether the environment's alias should be pointed at the new build. */
-  flip: boolean;
   /**
    * How many nodes should serve the environment. Absent says nothing about
    * placement, and an environment that already exists keeps what it has.
@@ -222,7 +221,7 @@ export function createDeployService(
    * just brought into service must not park for having had no request yet.
    *
    * A stamp that fails is IGNORED, and deliberately: the deploy has succeeded —
-   * the build exists, and the alias points at it when it was asked to — while
+   * the build exists, and the current-build marker points at it — while
    * the stamp only delays parking, and the next wake or the next deploy writes
    * it again. Failing the deploy over it would report a failure that did not
    * happen.
@@ -243,7 +242,7 @@ export function createDeployService(
    * going to start anything.
    *
    * Running out of time is a warning and never a failure: the build exists and
-   * the alias points at it, so the loop will keep trying to start it long after
+   * the current marker points at it, so the loop will keep trying to start it long after
    * this deploy stopped watching.
    */
   async function awaitRouted(
@@ -260,7 +259,7 @@ export function createDeployService(
 
     if (daemon.reconciler === undefined) {
       await giveUp(
-        `build "${build}" was deployed and the alias flipped, but this node runs no ` +
+        `build "${build}" was deployed and made current, but this node runs no ` +
           `reconcile loop, so nothing here will start it`,
       );
       return;
@@ -286,7 +285,7 @@ export function createDeployService(
       }
       if (remaining() <= 0) {
         await giveUp(
-          `build "${build}" was deployed and the alias flipped, but no process serving it ` +
+          `build "${build}" was deployed and made current, but no process serving it ` +
             `had passed its readiness gate after ${String(routedTimeoutMs)}ms` +
             /* Named, because a deploy that was watching another node entirely is
                the one case where "nothing was ready" is not about this node. */
@@ -303,7 +302,7 @@ export function createDeployService(
     meta: DeployMeta,
     artifact: StagedArtifact,
     signal: AbortSignal,
-  ): Promise<string> {
+  ): Promise<BuildRecord> {
     update(id, { state: "uploading" });
     const bucket = daemon.config.bucket;
     /*
@@ -315,77 +314,92 @@ export function createDeployService(
      * environment, on this node or any other, and makes those rollouts wait
      * behind it: that IS the serialization, and it is what it costs.
      *
-     * The flip and the wait for the routing below are deliberately OUTSIDE
-     * it. They wait on the reconcile loop, whose rollout needs this very
-     * lock — holding it across them would deadlock a deploy against the loop
-     * that carries it out.
+     * Recording the build and current marker is part of that same serialized
+     * change. Only the routing watch stays outside: it waits on the reconcile
+     * loop, whose rollout needs this lock, so holding it there would deadlock.
      */
-    const { celldVersionId } = await withLock(
-      daemon.registry,
-      {
-        space: POINTER_LOCK_SPACE,
-        name: pointerLockName(meta.project, meta.environment),
-        holder,
-        timeoutMs: lockTimeoutMs,
-        signal,
-      },
-      (signal) =>
-        runner.run(
-          {
-            project: meta.project,
-            environment: meta.environment,
-            script: meta.script,
-            artifact,
-            target: {
-              endpoint: bucket.endpoint,
-              region: bucket.region,
-              bucket: bucket.bucket,
-              prefix: joinPrefix(bucket.prefix, fleetPrefix(meta.project, meta.environment)),
-              accessKey: bucket.accessKey,
-              secretKey: bucket.secretKey,
+    let celldVersionId: string | undefined;
+    try {
+      const build = await withLock(
+        daemon.registry,
+        {
+          space: POINTER_LOCK_SPACE,
+          name: pointerLockName(meta.project, meta.environment),
+          holder,
+          timeoutMs: lockTimeoutMs,
+          signal,
+        },
+        async (signal) => {
+          const published = await runner.run(
+            {
+              project: meta.project,
+              environment: meta.environment,
+              script: meta.script,
+              artifact,
+              target: {
+                endpoint: bucket.endpoint,
+                region: bucket.region,
+                bucket: bucket.bucket,
+                prefix: joinPrefix(bucket.prefix, fleetPrefix(meta.project, meta.environment)),
+                accessKey: bucket.accessKey,
+                secretKey: bucket.secretKey,
+              },
             },
-          },
-          { signal },
-        ),
-    );
-    return celldVersionId;
+            { signal },
+          );
+          celldVersionId = published.celldVersionId;
+
+          throwIfStopped(signal);
+          const build = await createBuild(daemon.registry, meta.project, {
+            id: meta.buildId ?? celldVersionId,
+            celldVersionId,
+            runtimeConfigurable: meta.runtimeConfigurable,
+            ...(meta.builtWithVarset === undefined
+              ? {}
+              : { builtWithVarset: meta.builtWithVarset }),
+            ...(meta.source === undefined ? {} : { source: meta.source }),
+            ...(meta.oidc === undefined ? {} : { oidc: meta.oidc }),
+          });
+          update(id, { build: build.id });
+          throwIfStopped(signal);
+          const current = await setCurrentBuild(
+            daemon.registry,
+            meta.project,
+            meta.environment,
+            build.id,
+            { signal },
+          );
+          for (const warning of current.warnings) warn(id, warning);
+          return build;
+        },
+      );
+      /* The lock stops listening while it releases its record. A task deadline or
+         shutdown can land in that final window, so check the task's authority
+         once more before handing a successful result back to the scheduler. */
+      throwIfStopped(signal);
+      return build;
+    } catch (error) {
+      if (celldVersionId === undefined) throw error;
+      throw new Error(
+        `celld published version "${celldVersionId}", but Scafo could not confirm or finish ` +
+          `recording it as the environment's current build: ${boundedDetail(error)}`,
+        { cause: error },
+      );
+    }
   }
 
-  async function finish(id: string, meta: DeployMeta, celldVersionId: string): Promise<void> {
+  async function finish(id: string, meta: DeployMeta, build: BuildRecord): Promise<void> {
     try {
-      throwIfStopped(stopping.signal);
-      const build = await createBuild(daemon.registry, meta.project, {
-        id: meta.buildId ?? celldVersionId,
-        celldVersionId,
-        runtimeConfigurable: meta.runtimeConfigurable,
-        /* Where the code just published actually lives, which is what makes this
-           build's own host wakeable once a flip has superseded it. */
-        environment: meta.environment,
-        ...(meta.builtWithVarset === undefined ? {} : { builtWithVarset: meta.builtWithVarset }),
-        ...(meta.source === undefined ? {} : { source: meta.source }),
-        ...(meta.oidc === undefined ? {} : { oidc: meta.oidc }),
-      });
-      update(id, { build: build.id });
-      throwIfStopped(stopping.signal);
-
-      /* A deploy that was not asked to flip is finished: the build is recorded
-         and startable, and what the environment serves is deliberately unchanged. */
-      if (!meta.flip) {
-        await stampAwake(meta);
-        throwIfStopped(stopping.signal);
-        update(id, { state: "deployed" });
-        return;
-      }
-
-      throwIfStopped(stopping.signal);
-      const flipped = await flipAlias(daemon.registry, meta.project, meta.environment, build.id);
-      for (const warning of flipped.warnings) warn(id, warning);
-
       /* Starting, gating and routing the new build is the reconcile loop's job;
          this only watches for it to happen, and settles the state either way. */
       await awaitRouted(id, meta, build.id, stopping.signal);
     } catch (error) {
-      update(id, { state: "failed", detail: boundedDetail(error) });
+      update(id, {
+        state: "failed",
+        detail:
+          `celld published and Scafo recorded build "${build.id}" as current, but stopped ` +
+          `before its routing watch finished: ${boundedDetail(error)}`,
+      });
     }
   }
 
@@ -440,7 +454,7 @@ export function createDeployService(
           forget(statuses, history);
           const answer = snapshot(accepted);
           const continuation = scheduled.completion.then(
-            (celldVersionId) => finish(id, meta, celldVersionId),
+            (build) => finish(id, meta, build),
             (error) => {
               update(id, { state: "failed", detail: boundedDetail(error) });
             },

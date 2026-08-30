@@ -41,24 +41,16 @@ describe("what a host is counted as", () => {
     ]);
   });
 
-  it("takes a custom domain and a build's own host from the ROUTING, which is the only thing that knows", () => {
+  it("takes a custom domain from the routing, which is the only thing that knows", () => {
     const counters = counting();
     counters.observeRouting({
-      routes: [
-        route("shop.example.com", "shop", "production", "aaaa1111"),
-        route("shop--aaaa1111.apps.test", "shop", "production", "aaaa1111"),
-        route("shop--bbbb2222.apps.test", "shop", "production", "bbbb2222"),
-      ],
+      routes: [route("shop.example.com", "shop", "production", "aaaa1111")],
       claims: [{ host: "shop.example.com", project: "shop", environment: "production" }],
     });
 
     counters.ingest(line({ host: "shop.example.com" }));
-    /* A canary's two legs are addressable on their own, and both are that
-       environment's traffic — which is what makes the legs add up to it. */
-    counters.ingest(line({ host: "shop--aaaa1111.apps.test" }));
-    counters.ingest(line({ host: "shop--bbbb2222.apps.test" }));
 
-    expect(named(counters)).toEqual([{ project: "shop", env: "production", requests: 3 }]);
+    expect(named(counters)).toEqual([{ project: "shop", env: "production", requests: 1 }]);
     expect(counters.snapshot().unattributed).toBe(0);
   });
 
@@ -76,17 +68,17 @@ describe("what a host is counted as", () => {
     expect(named(counters)).toEqual([{ project: "shop", env: "production", requests: 1 }]);
   });
 
-  it("lets the routing win over the grammar, so a build host is its environment's", () => {
+  it("lets the routing win over the platform-host grammar", () => {
     const counters = counting();
     counters.observeRouting({
-      routes: [route("shop--aaaa1111.apps.test", "shop", "staging", "aaaa1111")],
+      routes: [route("shop.apps.test", "shop", "staging", "aaaa1111")],
       claims: [],
     });
 
-    counters.ingest(line({ host: "shop--aaaa1111.apps.test" }));
+    counters.ingest(line({ host: "shop.apps.test" }));
 
-    /* Read off the grammar alone this would have been an environment called
-       `aaaa1111`; the routing knows it is a leg of `staging`. */
+    /* Read off the grammar alone this is production; the published routing is
+       the authority for what the request actually reached. */
     expect(named(counters)).toEqual([{ project: "shop", env: "staging", requests: 1 }]);
   });
 
@@ -277,11 +269,10 @@ describe("the snapshot", () => {
 });
 
 describe("what the reconcile pass hands over", () => {
-  it("attributes off the SAME routing the ingress is given, custom domain and build host alike", async () => {
+  it("attributes off the same routing the ingress is given", async () => {
     /* The attribution is not a second reading of what serves an environment —
        it is the routing itself, handed over where it is rendered. A second
-       reading would drift, and the one that drifted would credit a build a flip
-       had already superseded. */
+       reading would drift from what traffic actually reaches. */
     const counters = counting();
     const applied: IngressDesired[] = [];
     const daemon = {
@@ -310,17 +301,12 @@ describe("what the reconcile pass hands over", () => {
        environment that ingress will send it to. */
     expect(applied[0].routes.map((entry) => entry.host)).toContain("shop.example.com");
 
-    for (const host of [
-      "shop.apps.test",
-      "shop--production.apps.test",
-      "shop--aaaa1111.apps.test",
-      "shop.example.com",
-    ]) {
+    for (const host of ["shop.apps.test", "shop--production.apps.test", "shop.example.com"]) {
       counters.ingest(line({ host }));
     }
 
     expect(counters.snapshot().unattributed).toBe(0);
-    expect(named(counters)).toEqual([{ project: "shop", env: "production", requests: 4 }]);
+    expect(named(counters)).toEqual([{ project: "shop", env: "production", requests: 3 }]);
   });
 
   it("publishes the platform apexes as the fleet's API, or not at all", async () => {
@@ -380,7 +366,7 @@ function line(over: { host: string; status?: number; size?: number; durationMs?:
 }
 
 function route(host: string, project: string, env: string, build: string): IngressRoute {
-  return { host, backends: [{ backend: { project, env, build, port: 9101 }, weight: 100 }] };
+  return { host, backend: { project, env, build, port: 9101 } };
 }
 
 /** An environment record carrying only what the routing is rendered from. */
@@ -390,7 +376,6 @@ function environment(name: string, domains: string[], build: string): Environmen
     name,
     prefix: `fleets/shop/${name}`,
     alias: { build, flippedAt: new Date(CLOCK_START_MS).toISOString() },
-    split: null,
     domains,
     placement: "auto",
     ephemeral: false,

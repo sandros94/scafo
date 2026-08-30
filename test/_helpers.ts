@@ -254,11 +254,7 @@ export async function invariants(store: CasStore, opts?: InvariantOptions): Prom
       if (found === null) continue;
       const environment = found.value;
 
-      const pointers = [
-        environment.alias?.build,
-        environment.alias?.previous,
-        ...(environment.split ?? []).map((entry) => entry.build),
-      ];
+      const pointers = [environment.alias?.build];
       for (const build of pointers) {
         if (build === undefined) continue;
         expect(builds, `${project}/${name} points at build "${build}"`).toContain(build);

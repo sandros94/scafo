@@ -14,7 +14,6 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   createEnvironment,
   createProject,
-  DEFAULT_BUILD_IDLE_S,
   DEFAULT_EPHEMERAL_PARK_AFTER_S,
   DEFAULT_WAKE_DEADLINE_S,
   getEnvironment,
@@ -24,7 +23,7 @@ import {
   setParkPolicy,
 } from "../src/core/registry/index.ts";
 import { environmentKey } from "../src/core/registry/paths.ts";
-import type { EnvironmentRecord, ParkPolicy } from "../src/core/types/registry.ts";
+import type { EnvironmentRecord } from "../src/core/types/registry.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, type ManualClock, rejectsWith } from "./_helpers.ts";
 
@@ -52,28 +51,20 @@ describe("resolveParkPolicy", () => {
 
     expect(resolveParkPolicy(environment)).toEqual({
       afterS: DEFAULT_EPHEMERAL_PARK_AFTER_S,
-      recallBuilds: true,
-      buildIdleS: DEFAULT_BUILD_IDLE_S,
       wakeDeadlineS: DEFAULT_WAKE_DEADLINE_S,
     });
     /* Named rather than spelled out, so the numbers live in one place. */
-    expect([DEFAULT_EPHEMERAL_PARK_AFTER_S, DEFAULT_BUILD_IDLE_S, DEFAULT_WAKE_DEADLINE_S]).toEqual(
-      [900, 300, 30],
-    );
+    expect([DEFAULT_EPHEMERAL_PARK_AFTER_S, DEFAULT_WAKE_DEADLINE_S]).toEqual([900, 30]);
   });
 
   it("keeps every field the operator did state", async () => {
     await setParkPolicy(clock.ctx, PROJECT, PREVIEW, {
       afterS: 60,
-      recallBuilds: false,
-      buildIdleS: 30,
       wakeDeadlineS: 5,
     });
 
     expect(resolveParkPolicy(await getEnvironment(clock.ctx, PROJECT, PREVIEW))).toEqual({
       afterS: 60,
-      recallBuilds: false,
-      buildIdleS: 30,
       wakeDeadlineS: 5,
     });
   });
@@ -90,19 +81,6 @@ describe("resolveParkPolicy", () => {
 
     expect(resolveParkPolicy(await getEnvironment(clock.ctx, PROJECT, PROD)).afterS).toBe(0);
   });
-
-  it("still resolves the recall fields of a long-lived environment", async () => {
-    /* Only the clock is refused one. Waking a superseded build at its own host
-       is a request answering itself and works on any environment. */
-    await setParkPolicy(clock.ctx, PROJECT, PROD, { recallBuilds: false, buildIdleS: 45 });
-
-    expect(resolveParkPolicy(await getEnvironment(clock.ctx, PROJECT, PROD))).toEqual({
-      afterS: 0,
-      recallBuilds: false,
-      buildIdleS: 45,
-      wakeDeadlineS: DEFAULT_WAKE_DEADLINE_S,
-    });
-  });
 });
 
 describe("setParkPolicy", () => {
@@ -118,13 +96,13 @@ describe("setParkPolicy", () => {
   });
 
   it("replaces the whole policy rather than merging into it", async () => {
-    await setParkPolicy(clock.ctx, PROJECT, PREVIEW, { afterS: 60, buildIdleS: 30 });
+    await setParkPolicy(clock.ctx, PROJECT, PREVIEW, { afterS: 60, wakeDeadlineS: 10 });
 
-    const updated = await setParkPolicy(clock.ctx, PROJECT, PREVIEW, { buildIdleS: 45 });
+    const updated = await setParkPolicy(clock.ctx, PROJECT, PREVIEW, { wakeDeadlineS: 45 });
 
     /* One statement of how this environment scales to zero: merging would leave
        an operator unable to take a decision back off again. */
-    expect(updated.park).toEqual({ buildIdleS: 45 });
+    expect(updated.park).toEqual({ wakeDeadlineS: 45 });
   });
 
   it("clears it by REMOVING the field, not by storing an empty one", async () => {
@@ -144,7 +122,7 @@ describe("setParkPolicy", () => {
     expect("park" in cleared).toBe(false);
   });
 
-  it("refuses a window on a long-lived environment, naming what does work on one", async () => {
+  it("refuses a window on a long-lived environment", async () => {
     const putsBefore = store.puts;
 
     const error = await rejectsWith(
@@ -156,7 +134,6 @@ describe("setParkPolicy", () => {
        goes looking for the flag that turns it off, and there is not one. */
     expect(error.detail).toContain(`"${PROJECT}/${PROD}"`);
     expect(error.detail).toContain("live traffic");
-    expect(error.detail).toContain("recallBuilds");
     expect(store.puts).toBe(putsBefore);
     expect((await getEnvironment(clock.ctx, PROJECT, PROD)).park).toBeUndefined();
   });
@@ -171,24 +148,21 @@ describe("setParkPolicy", () => {
     );
   });
 
-  it.each([
-    { afterS: 1.5 },
-    { afterS: -1 },
-    { buildIdleS: -30 },
-    { buildIdleS: Number.NaN },
-    { wakeDeadlineS: 2.5 },
-  ])("refuses %p, which is not a whole number of seconds", async (policy) => {
-    const putsBefore = store.puts;
+  it.each([{ afterS: 1.5 }, { afterS: -1 }, { wakeDeadlineS: 2.5 }])(
+    "refuses %p, which is not a whole number of seconds",
+    async (policy) => {
+      const putsBefore = store.puts;
 
-    const error = await rejectsWith(
-      () => setParkPolicy(clock.ctx, PROJECT, PREVIEW, policy),
-      "invalid-input",
-    );
+      const error = await rejectsWith(
+        () => setParkPolicy(clock.ctx, PROJECT, PREVIEW, policy),
+        "invalid-input",
+      );
 
-    expect(error.detail).toContain("whole number of seconds");
-    expect(store.puts).toBe(putsBefore);
-    expect((await getEnvironment(clock.ctx, PROJECT, PREVIEW)).park).toBeUndefined();
-  });
+      expect(error.detail).toContain("whole number of seconds");
+      expect(store.puts).toBe(putsBefore);
+      expect((await getEnvironment(clock.ctx, PROJECT, PREVIEW)).park).toBeUndefined();
+    },
+  );
 
   it("refuses a wake deadline of 0, which no wake could ever meet", async () => {
     const error = await rejectsWith(
@@ -207,24 +181,6 @@ describe("setParkPolicy", () => {
     expect(updated.park).toEqual({ afterS: 0 });
     expect(resolveParkPolicy(updated).afterS).toBe(0);
   });
-
-  it.each(["true", 1, null])(
-    "refuses recallBuilds %p, which is not true or false",
-    async (value) => {
-      const error = await rejectsWith(
-        () =>
-          setParkPolicy(clock.ctx, PROJECT, PREVIEW, {
-            recallBuilds: value,
-          } as unknown as ParkPolicy),
-        "invalid-input",
-      );
-
-      /* A flag that guesses what "1" meant is a flag that misreads a typo as an
-       instruction. */
-      expect(error.detail).toContain("recallBuilds");
-      expect((await getEnvironment(clock.ctx, PROJECT, PREVIEW)).park).toBeUndefined();
-    },
-  );
 
   it("refuses an environment that is not there", async () => {
     const error = await rejectsWith(

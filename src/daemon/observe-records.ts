@@ -10,10 +10,9 @@
  * flush can land half of themselves — leaving a window in which a node's events
  * exist and its counters do not, which is exactly the disagreement a reader
  * cannot recover from. Every record therefore carries a `record` discriminant,
- * and a reader filters on it. It is not called `kind` or `type` because an EVENT
- * already carries both — `type` is the event's own, and `kind` is what a
- * `wake.admitted` calls the thing its Host resolved to — and a discriminant that
- * collided with either would be a record shape that cannot be written down.
+ * and a reader filters on it. It is not called `type` because an EVENT already
+ * carries its own `type`, and a discriminant that collided with it would be a
+ * record shape that cannot be written down.
  *
  * COUNTER RECORDS ARE MONOTONIC TOTALS, NOT WINDOWS. They are the counters as
  * they stood at the flush, counted since {@link ObserveCountersRecord.since} —

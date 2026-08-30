@@ -133,24 +133,8 @@ export interface TraefikLoadBalancerService {
   loadBalancer: { servers: Array<{ url: string }> };
 }
 
-/**
- * A service that divides its requests between OTHER services by weight.
- *
- * Traefik has no weights on a load balancer's servers: a weighted split is a
- * service of its own, naming per-leg child services that each hold one server.
- * The names are UNQUALIFIED, which is what makes them resolve within the
- * document this driver publishes — a name carrying `@` names another provider's.
- *
- * Pinned empirically against `traefik:v3` (v3.7.10) through its http provider
- * rather than taken from the documentation: 200 requests over a two-leg
- * `[90, 10]` split arrived 180/20, and unqualified child names resolved.
- */
-export interface TraefikWeightedService {
-  weighted: { services: Array<{ name: string; weight: number }> };
-}
-
 /** One service: where the requests its router matched are sent. */
-export type TraefikService = TraefikLoadBalancerService | TraefikWeightedService;
+export type TraefikService = TraefikLoadBalancerService;
 
 /**
  * A Traefik dynamic configuration as this driver renders it.
@@ -226,10 +210,6 @@ export function createTraefikDriver(opts?: TraefikDriverOptions): TraefikDriver 
  * would for a pushed ingress, because Traefik hashes the body it polls and does
  * no work at all when the bytes have not changed.
  *
- * A host with SEVERAL backends becomes a {@link TraefikWeightedService} naming
- * one child service per leg, which is the only place Traefik puts weights; a
- * host with one keeps the plain load balancer it has always had.
- *
  * WHAT REACHES THE DAEMON is rendered the same way and ranked differently. A
  * host waiting to be woken is an ordinary router over an ordinary service — it
  * names one host and dials the daemon instead of a runtime process — while a
@@ -267,7 +247,7 @@ export function renderTraefikConfig(
   const routers: Record<string, TraefikRouter> = {};
   const services: Record<string, TraefikService> = {};
 
-  for (const { host, backends } of [...desired.routes].sort((a, b) => compare(a.host, b.host))) {
+  for (const { host, backend } of [...desired.routes].sort((a, b) => compare(a.host, b.host))) {
     /*
      * Checked here even though every host arrives having passed `assertHost`
      * upstream — a label built from validated slugs under a configured platform
@@ -284,30 +264,9 @@ export function renderTraefikConfig(
     const key = traefikKey(host);
     routers[key] = { rule: `Host(\`${host}\`)`, service: key, entryPoints: [...entryPoints] };
 
-    /* One backend is a load balancer over one server, not a weighted service
-       over one child: the indirection would buy nothing and would rewrite the
-       document — which Traefik hashes — for every host on the node. */
-    const only = backends.length === 1 ? backends[0] : undefined;
-    if (only !== undefined) {
-      services[key] = {
-        loadBalancer: { servers: [{ url: upstreamUrl(only.backend, upstreamHost) }] },
-      };
-      continue;
-    }
-
     services[key] = {
-      weighted: {
-        services: backends.map((leg) => ({
-          name: traefikLegKey(host, leg.backend.build),
-          weight: leg.weight,
-        })),
-      },
+      loadBalancer: { servers: [{ url: upstreamUrl(backend, upstreamHost) }] },
     };
-    for (const leg of backends) {
-      services[traefikLegKey(host, leg.backend.build)] = {
-        loadBalancer: { servers: [{ url: upstreamUrl(leg.backend, upstreamHost) }] },
-      };
-    }
   }
 
   const wake = desired.wake;
@@ -384,19 +343,6 @@ export function renderTraefikConfig(
 /** The router and service name the routing for `host` is written under. */
 export function traefikKey(host: string): string {
   return `${TRAEFIK_KEY_PREFIX}${host}`;
-}
-
-/**
- * The child service one leg of a weighted `host` is written under.
- *
- * Separated from the host by the same underscore the namespace uses, and for the
- * same reason: an underscore cannot occur in a DNS name or in a build id, so no
- * child key can collide with another host's key or with a router's. A separator
- * a host CAN contain — `--`, which every environment label carries — would make
- * `scafo_<host>--<build>` ambiguous against a claimed domain shaped like one.
- */
-export function traefikLegKey(host: string, build: string): string {
-  return `${TRAEFIK_KEY_PREFIX}${host}_${build}`;
 }
 
 /** The router and service name one platform domain's catch-all is written under. */

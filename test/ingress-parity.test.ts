@@ -11,7 +11,7 @@
  *
  * The fixtures are built by `renderRoutes` rather than written out by hand, so
  * what is compared is routing the product really produces — an environment host
- * with its apex and its build hash, a claimed domain, several projects at once —
+ * with its apex, a claimed domain, several projects at once —
  * rather than a shape chosen to make the comparison easy.
  */
 
@@ -19,11 +19,10 @@ import { describe, expect, it } from "vitest";
 import {
   API_DENIED_PREFIXES,
   APEX_ENVIRONMENT,
-  FULL_WEIGHT,
   renderRoutes,
 } from "../src/core/placement/routes.ts";
 import type { IngressDesired } from "../src/core/types/ingress.ts";
-import type { EnvironmentRecord, SplitEntry } from "../src/core/types/registry.ts";
+import type { EnvironmentRecord } from "../src/core/types/registry.ts";
 import type { RuntimeProcess } from "../src/core/types/runtime.ts";
 import { HOST_LABEL_RE, isHost } from "../src/core/utils/host.ts";
 import { isSlug } from "../src/core/utils/slug.ts";
@@ -63,18 +62,11 @@ const CUSTOM_DOMAIN = "shop.example.com";
 const NODE_PORT = 7400;
 
 /**
- * One host, one process it reaches, and the share of its traffic that goes
- * there: all a routing means, in either format.
- *
- * The weight is part of the essence rather than an extra: a split that two
- * ingresses agreed on the SET of but not the shares of would be two different
- * routings dressed as one, and an operator moving between them would see their
- * canary silently change size.
+ * One host and the process it reaches: all a routing means, in either format.
  */
 interface Upstream {
   host: string;
   upstream: string;
-  weight: number;
   /**
    * WHICH PATHS the entry answers for, in a vocabulary both formats are read
    * into: `"all"`, `"all except <prefixes>"` for the API apex, `"only
@@ -105,7 +97,7 @@ const FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
     }),
   },
   {
-    name: "production, which is also the apex, plus the build it serves",
+    name: "production, which is also the apex",
     desired: renderRoutes({
       platformDomains: [DOMAIN],
       environments: [environment(PROJECT, APEX_ENVIRONMENT, BUILD)],
@@ -123,7 +115,7 @@ const FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
     }),
   },
   {
-    name: "two projects under two platform domains, mid-flip",
+    name: "two projects under two platform domains",
     desired: renderRoutes({
       platformDomains: [DOMAIN, OTHER_DOMAIN],
       environments: [
@@ -133,63 +125,10 @@ const FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
       ],
       processes: [
         process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000),
-        /* The build being superseded: still running, so still reachable under
-           its own hash, and that host must survive the trip through both. */
-        process(PROJECT, APEX_ENVIRONMENT, OTHER_BUILD, 42_002),
         process(PROJECT, "preview", OTHER_BUILD, 42_004),
         process(OTHER_PROJECT, APEX_ENVIRONMENT, BUILD, 42_006),
       ],
       claims: [{ host: CUSTOM_DOMAIN, project: PROJECT, environment: APEX_ENVIRONMENT }],
-    }),
-  },
-  {
-    name: "a 90/10 canary, with both legs ready",
-    desired: renderRoutes({
-      platformDomains: [DOMAIN],
-      environments: [
-        environment(
-          PROJECT,
-          APEX_ENVIRONMENT,
-          BUILD,
-          [CUSTOM_DOMAIN],
-          [
-            { build: BUILD, weight: 90 },
-            { build: OTHER_BUILD, weight: 10 },
-          ],
-        ),
-      ],
-      processes: [
-        process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000),
-        process(PROJECT, APEX_ENVIRONMENT, OTHER_BUILD, 42_002),
-      ],
-      claims: [{ host: CUSTOM_DOMAIN, project: PROJECT, environment: APEX_ENVIRONMENT }],
-    }),
-  },
-  {
-    name: "a three-way split beside an unsplit environment",
-    desired: renderRoutes({
-      platformDomains: [DOMAIN, OTHER_DOMAIN],
-      environments: [
-        environment(
-          PROJECT,
-          APEX_ENVIRONMENT,
-          BUILD,
-          [],
-          [
-            { build: BUILD, weight: 50 },
-            { build: OTHER_BUILD, weight: 30 },
-            { build: THIRD_BUILD, weight: 20 },
-          ],
-        ),
-        environment(OTHER_PROJECT, "staging", BUILD),
-      ],
-      processes: [
-        process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000),
-        process(PROJECT, APEX_ENVIRONMENT, OTHER_BUILD, 42_002),
-        process(PROJECT, APEX_ENVIRONMENT, THIRD_BUILD, 42_004),
-        process(OTHER_PROJECT, "staging", BUILD, 42_006),
-      ],
-      claims: [],
     }),
   },
 ];
@@ -234,25 +173,11 @@ const WAKE_FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
     }),
   },
   {
-    name: "a 90/10 split serving beside a parked environment, under two platform domains",
+    name: "a serving environment beside a parked environment, under two platform domains",
     desired: renderRoutes({
       platformDomains: [DOMAIN, OTHER_DOMAIN],
-      environments: [
-        environment(
-          PROJECT,
-          APEX_ENVIRONMENT,
-          BUILD,
-          [CUSTOM_DOMAIN],
-          [
-            { build: BUILD, weight: 90 },
-            { build: OTHER_BUILD, weight: 10 },
-          ],
-        ),
-      ],
-      processes: [
-        process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000),
-        process(PROJECT, APEX_ENVIRONMENT, OTHER_BUILD, 42_002),
-      ],
+      environments: [environment(PROJECT, APEX_ENVIRONMENT, BUILD, [CUSTOM_DOMAIN])],
+      processes: [process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000)],
       claims: [{ host: CUSTOM_DOMAIN, project: PROJECT, environment: APEX_ENVIRONMENT }],
       wake: { port: NODE_PORT, parked: [environment(OTHER_PROJECT, "preview", THIRD_BUILD)] },
     }),
@@ -287,25 +212,11 @@ const API_FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
     }),
   },
   {
-    name: "an apex beside a split, a claimed domain and a parked environment",
+    name: "an apex beside a claimed domain and a parked environment",
     desired: renderRoutes({
       platformDomains: [DOMAIN, OTHER_DOMAIN],
-      environments: [
-        environment(
-          PROJECT,
-          APEX_ENVIRONMENT,
-          BUILD,
-          [CUSTOM_DOMAIN],
-          [
-            { build: BUILD, weight: 90 },
-            { build: OTHER_BUILD, weight: 10 },
-          ],
-        ),
-      ],
-      processes: [
-        process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000),
-        process(PROJECT, APEX_ENVIRONMENT, OTHER_BUILD, 42_002),
-      ],
+      environments: [environment(PROJECT, APEX_ENVIRONMENT, BUILD, [CUSTOM_DOMAIN])],
+      processes: [process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000)],
       claims: [{ host: CUSTOM_DOMAIN, project: PROJECT, environment: APEX_ENVIRONMENT }],
       wake: { port: NODE_PORT, parked: [environment(OTHER_PROJECT, "preview", THIRD_BUILD)] },
       api: { port: NODE_PORT },
@@ -335,34 +246,6 @@ describe("the two drivers say the same thing about the same routing", () => {
       expect(caddy).toEqual(essenceOf(desired));
     });
   }
-
-  it("agrees on the weights of every split it is given, not merely on the legs", () => {
-    /* The set of upstreams and the shares between them are two claims, and only
-       the second one is new. Asserted apart from the fixtures above so a driver
-       that dropped its weights while keeping its upstreams cannot pass. */
-    const weighted = FIXTURES.filter(({ desired }) =>
-      desired.routes.some((route) => route.backends.length > 1),
-    );
-    expect(weighted.length).toBeGreaterThan(0);
-
-    for (const { name, desired } of weighted) {
-      const caddy = caddyUpstreams(renderCaddyRoutes(desired));
-      const traefik = traefikUpstreams(renderTraefikConfig(desired));
-
-      expect(
-        traefik.map((leg) => leg.weight),
-        name,
-      ).toEqual(caddy.map((leg) => leg.weight));
-      /* And the shares of one host still add up to the whole of it. */
-      for (const route of desired.routes) {
-        const shares = caddy.filter((leg) => leg.host === route.host);
-        expect(
-          shares.reduce((sum, leg) => sum + leg.weight, 0),
-          `${name}: ${route.host}`,
-        ).toBe(FULL_WEIGHT);
-      }
-    }
-  });
 
   it("agrees that an empty routing means an empty routing, in both formats", () => {
     /* Said in opposite ways, which is the whole difference between the two: a
@@ -541,12 +424,11 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
       );
       expect(firstTail, name).toBeGreaterThan(lastHost);
       const firstCatchAll = caddy.findIndex((id) => id.startsWith(CATCHALL_ID_PREFIX));
-      if (firstCatchAll !== -1) {
-        expect(
-          caddy.slice(firstCatchAll).every((id) => id.startsWith(CATCHALL_ID_PREFIX)),
-          name,
-        ).toBe(true);
-      }
+      const catchAlls = firstCatchAll === -1 ? [] : caddy.slice(firstCatchAll);
+      expect(
+        catchAlls.every((id) => id.startsWith(CATCHALL_ID_PREFIX)),
+        name,
+      ).toBe(true);
 
       /* Traefik scores rules rather than reading an array, so the rank is
          stated: the denial above the apex, both above the catch-all. */
@@ -603,7 +485,7 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
       traefikUpstreams(renderTraefikConfig(desired)),
     ]) {
       expect(driver.filter((leg) => leg.host === DOMAIN)).toEqual([
-        { host: DOMAIN, upstream: "127.0.0.1:42000", weight: FULL_WEIGHT, paths: "all" },
+        { host: DOMAIN, upstream: "127.0.0.1:42000", paths: "all" },
       ]);
     }
   });
@@ -706,34 +588,28 @@ function essenceOf(desired: IngressDesired): Upstream[] {
   const denied = [...(api?.denied ?? [])].sort().join(",");
 
   return [
-    ...desired.routes.flatMap((route) =>
-      route.backends.map((leg) => ({
-        host: route.host,
-        upstream: `127.0.0.1:${String(leg.backend.port)}`,
-        weight: leg.weight,
-        paths: "all",
-      })),
-    ),
+    ...desired.routes.map((route) => ({
+      host: route.host,
+      upstream: `127.0.0.1:${String(route.backend.port)}`,
+      paths: "all",
+    })),
     ...(wake?.hosts ?? []).map((host) => ({
       host,
       upstream: daemon,
-      weight: FULL_WEIGHT,
       paths: "all",
     })),
     ...(wake?.domains ?? []).map((domain) => ({
       host: `*.${domain}`,
       upstream: daemon,
-      weight: FULL_WEIGHT,
       paths: "all",
     })),
     /* Two entries per apex, and both are load-bearing: what the API answers for,
        and what is answered by the ingress itself and never proxied. */
     ...(api?.hosts ?? []).flatMap((host) => [
-      { host, upstream: DENIED, weight: FULL_WEIGHT, paths: `only ${denied}` },
+      { host, upstream: DENIED, paths: `only ${denied}` },
       {
         host,
         upstream: `127.0.0.1:${String(api?.port ?? 0)}`,
-        weight: FULL_WEIGHT,
         paths: `all except ${denied}`,
       },
     ]),
@@ -764,13 +640,7 @@ function nodeSurface(upstreams: Upstream[]): {
 }
 
 /**
- * What a Caddy route says: the host it matches, the upstreams it dials and the
- * share each takes.
- *
- * A route with no load-balancing policy has one upstream taking all of it, which
- * is how Caddy is told "there is nothing to choose between"; the weights of one
- * that has a policy are POSITIONAL, so they are zipped with the upstreams rather
- * than looked up.
+ * What a Caddy route says: the host it matches and the upstream it dials.
  */
 function caddyUpstreams(routes: CaddyRoute[]): Upstream[] {
   return routes
@@ -782,17 +652,12 @@ function caddyUpstreams(routes: CaddyRoute[]): Upstream[] {
             /* A static answer dials nothing, which is the whole of what it
                promises: it is read as the denial it is rather than skipped. */
             if (handle.handler === "static_response") {
-              return [{ host, upstream: DENIED, weight: FULL_WEIGHT, paths }];
+              return [{ host, upstream: DENIED, paths }];
             }
 
-            const weights = handle.load_balancing?.selection_policy.weights;
-            if (weights !== undefined && weights.length !== handle.upstreams.length) {
-              throw new Error(`"${host}" has ${String(weights.length)} weights for its upstreams`);
-            }
-            return handle.upstreams.map((upstream, at) => ({
+            return handle.upstreams.map((upstream) => ({
               host,
               upstream: upstream.dial,
-              weight: weights?.[at] ?? FULL_WEIGHT,
               paths,
             }));
           }),
@@ -824,9 +689,7 @@ function prefixesOf(patterns: string[]): string {
 
 /**
  * The same, read out of a Traefik document: the host comes out of the router's
- * rule, and the upstreams out of the service the rule names — following the
- * child services of a weighted one, so the extraction fails if a leg ever stops
- * resolving inside the document that declares it.
+ * rule, and the upstream out of the service the rule names.
  */
 function traefikUpstreams(config: TraefikDynamicConfig): Upstream[] {
   const services = config.http?.services ?? {};
@@ -845,29 +708,17 @@ function traefikUpstreams(config: TraefikDynamicConfig): Upstream[] {
          denial it is rather than resolved: nothing in this document declares it,
          and nothing is supposed to. */
       if (router.service === NOOP_SERVICE) {
-        return [{ host, upstream: DENIED, weight: FULL_WEIGHT, paths }];
+        return [{ host, upstream: DENIED, paths }];
       }
 
       const service = resolve(router.service);
-      const legs =
-        "weighted" in service
-          ? service.weighted.services.map((child) => ({
-              service: resolve(child.name),
-              weight: child.weight,
-            }))
-          : [{ service, weight: FULL_WEIGHT }];
-
-      return legs.flatMap((leg) => {
-        if ("weighted" in leg.service) throw new Error(`"${host}" nests a weighted service`);
-        return leg.service.loadBalancer.servers.map((server) => ({
-          host,
-          /* Down to the same authority the Caddy dial is written as; the scheme
+      return service.loadBalancer.servers.map((server) => ({
+        host,
+        /* Down to the same authority the Caddy dial is written as; the scheme
              is the format's business, the destination is the routing's. */
-          upstream: new URL(server.url).host,
-          weight: leg.weight,
-          paths,
-        }));
-      });
+        upstream: new URL(server.url).host,
+        paths,
+      }));
     })
     .sort(byUpstream);
 }
@@ -915,7 +766,6 @@ function environment(
   name: string,
   build?: string,
   domains: string[] = [],
-  split: SplitEntry[] | null = null,
 ): { project: string; env: EnvironmentRecord } {
   return {
     project,
@@ -924,7 +774,6 @@ function environment(
       name,
       prefix: `fleets/${project}/${name}`,
       alias: build === undefined ? null : { build, flippedAt: "2026-01-01T00:00:00.000Z" },
-      split,
       domains,
       placement: "auto",
       ephemeral: false,

@@ -237,7 +237,8 @@ function run(
       beginCleanup();
       if (cleanup !== undefined) await cleanup;
       if (cancelled) {
-        reject(aborted(opts.signal));
+        const failure = aborted(opts.signal);
+        reject(version === undefined ? failure : afterPublished(version, failure));
         return;
       }
       if (spawnFailure !== undefined) {
@@ -250,7 +251,11 @@ function run(
       }
       const ended =
         signal === null ? `exited with code ${String(code)}` : `was killed by ${signal}`;
-      const prefix = `"${command} ${args[0] ?? ""}" ${ended}: `;
+      const partial =
+        version === undefined
+          ? ""
+          : `celld reported version "${version.toLowerCase()}", so it may already have moved current; `;
+      const prefix = `${partial}"${command} ${args[0] ?? ""}" ${ended}: `;
       const tailBytes = Math.max(1, 4096 - new TextEncoder().encode(prefix).byteLength);
       reject(
         new ScafoError("invalid-input", "Publish failed", {
@@ -259,6 +264,17 @@ function run(
         }),
       );
     }
+  });
+}
+
+/** Preserves an abort's contract while making its possible pointer effect explicit. */
+function afterPublished(version: string, failure: ScafoError): ScafoError {
+  return new ScafoError(failure.code, failure.message, {
+    status: failure.status,
+    detail:
+      `celld reported version "${version.toLowerCase()}", so it may already have moved current ` +
+      `before publication was stopped`,
+    cause: failure,
   });
 }
 

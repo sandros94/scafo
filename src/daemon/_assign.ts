@@ -181,7 +181,7 @@ async function runCreditAssignment(
         project,
         env,
         replicas: resolveReplicas(found.value),
-        processes: wanted === null ? 0 : wanted.builds.length + (wanted.unresolved?.length ?? 0),
+        processes: wanted === null ? 0 : wanted.builds.length,
         ...(found.value.nodeSelector === undefined ? {} : { selector: found.value.nodeSelector }),
       });
     }

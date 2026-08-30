@@ -9,7 +9,7 @@
  *
  * BLOCK IS THE VERB WORTH READING TWICE. It is a full stop: a blocked project is
  * served nowhere in the fleet, its hosts are not woken, it gets no certificates
- * and it accepts no deploys — while every build, environment, alias and domain
+ * and it accepts no deploys — while every build, environment, current marker and domain
  * it has is left exactly where it was. Unblocking is one call, and the next pass
  * of every node puts it all back. It is admin-only, and deliberately: the case
  * it exists for is a platform stopping a project it hosts, which is precisely

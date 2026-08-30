@@ -1,318 +1,85 @@
-/*
- * What a request's Host asks this node to wake, and every way it asks for
- * nothing.
- *
- * THE HOST GRAMMAR IS THE EXACT INVERSE OF WHAT THE ROUTING RENDERS, so the
- * cases below are the routing's own kinds of host read backwards: a project's
- * apex, an environment's label, a build's own hash, and a custom domain a parked
- * environment claimed.
- *
- * NULL IS THE ONLY FAILURE, and the matrix exists because the ways of arriving
- * at it must stay indistinguishable from outside: a name that never existed, an
- * environment that was retired, a build the reaper has taken, one whose record
- * predates recall, and one whose environment has recall turned off are one
- * answer. The registry is a memory store seeded through the registry API itself.
- */
+/* Wake targets are environments; builds have no independently addressable host. */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import type { ParkedEnvironment } from "../src/daemon/_desired.ts";
-import { resolveWakeTarget, type WakeTarget } from "../src/daemon/_wake-target.ts";
-import { APEX_ENVIRONMENT } from "../src/core/placement/routes.ts";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import {
+  blockProject,
   claimDomain,
   createBuild,
   createEnvironment,
   createProject,
-  DEFAULT_BUILD_IDLE_S,
-  flipAlias,
-  getBuild,
   getEnvironment,
-  resolveParkPolicy,
   retireEnvironment,
-  setParkPolicy,
-  stampBuildWake,
 } from "../src/core/registry/index.ts";
-import type { EnvironmentRecord } from "../src/core/types/registry.ts";
+import { resolveWakeTarget } from "../src/daemon/_wake-target.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock } from "./_helpers.ts";
 
-const DOMAIN = "apps.test";
-const OTHER_DOMAIN = "apps.example";
 const PROJECT = "shop";
 const PREVIEW = "preview";
-const BUILD = "aaaa1111";
-/** The build a flip left behind: what a build-hash host recalls. */
-const SUPERSEDED = "bbbb2222";
-const CUSTOM = "shop.example.com";
+const BUILD = "aaaaaaaa";
+const DOMAIN = "preview.example.com";
 
 let clock: ManualClock;
 
 beforeEach(async () => {
   clock = ctxWith(new MemoryCasStore());
   await createProject(clock.ctx, { slug: PROJECT });
+  await createEnvironment(clock.ctx, PROJECT, { name: PREVIEW, ephemeral: true });
+  await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
+  await setCurrentBuild(clock.ctx, PROJECT, PREVIEW, BUILD);
 });
 
-describe("a host under a platform domain", () => {
-  it("reads the apex as the project's production environment", async () => {
-    const production = await deployed(APEX_ENVIRONMENT);
-
-    await expect(resolve(`${PROJECT}.${DOMAIN}`)).resolves.toEqual({
+describe("resolveWakeTarget", () => {
+  it("resolves an environment host", async () => {
+    await expect(target(`shop--${PREVIEW}.apps.test`)).resolves.toMatchObject({
       kind: "environment",
       project: PROJECT,
-      env: production,
-      policy: resolveParkPolicy(production),
+      env: { name: PREVIEW, alias: { build: BUILD } },
     });
   });
 
-  it("reads a label as that environment of that project", async () => {
-    const preview = await deployed(PREVIEW);
-
-    await expect(resolve(`${PROJECT}--${PREVIEW}.${DOMAIN}`)).resolves.toEqual({
-      kind: "environment",
-      project: PROJECT,
-      env: preview,
-      policy: resolveParkPolicy(preview),
+  it("resolves production from the project apex", async () => {
+    await createEnvironment(clock.ctx, PROJECT, { name: "production" });
+    await setCurrentBuild(clock.ctx, PROJECT, "production", BUILD);
+    await expect(target("shop.apps.test")).resolves.toMatchObject({
+      env: { name: "production" },
     });
   });
 
-  it("answers the same under every platform domain this installation serves", async () => {
-    await deployed(PREVIEW);
-
-    for (const domain of [DOMAIN, OTHER_DOMAIN]) {
-      const target = await resolve(`${PROJECT}--${PREVIEW}.${domain}`);
-      expect(target, domain).toMatchObject({ kind: "environment", env: { name: PREVIEW } });
-    }
+  it("resolves a parked environment's custom domain", async () => {
+    await claimDomain(clock.ctx, DOMAIN, PROJECT, PREVIEW);
+    await expect(target(DOMAIN, true)).resolves.toMatchObject({ env: { name: PREVIEW } });
+    await expect(target(DOMAIN)).resolves.toBeNull();
   });
 
-  it("prefers the ENVIRONMENT when a build id is also an environment name", async () => {
-    /* An environment may legally be named the same as some build. The label was
-       rendered from the environment first, so it is read back that way, and the
-       build's own host simply has nowhere to go. */
-    const named = await deployed(SUPERSEDED);
-    await deployed(PREVIEW, SUPERSEDED);
-
-    const target = await resolve(`${PROJECT}--${SUPERSEDED}.${DOMAIN}`);
-
-    expect(named.name).toBe(SUPERSEDED);
-    expect(target).toMatchObject({ kind: "environment", env: { name: SUPERSEDED } });
+  it("does not reinterpret an unknown environment label as a build", async () => {
+    await expect(target(`shop--${BUILD}.apps.test`)).resolves.toBeNull();
   });
 
-  it("reads a build hash as that build, once nothing answers to it as an environment", async () => {
-    const preview = await deployed(PREVIEW);
-    await recorded(SUPERSEDED, PREVIEW);
-
-    /* Recalling a superseded build means starting a process against the fleet
-       holding its code, and the build record is the only thing that says which
-       fleet that is — which is why the target carries the environment too. */
-    await expect(resolve(`${PROJECT}--${SUPERSEDED}.${DOMAIN}`)).resolves.toEqual({
-      kind: "build",
-      project: PROJECT,
-      env: preview,
-      build: await getBuild(clock.ctx, PROJECT, SUPERSEDED),
-      policy: resolveParkPolicy(preview),
-      active: false,
-    });
-  });
-
-  it("marks an active alias build rather than treating it as a recalled one", async () => {
-    const preview = await deployed(PREVIEW);
-
-    await expect(resolve(`${PROJECT}--${BUILD}.${DOMAIN}`)).resolves.toMatchObject({
-      kind: "build",
-      env: preview,
-      build: { id: BUILD },
-      active: true,
-    });
-  });
-
-  it("takes an active build even when superseded-build recall is disabled", async () => {
-    const preview = await deployed(PREVIEW);
-    await setParkPolicy(clock.ctx, PROJECT, PREVIEW, { recallBuilds: false });
-
-    await expect(resolve(`${PROJECT}--${BUILD}.${DOMAIN}`)).resolves.toMatchObject({
-      kind: "build",
-      env: preview,
-      build: { id: BUILD },
-      active: true,
-    });
-  });
-
-  it("never reads an apex host as a build", async () => {
-    /* An apex host has no second half to read as one, so a project with no
-       production environment is a 404 rather than a hunt through its builds. */
-    await recorded(BUILD, PREVIEW);
-
-    await expect(resolve(`${PROJECT}.${DOMAIN}`)).resolves.toBeNull();
-  });
-
-  it.each([
-    [`${PROJECT}--ghost.${DOMAIN}`, "a name no environment and no build answers to"],
-    [`${PROJECT}--deadbeef.${DOMAIN}`, "a build id nothing was ever recorded under"],
-    [`ghost--${PREVIEW}.${DOMAIN}`, "a project that does not exist"],
-    [`a--b--c.${DOMAIN}`, "a label with too many halves"],
-    [`NOTALABEL.${DOMAIN}`, "a label that is not a slug"],
-    [`${PROJECT}--${PREVIEW}.elsewhere.test`, "a domain this installation does not serve"],
-    [DOMAIN, "the platform domain itself, which is nobody's project"],
-  ])("answers nothing for %s — %s", async (host) => {
-    await deployed(PREVIEW);
-
-    await expect(resolve(host)).resolves.toBeNull();
-  });
-});
-
-describe("an environment there is no point waking", () => {
-  it("refuses a retired one rather than holding a request for it", async () => {
-    /* On its way out: no node will start anything for it, however hard the
-       request asks, so it is a 404 rather than a request held to the deadline. */
-    await deployed(PREVIEW);
+  it("refuses missing-current, retired and blocked environments", async () => {
+    await createEnvironment(clock.ctx, PROJECT, { name: "empty" });
+    await expect(target("shop--empty.apps.test")).resolves.toBeNull();
     await retireEnvironment(clock.ctx, PROJECT, PREVIEW);
+    await expect(target(`shop--${PREVIEW}.apps.test`)).resolves.toBeNull();
 
-    await expect(resolve(`${PROJECT}--${PREVIEW}.${DOMAIN}`)).resolves.toBeNull();
+    await createEnvironment(clock.ctx, PROJECT, { name: "other" });
+    await setCurrentBuild(clock.ctx, PROJECT, "other", BUILD);
+    await blockProject(clock.ctx, PROJECT);
+    await expect(target("shop--other.apps.test")).resolves.toBeNull();
   });
 
-  it("refuses one whose alias was never flipped", async () => {
-    /* There is no build to serve at its own hosts, so waking it would achieve
-       nothing. */
-    await createEnvironment(clock.ctx, PROJECT, { name: PREVIEW, ephemeral: true });
-
-    await expect(resolve(`${PROJECT}--${PREVIEW}.${DOMAIN}`)).resolves.toBeNull();
-  });
-
-  it("takes one whose alias was never flipped but has a build inside its window", async () => {
-    /* The same outcome for a different reason, and the one exception: a build
-       somebody woke is a process this node will start, and it does answer. */
-    await createEnvironment(clock.ctx, PROJECT, { name: PREVIEW, ephemeral: true });
-    await recorded(SUPERSEDED, PREVIEW);
-    await stampBuildWake(clock.ctx, PROJECT, PREVIEW, SUPERSEDED);
-
-    await expect(resolve(`${PROJECT}--${PREVIEW}.${DOMAIN}`)).resolves.toMatchObject({
-      kind: "environment",
-      env: { name: PREVIEW, alias: null },
-    });
-  });
-
-  it("refuses one whose recalled build has aged out of its window", async () => {
-    await createEnvironment(clock.ctx, PROJECT, { name: PREVIEW, ephemeral: true });
-    await recorded(SUPERSEDED, PREVIEW);
-    await stampBuildWake(clock.ctx, PROJECT, PREVIEW, SUPERSEDED);
-
-    clock.tick(DEFAULT_BUILD_IDLE_S * 1000);
-
-    await expect(resolve(`${PROJECT}--${PREVIEW}.${DOMAIN}`)).resolves.toBeNull();
-  });
-
-  it("refuses one whose fresh stamp names a build the reaper has taken", async () => {
-    /* The record is READ rather than trusted: a stamp outlives the build it
-       named, and one pointing at nothing wakes nothing. */
-    await createEnvironment(clock.ctx, PROJECT, { name: PREVIEW, ephemeral: true });
-    await stampBuildWake(clock.ctx, PROJECT, PREVIEW, "deadbeef");
-
-    await expect(resolve(`${PROJECT}--${PREVIEW}.${DOMAIN}`)).resolves.toBeNull();
-  });
-
-  it("refuses one whose fresh stamp is under a policy that recalls nothing", async () => {
-    await createEnvironment(clock.ctx, PROJECT, { name: PREVIEW, ephemeral: true });
-    await recorded(SUPERSEDED, PREVIEW);
-    await stampBuildWake(clock.ctx, PROJECT, PREVIEW, SUPERSEDED);
-    await setParkPolicy(clock.ctx, PROJECT, PREVIEW, { recallBuilds: false });
-
-    await expect(resolve(`${PROJECT}--${PREVIEW}.${DOMAIN}`)).resolves.toBeNull();
+  it("answers unknown and malformed hosts uniformly", async () => {
+    await expect(target("other.test")).resolves.toBeNull();
+    await expect(target("not_a_host.apps.test")).resolves.toBeNull();
   });
 });
 
-describe("a build hash that recalls nothing", () => {
-  it("refuses a build whose record does not say which fleet holds its code", async () => {
-    /* A record that predates recall. Its host answers 404 rather than starting a
-       process against a guess. */
-    await deployed(PREVIEW);
-    await createBuild(clock.ctx, PROJECT, { id: SUPERSEDED, runtimeConfigurable: true });
-
-    await expect(resolve(`${PROJECT}--${SUPERSEDED}.${DOMAIN}`)).resolves.toBeNull();
+async function target(host: string, parked = false): Promise<unknown> {
+  const env = await getEnvironment(clock.ctx, PROJECT, PREVIEW);
+  return resolveWakeTarget(clock.ctx, {
+    host,
+    platformDomains: ["apps.test"],
+    parked: parked ? [{ project: PROJECT, env }] : [],
   });
-
-  it("refuses a build whose environment is gone", async () => {
-    await recorded(SUPERSEDED, "ghost");
-
-    await expect(resolve(`${PROJECT}--${SUPERSEDED}.${DOMAIN}`)).resolves.toBeNull();
-  });
-
-  it("refuses a build whose environment has been retired", async () => {
-    await deployed(PREVIEW);
-    await recorded(SUPERSEDED, PREVIEW);
-    await retireEnvironment(clock.ctx, PROJECT, PREVIEW);
-
-    await expect(resolve(`${PROJECT}--${SUPERSEDED}.${DOMAIN}`)).resolves.toBeNull();
-  });
-
-  it.each([{ recallBuilds: false }, { buildIdleS: 0 }])(
-    "refuses one whose environment says %p",
-    async (policy) => {
-      /* `recallBuilds`, or a `buildIdleS` of zero, which is the same statement
-         made with a clock. */
-      await deployed(PREVIEW);
-      await recorded(SUPERSEDED, PREVIEW);
-      await setParkPolicy(clock.ctx, PROJECT, PREVIEW, policy);
-
-      await expect(resolve(`${PROJECT}--${SUPERSEDED}.${DOMAIN}`)).resolves.toBeNull();
-    },
-  );
-});
-
-describe("a custom domain", () => {
-  it("wakes the parked environment whose record mirrors it", async () => {
-    const parked = await claimed(PREVIEW);
-
-    await expect(resolve(CUSTOM, [{ project: PROJECT, env: parked }])).resolves.toEqual({
-      kind: "environment",
-      project: PROJECT,
-      env: parked,
-      policy: resolveParkPolicy(parked),
-    });
-  });
-
-  it("answers nothing for one no parked record lists", async () => {
-    /* A custom domain is only wakeable while the environment holding it is one
-       this node reads as parked: nothing else claims a name scafo did not mint,
-       and a claimed domain whose environment is up is served by that process. */
-    await claimed(PREVIEW);
-
-    await expect(resolve(CUSTOM)).resolves.toBeNull();
-  });
-
-  it("answers nothing for a host under no platform domain and no parked record", async () => {
-    const parked = await claimed(PREVIEW);
-
-    await expect(
-      resolve("something.elsewhere.test", [{ project: PROJECT, env: parked }]),
-    ).resolves.toBeNull();
-  });
-});
-
-/** Resolves `host` against this installation's platform domains and parked list. */
-function resolve(host: string, parked: ParkedEnvironment[] = []): Promise<WakeTarget | null> {
-  return resolveWakeTarget(clock.ctx, { host, platformDomains: [DOMAIN, OTHER_DOMAIN], parked });
-}
-
-/** An ephemeral environment of the seeded project, with a build flipped onto it. */
-async function deployed(name: string, build: string = BUILD): Promise<EnvironmentRecord> {
-  await createEnvironment(clock.ctx, PROJECT, { name, ephemeral: true });
-  await recorded(build, name);
-  await flipAlias(clock.ctx, PROJECT, name, build);
-  return getEnvironment(clock.ctx, PROJECT, name);
-}
-
-/** A build recorded against the fleet of `env`, which is what makes it recallable. */
-async function recorded(build: string, env: string): Promise<void> {
-  await createBuild(clock.ctx, PROJECT, {
-    id: build,
-    runtimeConfigurable: true,
-    environment: env,
-  });
-}
-
-/** A deployed environment with {@link CUSTOM} claimed for it, read back. */
-async function claimed(name: string): Promise<EnvironmentRecord> {
-  await deployed(name);
-  await claimDomain(clock.ctx, CUSTOM, PROJECT, name);
-  return getEnvironment(clock.ctx, PROJECT, name);
 }

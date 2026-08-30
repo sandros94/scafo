@@ -8,7 +8,6 @@ import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { checkDomain } from "../core/registry/domains.ts";
 import { isProjectBlocked } from "../core/registry/projects.ts";
-import { canarySplit, flipAlias, rollbackAlias, setSplit } from "../core/registry/environments.ts";
 import { isLeaseExpired } from "../core/registry/lease.ts";
 import { setParkPolicy } from "../core/registry/park.ts";
 import { APEX_ENVIRONMENT } from "../core/placement/routes.ts";
@@ -25,12 +24,7 @@ import {
   type ArtifactStager,
   type StagedArtifact,
 } from "../core/types/deploy.ts";
-import type {
-  CoordinatorLease,
-  EnvironmentRecord,
-  NodeRecord,
-  ScafoWarning,
-} from "../core/types/registry.ts";
+import type { CoordinatorLease, EnvironmentRecord, NodeRecord } from "../core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../core/types/supervisor.ts";
 import { isHost } from "../core/utils/host.ts";
 import { assertSlug, formatHostLabel, parseHostLabel } from "../core/utils/slug.ts";
@@ -39,11 +33,9 @@ import { deleteEnvironmentRequest } from "./_environments.ts";
 import { isPullingIngress } from "./_ingress.ts";
 import {
   type DeployVerifiers,
-  readAliasRequest,
   readDeployMetadata,
   readParkRequest,
   readSelectorRequest,
-  readSplitRequest,
   verifyCaller,
 } from "./_intake.ts";
 import type { IngressCounters } from "./access-counters.ts";
@@ -119,14 +111,6 @@ export interface DaemonContext {
    * what says which environment a host in that log belongs to.
    */
   ingressCounters?: IngressCounters;
-  /**
-   * Where the wake surface's weighted pick between an environment's serving legs
-   * comes from — a value in `[0, 1)`, drawn once per look at a held request.
-   *
-   * Defaults to `Math.random`, which is what a split asks for. Injectable so a
-   * test can state which leg a request takes rather than sample for it.
-   */
-  random?: () => number;
   /**
    * Where the node publishes what it serves. Without one the processes still
    * run and are simply not reachable from outside the node.
@@ -227,15 +211,9 @@ export interface EnvironmentDeleted {
   deleted: string[];
 }
 
-/** Body of the retire, unretire, selector, park and split routes: the environment as it now stands. */
+/** Body of an environment configuration route. */
 export interface EnvironmentResult {
   environment: EnvironmentRecord;
-}
-
-/** Body of an environment alias change: the environment as it now stands. */
-export interface AliasResult {
-  environment: EnvironmentRecord;
-  warnings: ScafoWarning[];
 }
 
 /**
@@ -267,8 +245,8 @@ export function createNodeApp(daemon: DaemonContext): H3 {
    * HOST DISPATCH, AND IT COMES BEFORE EVERYTHING. A node's routing sends two
    * kinds of traffic to this listener: the operator and peer calls the routes
    * below answer, and every host the ingress had nothing else to do with — a
-   * parked environment's, a superseded build's, or a name under a platform
-   * domain that nothing serves. The second kind is decided by the `Host` header
+   * parked environment's, or a name under a platform domain that nothing
+   * serves. The second kind is decided by the `Host` header
    * alone and never reaches a route: no API path, no token, and no fall into an
    * API 404 either, because a host on that surface is answered by the wake
    * service whatever path it asks for.
@@ -457,33 +435,6 @@ export function createNodeApp(daemon: DaemonContext): H3 {
   );
 
   /*
-   * How an environment's traffic is divided between its builds, set or cleared.
-   * A plain CAS update on one record, like the two above, and it states an
-   * intent the same way: the nodes serving the environment start the legs it
-   * names on their next passes, and the routing follows as each becomes ready.
-   *
-   * Authenticated like the alias route rather than like the selector — with a
-   * WORKLOAD token accepted for the project in the path — because a split is the
-   * same kind of act as a flip: it moves an application's live traffic between
-   * that application's own builds, which is what a project's CI is trusted to do
-   * for its own project and for no other.
-   */
-  app.post("/v1/environments/:project/:env/split", async (event): Promise<EnvironmentResult> => {
-    const [project, name] = target(event);
-    /* Before the body is read: the project is in the path, so there is nothing
-         to learn from the request first. */
-    await verifyCaller(verifiers, event, project);
-
-    const request = await readSplitRequest(event, { maxBytes: daemon.config.api.jsonBytes });
-    return {
-      environment:
-        request.kind === "canary"
-          ? await canarySplit(daemon.registry, project, name, request.canary)
-          : await setSplit(daemon.registry, project, name, request.split),
-    };
-  });
-
-  /*
    * Deleting is lease-gated, so only the coordinator can carry it out — but any
    * node accepts the request and forwards it there, because which node holds the
    * lease is this installation's business rather than the operator's.
@@ -560,18 +511,6 @@ export function createNodeApp(daemon: DaemonContext): H3 {
       });
     }
     return status;
-  });
-
-  app.post("/v1/projects/:project/environments/:env/alias", async (event): Promise<AliasResult> => {
-    const [project, environment] = target(event);
-    await verifyCaller(verifiers, event, project);
-    const request = await readAliasRequest(event, { maxBytes: daemon.config.api.jsonBytes });
-
-    if (request.rollback) {
-      const rolledBack = await rollbackAlias(daemon.registry, project, environment);
-      return { environment: rolledBack, warnings: [] };
-    }
-    return flipAlias(daemon.registry, project, environment, request.build as string);
   });
 
   /*
@@ -700,7 +639,7 @@ async function servesHost(daemon: DaemonContext, host: string): Promise<boolean>
 
   /*
    * A platform-domain host is approved only when the name resolves to
-   * something real: an environment, a wakeable build, or a process actually
+   * something real: an environment that can be woken, or a process actually
    * running one. A parseable label alone is NOT enough — the ask gates
    * CERTIFICATE ISSUANCE, and approving every well-formed name would let
    * anyone mint issuance attempts for junk labels until the CA's rate limit
@@ -736,8 +675,8 @@ async function servesHost(daemon: DaemonContext, host: string): Promise<boolean>
 }
 
 /**
- * Whether a process this node is RUNNING answers to the label: its build-hash
- * name, or its environment's own label. Running is what matters here — a
+ * Whether a process this node is RUNNING answers to its environment label.
+ * Running is what matters here — a
  * served host needs its certificate whatever its park policy says about
  * waking it later.
  */
@@ -745,7 +684,6 @@ function servedLabel(daemon: DaemonContext, label: string): boolean {
   const processes = daemon.reconciler?.status().processes ?? [];
   return processes.some(
     (process) =>
-      label === formatHostLabel(process.project, process.build) ||
       label === formatHostLabel(process.project, process.env) ||
       (process.env === APEX_ENVIRONMENT && label === process.project),
   );

@@ -11,6 +11,7 @@
 
 import { S3Client } from "uns3";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { setCurrentBuild } from "../../src/core/registry/_current.ts";
 import {
   acquireLease,
   checkDomain,
@@ -18,7 +19,6 @@ import {
   createBuild,
   createEnvironment,
   createProject,
-  flipAlias,
   getVarsetEnvelope,
   importVarsetKey,
   initRegistry,
@@ -225,10 +225,10 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
         await expect(listProjects(ctx)).resolves.toContain(project);
 
         const build = await createBuild(ctx, project, { id: buildId, runtimeConfigurable: true });
-        expect(build.artifact).toBe(`artifacts/${project}/${buildId}.tar.zst`);
+        expect(build.id).toBe(buildId);
 
         await createEnvironment(ctx, project, { name: "prod" });
-        const flipped = await flipAlias(ctx, project, "prod", buildId);
+        const flipped = await setCurrentBuild(ctx, project, "prod", buildId);
         expect(flipped.environment.alias).toMatchObject({ build: buildId });
         expect(flipped.warnings).toEqual([]);
 

@@ -3,8 +3,8 @@
  * process is serving yet.
  *
  * A request arrives here because the routing sent it here — a parked
- * environment's host, a superseded build's hash host, or any host under a
- * platform domain that nothing else claims. It is held while the reconcile loop
+ * environment's host, or any host under a platform domain that nothing else
+ * claims. It is held while the reconcile loop
  * starts what it asked for, and handed to that process once it is ready.
  *
  * WHICH NODE STARTS IT IS THE PLACEMENT'S ANSWER RATHER THAN THE ROUTING'S.
@@ -20,8 +20,8 @@ import { describeError, ScafoError } from "../core/error.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
 import { countingRegistry, storeOpsOf } from "../core/registry/counting.ts";
 import { readPlacement } from "../core/registry/placement.ts";
-import { stampBuildWake, stampEnvironmentWake } from "../core/registry/wake.ts";
-import { pickLeg, servingLegs } from "../core/placement/routes.ts";
+import { stampEnvironmentWake } from "../core/registry/wake.ts";
+import { servingBackend } from "../core/placement/routes.ts";
 import type { NodeRecord, PlacementRecord } from "../core/types/registry.ts";
 import { startBudget } from "../core/utils/budget.ts";
 import { isProxiedHop, liveAssignedNodes } from "./_peer.ts";
@@ -152,18 +152,14 @@ type WakeRun =
  * request only reaches the daemon through routing lag — the ingress has not yet
  * been told the process is ready — and the ordinary path answers it correctly:
  * the ready process is found on the first look and the request is proxied
- * without ever being held. A build-hash request for an active leg writes no
- * recall stamp; it records environment activity, so that leg remains or becomes
- * desired as the next pass reads it.
+ * without ever being held. It records environment activity so the next pass
+ * keeps that environment desired.
  */
 export function createWakeService(daemon: DaemonContext): WakeService {
   let inFlight = 0;
   let admitted = 0;
   let refused = 0;
   let forwarded = 0;
-
-  /** Where the weighted pick between an environment's legs comes from. */
-  const draw = daemon.random ?? Math.random;
 
   /* Where a woken process is dialled: WHAT IT BINDS, which is loopback on a
      single node and this node's tunnel address on a fleet. The same value the
@@ -195,35 +191,14 @@ export function createWakeService(daemon: DaemonContext): WakeService {
    * The loopback port serving the target right now, or undefined while nothing
    * is.
    *
-   * AN ENVIRONMENT IS ANSWERED WITH WHAT THE INGRESS WOULD ANSWER IT WITH, from
-   * {@link servingLegs} — the same computation `renderRoutes` weights its hosts
-   * over — and never with "any ready process of this environment". THE FLIP
-   * WINDOW IS WHY, and it is minutes wide: the process serving the build a flip
-   * superseded keeps running until every desired leg is ready and a later pass
-   * stops it, so answering from any ready process serves the SUPERSEDED build
-   * for that whole window while the ingress has already moved. Nor is it a
-   * corner — every host without an explicit route falls through to this daemon,
-   * so during router propagation, and for every parked or starting environment,
-   * this answer IS the user-visible one.
-   *
-   * The pick among the legs is weighted as the ingress weights them, one draw
-   * per look. A RECALLED BUILD IS ITS OWN CASE: it takes no share of the
-   * environment's hosts and is therefore no leg of it, so its own hash host is
-   * matched exactly against the process serving THAT build and nothing else.
+   * An environment is answered with the same current ready backend the ingress
+   * renders, never with any ready process left over from an internal rollout.
+   * That distinction matters while the old process overlaps its replacement.
    */
   function servingPort(target: WakeTarget): number | undefined {
     const processes = daemon.reconciler?.status().processes ?? [];
 
-    if (target.kind === "build") {
-      return processes.find(
-        (process) =>
-          process.ready &&
-          process.project === target.project &&
-          process.env === target.env.name &&
-          process.build === target.build.id,
-      )?.port;
-    }
-    return pickLeg(servingLegs(target.project, target.env, processes), draw())?.backend.port;
+    return servingBackend(target.project, target.env, processes)?.port;
   }
 
   /**
@@ -249,22 +224,12 @@ export function createWakeService(daemon: DaemonContext): WakeService {
 
   /**
    * Records a demand the desired state cannot already derive. Never swallowed:
-   * the stamp is the whole of what makes an environment or superseded build
-   * start, so a wake that cannot be written down is a wake that will not happen,
+   * the stamp is the whole of what makes a parked environment start, so a wake
+   * that cannot be written down is a wake that will not happen,
    * and holding the request until the deadline would only report it thirty
-   * seconds later. An active build always records environment activity rather
-   * than a build recall: a parked environment needs the stamp to become desired,
-   * and a running one has received meaningful traffic.
+   * seconds later. A running environment has received meaningful traffic too.
    */
   async function stamp(registry: RegistryContext, target: WakeTarget): Promise<void> {
-    if (target.kind === "build") {
-      if (target.active) {
-        await stampEnvironmentWake(registry, target.project, target.env.name);
-        return;
-      }
-      await stampBuildWake(registry, target.project, target.env.name, target.build.id);
-      return;
-    }
     await stampEnvironmentWake(registry, target.project, target.env.name);
   }
 
@@ -373,10 +338,8 @@ export function createWakeService(daemon: DaemonContext): WakeService {
           type: "wake.admitted",
           id,
           host,
-          kind: target.kind,
           project: target.project,
           env: target.env.name,
-          ...(target.kind === "build" ? { build: target.build.id } : {}),
           inFlight,
         });
         /* What resolving the Host and the placement cost, attributed to the
@@ -513,8 +476,8 @@ function forwardedHost(event: H3Event): string | null {
  * A name this installation has nothing to serve at, and the ONE answer every way
  * of getting there shares.
  *
- * It says nothing about which way that was — never deployed, retired, reaped,
- * recall turned off — and it is permanent by design rather than by omission: the
+ * It says nothing about which way that was — never deployed, retired or reaped —
+ * and it is permanent by design rather than by omission: the
  * bucket is the source of truth, and a record deleted from it does not come back.
  */
 function unknownHost(host: string): Response {

@@ -5,6 +5,7 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import {
   acquireLease,
   createBuild,
@@ -12,7 +13,6 @@ import {
   createProject,
   deleteEnvironment,
   deletePlacement,
-  flipAlias,
   getEnvironment,
   heartbeatNode,
   isNodeLive,
@@ -58,7 +58,7 @@ beforeEach(async () => {
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, { name: ENV });
   await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
-  await flipAlias(clock.ctx, PROJECT, ENV, BUILD);
+  await setCurrentBuild(clock.ctx, PROJECT, ENV, BUILD);
 
   const acquired = await acquireLease(clock.ctx, NODE_A);
   if (acquired === null) throw new Error("the fixture could not take the lease");

@@ -8,27 +8,22 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import { type DesiredState, readDesired } from "../src/daemon/_desired.ts";
 import {
   acquireLease,
-  buildKey,
   createBuild,
   createEnvironment,
   createProject,
-  DEFAULT_BUILD_IDLE_S,
   DEFAULT_EPHEMERAL_PARK_AFTER_S,
-  deleteKey,
   deletePlacement,
   environmentKey,
-  flipAlias,
   type LeaseHandle,
   putJson,
   readJson,
   retireEnvironment,
   setNodeSelector,
   setParkPolicy,
-  setSplit,
-  stampBuildWake,
   stampEnvironmentWake,
   unretireEnvironment,
   writePlacement,
@@ -42,17 +37,12 @@ import { ctxWith, type ManualClock, ObservingStore } from "./_helpers.ts";
 const PROJECT = "shop";
 const OTHER_PROJECT = "blog";
 const BUILD = "b1b1b1b1";
-const OTHER_BUILD = "b2b2b2b2";
-/** A third build, so a wake has something to recall that is nobody's leg. */
-const THIRD_BUILD = "b3b3b3b3";
 const SELF = "node-a";
 const PEER = "node-b";
 const PREVIEW = "preview";
 const HOUR_MS = 3_600_000;
 /** How long an ephemeral environment runs past its last wake, by default. */
 const PARK_AFTER_MS = DEFAULT_EPHEMERAL_PARK_AFTER_S * 1000;
-/** How long a recalled build runs past ITS last wake, by default. */
-const BUILD_IDLE_MS = DEFAULT_BUILD_IDLE_S * 1000;
 
 let clock: ManualClock;
 let registry: RegistryContext;
@@ -267,7 +257,7 @@ describe("an environment that carries a node selector", () => {
 });
 
 describe("what is left out for reasons other than placement", () => {
-  it("leaves out an environment whose alias was never flipped, placed or not", async () => {
+  it("leaves out an environment without a current build, placed or not", async () => {
     await createEnvironment(registry, PROJECT, { name: "fresh" });
     await writePlacement(registry, PROJECT, "fresh", [SELF], lease);
 
@@ -356,110 +346,7 @@ describe("what is left out for reasons other than placement", () => {
   });
 });
 
-describe("an environment whose traffic is split", () => {
-  beforeEach(async () => {
-    await createBuild(registry, PROJECT, { id: OTHER_BUILD, runtimeConfigurable: true });
-  });
-
-  it("resolves the alias first, then the legs in the order the registry states them", async () => {
-    await setSplit(registry, PROJECT, "prod", [
-      { build: OTHER_BUILD, weight: 90 },
-      { build: BUILD, weight: 10 },
-    ]);
-
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
-
-    /* Alias FIRST, whatever the split says, because the alias is the primary
-       pointer whether or not it is also a leg — and then the split in its own
-       order, so two nodes plan the same rollouts in the same sequence. */
-    expect(state.environments[0].builds).toEqual([
-      { build: expect.objectContaining({ id: BUILD }), role: "alias" },
-      { build: expect.objectContaining({ id: OTHER_BUILD }), role: "split" },
-    ]);
-    expect(state.failures).toEqual([]);
-  });
-
-  it("counts a leg that names the alias once", async () => {
-    await setSplit(registry, PROJECT, "prod", [
-      { build: BUILD, weight: 50 },
-      { build: OTHER_BUILD, weight: 50 },
-    ]);
-
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
-
-    expect(state.environments[0].builds.map((leg) => leg.build.id)).toEqual([BUILD, OTHER_BUILD]);
-    expect(state.environments[0].builds[0].role).toBe("alias");
-  });
-
-  it("keeps the environment and records the leg whose build is gone", async () => {
-    /*
-     * A corrupted or raced registry — the reaper refuses to delete a build any
-     * split references — and the reading that matters is what does NOT happen:
-     * the environment stays desired, so nothing it runs is planned for a stop.
-     * Dropping the leg silently would retire the process still serving it and
-     * hand its share of the traffic to the other legs.
-     */
-    await setSplit(registry, PROJECT, "prod", [
-      { build: BUILD, weight: 90 },
-      { build: OTHER_BUILD, weight: 10 },
-    ]);
-    await deleteKey(registry, buildKey(PROJECT, OTHER_BUILD));
-
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
-
-    expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
-    expect(state.environments[0].builds.map((leg) => leg.build.id)).toEqual([BUILD]);
-    expect(state.environments[0].unresolved).toEqual([OTHER_BUILD]);
-    expect(state.failures).toEqual([
-      { subject: `${PROJECT}/prod`, detail: expect.stringContaining(OTHER_BUILD) },
-    ]);
-  });
-
-  it("says nothing about unresolved legs when every one of them resolved", async () => {
-    await setSplit(registry, PROJECT, "prod", [
-      { build: BUILD, weight: 90 },
-      { build: OTHER_BUILD, weight: 10 },
-    ]);
-
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
-
-    /* No field rather than an empty one: an environment with nothing missing
-       says nothing here, exactly as an unconstrained one says no selector. */
-    expect(state.environments[0].unresolved).toBeUndefined();
-  });
-
-  it("goes back to the alias alone the moment the split is cleared", async () => {
-    await setSplit(registry, PROJECT, "prod", [
-      { build: BUILD, weight: 50 },
-      { build: OTHER_BUILD, weight: 50 },
-    ]);
-    await setSplit(registry, PROJECT, "prod", null);
-
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
-
-    expect(state.environments[0].builds.map((leg) => leg.build.id)).toEqual([BUILD]);
-  });
-
-  it("leaves a retired environment out, split or no split", async () => {
-    await setSplit(registry, PROJECT, "prod", [
-      { build: BUILD, weight: 50 },
-      { build: OTHER_BUILD, weight: 50 },
-    ]);
-    await retireEnvironment(registry, PROJECT, "prod");
-
-    expect(
-      (await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" })).environments,
-    ).toEqual([]);
-  });
-});
-
 describe("an ephemeral environment that has gone quiet", () => {
-  beforeEach(async () => {
-    for (const id of [OTHER_BUILD, THIRD_BUILD]) {
-      await createBuild(registry, PROJECT, { id, runtimeConfigurable: true });
-    }
-  });
-
   it("is served exactly as it always was while its wake is fresh", async () => {
     await parkable(PREVIEW);
     await stampEnvironmentWake(registry, PROJECT, PREVIEW);
@@ -473,18 +360,13 @@ describe("an ephemeral environment that has gone quiet", () => {
 
   it("parks once nothing has woken it for as long as its policy allows", async () => {
     await parkable(PREVIEW);
-    await setSplit(registry, PROJECT, PREVIEW, [
-      { build: BUILD, weight: 90 },
-      { build: OTHER_BUILD, weight: 10 },
-    ]);
     await stampEnvironmentWake(registry, PROJECT, PREVIEW);
     clock.tick(PARK_AFTER_MS);
 
     const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     /*
-     * Its alias AND every leg of its split go together: parking is about the
-     * environment, not about one pointer. The next pass stops them, and because
+     * Its current build stops with the environment. The next pass stops it, and because
      * the routing is rendered from what this node actually runs, its own hosts
      * stop resolving with them.
      */
@@ -496,10 +378,10 @@ describe("an ephemeral environment that has gone quiet", () => {
     expect(state.failures).toEqual([]);
   });
 
-  it("counts the wait from the alias flip when nothing has ever stamped it", async () => {
+  it("counts the wait from the current deployment when nothing has ever stamped it", async () => {
     await createEnvironment(registry, PROJECT, { name: PREVIEW, ephemeral: true });
     clock.tick(PARK_AFTER_MS);
-    await flipAlias(registry, PROJECT, PREVIEW, BUILD);
+    await setCurrentBuild(registry, PROJECT, PREVIEW, BUILD);
 
     /* Created long ago, deployed a moment ago. An environment that predates
        wake stamps must not read as parked the instant a node that knows about
@@ -514,39 +396,22 @@ describe("an ephemeral environment that has gone quiet", () => {
     ).toEqual([{ project: PROJECT, env: PREVIEW }]);
   });
 
-  it("counts the wait from its creation when it has neither a stamp nor a flip", async () => {
-    /* The only case in which the creation is the base, and it is observable in
-       one place: nothing of the environment's own is served either way, so what
-       the base decides is whether a build somebody woke may run at its own host. */
+  it("counts the wait from its creation when it has neither a stamp nor a deployment", async () => {
+    /* Nothing of an environment without a current build is served. */
     await createEnvironment(registry, PROJECT, { name: PREVIEW, ephemeral: true });
     clock.tick(PARK_AFTER_MS);
-    await stampBuildWake(registry, PROJECT, PREVIEW, THIRD_BUILD);
 
     const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
-    expect(await legsOf(PREVIEW)).toEqual([{ id: THIRD_BUILD, role: "recalled" }]);
-    /* And it is NOT called parked: an environment whose alias was never flipped
-       serves nothing either way, and calling it parked would promise an operator
-       that a request wakes something. */
+    expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
     expect(state.parked).toEqual([]);
-  });
-
-  it("recalls a build woken while it is still inside its own window", async () => {
-    /* Whether a build wake is honoured does not depend on the environment
-       around it: here the environment is AWAKE (a deploy just stamped it) and
-       has never flipped, and the woken build runs at its own host anyway. */
-    await createEnvironment(registry, PROJECT, { name: PREVIEW, ephemeral: true });
-    await stampEnvironmentWake(registry, PROJECT, PREVIEW);
-    await stampBuildWake(registry, PROJECT, PREVIEW, THIRD_BUILD);
-
-    expect(await legsOf(PREVIEW)).toEqual([{ id: THIRD_BUILD, role: "recalled" }]);
   });
 
   it("keeps it awake when the timestamp it would count from cannot be read", async () => {
     /* Nothing here should stop an application over a timestamp it could not
        parse: a damaged record is not evidence that anything has gone quiet. */
     await parkable(PREVIEW);
-    await damageFlip(PREVIEW);
+    await damageCurrentTimestamp(PREVIEW);
     clock.tick(PARK_AFTER_MS * 100);
 
     const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
@@ -562,7 +427,7 @@ describe("an ephemeral environment that has gone quiet", () => {
 
     const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
-    expect(await legsOf(PREVIEW)).toEqual([{ id: BUILD, role: "alias" }]);
+    expect(await legsOf(PREVIEW)).toEqual([{ id: BUILD, role: "current" }]);
     expect(state.parked).toEqual([]);
   });
 
@@ -582,117 +447,6 @@ describe("an ephemeral environment that has gone quiet", () => {
 
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
     expect(state.parked).toEqual([]);
-  });
-
-  it("serves a parked environment's recalled build alone, and still calls it parked", async () => {
-    await parkable(PREVIEW);
-    await stampEnvironmentWake(registry, PROJECT, PREVIEW);
-    clock.tick(PARK_AFTER_MS);
-    await stampBuildWake(registry, PROJECT, PREVIEW, THIRD_BUILD);
-
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
-
-    /* Its own hosts stay unserved — that is what parked means — while the one
-       host somebody actually asked for comes back. Parked and desired at once,
-       which is why the report is not simply "absent from desired state". */
-    expect(await legsOf(PREVIEW)).toEqual([{ id: THIRD_BUILD, role: "recalled" }]);
-    expect(parkedNames(state)).toEqual([{ project: PROJECT, env: PREVIEW }]);
-  });
-});
-
-describe("the builds a wake has recalled", () => {
-  /* Nothing ticks in this block unless a test says so, so every environment
-     here is comfortably inside its own window: what is under test is the
-     BUILD's clock, not the environment's. */
-  beforeEach(async () => {
-    for (const id of [OTHER_BUILD, THIRD_BUILD]) {
-      await createBuild(registry, PROJECT, { id, runtimeConfigurable: true });
-    }
-    await parkable(PREVIEW);
-  });
-
-  it("appends a woken build AFTER the alias and every leg of the split", async () => {
-    await setSplit(registry, PROJECT, PREVIEW, [
-      { build: BUILD, weight: 90 },
-      { build: OTHER_BUILD, weight: 10 },
-    ]);
-    await stampBuildWake(registry, PROJECT, PREVIEW, THIRD_BUILD);
-
-    /* Last on purpose: a recalled build serves the one caller that asked for its
-       own host, while the alias and the legs carry the environment's traffic,
-       and the planner rolls a build out in the order it is given. */
-    expect(await legsOf(PREVIEW)).toEqual([
-      { id: BUILD, role: "alias" },
-      { id: OTHER_BUILD, role: "split" },
-      { id: THIRD_BUILD, role: "recalled" },
-    ]);
-  });
-
-  it("leaves out a build whose own wake has gone stale", async () => {
-    await stampBuildWake(registry, PROJECT, PREVIEW, THIRD_BUILD);
-    clock.tick(BUILD_IDLE_MS);
-
-    expect(await legsOf(PREVIEW)).toEqual([{ id: BUILD, role: "alias" }]);
-  });
-
-  it("drops a stamp naming a build the registry no longer has, reporting nothing", async () => {
-    /*
-     * A build the reaper has taken is a permanent 404 by design — the bucket is
-     * the source of truth and nothing brings the record back — so there is
-     * nothing an operator could act on. Recording it as an unresolved leg
-     * instead would count it as unproven and hold back every stop this
-     * environment ever plans, forever.
-     */
-    await stampBuildWake(registry, PROJECT, PREVIEW, "deadbeef");
-
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
-    const wanted = state.environments.find((entry) => entry.env.name === PREVIEW);
-
-    expect(await legsOf(PREVIEW)).toEqual([{ id: BUILD, role: "alias" }]);
-    expect(wanted?.unresolved).toBeUndefined();
-    expect(state.failures).toEqual([]);
-  });
-
-  it("never runs a build twice because a wake named a leg it already has", async () => {
-    await setSplit(registry, PROJECT, PREVIEW, [
-      { build: BUILD, weight: 90 },
-      { build: OTHER_BUILD, weight: 10 },
-    ]);
-    for (const id of [BUILD, OTHER_BUILD]) {
-      await stampBuildWake(registry, PROJECT, PREVIEW, id);
-    }
-
-    /* One build is one process, whichever of the three roles put it there. */
-    expect(await legsOf(PREVIEW)).toEqual([
-      { id: BUILD, role: "alias" },
-      { id: OTHER_BUILD, role: "split" },
-    ]);
-  });
-
-  it("adds nothing at all to an environment that does not recall builds", async () => {
-    await setParkPolicy(registry, PROJECT, PREVIEW, { recallBuilds: false });
-    await stampBuildWake(registry, PROJECT, PREVIEW, THIRD_BUILD);
-
-    expect(await legsOf(PREVIEW)).toEqual([{ id: BUILD, role: "alias" }]);
-  });
-
-  it("adds nothing when a woken build is given no time to run at all", async () => {
-    await setParkPolicy(registry, PROJECT, PREVIEW, { buildIdleS: 0 });
-    await stampBuildWake(registry, PROJECT, PREVIEW, THIRD_BUILD);
-
-    expect(await legsOf(PREVIEW)).toEqual([{ id: BUILD, role: "alias" }]);
-  });
-
-  it("recalls one for a LONG-LIVED environment too, which never parks", async () => {
-    /* Only the clock is refused a long-lived environment. Waking a superseded
-       build at its own host is a request answering itself, and works on any
-       environment there is. */
-    await stampBuildWake(registry, PROJECT, "prod", THIRD_BUILD);
-
-    expect(await legsOf("prod")).toEqual([
-      { id: BUILD, role: "alias" },
-      { id: THIRD_BUILD, role: "recalled" },
-    ]);
   });
 });
 
@@ -761,16 +515,16 @@ describe("how a pass reads all of that", () => {
   });
 });
 
-/** An environment with a build its alias points at, ready to be served. */
+/** An environment with a current build, ready to be served. */
 async function deployed(project: string, name: string): Promise<void> {
   await createEnvironment(registry, project, { name });
-  await flipAlias(registry, project, name, BUILD);
+  await setCurrentBuild(registry, project, name, BUILD);
 }
 
 /** The same, ephemeral: the only kind of environment that parks on a clock. */
 async function parkable(name: string): Promise<void> {
   await createEnvironment(registry, PROJECT, { name, ephemeral: true });
-  await flipAlias(registry, PROJECT, name, BUILD);
+  await setCurrentBuild(registry, PROJECT, name, BUILD);
 }
 
 /** The parked environments by name; the state carries their whole records. */
@@ -815,14 +569,14 @@ async function watchedInstallation(): Promise<{
   const names = Array.from({ length: 12 }, (_, index) => `env-${String(index).padStart(2, "0")}`);
   for (const name of names) {
     await createEnvironment(ctx, PROJECT, { name });
-    await flipAlias(ctx, PROJECT, name, BUILD);
+    await setCurrentBuild(ctx, PROJECT, name, BUILD);
     await writePlacement(ctx, PROJECT, name, [SELF], taken);
   }
   return { ctx, observing, names };
 }
 
-/** Leaves the environment with an alias flip nothing can read as a time. */
-async function damageFlip(name: string): Promise<void> {
+/** Leaves the environment with a current-deployment timestamp nothing can read. */
+async function damageCurrentTimestamp(name: string): Promise<void> {
   const current = await readJson<EnvironmentRecord>(registry, environmentKey(PROJECT, name));
   const alias = current?.value.alias;
   await writeRecord(name, {

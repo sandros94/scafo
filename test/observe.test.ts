@@ -51,10 +51,8 @@ describe("what an event is stamped with", () => {
       type: "wake.admitted",
       id: "bbbb",
       host: "shop--preview.apps.test",
-      kind: "build",
       project: "shop",
       env: "preview",
-      build: "aaaa1111",
       inFlight: 2,
     });
 
@@ -63,10 +61,8 @@ describe("what an event is stamped with", () => {
       type: "wake.admitted",
       id: "bbbb",
       host: "shop--preview.apps.test",
-      kind: "build",
       project: "shop",
       env: "preview",
-      build: "aaaa1111",
       inFlight: 2,
     });
   });

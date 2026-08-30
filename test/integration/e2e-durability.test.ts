@@ -106,7 +106,6 @@ describeE2e("durability, end to end", () => {
         PROJECT,
         "--env",
         ENVIRONMENT,
-        "--flip",
         "--key",
         keyPath,
       ],

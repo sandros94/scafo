@@ -22,8 +22,8 @@ import type { H3 } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it } from "vitest";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import type { ParkedEnvironment } from "../src/daemon/_desired.ts";
-import { readDesired } from "../src/daemon/_desired.ts";
 import { type DaemonContext, type DaemonState, createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import {
@@ -42,7 +42,6 @@ import {
 import type { CapacityPlan } from "../src/core/capacity/compute.ts";
 import type { ProblemDetails } from "../src/core/error.ts";
 import { signNodeToken } from "../src/core/auth/index.ts";
-import { createPortAllocator, planReconcile, renderRoutes } from "../src/core/placement/index.ts";
 import {
   acquireLease,
   claimDomain,
@@ -50,17 +49,13 @@ import {
   createEnvironment,
   createProject,
   drainNode,
-  flipAlias,
   getEnvironment,
   type LeaseHandle,
-  listBuildWakes,
-  placementKey,
   readEnvironmentWake,
   registerNode,
   retireEnvironment,
   setNodeSelector,
   setParkPolicy,
-  setSplit,
   writePlacement,
 } from "../src/core/registry/index.ts";
 import type { RuntimeProcess } from "../src/core/types/runtime.ts";
@@ -79,7 +74,7 @@ const PROJECT = "shop";
 /** Two parked environments: one to wake, one to be turned away while it is. */
 const PREVIEW = "preview";
 const OTHER_PREVIEW = "staging";
-/** An environment on its way out, and a build recorded before builds named a fleet. */
+/** An environment on its way out, and a recorded build-shaped name. */
 const RETIRED = "gone";
 const ORPHAN_BUILD = "cccc3333";
 const BUILD = "aaaa1111";
@@ -298,9 +293,9 @@ describe("a name this installation has nothing to serve at", () => {
   it("gives every way of getting there the SAME document", async () => {
     const ways: Array<[host: string, why: string]> = [
       [`${PROJECT}--ghost.${DOMAIN}`, "an environment that was never deployed"],
-      [`${PROJECT}--deadbeef.${DOMAIN}`, "a build the reaper has taken"],
+      [`${PROJECT}--deadbeef.${DOMAIN}`, "a build-shaped environment that does not exist"],
       [`${PROJECT}--${RETIRED}.${DOMAIN}`, "an environment that was retired"],
-      [`${PROJECT}--${ORPHAN_BUILD}.${DOMAIN}`, "a build that predates recall"],
+      [`${PROJECT}--${ORPHAN_BUILD}.${DOMAIN}`, "a recorded build ID that is not an environment"],
       [`ghost--${PREVIEW}.${DOMAIN}`, "a project that does not exist"],
     ];
 
@@ -314,8 +309,8 @@ describe("a name this installation has nothing to serve at", () => {
     }
 
     /*
-     * It says nothing about which way that was — never deployed, retired,
-     * reaped, recall turned off — and it is permanent by design rather than by
+     * It says nothing about which way that was — never deployed, retired, or a
+     * recorded build ID without an environment — and it is permanent by design rather than by
      * omission: the bucket is the source of truth, and a record deleted from it
      * does not come back.
      */
@@ -361,167 +356,6 @@ describe("waking what this node has parked", () => {
 
     expect((await held).status).toBe(200);
     expect(upstream).toHaveLength(1);
-  });
-
-  it("stamps the BUILD when a build's own host is what was asked for", async () => {
-    loop.onKick = (): void => {
-      loop.processes = [ready(PREVIEW, SUPERSEDED, 42_006)];
-    };
-
-    const response = await ask(`${PROJECT}--${SUPERSEDED}.${DOMAIN}`, "/");
-
-    expect(response.status).toBe(200);
-    expect(upstream[0].url).toBe("http://127.0.0.1:42006/");
-    /* A recall keeps ONE build awake at its own host; the environment around it
-       is not woken by it and is not stamped. */
-    expect([...(await listBuildWakes(clock.ctx, PROJECT, PREVIEW)).keys()]).toEqual([SUPERSEDED]);
-    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.toBeNull();
-  });
-
-  it.each([
-    [BUILD, "active alias"],
-    [THIRD, "active split leg"],
-  ])("records an %s build host as environment activity, not a %s recall", async (build, role) => {
-    await setSplit(clock.ctx, PROJECT, PREVIEW, [
-      { build: BUILD, weight: 50 },
-      { build: THIRD, weight: 50 },
-    ]);
-    await setParkPolicy(clock.ctx, PROJECT, PREVIEW, { recallBuilds: false });
-    loop.parked = loop.parked.filter((entry) => entry.env.name !== PREVIEW);
-    loop.processes = [ready(PREVIEW, BUILD, 42_004), ready(PREVIEW, THIRD, 42_008)];
-
-    const response = await ask(`${PROJECT}--${build}.${DOMAIN}`, "/");
-
-    expect(response.status, role).toBe(200);
-    expect(dialled(), role).toEqual([build === BUILD ? 42_004 : 42_008]);
-    expect(loop.kicks, role).toBe(1);
-    await expect(listBuildWakes(clock.ctx, PROJECT, PREVIEW), role).resolves.toEqual(new Map());
-    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW), role).resolves.toEqual(
-      new Date(clock.nowMs()),
-    );
-    expect(
-      observe.snapshot().events.map((event) => event.type),
-      role,
-    ).toContain("wake.stamped");
-  });
-
-  it("wakes a parked active build through its environment, not a recall", async () => {
-    await setParkPolicy(clock.ctx, PROJECT, PREVIEW, { afterS: 1, recallBuilds: false });
-    clock.tick(1_000);
-    loop.onKick = (): void => {
-      loop.processes = [ready(PREVIEW, BUILD, 42_004)];
-    };
-
-    const response = await ask(`${PROJECT}--${BUILD}.${DOMAIN}`, "/");
-
-    expect(response.status).toBe(200);
-    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.toEqual(
-      new Date(clock.nowMs()),
-    );
-    await expect(listBuildWakes(clock.ctx, PROJECT, PREVIEW)).resolves.toEqual(new Map());
-    expect(observe.snapshot().events.map((event) => event.type)).toContain("wake.stamped");
-    await expect(counters()).resolves.toEqual({
-      inFlight: 0,
-      admitted: 1,
-      refused: 0,
-      forwarded: 0,
-    });
-    expect(
-      (await readDesired(clock.ctx, { nodeId: NODE_ID, mode: "legacy-fallback" })).environments,
-    ).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          project: PROJECT,
-          env: expect.objectContaining({ name: PREVIEW }),
-          builds: [expect.objectContaining({ build: expect.objectContaining({ id: BUILD }) })],
-        }),
-      ]),
-    );
-  });
-
-  it("wakes an active build after a nonparked snapshot crosses its idle boundary", async () => {
-    await setParkPolicy(clock.ctx, PROJECT, PREVIEW, { afterS: 1, recallBuilds: false });
-    loop.parked = loop.parked.filter((entry) => entry.env.name !== PREVIEW);
-    tickAtPlacementRead();
-    loop.onKick = (): void => {
-      loop.processes = [ready(PREVIEW, BUILD, 42_004)];
-    };
-
-    const response = await ask(`${PROJECT}--${BUILD}.${DOMAIN}`, "/");
-
-    expect(response.status).toBe(200);
-    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.toEqual(
-      new Date(clock.nowMs()),
-    );
-    await expect(listBuildWakes(clock.ctx, PROJECT, PREVIEW)).resolves.toEqual(new Map());
-    expect(
-      (await readDesired(clock.ctx, { nodeId: NODE_ID, mode: "legacy-fallback" })).environments,
-    ).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ env: expect.objectContaining({ name: PREVIEW }) }),
-      ]),
-    );
-  });
-
-  it("wakes an active build at the receiver after a stale nonparked snapshot", async () => {
-    await placedOn(PREVIEW, [NODE_ID]);
-    await setParkPolicy(clock.ctx, PROJECT, PREVIEW, { afterS: 1, recallBuilds: false });
-    loop.parked = loop.parked.filter((entry) => entry.env.name !== PREVIEW);
-    tickAtPlacementRead();
-    loop.onKick = (): void => {
-      loop.processes = [ready(PREVIEW, BUILD, 42_004)];
-    };
-
-    const response = await forwardedAsk(`${PROJECT}--${BUILD}.${DOMAIN}`, "/");
-
-    expect(response.status).toBe(200);
-    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.toEqual(
-      new Date(clock.nowMs()),
-    );
-    await expect(listBuildWakes(clock.ctx, PROJECT, PREVIEW)).resolves.toEqual(new Map());
-    expect(observe.snapshot().events.map((event) => event.type)).toContain("wake.stamped");
-    await expect(counters()).resolves.toEqual({
-      inFlight: 0,
-      admitted: 1,
-      refused: 0,
-      forwarded: 0,
-    });
-  });
-
-  it("stops an old alias after its build host fell through routing lag", async () => {
-    loop.processes = [ready(PREVIEW, BUILD, 42_004)];
-
-    const response = await ask(`${PROJECT}--${BUILD}.${DOMAIN}`, "/");
-    expect(response.status).toBe(200);
-    await flipAlias(clock.ctx, PROJECT, PREVIEW, THIRD);
-
-    const state = await readDesired(clock.ctx, { nodeId: NODE_ID, mode: "legacy-fallback" });
-    const desired = state.environments.find((entry) => entry.env.name === PREVIEW);
-    if (desired === undefined) throw new Error("preview was not desired after its alias flip");
-
-    const plan = planReconcile({
-      desired: [desired],
-      actual: [ready(PREVIEW, BUILD, 42_004), ready(PREVIEW, THIRD, 42_008)],
-      ports: createPortAllocator(),
-    });
-
-    expect(plan).toEqual([
-      {
-        type: "stop",
-        processId: `${PROJECT}--${PREVIEW}--${BUILD}`,
-        reason: `superseded by build "${THIRD}"`,
-      },
-    ]);
-
-    const routes = renderRoutes({
-      platformDomains: [DOMAIN],
-      environments: [{ project: PROJECT, env: desired.env }],
-      processes: [ready(PREVIEW, THIRD, 42_008)],
-      claims: [],
-    });
-    expect(routes.routes.map((route) => route.host)).not.toContain(
-      `${PROJECT}--${BUILD}.${DOMAIN}`,
-    );
   });
 
   it("says to come back when nothing was ready in time", async () => {
@@ -615,11 +449,11 @@ describe("waking what this node has parked", () => {
 });
 
 describe("what a woken host is answered with", () => {
-  it("answers an environment with its ALIAS build while the superseded one still runs", async () => {
+  it("answers an environment with its current build while the preceding one still runs", async () => {
     /*
-     * THE FLIP WINDOW, and it is minutes wide rather than milliseconds: a
-     * process is stopped only once every desired leg is ready, so the build a
-     * flip superseded keeps running for passes after the ingress has moved off
+     * THE REPLACEMENT WINDOW, and it is minutes wide rather than milliseconds: a
+     * process is stopped only once every desired leg is ready, so the preceding
+     * build keeps running for passes after the ingress has moved off
      * it. It is listed FIRST here because that is the order the loop reports it
      * in — it started first — so anything answering with the first ready process
      * of the environment would serve it.
@@ -641,33 +475,9 @@ describe("what a woken host is answered with", () => {
     expect(dialled()).toEqual([42_004]);
   });
 
-  it("divides a split environment over its legs, and over none of the others", async () => {
-    await setSplit(clock.ctx, PROJECT, PREVIEW, [
-      { build: BUILD, weight: 50 },
-      { build: THIRD, weight: 50 },
-    ]);
-    /* The build the split does not name keeps running and stays reachable under
-       its own hash; it simply takes none of the environment's traffic. */
-    loop.processes = [
-      ready(PREVIEW, SUPERSEDED, 42_006),
-      ready(PREVIEW, BUILD, 42_004),
-      ready(PREVIEW, THIRD, 42_008),
-    ];
-    app = appWith({ draws: [0, 0.25, 0.499, 0.5, 0.75, 0.999] });
-
-    for (const draw of [0, 0.25, 0.499, 0.5, 0.75, 0.999]) {
-      expect((await ask(PARKED_HOST, "/")).status, String(draw)).toBe(200);
-    }
-
-    /* Both legs are reachable and the shares are the registry's, walked in the
-       order it states them — the same weights the ingress is handed, so the
-       daemon's answer and the router's agree on the distribution. */
-    expect(dialled()).toEqual([42_004, 42_004, 42_004, 42_008, 42_008, 42_008]);
-  });
-
   it("holds rather than answering with a build the routing has moved off", async () => {
-    /* The alias has moved and its build is still coming up. What is left running
-       is the build it superseded, which the ingress sends nothing — so this
+    /* The current marker has moved and its build is still coming up. What is left
+       running is the preceding build, which the ingress sends nothing — so this
        sends it nothing either: the request waits for the leg that IS routed. */
     loop.processes = [ready(PREVIEW, SUPERSEDED, 42_006)];
 
@@ -683,31 +493,6 @@ describe("what a woken host is answered with", () => {
     expect(dialled()).toEqual([42_004]);
     expect(loop.kicks).toBe(1);
     await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.not.toBeNull();
-  });
-
-  it("answers a build's own host with that build alone, mid-start of another", async () => {
-    /*
-     * THE MIRROR CASE, pinned here rather than argued: a build-hash host is
-     * matched exactly, so the build starting beside it — ready first, and the
-     * environment's only ready process — never answers for it. What can still
-     * make one build's host serve another's CODE is upstream of this surface and
-     * not visible to it: the fleet has ONE deployment pointer, a process reads it
-     * once while it starts, and a publish landing between an activation and its
-     * start hands the starting process the wrong version under the right id.
-     */
-    loop.processes = [ready(PREVIEW, BUILD, 42_004)];
-
-    const held = ask(`${PROJECT}--${SUPERSEDED}.${DOMAIN}`, "/");
-    await sleep(WAKE_POLL_INTERVAL_MS / 2);
-    expect(upstream).toEqual([]);
-
-    loop.processes = [...loop.processes, ready(PREVIEW, SUPERSEDED, 42_006)];
-
-    expect((await held).status).toBe(200);
-    expect(dialled()).toEqual([42_006]);
-    /* A recall keeps ONE build awake at its own host, and the split it is not a
-       leg of decides nothing about it. */
-    expect([...(await listBuildWakes(clock.ctx, PROJECT, PREVIEW)).keys()]).toEqual([SUPERSEDED]);
   });
 });
 
@@ -1000,7 +785,6 @@ describe("what a wake says about itself", () => {
     expect(observe.snapshot().events[0]).toMatchObject({
       type: "wake.admitted",
       host: PARKED_HOST,
-      kind: "environment",
       project: PROJECT,
       env: PREVIEW,
       inFlight: 1,
@@ -1010,21 +794,6 @@ describe("what a wake says about itself", () => {
     expect(eventOf("wake.resolved")).toMatchObject({ storeOps: expect.any(Number) });
     expect((eventOf("wake.resolved") as { storeOps: number }).storeOps).toBeGreaterThan(0);
     expect(eventOf("wake.served")).toMatchObject({ port: 42_004, status: 200 });
-  });
-
-  it("names the build a recalled host asked for, and no environment leg", async () => {
-    loop.onKick = (): void => {
-      loop.processes = [ready(PREVIEW, SUPERSEDED, 42_006)];
-    };
-
-    await ask(`${PROJECT}--${SUPERSEDED}.${DOMAIN}`, "/");
-
-    expect(eventOf("wake.admitted")).toMatchObject({
-      kind: "build",
-      project: PROJECT,
-      env: PREVIEW,
-      build: SUPERSEDED,
-    });
   });
 
   it("records a refusal AT the cap, and records it as a refusal", async () => {
@@ -1167,13 +936,6 @@ interface AppOptions {
    */
   bindHost?: string;
   /**
-   * The weighted-pick draws the wake surface takes, one per held request and in
-   * this order, cycling once they run out. Defaults to none, which is
-   * `Math.random` — a split is a distribution, and a case that means one leg
-   * says which draw it took rather than sampling for it.
-   */
-  draws?: number[];
-  /**
    * Whether this node reports on itself. On by default, so every case runs the
    * observing path; `false` is the node that is not observing at all, which is
    * an ABSENT seam rather than a disabled one.
@@ -1201,12 +963,6 @@ function appWith(opts: AppOptions): H3 {
   if (opts.observability !== false) daemon.observability = observe;
   if (opts.capacity !== false) daemon.capacity = capacityPlan(opts.maxConcurrentWakes ?? 2);
   if (opts.reconciler !== false) daemon.reconciler = loop;
-  if (opts.draws !== undefined) {
-    const draws = opts.draws;
-    let taken = 0;
-    daemon.random = (): number => draws[taken++ % draws.length];
-  }
-
   return createNodeApp(daemon);
 }
 
@@ -1277,25 +1033,6 @@ function fakeReconciler(): FakeReconciler {
   return fake;
 }
 
-/** Advances the clock after host resolution and before this node records the wake. */
-function tickAtPlacementRead(): void {
-  const store = clock.ctx.store;
-  let ticked = false;
-  clock.ctx.store = {
-    get: async (key) => {
-      if (!ticked && key === placementKey(PROJECT, PREVIEW)) {
-        ticked = true;
-        clock.tick(1_000);
-      }
-      return store.get(key);
-    },
-    getBytes: (key) => store.getBytes(key),
-    put: (key, body, cas) => store.put(key, body, cas),
-    del: (key) => store.del(key),
-    list: (prefix) => store.list(prefix),
-  };
-}
-
 /** A process that has passed its gate, which is the only kind a wake is handed to. */
 function ready(env: string, build: string, port: number): RuntimeProcess {
   return {
@@ -1322,16 +1059,15 @@ async function seed(): Promise<void> {
     await createBuild(clock.ctx, PROJECT, {
       id,
       runtimeConfigurable: true,
-      environment: PREVIEW,
     });
   }
   /* Recorded before builds said which fleet holds their code: not wakeable. */
   await createBuild(clock.ctx, PROJECT, { id: ORPHAN_BUILD, runtimeConfigurable: true });
 
-  await flipAlias(clock.ctx, PROJECT, PREVIEW, SUPERSEDED);
-  await flipAlias(clock.ctx, PROJECT, PREVIEW, BUILD);
-  await flipAlias(clock.ctx, PROJECT, OTHER_PREVIEW, BUILD);
-  await flipAlias(clock.ctx, PROJECT, RETIRED, BUILD);
+  await setCurrentBuild(clock.ctx, PROJECT, PREVIEW, SUPERSEDED);
+  await setCurrentBuild(clock.ctx, PROJECT, PREVIEW, BUILD);
+  await setCurrentBuild(clock.ctx, PROJECT, OTHER_PREVIEW, BUILD);
+  await setCurrentBuild(clock.ctx, PROJECT, RETIRED, BUILD);
   await claimDomain(clock.ctx, CUSTOM, PROJECT, PREVIEW);
   await retireEnvironment(clock.ctx, PROJECT, RETIRED);
 

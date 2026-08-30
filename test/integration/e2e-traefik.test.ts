@@ -60,14 +60,10 @@ import {
   FIXTURES,
   type HttpAnswer,
   httpGet,
-  httpPost,
   registryAt,
   REPO_ROOT,
   runCli,
-  sampleVersions,
   SETUP_TIMEOUT_MS,
-  SPLIT_MIN_REQUESTS,
-  SPLIT_SAMPLE,
   stageApp,
   type StartedStore,
   startStore,
@@ -310,7 +306,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   );
 
   it(
-    "deploys the first build, flips the alias to it and reports it routed",
+    "deploys the first build, makes it current and reports it routed",
     async () => {
       const started = Date.now();
       const result = await runCli(deployArgs(await staged("v1")), {});
@@ -334,7 +330,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   );
 
   it(
-    "serves the first build through TRAEFIK on the environment host, the apex and the build host",
+    "serves the first build through Traefik on the environment host and apex",
     async () => {
       /*
        * The ROUTERS are waited for FIRST, through Traefik's API and before any
@@ -342,24 +338,21 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
        * The catch-all answers for these hosts the moment the processes are
        * ready, polls or no polls, so a request-side wait would pass through the
        * WAKE surface while Traefik still holds only the catch-all — proving
-       * nothing about the routing this test is about. And a request for the
-       * BUILD host that goes that way is a build WAKE: it stamps the build,
-       * which keeps it recalled for `buildIdleS` after the flip below retires
-       * it, and the flip's own withdrawal assertions then wait on a window this
-       * test opened. Routing first, traffic second.
+       * nothing about the routing this test is about. Routing first, traffic
+       * second.
        */
       const expected = [
-        ...[envHost(), apexHost(), buildHost(buildV1)].map((host) => `scafo_${host}`),
+        ...[envHost(), apexHost()].map((host) => `scafo_${host}`),
         ...STANDING_ROUTERS,
       ].sort();
-      await wait("Traefik to hold the three v1 routers", DEADLINE_MS, async () => {
+      await wait("Traefik to hold the two v1 routers", DEADLINE_MS, async () => {
         const routers = (await scafoRouters()).sort();
         return routers.join(",") === expected.map((name) => `${name}@http`).join(",")
           ? routers
           : null;
       });
 
-      for (const host of [envHost(), apexHost(), buildHost(buildV1)]) {
+      for (const host of [envHost(), apexHost()]) {
         const answer = await untilServes(host, "v1");
         expect(JSON.parse(answer.body).url, `the url ${host} saw`).toContain(host);
       }
@@ -420,7 +413,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   );
 
   it(
-    "flips to a second build, and Traefik follows within a poll of the node publishing it",
+    "makes a second deployment current, and Traefik follows the published route",
     async () => {
       const result = await runCli(deployArgs(await staged("v2")), {});
       expectCleanExit(result);
@@ -430,63 +423,22 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       observed.buildV2 = buildV2;
       observed.deployV2Output = result.output;
 
-      /*
-       * Both v2 hosts, from both ends. "routed" is a fact about the PROCESS —
-       * its readiness gate passed — and the pass publishes the routing after
-       * its rollouts, so the router may land a beat behind the word. Polled for
-       * that reason; the delta below records how far behind it ever is, which
-       * under a deploy is usually nothing visible.
-       */
+      /* The process is ready before Traefik necessarily polls the new route. */
       const publishedAt = Date.now();
-      await wait(`the router for ${buildHost(buildV2)} to be published`, DEADLINE_MS, async () => {
+      await wait(`the router for ${envHost()} to be published`, DEADLINE_MS, async () => {
         const routers = (await snapshotNow()).http?.routers ?? {};
-        return `scafo_${buildHost(buildV2)}` in routers ? routers : null;
+        return `scafo_${envHost()}` in routers ? routers : null;
       });
       await untilServes(envHost(), "v2");
-      observed.flipPublishedToServedMs = Date.now() - publishedAt;
+      observed.deployPublishedToServedMs = Date.now() - publishedAt;
 
       await untilServes(apexHost(), "v2");
-      await untilServes(buildHost(buildV2), "v2");
-
-      /*
-       * The withdrawal is where the pull model is actually visible, because it
-       * happens on the node's own schedule rather than under a command that is
-       * already waiting. The planner stops the superseded process on the pass
-       * AFTER v2 passed its gate, the node stops publishing that host, and only
-       * Traefik's next poll takes the router away.
-       *
-       * In between, the router still points at a port nothing listens on — so
-       * Traefik answers 502 for a host that is on its way out, where a settled
-       * withdrawal answers 404. A pushed ingress has the same gap in principle
-       * and a shorter one in practice, since removing the route is part of the
-       * same pass that stopped the process.
-       */
-      /*
-       * Watched through the SNAPSHOT and Traefik's own API, never by requesting
-       * the host: a request for a superseded build's host is a WAKE now, and a
-       * poll that asked would restart the very process this test is watching
-       * being stopped. The 502-then-gone window the pull model has is still
-       * there in principle; observing it costs a wake, so it is prose here and
-       * an assertion nowhere. The one deliberate wake is this suite's last test.
-       */
-      const unpublishedAt = await wait(
-        `the node to stop publishing ${buildHost(buildV1)}`,
-        DEADLINE_MS,
-        async () => {
-          const routers = (await snapshotNow()).http?.routers ?? {};
-          return `scafo_${buildHost(buildV1)}` in routers ? null : Date.now();
-        },
-      );
-      await wait(`${buildHost(buildV1)} to leave Traefik's routers`, DEADLINE_MS, async () =>
-        (await scafoRouters()).includes(`scafo_${buildHost(buildV1)}@http`) ? null : true,
-      );
-      observed.withdrawPullLatencyMs = Date.now() - unpublishedAt;
     },
     STEP_TIMEOUT_MS,
   );
 
   it(
-    "settles on exactly one running process, serving the build the alias points at",
+    "settles on exactly one running process, serving the current build",
     async () => {
       const state = await wait(
         "the node to report a single running process",
@@ -514,190 +466,6 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       expect(state.reconcile?.failures ?? []).toEqual([]);
       observed.finalProcesses = state.processes;
       observed.finalReconcile = state.reconcile;
-    },
-    STEP_TIMEOUT_MS,
-  );
-
-  /*
-   * Weighted traffic, the pull-model half. The Caddy suite eases a canary in
-   * with `scafo deploy --canary`; this one states the split outright with
-   * `scafo env split --set`, so between the two suites both surfaces are driven
-   * end to end — and here the leg being brought back (v1) is one whose process
-   * was STOPPED when v2 superseded it, which is the restart path.
-   */
-
-  it(
-    "splits the environment's traffic over both builds, and Traefik serves both",
-    async () => {
-      const started = Date.now();
-      const result = await runCli(
-        [
-          "env",
-          "split",
-          "--project",
-          PROJECT,
-          "--env",
-          ENVIRONMENT,
-          "--set",
-          `${buildV1}=50,${buildV2}=50`,
-          "--node",
-          `http://127.0.0.1:${String(apiPort)}`,
-          "--key",
-          keyPath,
-        ],
-        {},
-      );
-      expectCleanExit(result);
-      expect(result.output).toContain("splits its traffic");
-      observed.splitOutput = result.output;
-
-      const record = await getEnvironment(registry, PROJECT, ENVIRONMENT);
-      expect(record.split).toEqual([
-        { build: buildV1, weight: 50 },
-        { build: buildV2, weight: 50 },
-      ]);
-      /* The alias has not moved; a split weights traffic and nothing else. */
-      expect(record.alias).toMatchObject({ build: buildV2 });
-
-      /*
-       * What the NODE publishes, first — the weighted service, with one child
-       * per leg — and only then what Traefik serves. Keeping the two apart is
-       * this suite's whole reason for existing, and the split is where the
-       * document changes shape rather than merely changing a port.
-       */
-      const weighted = await wait(
-        "the node to publish a weighted service for the environment host",
-        DEADLINE_MS,
-        async () => {
-          const service = (await snapshotNow()).http?.services[`scafo_${envHost()}`];
-          return service !== undefined && "weighted" in service ? service : null;
-        },
-      );
-      expect(weighted.weighted.services.map((child) => child.weight)).toEqual([50, 50]);
-      /* Every child resolves inside the same document, unqualified. */
-      const services = (await snapshotNow()).http?.services ?? {};
-      for (const child of weighted.weighted.services) {
-        expect(child.name, child.name).not.toContain("@");
-        expect(services[child.name], child.name).toBeDefined();
-      }
-      observed.weightedService = weighted;
-      observed.splitPublishedMs = Date.now() - started;
-
-      /*
-       * And now the wire. Two builds of one environment answering on one host is
-       * only possible because the node activated and started each of them in its
-       * own paired step: batched activations would have started both processes
-       * on the last-activated version, and all forty of these would say "v2".
-       */
-      const reached = await wait(
-        `${envHost()} to answer with both builds`,
-        DEADLINE_MS,
-        async () => {
-          const counted = await sampleVersions(httpPort, envHost(), SPLIT_SAMPLE);
-          return counted.v1 !== undefined && counted.v2 !== undefined ? counted : null;
-        },
-      );
-      observed.splitReachedSample = reached;
-      observed.splitServedMs = Date.now() - started;
-
-      /* Measured again on a settled routing: the sample above may have started a
-         poll before Traefik read the weighted service, and a window that
-         straddles the change measures the change rather than the split. */
-      const seen = await sampleVersions(httpPort, envHost(), SPLIT_SAMPLE);
-      observed.splitSample = seen;
-
-      for (const version of ["v1", "v2"]) {
-        expect(seen[version], `${version} of ${JSON.stringify(seen)}`).toBeGreaterThanOrEqual(
-          SPLIT_MIN_REQUESTS,
-        );
-      }
-      expect(Object.keys(seen).sort()).toEqual(["v1", "v2"]);
-
-      /* The apex divides the same way, and each leg stays addressable alone. */
-      const apex = await sampleVersions(httpPort, apexHost(), SPLIT_SAMPLE);
-      expect(Object.keys(apex).sort()).toEqual(["v1", "v2"]);
-      observed.splitApexSample = apex;
-      expect(JSON.parse((await untilServes(buildHost(buildV1), "v1")).body).version).toBe("v1");
-      expect(JSON.parse((await untilServes(buildHost(buildV2), "v2")).body).version).toBe("v2");
-    },
-    STEP_TIMEOUT_MS,
-  );
-
-  it(
-    "promotes one leg with a flip, which clears the split and withdraws the other",
-    async () => {
-      const answer = await httpPost(
-        apiPort,
-        `/v1/projects/${PROJECT}/environments/${ENVIRONMENT}/alias`,
-        { build: buildV1 },
-        await operatorToken(),
-      );
-      expect(answer.status, answer.body).toBe(200);
-
-      const body = JSON.parse(answer.body);
-      expect(body.environment.split).toBeNull();
-      /* A flip is a full cutover and says so, so an operator promoting a leg is
-         told the split they were running has ended. */
-      expect(body.warnings.map((warning: { code: string }) => warning.code)).toContain(
-        "split-cleared",
-      );
-      observed.promotionWarnings = body.warnings;
-
-      /* Back to a plain load balancer: the weighted service and its children go
-         with the split that declared them. */
-      const plain = await wait(
-        "the node to publish a single-backend service again",
-        DEADLINE_MS,
-        async () => {
-          const service = (await snapshotNow()).http?.services[`scafo_${envHost()}`];
-          return service !== undefined && "loadBalancer" in service ? service : null;
-        },
-      );
-      expect(plain.loadBalancer.servers).toHaveLength(1);
-      observed.afterPromotionService = plain;
-
-      const settled = await wait(
-        `${envHost()} to serve the promoted build alone`,
-        DEADLINE_MS,
-        async () => {
-          const counted = await sampleVersions(httpPort, envHost(), SPLIT_SAMPLE);
-          return counted.v1 === SPLIT_SAMPLE ? counted : null;
-        },
-      );
-      observed.promotedSample = settled;
-
-      /* The leg that lost is retired the way every superseded build is. Watched
-         through Traefik's API rather than by requesting its host, which would
-         now wake the very build the promotion just retired. */
-      await wait(`${buildHost(buildV2)} to leave Traefik's routers`, DEADLINE_MS, async () =>
-        (await scafoRouters()).includes(`scafo_${buildHost(buildV2)}@http`) ? null : true,
-      );
-    },
-    STEP_TIMEOUT_MS,
-  );
-
-  it(
-    "wakes the retired leg through the catch-all, serving it at its own host again",
-    async () => {
-      /*
-       * THE ONE DELIBERATE WAKE, and on this driver it is the catch-all's whole
-       * journey under test: the host matches no router, the HostRegexp hands it
-       * to the daemon, the daemon starts the superseded build against its own
-       * fleet and holds the request through the readiness gate. Run before the
-       * retirement below on purpose — a retired environment refuses to wake,
-       * and the recalled process this leaves behind is exactly what retirement
-       * is then shown to stop.
-       */
-      const woken = await wait(
-        `${buildHost(buildV2)} to wake and serve v2 again`,
-        DEADLINE_MS,
-        async () => {
-          const answer = await httpGet(httpPort, "/", { host: buildHost(buildV2) });
-          return answer.status === 200 && answer.body.includes(`"v2"`) ? answer : null;
-        },
-      );
-      expect(JSON.parse(woken.body).version).toBe("v2");
-      observed.wokenThroughCatchAll = woken;
     },
     STEP_TIMEOUT_MS,
   );
@@ -744,8 +512,8 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
        * spelling the driver keeps is for the node that has no platform domains
        * at all.
        *
-       * SAFE TO REQUEST, unlike a superseded build's host: a retired environment
-       * is a 404 the wake surface answers without stamping anything, so the poll
+       * SAFE TO REQUEST: a retired environment is a 404 the wake surface answers
+       * without stamping anything, so the poll
        * cannot keep alive what it is watching leave.
        */
       const settledAt = await wait(
@@ -765,9 +533,8 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       /* From the daemon, in the same problem document every refusal wears. */
       expect(gone.body).toContain("urn:scafo:not-found");
 
-      /* The apex and the build host go with it; every name of the retired
-         environment gets the daemon's one answer. */
-      for (const host of [apexHost(), buildHost(buildV2)]) {
+      /* The apex goes with it. */
+      for (const host of [apexHost()]) {
         const answer = await httpGet(httpPort, "/", { host });
         expect(answer.status, host).toBe(404);
         expect(answer.body, host).toContain("urn:scafo:not-found");
@@ -798,10 +565,6 @@ function apexHost(): string {
   return `${PROJECT}.${PLATFORM_DOMAIN}`;
 }
 
-function buildHost(build: string): string {
-  return `${PROJECT}--${build}.${PLATFORM_DOMAIN}`;
-}
-
 /** The flags one deploy of the fixture is run with, from the host. */
 function deployArgs(dir: string): string[] {
   return [
@@ -813,7 +576,6 @@ function deployArgs(dir: string): string[] {
     PROJECT,
     "--env",
     ENVIRONMENT,
-    "--flip",
     "--runtime-configurable",
     "--key",
     keyPath,

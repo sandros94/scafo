@@ -54,7 +54,6 @@ import {
   trustKey,
 } from "../../src/core/registry/index.ts";
 import type { NodeRecord, OperatorRecord, TrustPolicy } from "../../src/core/types/registry.ts";
-import type { ProcessStatus } from "../../src/core/types/supervisor.ts";
 import {
   NODE_IMAGE,
   BOOT_DEADLINE_MS,
@@ -67,14 +66,10 @@ import {
   FIXTURES,
   type HttpAnswer,
   httpGet,
-  httpPost,
   registryAt,
   REPO_ROOT,
   runCli,
-  sampleVersions,
   SETUP_TIMEOUT_MS,
-  SPLIT_MIN_REQUESTS,
-  SPLIT_SAMPLE,
   stageApp as stageAppIn,
   type StartedStore,
   startStore,
@@ -143,8 +138,6 @@ let operatorKey: OperatorKeyFile;
 let buildV1: string;
 let buildV2: string;
 let buildCi: string;
-/** The build eased in with `scafo deploy --canary`, beside the alias. */
-let buildCanary: string;
 
 const tmpDirs: string[] = [];
 /** Everything the daemon container has written, kept for failure messages. */
@@ -295,7 +288,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   );
 
   it(
-    "deploys the first build, flips the alias to it and reports it routed",
+    "deploys the first build, makes it current and reports it routed",
     async () => {
       const started = Date.now();
       const result = await runCli(deployArgs(await stageApp("v1")), {});
@@ -313,13 +306,13 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   );
 
   it(
-    "serves the first build through Caddy on the environment host, the apex and the build host",
+    "serves the first build through Caddy on the environment host and apex",
     async () => {
-      for (const host of [envHost(), apexHost(), buildHost(buildV1)]) {
+      for (const host of [envHost(), apexHost()]) {
         const answer = await untilServes(host, "v1");
         expect(JSON.parse(answer.body).url, `the url ${host} saw`).toContain(host);
       }
-      observed.v1Hosts = [envHost(), apexHost(), buildHost(buildV1)];
+      observed.v1Hosts = [envHost(), apexHost()];
     },
     STEP_TIMEOUT_MS,
   );
@@ -428,7 +421,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   );
 
   it(
-    "flips to a second build, and withdraws the superseded build's host once its process is stopped",
+    "makes a second deployment current and withdraws the superseded process",
     async () => {
       const started = Date.now();
       const result = await runCli(deployArgs(await stageApp("v2")), {});
@@ -443,56 +436,16 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
 
       await untilServes(envHost(), "v2");
       await untilServes(apexHost(), "v2");
-      await untilServes(buildHost(buildV2), "v2");
-
-      /*
-       * The withdrawal is watched through the ADMIN API and never by requesting
-       * the host: a request for a superseded build's host is a WAKE now — it
-       * would restart the very process this test is waiting to see stopped, and
-       * the poll would hold its own condition false until the deadline. The one
-       * deliberate wake of a superseded build is the last test of this suite.
-       */
-      await until(`${buildHost(buildV1)} to stop being routed`, DEADLINE_MS, async () => {
-        const routes = await caddyRoutes();
-        return routes.some((route) => route["@id"] === `scafo_${buildHost(buildV1)}`)
-          ? null
-          : routes;
-      });
 
       const routes = await caddyRoutes();
       expect(routes.map((route) => route["@id"])).toContain("operator_authored");
-      /* Withdrawn from its own route, but not into nothing: the catch-all that
-         hands unmatched platform hosts to the daemon is what answers for it now. */
       expect(routes.map((route) => route["@id"])).toContain(`scafo_catchall_${PLATFORM_DOMAIN}`);
     },
     STEP_TIMEOUT_MS,
   );
 
   it(
-    "rolls the environment back to the first build, and serves it on the apex again",
-    async () => {
-      const answer = await httpPost(
-        apiPort,
-        `/v1/projects/${PROJECT}/environments/${ENVIRONMENT}/alias`,
-        { rollback: true },
-        await operatorToken(),
-      );
-      expectStatus(answer, 200);
-      expect(JSON.parse(answer.body).environment.alias).toMatchObject({ build: buildV1 });
-
-      const started = Date.now();
-      await untilServes(apexHost(), "v1");
-      await untilServes(envHost(), "v1");
-      observed.rollbackMs = Date.now() - started;
-
-      const record = await getEnvironment(registry, PROJECT, ENVIRONMENT);
-      expect(record.alias).toMatchObject({ build: buildV1, previous: buildV2 });
-    },
-    STEP_TIMEOUT_MS,
-  );
-
-  it(
-    "settles on exactly one running process, serving the build the alias points at",
+    "settles on exactly one running process, serving the current build",
     async () => {
       const state = await until(
         "the node to report a single running process",
@@ -510,7 +463,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       );
 
       const running = state.processes.filter((process) => process.state === "running");
-      expect(running[0].id).toBe(`${PROJECT}--${ENVIRONMENT}--${buildV1}`);
+      expect(running[0].id).toBe(`${PROJECT}--${ENVIRONMENT}--${buildV2}`);
       expect(state.node?.id).toBe(NODE_ID);
       expect(state.reconcile?.failures ?? []).toEqual([]);
       observed.finalProcesses = state.processes;
@@ -586,7 +539,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       observed.workloadDeployOutput = result.output;
 
       expectCleanExit(result);
-      /* Accepted (202), then carried the whole way: build, flip, and a process
+      /* Accepted (202), then carried the whole way: build, current marker and a process
          through its readiness gate. Every poll re-presented the same token,
          which a workload token — unlike a node token — survives. */
       expect(result.output, daemonLogTail()).toContain("routed");
@@ -638,188 +591,6 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
     },
     STEP_TIMEOUT_MS,
   );
-
-  /*
-   * Weighted traffic, from here to the end. Production is at v1 with one process
-   * running it, which is the state a canary is actually eased into: a build that
-   * has been serving for a while, and a new one nobody has sent traffic to yet.
-   */
-
-  it(
-    "eases a canary in without flipping, and Caddy divides the traffic between both builds",
-    async () => {
-      const started = Date.now();
-      const result = await runCli(canaryArgs(await stageApp("v5"), 50), {});
-      observed.canaryDeployMs = Date.now() - started;
-      observed.canaryDeployOutput = result.output;
-
-      expectCleanExit(result);
-      /* Deployed WITHOUT a flip, then weighed against whatever the alias points
-         at — which the node reads for itself, so the CLI never has to know. */
-      expect(result.output, daemonLogTail()).toContain("splits its traffic");
-      buildCanary = buildIdOf(result.output);
-      expect(buildCanary).not.toBe(buildV1);
-      observed.buildCanary = buildCanary;
-
-      const environment = await getEnvironment(registry, PROJECT, ENVIRONMENT);
-      expect(environment.split).toEqual([
-        { build: buildV1, weight: 50 },
-        { build: buildCanary, weight: 50 },
-      ]);
-      /* The alias has NOT moved: it is still the primary pointer and still what
-         a rollback goes back to. */
-      expect(environment.alias).toMatchObject({ build: buildV1 });
-
-      /*
-       * THE ASSERTION THIS WHOLE SLICE EXISTS FOR. Two builds of one environment
-       * answering on one host — which means the node activated and started each
-       * of them in its own paired step. Batched activations would have started
-       * both processes on the last-activated version, and every one of these
-       * forty requests would have come back "v5".
-       */
-      const reached = await until(
-        `${apexHost()} to answer with both builds`,
-        DEADLINE_MS,
-        async () => {
-          const counted = await sampleVersions(caddyHttpPort, apexHost(), SPLIT_SAMPLE);
-          return counted.v1 !== undefined && counted.v5 !== undefined ? counted : null;
-        },
-      );
-      observed.canaryReachedSample = reached;
-
-      /* Measured again on a settled routing: the sample above may have started
-         before the canary's route was in place, and a window that straddles the
-         change is a measurement of the change rather than of the split. */
-      const seen = await sampleVersions(caddyHttpPort, apexHost(), SPLIT_SAMPLE);
-      observed.canarySample = seen;
-
-      for (const version of ["v1", "v5"]) {
-        expect(seen[version], `${version} of ${JSON.stringify(seen)}`).toBeGreaterThanOrEqual(
-          SPLIT_MIN_REQUESTS,
-        );
-      }
-      /* Nothing but the two legs answered: no 502 from a leg the routing named
-         before it was ready, and no third build. */
-      expect(Object.keys(seen).sort()).toEqual(["v1", "v5"]);
-
-      /* And each leg is still addressable on its own, unweighted. */
-      for (const [build, version] of [
-        [buildV1, "v1"],
-        [buildCanary, "v5"],
-      ]) {
-        const answer = await untilServes(buildHost(build), version);
-        expect(JSON.parse(answer.body).version).toBe(version);
-      }
-    },
-    STEP_TIMEOUT_MS,
-  );
-
-  it(
-    "promotes the canary with a flip, which clears the split and retires the leg that lost",
-    async () => {
-      const answer = await httpPost(
-        apiPort,
-        `/v1/projects/${PROJECT}/environments/${ENVIRONMENT}/alias`,
-        { build: buildCanary },
-        await operatorToken(),
-      );
-      expectStatus(answer, 200);
-
-      const body = JSON.parse(answer.body);
-      expect(body.environment.split).toBeNull();
-      expect(body.environment.alias).toMatchObject({ build: buildCanary, previous: buildV1 });
-      /* A flip is a full cutover and says so, because nothing else in the answer
-         mentions the split that was running a moment ago. */
-      expect(body.warnings.map((warning: { code: string }) => warning.code)).toContain(
-        "split-cleared",
-      );
-      observed.promotionWarnings = body.warnings;
-
-      const settled = await until(
-        `${apexHost()} to serve the promoted build alone`,
-        DEADLINE_MS,
-        async () => {
-          const counted = await sampleVersions(caddyHttpPort, apexHost(), SPLIT_SAMPLE);
-          return counted.v5 === SPLIT_SAMPLE ? counted : null;
-        },
-      );
-      observed.promotedSample = settled;
-
-      /* The retired leg goes the way every superseded build goes: its process is
-         stopped once the winner is ready, and its host goes with it. */
-      const state = await until(
-        "the node to report one process for production",
-        DEADLINE_MS,
-        async () => {
-          const got = await httpGet(apiPort, "/v1/state", {
-            authorization: `Bearer ${await operatorToken()}`,
-          });
-          if (got.status !== 200) return null;
-
-          const parsed = JSON.parse(got.body) as DaemonState;
-          return production(parsed).length === 1 ? parsed : null;
-        },
-      );
-      expect(production(state)[0].id).toBe(`${PROJECT}--${ENVIRONMENT}--${buildCanary}`);
-      expect(state.reconcile?.failures ?? []).toEqual([]);
-      observed.afterPromotionProcesses = state.processes;
-
-      const routes = await caddyRoutes();
-      expect(routes.map((route) => route["@id"])).not.toContain(`scafo_${buildHost(buildV1)}`);
-      /* And the operator's own route is still there, after all of it. */
-      expect(routes.map((route) => route["@id"])).toContain("operator_authored");
-    },
-    STEP_TIMEOUT_MS,
-  );
-
-  it(
-    "wakes a superseded build at its own host, and answers 404 for a name nobody owns",
-    async () => {
-      /*
-       * THE ONE DELIBERATE WAKE, run last because it is not free: the recalled
-       * build runs for `buildIdleS` after this, and every earlier test counts
-       * processes. The request lands on the catch-all, the daemon starts the
-       * superseded build against its own fleet, holds the request through the
-       * readiness gate, and answers with the very version that was retired —
-       * G2's "every build recallable at its own host", observed end to end.
-       */
-      const woken = await until(
-        `${buildHost(buildV1)} to wake and serve v1 again`,
-        DEADLINE_MS,
-        async () => {
-          const answer = await httpGet(caddyHttpPort, "/", { host: buildHost(buildV1) });
-          return answer.status === 200 && answer.body.includes(`"v1"`) ? answer : null;
-        },
-      );
-      expect(JSON.parse(woken.body).version).toBe("v1");
-      observed.wokenBuildAnswer = woken;
-
-      /* And the node says so: the wake surface admitted at least this one. */
-      const state = await httpGet(apiPort, "/v1/state", {
-        authorization: `Bearer ${await operatorToken()}`,
-      });
-      expect((JSON.parse(state.body) as DaemonState).wakes?.admitted).toBeGreaterThanOrEqual(1);
-
-      /*
-       * A name nothing owns is a 404 FROM THE DAEMON, in the same problem
-       * document every API refusal wears — which retires the old behaviour
-       * where an unrouted host got Caddy's bare 200-empty. One answer, whether
-       * the name never existed or its build was reaped: the bucket is the
-       * source of truth, and what it does not hold is not discussed.
-       */
-      const unknown = await httpGet(caddyHttpPort, "/", {
-        host: `${PROJECT}--deadbeef.${PLATFORM_DOMAIN}`,
-      });
-      expect(unknown.status).toBe(404);
-      expect(unknown.body).toContain("urn:scafo:not-found");
-
-      const unknownProject = await httpGet(caddyHttpPort, "/", {
-        host: `nobody-home.${PLATFORM_DOMAIN}`,
-      });
-      expect(unknownProject.status).toBe(404);
-    },
-    STEP_TIMEOUT_MS,
-  );
 });
 
 /* ------------------------------------------------------------------ helpers */
@@ -830,10 +601,6 @@ function envHost(): string {
 
 function apexHost(): string {
   return `${PROJECT}.${PLATFORM_DOMAIN}`;
-}
-
-function buildHost(build: string): string {
-  return `${PROJECT}--${build}.${PLATFORM_DOMAIN}`;
 }
 
 function ciHost(): string {
@@ -857,43 +624,9 @@ function deployArgs(dir: string, environment: string = ENVIRONMENT): string[] {
     PROJECT,
     "--env",
     environment,
-    "--flip",
     "--runtime-configurable",
     ...(environment === ENVIRONMENT ? ["--key", keyPath] : []),
   ];
-}
-
-/**
- * The same deploy with `--canary <weight>` in place of `--flip`.
- *
- * The two are refused together, which is what makes this a separate list rather
- * than an extra flag: a flip puts the new build in front of ALL the traffic and
- * a canary deliberately leaves the current one serving most of it.
- */
-function canaryArgs(dir: string, weight: number): string[] {
-  return [
-    "deploy",
-    dir,
-    "--node",
-    `http://127.0.0.1:${String(apiPort)}`,
-    "--project",
-    PROJECT,
-    "--env",
-    ENVIRONMENT,
-    "--canary",
-    String(weight),
-    "--runtime-configurable",
-    "--key",
-    keyPath,
-  ];
-}
-
-/** The running processes of the production environment, the CI one aside. */
-function production(state: DaemonState): ProcessStatus[] {
-  return state.processes.filter(
-    (process) =>
-      process.state === "running" && process.id.startsWith(`${PROJECT}--${ENVIRONMENT}--`),
-  );
 }
 
 /** The bucket settings the CLI reads when it talks to the store directly. */
@@ -944,11 +677,6 @@ function until<T>(what: string, deadlineMs: number, probe: () => Promise<T | nul
  */
 function expectCleanExit(result: CommandResult): void {
   expect(result.code, `${result.output}\n${daemonLogTail()}`).toBe(0);
-}
-
-/** Fails with the answer's body, which is where a problem document explains itself. */
-function expectStatus(answer: HttpAnswer, status: number): void {
-  expect(answer.status, answer.body).toBe(status);
 }
 
 /** The tail of the daemon container's output, as a failure message carries it. */

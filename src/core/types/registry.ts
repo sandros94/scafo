@@ -281,26 +281,16 @@ export interface OidcActor {
 }
 
 /**
- * An immutable build artifact. Key: `_scafo/projects/<project>/builds/<id>.json`.
+ * An immutable deployment-history record. Key: `_scafo/projects/<project>/builds/<id>.json`.
  */
 export interface BuildRecord {
   v: 1;
   id: string;
-  /** Key of the uploaded artifact bundle. */
-  artifact: string;
   celldVersionId?: string;
   /** Whether the build reads its configuration at runtime rather than at build time. */
   runtimeConfigurable: boolean;
   /** Varset the artifact was built against; drives the runtime-configurable warning. */
   builtWithVarset?: string;
-  /**
-   * Environment whose fleet holds this build's deployed code, and therefore what
-   * makes its build-hash host WAKEABLE: recalling a superseded build means
-   * starting a process against that fleet, and nothing else records which one it
-   * is. A record without this field predates recall and is not wakeable — its
-   * host answers 404 rather than starting a process against a guess.
-   */
-  environment?: string;
   source?: BuildSource;
   /** Present only when a verified workload token uploaded this build. */
   oidc?: OidcActor;
@@ -308,33 +298,22 @@ export interface BuildRecord {
 }
 
 /**
- * Caller-supplied half of a {@link BuildRecord}: `artifact` defaults to the
- * conventional artifact key and `createdAt` is stamped by the registry.
+ * Caller-supplied half of a {@link BuildRecord}; `createdAt` is stamped by the registry.
  */
 export interface BuildInput {
   id: string;
-  artifact?: string;
   celldVersionId?: string;
   runtimeConfigurable: boolean;
   builtWithVarset?: string;
-  /** Environment the build was published into; see {@link BuildRecord.environment}. */
-  environment?: string;
   source?: BuildSource;
   /** Auth-owned workload identity; deploy intake, not request metadata, sets this. */
   oidc?: OidcActor;
 }
 
-/** Which build an environment currently points at, plus the previous one for rollback. */
+/** Which build an environment currently runs. */
 export interface AliasState {
   build: string;
-  previous?: string;
   flippedAt: string;
-}
-
-/** One leg of a weighted traffic split. */
-export interface SplitEntry {
-  build: string;
-  weight: number;
 }
 
 /**
@@ -350,10 +329,6 @@ export interface ParkPolicy {
    * measure that traffic this field is refused for one.
    */
   afterS?: number;
-  /** Whether superseded builds may be woken at their build-hash hosts. */
-  recallBuilds?: boolean;
-  /** Seconds a woken superseded build runs past its last wake before it parks again. */
-  buildIdleS?: number;
   /** Seconds a request held for a wake may wait before `503 Retry-After`. */
   wakeDeadlineS?: number;
 }
@@ -367,10 +342,8 @@ export interface EnvironmentRecord {
   name: string;
   /** Bucket prefix the environment's fleet state lives under (`fleets/<project>/<name>`). */
   prefix: string;
-  /** Current build pointer (last flip); `null` until the first flip. */
+  /** Current build marker; `null` until the first successful deploy. */
   alias: AliasState | null;
-  /** Weighted routing override; `null` when the alias alone serves traffic. */
-  split: SplitEntry[] | null;
   varset?: string;
   domains: string[];
   placement: PlacementStrategy;

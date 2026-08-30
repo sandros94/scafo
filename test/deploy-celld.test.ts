@@ -7,7 +7,7 @@
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { ScafoError } from "../src/core/error.ts";
 import type { DeployRunInput, DeployRunResult, StagedArtifact } from "../src/core/types/deploy.ts";
 import { packDirectory } from "../src/drivers/archive/tar-zst.ts";
@@ -270,6 +270,82 @@ it("finds a split version marker before unlimited later stdout and stderr", asyn
     }).run(input(artifact), { signal: new AbortController().signal });
 
     expect(result).toEqual({ celldVersionId: "abcdef12" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("reports a detected version when Celld fails after it may have moved current", async () => {
+  const root = await mkdtemp(join(tmpdir(), "scafo-deploy-partial-"));
+  const source = join(root, "source");
+  const staging = join(root, "staging");
+  const bin = join(root, "celld-test");
+  try {
+    await writeFile(
+      bin,
+      [
+        `#!${process.execPath}`,
+        'import { writeSync } from "node:fs";',
+        'writeSync(1, "Current Version ID: abcdef12\\n");',
+        'writeSync(2, "late failure\\n");',
+        "process.exit(1);",
+      ].join("\n"),
+    );
+    await chmod(bin, 0o755);
+    await Promise.all([mkdir(source), mkdir(staging)]);
+    await writeFile(join(source, "wrangler.jsonc"), '{ "name": "shop" }');
+
+    const runner = createCelldDeployRunner({ binPath: bin, stagingDir: staging, baseEnv: {} });
+    const error = await runner
+      .run(input(await packDirectory(source)), { signal: new AbortController().signal })
+      .catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({ code: "invalid-input" });
+    expect((error as Error & { detail?: string }).detail).toContain("abcdef12");
+    expect((error as Error & { detail?: string }).detail).toContain(
+      "may already have moved current",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("reports a detected version when publication is aborted after Celld named it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "scafo-deploy-partial-abort-"));
+  const source = join(root, "source");
+  const staging = join(root, "staging");
+  const bin = join(root, "celld-test");
+  const ready = join(root, "ready");
+  try {
+    await writeFile(
+      bin,
+      [
+        `#!${process.execPath}`,
+        'import { writeFileSync, writeSync } from "node:fs";',
+        'writeSync(1, "Current Version ID: abcdef12\\n");',
+        'writeFileSync(process.env.SCAFO_TEST_READY, "ready");',
+        "setInterval(() => {}, 1000);",
+      ].join("\n"),
+    );
+    await chmod(bin, 0o755);
+    await Promise.all([mkdir(source), mkdir(staging)]);
+    await writeFile(join(source, "wrangler.jsonc"), '{ "name": "shop" }');
+    const controller = new AbortController();
+    const runner = createCelldDeployRunner({
+      binPath: bin,
+      stagingDir: staging,
+      baseEnv: { SCAFO_TEST_READY: ready },
+    });
+    const running = runner.run(input(await packDirectory(source)), { signal: controller.signal });
+    await vi.waitFor(() => readFile(ready, "utf8"));
+    controller.abort(new ScafoError("lease-lost", "Pointer lock was lost"));
+
+    const error = await running.catch((failure: unknown) => failure);
+    expect(error).toMatchObject({ code: "lease-lost" });
+    expect((error as Error & { detail?: string }).detail).toContain("abcdef12");
+    expect((error as Error & { detail?: string }).detail).toContain(
+      "may already have moved current",
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

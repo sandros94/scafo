@@ -11,6 +11,7 @@ import { H3, HTTPError } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import { type DaemonState, createNodeApp, type EnvironmentResult } from "../src/daemon/app.ts";
 import type { AssignmentFailure } from "../src/daemon/_assign.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
@@ -27,7 +28,6 @@ import {
   createProject,
   deleteKey,
   environmentKey,
-  flipAlias,
   getEnvironment,
   registerNode,
   retireEnvironment,
@@ -48,7 +48,6 @@ const CUSTOM_DOMAIN = "shop.example.com";
 /** The one platform domain this node serves; its bare apex is the fleet's API. */
 const PLATFORM_DOMAIN = "apps.test";
 const BUILD = "aaaa1111";
-const OTHER_BUILD = "bbbb2222";
 
 /** What the stand-in supervisor reports; the state route must pass it through. */
 const PROCESSES: ProcessStatus[] = [
@@ -360,12 +359,12 @@ describe("POST /v1/environments/:project/:env/park", () => {
   it("states how the environment scales to zero, without any lease at all", async () => {
     await parkable();
 
-    const body = await parkBody(PREVIEW, { policy: { afterS: 60, recallBuilds: false } });
+    const body = await parkBody(PREVIEW, { policy: { afterS: 60 } });
 
     /* A plain conditional update on one record, like the selector: what it
        states is an intent, and parked-ness is never stored — every node derives
        it from this policy and the wake stamps on its next pass. */
-    expect(body.environment.park).toEqual({ afterS: 60, recallBuilds: false });
+    expect(body.environment.park).toEqual({ afterS: 60 });
     expect(await getEnvironment(clock.ctx, PROJECT, PREVIEW)).toEqual(body.environment);
   });
 
@@ -428,159 +427,6 @@ describe("POST /v1/environments/:project/:env/park", () => {
     await parkable();
 
     const response = await parkRequest("ghost", { policy: { afterS: 60 } });
-
-    expect(response.status).toBe(404);
-  });
-});
-
-describe("POST /v1/environments/:project/:env/split", () => {
-  it("weights the environment's traffic over its builds, without any lease at all", async () => {
-    await splittable();
-
-    const body = await splitBody({
-      split: [
-        { build: BUILD, weight: 90 },
-        { build: OTHER_BUILD, weight: 10 },
-      ],
-    });
-
-    expect(body.environment.split).toEqual([
-      { build: BUILD, weight: 90 },
-      { build: OTHER_BUILD, weight: 10 },
-    ]);
-    /* The alias has not moved: a split weights traffic, it does not repoint the
-       environment, and a rollback still goes where it always did. */
-    expect(body.environment.alias).toMatchObject({ build: BUILD });
-    expect(await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).toEqual(body.environment);
-  });
-
-  it("ends the split when the body says null", async () => {
-    await splittable();
-    await splitBody({
-      split: [
-        { build: BUILD, weight: 50 },
-        { build: OTHER_BUILD, weight: 50 },
-      ],
-    });
-
-    const body = await splitBody({ split: null });
-
-    expect(body.environment.split).toBeNull();
-  });
-
-  it("weighs a canary against the alias, without being told what the alias is", async () => {
-    await splittable();
-
-    const body = await splitBody({ canary: { build: OTHER_BUILD, weight: 10 } });
-
-    /* The node reads the alias and writes the split in one conditional update,
-       so a canary can never be weighed against an alias that has since moved. */
-    expect(body.environment.split).toEqual([
-      { build: BUILD, weight: 90 },
-      { build: OTHER_BUILD, weight: 10 },
-    ]);
-  });
-
-  it("refuses a canary on an environment that was never flipped, naming the way forward", async () => {
-    await deployable();
-    await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
-
-    const response = await splitRequest({ canary: { build: BUILD, weight: 10 } });
-
-    expect(response.status).toBe(400);
-    expect((await response.json()).detail).toContain("--flip");
-  });
-
-  it("refuses a body that says nothing about the split", async () => {
-    await splittable();
-
-    /* Undoing a split is far too consequential to be what an omission defaults
-       to, exactly as it is for a selector. */
-    const response = await splitRequest({});
-
-    expect(response.status).toBe(400);
-    expect((await response.json()).detail).toContain("null to clear them");
-  });
-
-  it("refuses a body stating both a split and a canary", async () => {
-    await splittable();
-
-    const response = await splitRequest({
-      split: [
-        { build: BUILD, weight: 50 },
-        { build: OTHER_BUILD, weight: 50 },
-      ],
-      canary: { build: OTHER_BUILD, weight: 10 },
-    });
-
-    expect(response.status).toBe(400);
-    expect((await response.json()).detail).toContain("opposite");
-  });
-
-  it.each([
-    { split: "aaaa=90" },
-    { split: [{ build: BUILD }] },
-    { split: [{ build: BUILD, weight: "90" }] },
-    { split: [{ weight: 90 }] },
-    { canary: { build: BUILD } },
-    { canary: { build: BUILD, weight: "10" } },
-  ])("refuses %p", async (sent) => {
-    await splittable();
-
-    const response = await splitRequest(sent as Record<string, unknown>);
-
-    expect(response.status).toBe(400);
-    expect((await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).split).toBeNull();
-  });
-
-  it("relays the registry's refusal when the weights do not add up", async () => {
-    await splittable();
-
-    const response = await splitRequest({
-      split: [
-        { build: BUILD, weight: 90 },
-        { build: OTHER_BUILD, weight: 20 },
-      ],
-    });
-
-    expect(response.status).toBe(400);
-    expect((await response.json()).detail).toContain("sum to 100");
-  });
-
-  it("answers a leg whose build is not recorded as a miss", async () => {
-    await splittable();
-
-    const response = await splitRequest({
-      split: [
-        { build: BUILD, weight: 90 },
-        { build: "deadbeef", weight: 10 },
-      ],
-    });
-
-    expect(response.status).toBe(404);
-  });
-
-  it("refuses a caller with no token", async () => {
-    await splittable();
-
-    const response = await app.request(`/v1/environments/${PROJECT}/${ENVIRONMENT}/split`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ split: null }),
-    });
-
-    expect(response.status).toBe(401);
-    await expect(response.json()).resolves.toEqual(AUTH_INVALID_PROBLEM);
-  });
-
-  it("answers a missing environment as a miss rather than as a split", async () => {
-    await splittable();
-
-    const response = await app.request(`/v1/environments/${PROJECT}/ghost/split`, {
-      method: "POST",
-      headers: { ...(await bearer()), "content-type": "application/json" },
-      body: JSON.stringify({ split: null }),
-    });
 
     expect(response.status).toBe(404);
   });
@@ -743,11 +589,14 @@ describe("GET /v1/ingress/ask", () => {
      */
     await deployable();
     await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
-    await flipAlias(clock.ctx, PROJECT, ENVIRONMENT, BUILD);
+    await setCurrentBuild(clock.ctx, PROJECT, ENVIRONMENT, BUILD);
     const real = await app.request(`/v1/ingress/ask?domain=${PROJECT}--${ENVIRONMENT}.apps.test`);
     expect(real.status).toBe(200);
 
-    /* An environment that EXISTS but was never flipped is the same refusal as
+    const directBuild = await app.request(`/v1/ingress/ask?domain=${PROJECT}--${BUILD}.apps.test`);
+    expect(directBuild.status).toBe(404);
+
+    /* An environment that EXISTS but never had a current build is the same refusal as
        one that never existed: nothing serves it, nothing wakes for it, and a
        name that answers nothing has no business holding a certificate. */
     await createEnvironment(clock.ctx, PROJECT, { name: "unflipped" });
@@ -1040,31 +889,6 @@ async function bearer(): Promise<Record<string, string>> {
 async function deployable(): Promise<void> {
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, { name: ENVIRONMENT });
-}
-
-/** One call to the split route with `sent` as the whole body. */
-async function splitRequest(sent: Record<string, unknown>): Promise<Response> {
-  return app.request(`/v1/environments/${PROJECT}/${ENVIRONMENT}/split`, {
-    method: "POST",
-    headers: { ...(await bearer()), "content-type": "application/json" },
-    body: JSON.stringify(sent),
-  });
-}
-
-/** The same call, asserted to have succeeded, with its body read back. */
-async function splitBody(sent: Record<string, unknown>): Promise<EnvironmentResult> {
-  const response = await splitRequest(sent);
-  expect(response.status, await response.clone().text()).toBe(200);
-  return (await response.json()) as EnvironmentResult;
-}
-
-/** An environment with two builds recorded and its alias on the first. */
-async function splittable(): Promise<void> {
-  await deployable();
-  for (const id of [BUILD, OTHER_BUILD]) {
-    await createBuild(clock.ctx, PROJECT, { id, runtimeConfigurable: true });
-  }
-  await flipAlias(clock.ctx, PROJECT, ENVIRONMENT, BUILD);
 }
 
 /** One call to the park route with `sent` as the whole body. */

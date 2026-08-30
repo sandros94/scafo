@@ -9,6 +9,7 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import { runAssignment } from "../src/daemon/_assign.ts";
 import { drainThisNode } from "../src/cli/_bootstrap.ts";
 import {
@@ -17,7 +18,6 @@ import {
   createEnvironment,
   createProject,
   drainNode,
-  flipAlias,
   getNode,
   heartbeatNode,
   isNodeLive,
@@ -230,7 +230,7 @@ describe("drainThisNode, as a shutdown calls it", () => {
 /** An environment with a build to serve, so it is a real placement target. */
 async function deployed(name: string): Promise<void> {
   await createEnvironment(clock.ctx, PROJECT, { name });
-  await flipAlias(clock.ctx, PROJECT, name, BUILD);
+  await setCurrentBuild(clock.ctx, PROJECT, name, BUILD);
 }
 
 /** Registers `id` as a node that has just beaten, exactly as a boot does. */

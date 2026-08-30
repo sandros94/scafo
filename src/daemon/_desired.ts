@@ -1,17 +1,17 @@
 /* Internal: what the registry says THIS node should be serving. */
 
-import { isScafoError, ScafoError } from "../core/error.ts";
+import { ScafoError } from "../core/error.ts";
 import type { DesiredBuild, DesiredEnvironment } from "../core/placement/reconcile.ts";
 import { getBuild } from "../core/registry/builds.ts";
 import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { listEnvironments } from "../core/registry/environments.ts";
 import { environmentKey } from "../core/registry/paths.ts";
-import { type ResolvedParkPolicy, resolveParkPolicy } from "../core/registry/park.ts";
+import { resolveParkPolicy } from "../core/registry/park.ts";
 import { listPlacements } from "../core/registry/placement.ts";
 import { isProjectBlocked, listProjects } from "../core/registry/projects.ts";
 import { getVarsetEnvelope, openVarset } from "../core/registry/varsets.ts";
-import { listBuildWakes, readEnvironmentWake } from "../core/registry/wake.ts";
+import { readEnvironmentWake } from "../core/registry/wake.ts";
 import {
   type ConcurrencyGate,
   createConcurrencyGate,
@@ -75,8 +75,7 @@ export interface DesiredState {
   placements: PlacementView[];
   /**
    * Environments this node reads as PARKED: ephemeral ones that have gone longer
-   * without a wake than their park policy allows, whether or not a recalled build
-   * still runs for them.
+   * without a wake than their park policy allows.
    *
    * Reported rather than merely left out of {@link DesiredState.environments},
    * because those two absences are the same absence to `/v1/state` and to an
@@ -99,12 +98,11 @@ export interface DesiredState {
 export type PlacementReadMode = "required" | "legacy-fallback";
 
 /**
- * Every environment this node has something to serve for, with the builds it
- * should run already resolved: the one its alias points at, plus every leg of
- * its traffic split.
+ * Every environment this node has something to serve for, with its current
+ * build already resolved.
  *
- * An environment whose alias was never flipped is left out — it has no build
- * yet, so there is nothing to run for it. So is one whose placement record names
+ * An environment without a current build is left out — there is nothing to run
+ * for it. So is one whose placement record names
  * other nodes: that is a reassignment taking effect, and the caller stops
  * whatever it still runs for it while the nodes named pick it up on their own
  * passes. And so is a RETIRED one, which leaves by the same door: it drops out
@@ -318,47 +316,21 @@ function servedHere(
 }
 
 /**
- * One environment's builds: the alias, then every split leg it does not already
- * name, then every build a wake has recalled. Null when the environment has
- * nothing to serve at all.
+ * Resolves the environment's single current build. Null when it has nothing to serve.
  *
  * PARKED-NESS IS DERIVED HERE AND STORED NOWHERE. An ephemeral environment that
  * has gone longer than its policy allows without a wake is parked: none of its
- * alias or split builds are desired, so the next pass stops them and its own
- * hosts stop resolving with them. It is reported in {@link DesiredState.parked}
- * rather than merely dropped, and it is NOT undesired by that alone — a build
- * somebody woke keeps running at its build-hash host while the environment
- * around it stays parked, which is what recall is for.
+ * current build is desired, so the next pass stops it and its hosts stop
+ * resolving. It is reported in {@link DesiredState.parked}
+ * rather than merely dropped.
  *
- * A RECALLED BUILD WHOSE RECORD IS GONE IS DROPPED SILENTLY, and this is the one
- * place that reads the opposite way to the split legs below. A build the reaper
- * has taken is a permanent 404 by design — the bucket is the source of truth and
- * nothing brings the record back — so there is nothing an operator could act on,
- * and the stamp that named it is the only thing left pointing at it. Recording
- * it in {@link DesiredEnvironment.unresolved} instead would count it as an
- * unproven leg and hold back every stop of that environment forever.
- *
- * A SPLIT LEG WHOSE BUILD RECORD IS GONE is recorded against the environment and
- * left in {@link DesiredEnvironment.unresolved} rather than dropped quietly. The
- * planner counts it as an unproven leg, which holds back every stop for that
- * environment: whatever it is running now — including the leg that vanished —
- * keeps running. Silently dropping it would instead retire that leg the moment
- * the others were ready, and hand its share of the traffic to them, over a
- * build the operator never withdrew. The reaper refuses to delete a build any
- * split references, so this is a corrupted or raced registry rather than the
- * ordinary way a leg goes away; the ordinary way is `scafo env split --clear`.
- *
- * The ALIAS build is not treated that way and must not be: it is the whole of
- * what the environment serves when there is no split, so a missing one is not a
+ * The current build is not treated that way and must not be: it is the whole of
+ * what the environment serves, so a missing one is not a
  * gap in an environment, it is an environment nothing can be planned for. It
  * raises, the pass records it and plans nothing at all, and nothing is stopped.
  *
- * ONE ENVIRONMENT'S READS RUN IN SEQUENCE, because each of them decides what the
- * next one is: whether the environment is parked decides whether its alias is
- * wanted at all, and a split leg or a recalled build is skipped when a build
- * already RESOLVED carries its id — a dependency on what came back, not merely
- * on the ids the record names. They are also few, while the environments beside
- * them are many, which is the axis {@link readDesired} overlaps instead.
+ * One environment's reads run in sequence because parkedness decides whether
+ * its current build should be read at all.
  */
 export async function resolveEnvironmentBuilds(
   registry: RegistryContext,
@@ -383,48 +355,20 @@ export async function resolveEnvironmentBuilds(
   const policy = resolveParkPolicy(env);
   const parked = policy.afterS > 0 && (await isParked(registry, project, env, policy.afterS));
   /* Reported only when there is something the clock is keeping stopped: an
-     environment whose alias was never flipped serves nothing either way, and
+     environment without a current build serves nothing either way, and
      calling it parked would promise that a request wakes something. */
   if (parked && env.alias !== null) state.parked.push({ project, env });
 
-  const builds: DesiredBuild[] = [];
-  const unresolved: string[] = [];
-
-  /* An alias that was never flipped is not an early exit: whether a build wake
-     is honoured must not depend on the environment around it — recall works the
-     same for a parked environment, an awake one, and one that has nothing of
-     its own to serve yet. */
   const aliased = parked ? undefined : env.alias?.build;
-  if (aliased !== undefined) {
-    builds.push({ build: await getBuild(registry, project, aliased), role: "alias" });
-
-    for (const entry of env.split ?? []) {
-      if (builds.some((leg) => leg.build.id === entry.build)) continue;
-
-      try {
-        builds.push({ build: await getBuild(registry, project, entry.build), role: "split" });
-      } catch (error) {
-        if (!isScafoError(error) || error.code !== "not-found") throw error;
-        unresolved.push(entry.build);
-        state.failures.push({
-          subject: `${project}/${env.name}`,
-          detail:
-            `build "${entry.build}" is a leg of this environment's traffic split but has no ` +
-            `record in the registry, so it cannot be started; nothing this environment runs ` +
-            `is stopped while a leg is unresolved`,
-        });
-      }
-    }
-  }
-
-  await recalledBuilds(registry, project, env, policy, builds);
-  if (builds.length === 0) return null;
+  if (aliased === undefined) return null;
+  const builds: DesiredBuild[] = [
+    { build: await getBuild(registry, project, aliased), role: "current" },
+  ];
 
   return {
     project,
     env,
     builds,
-    ...(unresolved.length === 0 ? {} : { unresolved }),
     varsetId: env.varset,
   };
 }
@@ -433,7 +377,7 @@ export async function resolveEnvironmentBuilds(
  * Whether the environment has gone without a wake for longer than `afterS`.
  *
  * The base is its wake stamp, and the FALLBACK for one that has never been
- * stamped is the reaper's — the alias flip, then the creation — so an
+ * stamped is the reaper's — the current deployment, then the creation — so an
  * environment deployed before there were stamps does not read as parked the
  * instant a node that knows about parking picks it up. A base that cannot be
  * read at all keeps the environment awake: nothing here should stop an
@@ -451,36 +395,4 @@ async function isParked(
   if (!Number.isFinite(since)) return false;
 
   return nowDate(registry).getTime() - since >= afterS * 1000;
-}
-
-/**
- * Appends the builds a wake has recalled: superseded ones stamped awake less
- * than `buildIdleS` ago, freshest first, minus whatever already has a leg.
- *
- * Appended LAST on purpose — a recalled build serves one caller at its own host,
- * while the alias and the split legs carry the environment's traffic, and the
- * planner rolls a build out in the order it is given.
- */
-async function recalledBuilds(
-  registry: RegistryContext,
-  project: string,
-  env: EnvironmentRecord,
-  policy: ResolvedParkPolicy,
-  builds: DesiredBuild[],
-): Promise<void> {
-  if (!policy.recallBuilds || policy.buildIdleS <= 0) return;
-
-  const now = nowDate(registry).getTime();
-  for (const [id, at] of await listBuildWakes(registry, project, env.name)) {
-    if (now - at.getTime() >= policy.buildIdleS * 1000) continue;
-    if (builds.some((leg) => leg.build.id === id)) continue;
-
-    try {
-      builds.push({ build: await getBuild(registry, project, id), role: "recalled" });
-    } catch (error) {
-      if (!isScafoError(error) || error.code !== "not-found") throw error;
-      /* Reaped: a permanent 404 nobody can act on, so it is not a failure and
-         not an unresolved leg — see {@link resolveEnvironment}. */
-    }
-  }
 }

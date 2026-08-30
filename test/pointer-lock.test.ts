@@ -15,6 +15,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import type { DaemonContext } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import {
@@ -32,7 +33,7 @@ import {
 import { createBuild } from "../src/core/registry/builds.ts";
 import { putJson, readJson } from "../src/core/registry/cas.ts";
 import type { RegistryContext } from "../src/core/registry/context.ts";
-import { createEnvironment, flipAlias } from "../src/core/registry/environments.ts";
+import { createEnvironment } from "../src/core/registry/environments.ts";
 import { LOCK_POLL_MS } from "../src/core/registry/locks.ts";
 import { fleetPrefix, pointerLockKey } from "../src/core/registry/paths.ts";
 import { POINTER_READ_HOLD_MS } from "../src/core/registry/pointer-lock.ts";
@@ -98,8 +99,7 @@ describe("a deploy landing while a rollout is spawning", () => {
     /*
      * THE CONTRACT. The process was started to serve build X — its id says so,
      * the registry says so, and the routing will say so — so the pointer it
-     * reads while it starts must name X's version. Anything else is a
-     * build-hash host serving another build's code.
+     * reads while it starts must name X's version.
      */
     expect(world.supervisor.loaded).toEqual([
       { id: processIdOf(ENVIRONMENT, BUILD_X), version: versionOf(BUILD_X) },
@@ -262,7 +262,7 @@ async function seededWorld(opts?: WorldOptions): Promise<World> {
   });
   for (const environment of environments) {
     await createEnvironment(ctx, PROJECT, { name: environment });
-    if (flipped.includes(environment)) await flipAlias(ctx, PROJECT, environment, BUILD_X);
+    if (flipped.includes(environment)) await setCurrentBuild(ctx, PROJECT, environment, BUILD_X);
     await seedFleet(ctx, environment);
   }
   const lease = await acquireLease(ctx, NODE);
@@ -358,7 +358,6 @@ function deployMeta(): DeployMeta {
     script: SCRIPT,
     buildId: BUILD_Y,
     runtimeConfigurable: true,
-    flip: false,
   };
 }
 

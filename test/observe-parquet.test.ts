@@ -89,13 +89,12 @@ function event(body: Record<string, unknown>): ObserveEventRecord {
   } as ObserveEventRecord;
 }
 
-/** One of every event variant the seam can emit, in the order they are declared. */
+/** Representative events in the order the seam declares them. */
 const EVERY_EVENT: ObserveEventRecord[] = [
   event({
     type: "wake.admitted",
     id: "w1",
     host: "shop.apps.test",
-    kind: "environment",
     project: "shop",
     env: "production",
     inFlight: 3,
@@ -103,11 +102,9 @@ const EVERY_EVENT: ObserveEventRecord[] = [
   event({
     type: "wake.admitted",
     id: "w2",
-    host: "b1b1b1b1.apps.test",
-    kind: "build",
+    host: "shop--production.apps.test",
     project: "shop",
     env: "production",
-    build: "b1b1b1b1",
     inFlight: 1,
   }),
   event({ type: "wake.refused", id: "w3", host: "shop.apps.test" }),
@@ -198,7 +195,6 @@ describe("the wide schema a flush declares", () => {
       type: "string?",
       id: "string?",
       host: "string?",
-      kind: "string?",
       project: "string?",
       env: "string?",
       build: "string?",
@@ -368,11 +364,10 @@ describe("what one record becomes", () => {
       ]),
     );
 
-    /* The variants that differ within a type differ in the row too: an admitted
-       build names its build, an admitted environment leaves the column null, and
-       a `wake.resolved` that reported no cost leaves `storeOps` null. */
+    /* Both admitted environments leave the rollout build column null, and a
+       `wake.resolved` that reported no cost leaves `storeOps` null. */
     expect(rows[0].build).toBeUndefined();
-    expect(rows[1].build).toBe("b1b1b1b1");
+    expect(rows[1].build).toBeUndefined();
     expect(rows[3].storeOps).toBe(4);
     expect(rows[4].storeOps).toBeUndefined();
     expect(rows[9].kicked).toBe(true);
@@ -645,7 +640,7 @@ describe.skipIf(DUCKDB === undefined)("what DuckDB makes of a flush", () => {
         `SELECT count(*) FROM read_parquet('$FILE') WHERE "type" = 'wake.admitted' ` +
           `AND "build" IS NULL`,
       ),
-    ).toBe("1");
+    ).toBe("2");
 
     /* And the file says who wrote it, and how the pages are packed — which is the
        only claim about the compression that comes from a reader rather than from

@@ -5,6 +5,7 @@
  */
 
 import { beforeAll, describe, expect, it } from "vitest";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import {
   acquireLease,
   checkDomain,
@@ -13,7 +14,6 @@ import {
   createEnvironment,
   createProject,
   executeReap,
-  flipAlias,
   getBuild,
   getEnvironment,
   importVarsetKey,
@@ -62,14 +62,14 @@ beforeAll(async () => {
 
 const FLOWS: Flow[] = [
   {
-    name: "createBuild then flipAlias",
+    name: "createBuild then setCurrentBuild",
     seed: async ({ ctx }) => {
       await createProject(ctx, { slug: PROJECT });
       await createEnvironment(ctx, PROJECT, { name: "prod" });
     },
     run: async ({ ctx }) => {
       await createBuild(ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
-      await flipAlias(ctx, PROJECT, "prod", BUILD);
+      await setCurrentBuild(ctx, PROJECT, "prod", BUILD);
     },
     settled: async ({ ctx }) => {
       await expect(getBuild(ctx, PROJECT, BUILD)).resolves.toMatchObject({ id: BUILD });

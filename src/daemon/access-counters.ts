@@ -87,8 +87,8 @@ export interface IngressCountersSnapshot {
  *
  * BOTH HALVES ARE NEEDED AND THEY COVER DIFFERENT GAPS. `routes` is what the
  * ingress is actually serving, so it names every host with a ready process
- * behind it — an environment's label, its apex, a build's own hash host, a
- * custom domain — and it carries the environment each of them reaches. `claims`
+ * behind it — an environment's label, its apex or a custom domain — and it
+ * carries the environment each of them reaches. `claims`
  * is every custom domain an environment's record holds, ready or not, which is
  * what keeps a parked environment's own domain attributable while nothing is
  * running for it.
@@ -134,18 +134,12 @@ export interface IngressCountersOptions {
  *
  * 1. THE ROUTING, when it names the host. This is the authority, and it has to
  *    be: it is the only thing that knows a custom domain belongs to an
- *    environment, and the only thing that knows which environment a build's hash
- *    host is a leg of. Traffic to a build host therefore counts against that
- *    build's environment, which is what makes a canary's two legs add up to the
- *    environment's total.
+ *    environment.
  * 2. THE PLATFORM HOST GRAMMAR, for everything else under a platform domain —
  *    `<project>.<domain>` as the apex environment, `<project>--<ref>.<domain>`
  *    as that ref. This is what a request for a PARKED or STARTING environment
  *    looks like: nothing routes it yet, and it is still that environment's
- *    traffic. The one thing it cannot do is tell a build id from an environment
- *    name, so an unrouted build host reads as an environment of that name — the
- *    same ambiguity the wake surface resolves against the registry, left as
- *    written here because a line is counted rather than served.
+ *    traffic.
  *
  * Anything else — a domain this installation never minted, an address, a
  * scanner's invention — is {@link UNATTRIBUTED}, counted in full in its own
@@ -199,9 +193,7 @@ export function createIngressCounters(opts: IngressCountersOptions): IngressCoun
         next.set(claim.host, { project: claim.project, env: claim.environment });
       }
       for (const route of input.routes) {
-        const backend = route.backends[0]?.backend;
-        if (backend !== undefined)
-          next.set(route.host, { project: backend.project, env: backend.env });
+        next.set(route.host, { project: route.backend.project, env: route.backend.env });
       }
       routing = next;
     },

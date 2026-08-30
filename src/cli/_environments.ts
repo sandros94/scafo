@@ -13,7 +13,6 @@
 import { ScafoError } from "../core/error.ts";
 import { describeSelector } from "../core/placement/selector.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
-import { type CanaryInput, canarySplit, setSplit } from "../core/registry/environments.ts";
 import { acquireLease, type LeaseHandle, releaseLease } from "../core/registry/lease.ts";
 import {
   type ResolvedParkPolicy,
@@ -23,12 +22,7 @@ import {
 import { setNodeSelector } from "../core/registry/placement.ts";
 import { deleteEnvironment } from "../core/registry/reaper.ts";
 import { retireEnvironment, unretireEnvironment } from "../core/registry/retirement.ts";
-import type {
-  EnvironmentRecord,
-  NodeSelector,
-  ParkPolicy,
-  SplitEntry,
-} from "../core/types/registry.ts";
+import type { EnvironmentRecord, NodeSelector, ParkPolicy } from "../core/types/registry.ts";
 import { parseLabels } from "../core/utils/labels.ts";
 import { assertSlug } from "../core/utils/slug.ts";
 import { type NodeCallOptions, type NodeOptions, nodeRequest } from "./_node.ts";
@@ -57,10 +51,6 @@ export interface EnvironmentOps {
   setSelector(target: EnvironmentTarget, selector: NodeSelector | null): Promise<EnvironmentRecord>;
   /** States how the environment scales to zero; null falls back to what its kind implies. */
   setPark(target: EnvironmentTarget, policy: ParkPolicy | null): Promise<EnvironmentRecord>;
-  /** Weights the environment's traffic over several builds; null clears the split. */
-  setSplit(target: EnvironmentTarget, split: SplitEntry[] | null): Promise<EnvironmentRecord>;
-  /** Weighs one build against whatever the alias currently points at. */
-  canary(target: EnvironmentTarget, canary: CanaryInput): Promise<EnvironmentRecord>;
   /** Answers the store keys that were removed. */
   delete(target: EnvironmentTarget, opts?: DeleteOptions): Promise<string[]>;
 }
@@ -99,18 +89,6 @@ export function nodeOps(opts: NodeOptions): EnvironmentOps {
     return ((await answer.json()) as { environment: EnvironmentRecord }).environment;
   };
 
-  const stateSplit = async (
-    target: EnvironmentTarget,
-    body: { split: SplitEntry[] | null } | { canary: CanaryInput },
-  ): Promise<EnvironmentRecord> => {
-    const answer = await nodeRequest(at(target, "/split"), await opts.authorize(), {
-      ...call("POST"),
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    return ((await answer.json()) as { environment: EnvironmentRecord }).environment;
-  };
-
   return {
     via: opts.url,
     retire: (target) => retirement(target, "/retire"),
@@ -137,10 +115,6 @@ export function nodeOps(opts: NodeOptions): EnvironmentOps {
       });
       return ((await answer.json()) as { environment: EnvironmentRecord }).environment;
     },
-
-    /* Same shape, same reason: clearing a split has to be said, never implied. */
-    setSplit: (target, split) => stateSplit(target, { split }),
-    canary: (target, canary) => stateSplit(target, { canary }),
 
     async delete(target, deleteOpts): Promise<string[]> {
       const query = deleteOpts?.force === true ? "?force=1" : "";
@@ -186,9 +160,6 @@ export function directOps(registry: RegistryContext, opts?: DirectOptions): Envi
     setSelector: (target, selector) =>
       setNodeSelector(registry, target.project, target.env, selector),
     setPark: (target, policy) => setParkPolicy(registry, target.project, target.env, policy),
-    setSplit: (target, split) => setSplit(registry, target.project, target.env, split),
-    canary: (target, canary) => canarySplit(registry, target.project, target.env, canary),
-
     async delete(target, deleteOpts): Promise<string[]> {
       const lease = await takeLease(registry, nodeId, target);
       try {
@@ -283,84 +254,12 @@ export function describeSelectorChange(
   );
 }
 
-/** The two ways `scafo env split` can be told what to do. */
-export interface SplitFlags {
-  /** Legs written `build=weight,build2=weight2`, or undefined when `--set` was not given. */
-  set: string | undefined;
-  /** Whether `--clear` was given. */
-  clear: boolean;
-}
-
-/**
- * The split an invocation states: the legs of `--set`, or null for `--clear`.
- *
- * Exactly one of them, on the same reading as {@link readSelectorFlags}: BOTH
- * says nothing about which was meant, and NEITHER is refused rather than read as
- * "clear", because an accidental `scafo env split` that collapsed a canary onto
- * the alias would move an application's whole traffic without anyone asking.
- *
- * Only the SHAPE is checked here — `build=weight` pairs over whole numbers. What
- * the weights must add up to, how many legs a split needs and whether the builds
- * exist are the registry's, so the refusal an operator reads is the same one
- * they would get writing to the bucket themselves.
- *
- * ORDER IS KEPT as it was written: the legs reach the planner and the ingress in
- * this order, and two nodes rendering the same split must weight it identically.
- */
-export function readSplitFlags(flags: SplitFlags): SplitEntry[] | null {
-  if (flags.set !== undefined && flags.clear) {
-    throw new ScafoError("invalid-input", "Conflicting arguments", {
-      detail: `--set "${flags.set}" and --clear ask for opposite things; pass one of them`,
-    });
-  }
-  if (flags.clear) return null;
-  if (flags.set !== undefined) return parseSplit(flags.set, "--set");
-
-  throw new ScafoError("invalid-input", "Missing required argument", {
-    detail:
-      `pass --set "build=weight,build2=weight2" to weight this environment's traffic over ` +
-      `its builds, or --clear to serve the alias build alone again`,
-  });
-}
-
-/** How a split change reads on the terminal, naming what happens next. */
-export function describeSplitChange(
-  target: EnvironmentTarget,
-  environment: EnvironmentRecord,
-): string {
-  const name = `"${target.project}/${target.env}"`;
-  const split = environment.split;
-
-  if (split === null || split.length === 0) {
-    const build = environment.alias?.build;
-    const serving = build === undefined ? "nothing yet" : `build "${build}"`;
-    return (
-      `scafo: ${name} splits its traffic no more; it serves ${serving} alone, and the nodes ` +
-      `serving it stop every other leg on their next pass`
-    );
-  }
-  return (
-    `scafo: ${name} splits its traffic ${describeSplit(split)}; the nodes serving it start ` +
-    `every leg on their next pass, and each takes its share once it has passed its readiness ` +
-    `gate — until then its share goes to the legs that are ready`
-  );
-}
-
-/** A split as an operator wrote it: `"a" 90%, "b" 10%`. */
-export function describeSplit(split: SplitEntry[]): string {
-  return split.map((leg) => `"${leg.build}" ${String(leg.weight)}%`).join(", ");
-}
-
 /** The ways `scafo env park` can be told what an environment's scaling to zero is. */
 export interface ParkFlags {
   /** Seconds without a wake before it parks, or undefined when `--after` was not given. */
   after: string | undefined;
-  /** Seconds a woken superseded build keeps running, `--build-idle`. */
-  buildIdle: string | undefined;
   /** Seconds a request held for a wake may wait, `--wake-deadline`. */
   wakeDeadline: string | undefined;
-  /** Whether superseded builds may be woken at all, `--recall-builds`, `true` or `false`. */
-  recallBuilds: string | undefined;
   /** Whether `--clear` was given. */
   clear: boolean;
 }
@@ -383,9 +282,7 @@ export interface ParkFlags {
 export function readParkFlags(flags: ParkFlags): ParkPolicy | null {
   const stated: Array<[string, string | undefined]> = [
     ["--after", flags.after],
-    ["--build-idle", flags.buildIdle],
     ["--wake-deadline", flags.wakeDeadline],
-    ["--recall-builds", flags.recallBuilds],
   ];
   const given = stated.filter(([, value]) => value !== undefined).map(([name]) => name);
 
@@ -398,18 +295,14 @@ export function readParkFlags(flags: ParkFlags): ParkPolicy | null {
   if (given.length === 0) {
     throw new ScafoError("invalid-input", "Missing required argument", {
       detail:
-        `pass --after <seconds>, --build-idle <seconds>, --wake-deadline <seconds> or ` +
-        `--recall-builds <true|false> to state how this environment scales to zero, or ` +
+        `pass --after <seconds> or --wake-deadline <seconds> to state how this environment ` +
+        `scales to zero, or ` +
         `--clear to fall back to what its kind implies`,
     });
   }
 
   const policy: ParkPolicy = {};
   if (flags.after !== undefined) policy.afterS = seconds(flags.after, "--after");
-  if (flags.recallBuilds !== undefined) {
-    policy.recallBuilds = truth(flags.recallBuilds, "--recall-builds");
-  }
-  if (flags.buildIdle !== undefined) policy.buildIdleS = seconds(flags.buildIdle, "--build-idle");
   if (flags.wakeDeadline !== undefined) {
     policy.wakeDeadlineS = seconds(flags.wakeDeadline, "--wake-deadline");
   }
@@ -420,8 +313,7 @@ export function readParkFlags(flags: ParkFlags): ParkPolicy | null {
  * How a park change reads on the terminal: the RESOLVED policy rather than the
  * fields that were written, because the two differ in the case that surprises
  * people most — a long-lived environment never parks on a clock, whatever the
- * record says, and an operator who has just set `--build-idle` on one should see
- * that as well as what they changed.
+ * record says.
  */
 export function describeParkChange(
   target: EnvironmentTarget,
@@ -442,44 +334,7 @@ function describePark(policy: ResolvedParkPolicy): string {
     policy.afterS === 0
       ? "never parks on a clock"
       : `parks ${String(policy.afterS)}s after its last wake`;
-  const recall = policy.recallBuilds
-    ? `a superseded build runs again while its own host keeps being asked for, ` +
-      `until ${String(policy.buildIdleS)}s past its last wake`
-    : "superseded builds stay stopped";
-
-  return (
-    `${parks}; ${recall}; a request waiting on a wake is held for up to ` +
-    `${String(policy.wakeDeadlineS)}s`
-  );
-}
-
-/** `build=weight,build2=weight2`, in the order it was written. */
-function parseSplit(stated: string, flag: string): SplitEntry[] {
-  const malformed = (detail: string): ScafoError =>
-    new ScafoError("invalid-input", "Malformed traffic split", { detail });
-
-  const entries: SplitEntry[] = [];
-  for (const part of stated.split(",")) {
-    const pair = part.trim();
-    if (pair === "") continue;
-
-    const at = pair.indexOf("=");
-    if (at < 1) {
-      throw malformed(`${flag} "${stated}" must be written "build=weight,build2=weight2"`);
-    }
-
-    const weight = pair.slice(at + 1).trim();
-    if (!/^\d+$/.test(weight)) {
-      throw malformed(
-        `${flag} gives build "${pair.slice(0, at).trim()}" the weight "${weight}", which is ` +
-          `not a whole number of percent`,
-      );
-    }
-    entries.push({ build: pair.slice(0, at).trim(), weight: Number(weight) });
-  }
-
-  if (entries.length === 0) throw malformed(`${flag} "${stated}" names no builds at all`);
-  return entries;
+  return `${parks}; a request waiting on a wake is held for up to ${String(policy.wakeDeadlineS)}s`;
 }
 
 /** A whole number of seconds, zero included; anything else is the operator's mistake. */
@@ -490,16 +345,6 @@ function seconds(stated: string, flag: string): number {
     });
   }
   return Number(stated);
-}
-
-/** `true` or `false` and nothing else: a flag that guesses is a flag that misreads. */
-function truth(stated: string, flag: string): boolean {
-  if (stated !== "true" && stated !== "false") {
-    throw new ScafoError("invalid-input", "Malformed park policy", {
-      detail: `${flag} "${stated}" must be written "true" or "false"`,
-    });
-  }
-  return stated === "true";
 }
 
 async function takeLease(

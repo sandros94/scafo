@@ -553,7 +553,6 @@ describe("whose traffic a counted host actually was", () => {
       id: BUILD,
       celldVersionId: BUILD,
       runtimeConfigurable: false,
-      environment: "production",
     });
     await createProject(registry, { slug: "untouched" });
 
@@ -608,7 +607,6 @@ describe("what the traces come to", () => {
         type: "wake.admitted",
         id,
         host: "shop.apps.test",
-        kind: "environment",
         project: "shop",
         env: "production",
         inFlight: 1,

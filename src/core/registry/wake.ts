@@ -1,5 +1,5 @@
 /*
- * Wake stamps: when an environment or a superseded build was last asked for.
+ * Wake stamps: when an environment was last asked for.
  *
  * A stamp is a plain last-writer-wins write, deliberately outside the CAS
  * discipline everything else here follows: two nodes stamping the same wake
@@ -14,7 +14,7 @@ import type { ActivitySource } from "./reaper.ts";
 import { putJson, readJson } from "./cas.ts";
 import type { RegistryContext } from "./context.ts";
 import { nowIso } from "./context.ts";
-import { buildWakeKey, buildWakesPrefix, envWakeKey } from "./paths.ts";
+import { envWakeKey } from "./paths.ts";
 
 /** What a wake stamp records; the time is the whole of it. */
 export interface WakeStamp {
@@ -42,46 +42,10 @@ export async function readEnvironmentWake(
   return Number.isNaN(at) ? null : new Date(at);
 }
 
-/** Marks one superseded build awake as of now. */
-export async function stampBuildWake(
-  ctx: RegistryContext,
-  project: string,
-  env: string,
-  build: string,
-): Promise<void> {
-  await putJson<WakeStamp>(ctx, buildWakeKey(project, env, build), { at: nowIso(ctx) });
-}
-
-/**
- * Every build wake the environment has, freshest first. Unreadable stamps are
- * skipped: a stamp exists to keep something awake, and one that cannot say
- * when keeps nothing awake.
- */
-export async function listBuildWakes(
-  ctx: RegistryContext,
-  project: string,
-  env: string,
-): Promise<Map<string, Date>> {
-  const prefix = buildWakesPrefix(project, env);
-  const keys = await ctx.store.list(prefix);
-
-  const wakes: Array<[string, Date]> = [];
-  for (const key of keys) {
-    const build = key.slice(prefix.length).replace(/\.json$/, "");
-    if (build === "") continue;
-    const found = await readJson<WakeStamp>(ctx, key);
-    if (found === null) continue;
-    const at = Date.parse(found.value.at);
-    if (!Number.isNaN(at)) wakes.push([build, new Date(at)]);
-  }
-  wakes.sort((a, b) => b[1].getTime() - a[1].getTime());
-  return new Map(wakes);
-}
-
 /**
  * The reaper's view of these stamps: an environment's last wake is its last
  * activity. The fallback for an environment that has never been woken —
- * its alias flip, then its creation — stays where it always was, in the
+ * its current deployment, then its creation — stays where it always was, in the
  * reaper itself.
  */
 export function wakeActivity(ctx: RegistryContext): ActivitySource {

@@ -17,7 +17,7 @@
  *
  * THE SEAM IS THREADED, NEVER IMPORTED AS A GLOBAL. It reaches the code that
  * emits through {@link DaemonContext} and the executor's deps, exactly as the
- * clock and the weighted draw do, so a test states what a pass observed rather
+ * clock does, so a test states what a pass observed rather
  * than reaching into module state to find out.
  *
  * AN ABSENT SEAM COSTS NOTHING, AND THAT IS THE POINT OF IT BEING OPTIONAL.
@@ -50,12 +50,8 @@ export type ObservedEvent =
       type: "wake.admitted";
       id: string;
       host: string;
-      /** What the Host named: a whole environment, or one build recalled at its own host. */
-      kind: "environment" | "build";
       project: string;
       env: string;
-      /** The build a `build` target names; absent for an environment. */
-      build?: string;
       inFlight: number;
     }
   /* Turned away AT the cap, having stamped nothing and started nothing. */

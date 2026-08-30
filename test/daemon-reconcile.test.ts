@@ -9,6 +9,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import type { DaemonContext } from "../src/daemon/app.ts";
 import {
@@ -25,16 +26,14 @@ import type { CapacityPlan } from "../src/core/capacity/compute.ts";
 import { ScafoError } from "../src/core/error.ts";
 import { createCreditController, type CreditController } from "../src/daemon/_credit-controller.ts";
 import { formatProcessId } from "../src/core/placement/ids.ts";
-import { servingLegs } from "../src/core/placement/routes.ts";
+import { servingBackend } from "../src/core/placement/routes.ts";
 import { deleteKey, putJson, readJson } from "../src/core/registry/cas.ts";
 import type { RegistryContext } from "../src/core/registry/context.ts";
 import { createBuild } from "../src/core/registry/builds.ts";
 import {
   createEnvironment,
-  flipAlias,
   getEnvironment,
   setEnvironmentVarset,
-  setSplit,
 } from "../src/core/registry/environments.ts";
 import { acquireLease } from "../src/core/registry/lease.ts";
 import { LOCK_REFRESH_MS } from "../src/core/registry/locks.ts";
@@ -42,7 +41,7 @@ import { environmentKey, pointerLockKey } from "../src/core/registry/paths.ts";
 import { writePlacement } from "../src/core/registry/placement.ts";
 import { blockProject, createProject, unblockProject } from "../src/core/registry/projects.ts";
 import { importVarsetKey, putVarset, sealVarset } from "../src/core/registry/varsets.ts";
-import type { PlainVarset, SplitEntry } from "../src/core/types/registry.ts";
+import type { PlainVarset } from "../src/core/types/registry.ts";
 import type { IngressDesired, IngressDriver } from "../src/core/types/ingress.ts";
 import type { ProbeOptions, RuntimeDriver, RuntimeProcess } from "../src/core/types/runtime.ts";
 import type { RuntimeSpecInput } from "../src/core/types/runtime.ts";
@@ -295,23 +294,17 @@ describe("publishing what the node serves", () => {
     await world.reconciler.runOnce();
 
     /* One pass: the process was started and passed its gate, so it is routable
-       under the environment's label and under its build's own hash. */
+       under the environment's host. */
     expect(applied).toHaveLength(1);
     expect(applied[0]?.routes.map((route) => route.host)).toEqual([
-      `${PROJECT}--${BUILD_ONE}.apps.test`,
       `${PROJECT}--${ENVIRONMENT}.apps.test`,
     ]);
-    expect(applied[0]?.routes[0]?.backends).toEqual([
-      {
-        backend: {
-          project: PROJECT,
-          env: ENVIRONMENT,
-          build: BUILD_ONE,
-          port: PORT_RANGE_START,
-        },
-        weight: 100,
-      },
-    ]);
+    expect(applied[0]?.routes[0]?.backend).toEqual({
+      project: PROJECT,
+      env: ENVIRONMENT,
+      build: BUILD_ONE,
+      port: PORT_RANGE_START,
+    });
   });
 
   it("routes nothing to a process that never passed its gate", async () => {
@@ -361,8 +354,8 @@ describe("publishing what the node serves", () => {
 });
 
 describe("what the registry says is wanted", () => {
-  it("leaves an environment alone until its alias has been flipped at least once", async () => {
-    const world = await seededWorld({ flip: false });
+  it("leaves an environment alone until it has a current build", async () => {
+    const world = await seededWorld({ current: false });
 
     const plan = await world.reconciler.runOnce();
 
@@ -427,9 +420,9 @@ describe("what the registry says is wanted", () => {
   it("leaves the process an environment already has running when its key stops working", async () => {
     const world = await seededWorld({ varset: true, holdVarsetKey: true, otherBuild: BUILD_TWO });
     await world.reconciler.runOnce();
-    /* The key is rotated out from under the node, and a new build is flipped to. */
+    /* The key is rotated out from under the node, and a new build is made current. */
     world.daemon.varsetKey = await randomVarsetKey();
-    await flipAlias(world.registry, PROJECT, ENVIRONMENT, BUILD_TWO);
+    await setCurrentBuild(world.registry, PROJECT, ENVIRONMENT, BUILD_TWO);
 
     await world.reconciler.runOnce();
     const status = world.reconciler.status();
@@ -438,192 +431,6 @@ describe("what the registry says is wanted", () => {
     expect(world.supervisor.stopped).toEqual([]);
     expect(status.processes.map((process) => process.processId)).toEqual([processIdOf(BUILD_ONE)]);
     expect(status.failures[0]?.detail).toContain("decrypted");
-  });
-});
-
-describe("an environment split between two builds", () => {
-  /** 90 to the alias, 10 to the other build; the order the registry states them in. */
-  const NINETY_TEN: SplitEntry[] = [
-    { build: BUILD_ONE, weight: 90 },
-    { build: BUILD_TWO, weight: 10 },
-  ];
-
-  function splitWorld(): Promise<World> {
-    return seededWorld({ build: BUILD_ONE, otherBuild: BUILD_TWO, split: NINETY_TEN });
-  }
-
-  it("pairs each activation with its own start, rather than batching them", async () => {
-    const world = await splitWorld();
-
-    await world.reconciler.runOnce();
-
-    /*
-     * THE WHOLE HAZARD, in one assertion. celld has ONE deployment pointer per
-     * fleet and a process reads it once, while it starts. Batched as "activate
-     * one, activate two, start, start" — which is what a phased plan produces —
-     * BOTH processes would come up on version-2222bbbb, the registry and the
-     * routing would still say there are two legs, and the split would serve one
-     * build twice with nothing anywhere reporting it.
-     */
-    expect(world.events).toEqual([
-      `activate version-${BUILD_ONE}`,
-      `start ${processIdOf(BUILD_ONE)}`,
-      `gate ${processIdOf(BUILD_ONE)}`,
-      `activate version-${BUILD_TWO}`,
-      `start ${processIdOf(BUILD_TWO)}`,
-      `gate ${processIdOf(BUILD_TWO)}`,
-    ]);
-  });
-
-  it("starts one process per leg, each on its own port pair", async () => {
-    const world = await splitWorld();
-
-    await world.reconciler.runOnce();
-    const status = world.reconciler.status();
-
-    expect(status.processes.map((process) => process.processId)).toEqual([
-      processIdOf(BUILD_ONE),
-      processIdOf(BUILD_TWO),
-    ]);
-    expect(status.processes.map((process) => process.port)).toEqual([
-      PORT_RANGE_START,
-      PORT_RANGE_START + 2,
-    ]);
-    expect(status.processes.every((process) => process.ready)).toBe(true);
-    expect(status.failures).toEqual([]);
-  });
-
-  it("hands each leg the build it is a leg of", async () => {
-    const world = await splitWorld();
-
-    await world.reconciler.runOnce();
-
-    /* Every process is materialized from ITS OWN build record, not from the
-       environment's alias: the alias is one leg of two here. */
-    expect(world.driver.specs.map((input) => input.build.id)).toEqual([BUILD_ONE, BUILD_TWO]);
-  });
-
-  it("publishes the routing weighted as the registry states it", async () => {
-    const applied: IngressDesired[] = [];
-    const world = await seededWorld({
-      build: BUILD_ONE,
-      otherBuild: BUILD_TWO,
-      split: NINETY_TEN,
-      ingress: { apply: (d) => (applied.push(d), Promise.resolve()) },
-    });
-
-    await world.reconciler.runOnce();
-
-    const envHost = `${PROJECT}--${ENVIRONMENT}.apps.test`;
-    const route = applied.at(-1)?.routes.find((entry) => entry.host === envHost);
-    expect(route?.backends.map((leg) => `${leg.backend.build}:${String(leg.weight)}`)).toEqual([
-      `${BUILD_ONE}:90`,
-      `${BUILD_TWO}:10`,
-    ]);
-    /* And each leg keeps a host of its own, single-backend, so it can be checked
-       on without going through the split. */
-    for (const build of [BUILD_ONE, BUILD_TWO]) {
-      const hashed = applied
-        .at(-1)
-        ?.routes.find((entry) => entry.host === `${PROJECT}--${build}.apps.test`);
-      expect(hashed?.backends, build).toHaveLength(1);
-    }
-  });
-
-  it("restarts a crashed leg through the same paired path", async () => {
-    const world = await splitWorld();
-    await world.reconciler.runOnce();
-    world.events.length = 0;
-
-    /* The 10% leg dies. The fleet pointer names whichever build was rolled out
-       last, so restarting it must move the pointer again before it starts — the
-       same action a first start goes through. */
-    world.supervisor.crash(processIdOf(BUILD_TWO));
-    await world.reconciler.runOnce();
-
-    expect(world.events).toEqual([
-      `activate version-${BUILD_TWO}`,
-      `start ${processIdOf(BUILD_TWO)}`,
-      `gate ${processIdOf(BUILD_TWO)}`,
-    ]);
-    /* And the leg that is still up was neither restarted nor stopped. */
-    expect(world.supervisor.stopped).toEqual([]);
-    expect(world.reconciler.status().processes.map((process) => process.processId)).toEqual([
-      processIdOf(BUILD_ONE),
-      processIdOf(BUILD_TWO),
-    ]);
-  });
-
-  it("keeps serving both legs pass after pass, without restarting anything", async () => {
-    const world = await splitWorld();
-    await world.reconciler.runOnce();
-
-    const second = await world.reconciler.runOnce();
-
-    expect(second).toEqual([]);
-    expect(world.supervisor.started).toHaveLength(2);
-    expect(world.driver.activations).toHaveLength(2);
-  });
-
-  it("retires the leg a cleared split dropped, and only once the alias is ready", async () => {
-    const world = await splitWorld();
-    await world.reconciler.runOnce();
-
-    /* `scafo env split --clear`: the environment is wanted at its alias alone. */
-    await setSplit(world.registry, PROJECT, ENVIRONMENT, null);
-    const plan = await world.reconciler.runOnce();
-
-    expect(plan).toEqual([
-      {
-        type: "stop",
-        processId: processIdOf(BUILD_TWO),
-        reason: `superseded by build "${BUILD_ONE}"`,
-      },
-    ]);
-    expect(world.supervisor.stopped).toEqual([
-      { id: processIdOf(BUILD_TWO), graceMs: world.driver.stopGraceMs },
-    ]);
-    expect(world.reconciler.status().processes.map((process) => process.processId)).toEqual([
-      processIdOf(BUILD_ONE),
-    ]);
-  });
-
-  it("stops the other leg when a flip cuts over to one build", async () => {
-    const world = await splitWorld();
-    await world.reconciler.runOnce();
-
-    /* A flip is a full cutover and clears the split with it. */
-    await flipAlias(world.registry, PROJECT, ENVIRONMENT, BUILD_TWO);
-    const plan = await world.reconciler.runOnce();
-
-    expect(plan).toEqual([
-      {
-        type: "stop",
-        processId: processIdOf(BUILD_ONE),
-        reason: `superseded by build "${BUILD_TWO}"`,
-      },
-    ]);
-  });
-
-  it("leaves the ready leg serving when the other one cannot come up", async () => {
-    const world = await splitWorld();
-    world.driver.gate = (process): Promise<boolean> => Promise.resolve(process.build !== BUILD_TWO);
-
-    await world.reconciler.runOnce();
-    const status = world.reconciler.status();
-
-    /* The failing leg is stopped — this pass started it, so it has never served
-       a request — and the environment carries on with the leg that works, which
-       takes the whole of the traffic until the other one comes up. */
-    expect(world.supervisor.stopped).toEqual([
-      { id: processIdOf(BUILD_TWO), graceMs: world.driver.stopGraceMs },
-    ]);
-    expect(status.processes.map((process) => process.processId)).toEqual([processIdOf(BUILD_ONE)]);
-    expect(status.failures).toHaveLength(1);
-    expect(status.failures[0]).toMatchObject({
-      action: "await-ready",
-      subject: processIdOf(BUILD_TWO),
-    });
   });
 });
 
@@ -708,14 +515,10 @@ describe("the hold a rollout keeps the deployment pointer for", () => {
        first — and the process was already registered by then. */
     expect(atGate?.holder).toContain(THIS_NODE);
     expect(atGate?.processes.map((process) => process.processId)).toEqual([processIdOf(BUILD_ONE)]);
-    /* And once it is ready the wake surface can hand a held request to it, still
-       under the hold: `servingLegs` is what both that surface and the routing
-       pick among. */
+    /* And once it is ready the wake surface can hand a held request to it. */
     await expect(lockHolderOf(world.registry)).resolves.toContain(THIS_NODE);
     const environment = await getEnvironment(world.registry, PROJECT, ENVIRONMENT);
-    expect(servingLegs(PROJECT, environment, ready).map((leg) => leg.backend.port)).toEqual([
-      PORT_RANGE_START,
-    ]);
+    expect(servingBackend(PROJECT, environment, ready)?.port).toBe(PORT_RANGE_START);
 
     /* The rollout still waits the hold out before it is done, so the pointer is
        given back only once the process has had its window — the pass's own clock
@@ -1456,32 +1259,6 @@ describe("what a rollout says about itself", () => {
     });
     expect(observed(world).some((event) => event.type === "gate.passed")).toBe(false);
   });
-
-  it("reports one leg of a split apart from the other", async () => {
-    const world = await seededWorld({
-      build: BUILD_ONE,
-      otherBuild: BUILD_TWO,
-      split: [
-        { build: BUILD_ONE, weight: 90 },
-        { build: BUILD_TWO, weight: 10 },
-      ],
-    });
-    world.driver.gate = (process): Promise<boolean> => Promise.resolve(process.build !== BUILD_TWO);
-
-    await world.reconciler.runOnce();
-
-    /* Every event names the process it concerns, which is what tells two legs of
-       one environment apart — the same reason a pass records its failures
-       against a process id rather than an environment. */
-    expect(
-      observed(world)
-        .filter((event) => event.type === "gate.passed" || event.type === "gate.failed")
-        .map((event) => [event.type, (event as { processId: string }).processId]),
-    ).toEqual([
-      ["gate.passed", processIdOf(BUILD_ONE)],
-      ["gate.failed", processIdOf(BUILD_TWO)],
-    ]);
-  });
 });
 
 /** The variables the seeded varset holds, when a case asks for one. */
@@ -1491,12 +1268,12 @@ const VARSET: PlainVarset = {
 };
 
 interface WorldOptions {
-  /** Build the environment's alias is flipped to. Defaults to the first one. */
+  /** Current build of the environment. Defaults to the first one. */
   build?: string;
   /** A second build recorded alongside it, for cases that need an older one. */
   otherBuild?: string;
-  /** Whether the alias is flipped at all. Defaults to true. */
-  flip?: boolean;
+  /** Whether a current build is recorded. Defaults to true. */
+  current?: boolean;
   /** Whether the build carries the runtime version id an activation needs. */
   celldVersionId?: boolean;
   /** Whether the environment points at a sealed varset. */
@@ -1507,8 +1284,6 @@ interface WorldOptions {
   wrongVarsetKey?: boolean;
   /** A second environment of the same project, serving the same build with no varset. */
   otherEnvironment?: string;
-  /** A traffic split written onto the environment, after the alias is flipped. */
-  split?: SplitEntry[];
   capacity?: CapacityPlan;
   /** The shared node-local credits this world admits work through. */
   credits?: CreditController;
@@ -1562,8 +1337,7 @@ async function seededWorld(opts?: WorldOptions): Promise<World> {
       ...(opts?.celldVersionId === false ? {} : { celldVersionId: `version-${id}` }),
     });
   }
-  if (opts?.flip !== false) await flipAlias(ctx, PROJECT, ENVIRONMENT, build);
-  if (opts?.split !== undefined) await setSplit(ctx, PROJECT, ENVIRONMENT, opts.split);
+  if (opts?.current !== false) await setCurrentBuild(ctx, PROJECT, ENVIRONMENT, build);
 
   let varsetKey: CryptoKey | undefined;
   if (opts?.varset === true) {
@@ -1578,7 +1352,7 @@ async function seededWorld(opts?: WorldOptions): Promise<World> {
 
   if (opts?.otherEnvironment !== undefined) {
     await createEnvironment(ctx, PROJECT, { name: opts.otherEnvironment });
-    await flipAlias(ctx, PROJECT, opts.otherEnvironment, build);
+    await setCurrentBuild(ctx, PROJECT, opts.otherEnvironment, build);
   }
   const lease = await acquireLease(ctx, "coordinator");
   if (lease === null) throw new Error("the fixture could not take the coordinator lease");

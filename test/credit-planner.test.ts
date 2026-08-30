@@ -182,7 +182,7 @@ describe("planCreditPlacement", () => {
     expect(planned.placements).toEqual([{ target: "shop/prod", nodes: ["valid"] }]);
   });
 
-  it("charges every desired alias, split and recalled process on a selected node", async () => {
+  it("charges every desired process on a selected node", async () => {
     const planned = await planCreditPlacement({
       nodes: [{ id: "x", profile: { allocatableMb: 100, runtimeMb: 30 } }],
       workloads: [

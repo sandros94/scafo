@@ -1,430 +1,155 @@
-/* Environments and the pointers that steer traffic: alias flips, rollbacks and splits. */
+/* Environment records and their single current-build marker. */
 
 import { beforeEach, describe, expect, it } from "vitest";
+import { ScafoError } from "../src/core/error.ts";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import {
-  canarySplit,
   createBuild,
   createEnvironment,
   createProject,
-  flipAlias,
+  environmentKey,
   getEnvironment,
+  importVarsetKey,
   listEnvironments,
   putVarset,
-  rollbackAlias,
   sealVarset,
   setEnvironmentVarset,
-  setSplit,
-  importVarsetKey,
 } from "../src/core/registry/index.ts";
 import { fleetPrefix } from "../src/core/registry/paths.ts";
-import type { BuildInput } from "../src/core/types/registry.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
 
 const PROJECT = "app";
 const ENV = "prod";
-const B1 = "aaaaaaaa";
-const B2 = "bbbbbbbb";
-const B3 = "cccccccc";
-const FROZEN = "dddddddd";
+const BUILD = "aaaaaaaa";
 
-let store: MemoryCasStore;
 let clock: ManualClock;
 
-function build(id: string, extra?: Partial<BuildInput>): BuildInput {
-  return { id, runtimeConfigurable: true, ...extra };
-}
-
 beforeEach(async () => {
-  store = new MemoryCasStore();
-  clock = ctxWith(store);
+  clock = ctxWith(new MemoryCasStore());
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, { name: ENV });
-  for (const id of [B1, B2, B3]) await createBuild(clock.ctx, PROJECT, build(id));
+  await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
 });
 
-describe("createEnvironment", () => {
-  it("fixes the fleet prefix at creation", async () => {
-    const record = await getEnvironment(clock.ctx, PROJECT, ENV);
-    expect(record).toMatchObject({
+describe("environment records", () => {
+  it("fixes the fleet prefix and begins without a current build", async () => {
+    expect(await getEnvironment(clock.ctx, PROJECT, ENV)).toMatchObject({
       v: 1,
       name: ENV,
       prefix: fleetPrefix(PROJECT, ENV),
       alias: null,
-      split: null,
-      domains: [],
-      placement: "auto",
-      ephemeral: false,
     });
-    expect(record.prefix).toBe(`fleets/${PROJECT}/${ENV}`);
   });
 
-  it("requires the project to exist", async () => {
-    const error = await rejectsWith(
-      () => createEnvironment(clock.ctx, "missing", { name: "preview" }),
-      "not-found",
+  it("requires the project and lists names lexicographically", async () => {
+    await rejectsWith(() => createEnvironment(clock.ctx, "missing", { name: "dev" }), "not-found");
+    await createEnvironment(clock.ctx, PROJECT, { name: "zeta" });
+    await createEnvironment(clock.ctx, PROJECT, { name: "alpha" });
+    await expect(listEnvironments(clock.ctx, PROJECT)).resolves.toEqual(["alpha", ENV, "zeta"]);
+  });
+
+  it("is idempotent for identity and refuses a different one", async () => {
+    await expect(createEnvironment(clock.ctx, PROJECT, { name: ENV })).resolves.toEqual(
+      await getEnvironment(clock.ctx, PROJECT, ENV),
     );
-    expect(error.detail).toContain("missing");
-  });
-
-  it("is idempotent, but refuses different settings", async () => {
-    clock.tick(5000);
-    const again = await createEnvironment(clock.ctx, PROJECT, { name: ENV });
-    expect(again.createdAt).toBe((await getEnvironment(clock.ctx, PROJECT, ENV)).createdAt);
-
     await rejectsWith(
       () => createEnvironment(clock.ctx, PROJECT, { name: ENV, ephemeral: true }),
       "immutable",
     );
   });
 
-  /*
-   * A create is retried whenever a caller cannot tell whether the first one
-   * landed, so it has to stay idempotent for the life of the environment — not
-   * only while the record is still pristine.
-   */
-  it("stays idempotent once the environment has been in use", async () => {
-    await flipAlias(clock.ctx, PROJECT, ENV, B1);
+  it("records replicas and selectors on first creation without making them identity", async () => {
+    const created = await createEnvironment(clock.ctx, PROJECT, {
+      name: "placed",
+      replicas: "all",
+      nodeSelector: { tier: "fast" },
+    });
+    expect(created).toMatchObject({ replicas: "all", nodeSelector: { tier: "fast" } });
 
-    const again = await createEnvironment(clock.ctx, PROJECT, { name: ENV });
-    expect(again.alias).toMatchObject({ build: B1 });
-  });
-
-  it("lists environments lexicographically", async () => {
-    await createEnvironment(clock.ctx, PROJECT, { name: "alpha" });
-    await expect(listEnvironments(clock.ctx, PROJECT)).resolves.toEqual(["alpha", ENV]);
+    await expect(createEnvironment(clock.ctx, PROJECT, { name: "placed" })).resolves.toEqual(
+      created,
+    );
   });
 });
 
-describe("flipAlias", () => {
-  it("requires the build to exist", async () => {
-    await rejectsWith(() => flipAlias(clock.ctx, PROJECT, ENV, "deadbeef"), "not-found");
-    expect((await getEnvironment(clock.ctx, PROJECT, ENV)).alias).toBeNull();
-  });
-
-  it("records the flip against the injected clock", async () => {
-    clock.tick(1000);
-    const { environment } = await flipAlias(clock.ctx, PROJECT, ENV, B1);
-
-    expect(environment.alias).toEqual({
-      build: B1,
+describe("current build", () => {
+  it("records only the current build and timestamp", async () => {
+    const update = await setCurrentBuild(clock.ctx, PROJECT, ENV, BUILD);
+    expect(update.environment.alias).toEqual({
+      build: BUILD,
       flippedAt: new Date(clock.nowMs()).toISOString(),
     });
-    expect(environment.alias?.previous).toBeUndefined();
+    expect(update.warnings).toEqual([]);
   });
 
-  it("moves the outgoing build into previous on every later flip", async () => {
-    await flipAlias(clock.ctx, PROJECT, ENV, B1);
-    clock.tick(1000);
-    const second = await flipAlias(clock.ctx, PROJECT, ENV, B2);
-    expect(second.environment.alias).toMatchObject({ build: B2, previous: B1 });
-
-    clock.tick(1000);
-    const third = await flipAlias(clock.ctx, PROJECT, ENV, B3);
-    expect(third.environment.alias).toMatchObject({ build: B3, previous: B2 });
-  });
-
-  it("clears an active split: a flip is a full cutover", async () => {
-    await flipAlias(clock.ctx, PROJECT, ENV, B1);
-    await setSplit(clock.ctx, PROJECT, ENV, [
-      { build: B1, weight: 90 },
-      { build: B2, weight: 10 },
-    ]);
-    expect((await getEnvironment(clock.ctx, PROJECT, ENV)).split).not.toBeNull();
-
-    const { environment } = await flipAlias(clock.ctx, PROJECT, ENV, B3);
-    expect(environment.split).toBeNull();
-    expect(environment.alias).toMatchObject({ build: B3, previous: B1 });
-  });
-
-  it("says so, naming the legs it just stopped serving", async () => {
-    /* An operator running 90/10 who flips has also ended the split, which is
-       usually what they meant — and is worth saying either way, because nothing
-       else in the answer mentions what was there a moment ago. */
-    await flipAlias(clock.ctx, PROJECT, ENV, B1);
-    await setSplit(clock.ctx, PROJECT, ENV, [
-      { build: B1, weight: 90 },
-      { build: B2, weight: 10 },
-    ]);
-
-    const { warnings } = await flipAlias(clock.ctx, PROJECT, ENV, B3);
-
-    expect(warnings.map((warning) => warning.code)).toEqual(["split-cleared"]);
-    expect(warnings[0].detail).toContain(`"${B1}" at 90%`);
-    expect(warnings[0].detail).toContain(`"${B2}" at 10%`);
-    expect(warnings[0].detail).toContain(B3);
-  });
-
-  it("says nothing about a split when there was none", async () => {
-    await flipAlias(clock.ctx, PROJECT, ENV, B1);
-
-    const { warnings } = await flipAlias(clock.ctx, PROJECT, ENV, B2);
-    expect(warnings).toEqual([]);
-  });
-});
-
-describe("canarySplit", () => {
-  it("weighs the new build against whatever the alias points at", async () => {
-    await flipAlias(clock.ctx, PROJECT, ENV, B1);
-
-    const record = await canarySplit(clock.ctx, PROJECT, ENV, { build: B2, weight: 10 });
-
-    /* Alias leg first, which is the order every reader takes the legs in. */
-    expect(record.split).toEqual([
-      { build: B1, weight: 90 },
-      { build: B2, weight: 10 },
-    ]);
-    /* And the alias has NOT moved: it is still the primary pointer and still
-       what a rollback goes back to. */
-    expect(record.alias).toMatchObject({ build: B1 });
-  });
-
-  it("refuses an environment that has never been flipped, naming the way forward", async () => {
-    const error = await rejectsWith(
-      () => canarySplit(clock.ctx, PROJECT, ENV, { build: B1, weight: 10 }),
-      "invalid-input",
-    );
-
-    /* There is nothing to hold the other side of the split, and easing traffic
-       onto the only thing that serves an environment means nothing. */
-    expect(error.detail).toContain("--flip");
-    expect((await getEnvironment(clock.ctx, PROJECT, ENV)).split).toBeNull();
-  });
-
-  it("refuses to split a build against itself", async () => {
-    await flipAlias(clock.ctx, PROJECT, ENV, B1);
-
-    const error = await rejectsWith(
-      () => canarySplit(clock.ctx, PROJECT, ENV, { build: B1, weight: 10 }),
-      "invalid-input",
-    );
-    expect(error.detail).toContain(B1);
-  });
-
-  it("requires the canary build to exist", async () => {
-    await flipAlias(clock.ctx, PROJECT, ENV, B1);
-
-    await rejectsWith(
-      () => canarySplit(clock.ctx, PROJECT, ENV, { build: "deadbeef", weight: 10 }),
-      "not-found",
-    );
-    expect((await getEnvironment(clock.ctx, PROJECT, ENV)).split).toBeNull();
-  });
-
-  it("refuses a weight that leaves one side of the split with nothing", async () => {
-    await flipAlias(clock.ctx, PROJECT, ENV, B1);
-
-    for (const weight of [0, 100, -5, 10.5]) {
-      const error = await rejectsWith(
-        () => canarySplit(clock.ctx, PROJECT, ENV, { build: B2, weight }),
-        "invalid-input",
-      );
-      expect(error.detail, String(weight)).toContain("1 to 99");
-    }
-  });
-
-  it("replaces a split that was already there", async () => {
-    await flipAlias(clock.ctx, PROJECT, ENV, B1);
-    await canarySplit(clock.ctx, PROJECT, ENV, { build: B2, weight: 10 });
-
-    const widened = await canarySplit(clock.ctx, PROJECT, ENV, { build: B2, weight: 50 });
-
-    expect(widened.split).toEqual([
-      { build: B1, weight: 50 },
-      { build: B2, weight: 50 },
-    ]);
-  });
-
-  it("is promoted by an ordinary flip, which clears it", async () => {
-    await flipAlias(clock.ctx, PROJECT, ENV, B1);
-    await canarySplit(clock.ctx, PROJECT, ENV, { build: B2, weight: 10 });
-
-    const { environment } = await flipAlias(clock.ctx, PROJECT, ENV, B2);
-
-    expect(environment.split).toBeNull();
-    expect(environment.alias).toMatchObject({ build: B2, previous: B1 });
-  });
-});
-
-describe("rollbackAlias", () => {
-  it("swaps current and previous back and forth", async () => {
-    await flipAlias(clock.ctx, PROJECT, ENV, B1);
-    clock.tick(1000);
-    await flipAlias(clock.ctx, PROJECT, ENV, B2);
-
-    clock.tick(1000);
-    const rolled = await rollbackAlias(clock.ctx, PROJECT, ENV);
-    expect(rolled.alias).toEqual({
-      build: B1,
-      previous: B2,
-      flippedAt: new Date(clock.nowMs()).toISOString(),
+  it("warns when a frozen build cannot use the environment varset", async () => {
+    const frozen = "bbbbbbbb";
+    await createEnvironment(clock.ctx, PROJECT, { name: "warned", varset: "cccccccc" });
+    await createBuild(clock.ctx, PROJECT, {
+      id: frozen,
+      runtimeConfigurable: false,
+      builtWithVarset: "dddddddd",
     });
-
-    const forward = await rollbackAlias(clock.ctx, PROJECT, ENV);
-    expect(forward.alias).toMatchObject({ build: B2, previous: B1 });
-  });
-
-  it("has nothing to roll back to before the second flip", async () => {
-    const unflipped = await rejectsWith(() => rollbackAlias(clock.ctx, PROJECT, ENV), "not-found");
-    expect(unflipped.detail).toContain("no previous build");
-
-    await flipAlias(clock.ctx, PROJECT, ENV, B1);
-    const flippedOnce = await rejectsWith(
-      () => rollbackAlias(clock.ctx, PROJECT, ENV),
-      "not-found",
-    );
-    expect(flippedOnce.detail).toContain("no previous build");
-  });
-});
-
-describe("setSplit", () => {
-  it("stores whole-number weights that sum to 100", async () => {
-    const entries = [
-      { build: B1, weight: 60 },
-      { build: B2, weight: 40 },
-    ];
-    const record = await setSplit(clock.ctx, PROJECT, ENV, entries);
-    expect(record.split).toEqual(entries);
-  });
-
-  it("leaves the alias untouched, so rollback still has a target", async () => {
-    await flipAlias(clock.ctx, PROJECT, ENV, B1);
-    clock.tick(1000);
-    await flipAlias(clock.ctx, PROJECT, ENV, B2);
-    const before = await getEnvironment(clock.ctx, PROJECT, ENV);
-
-    const record = await setSplit(clock.ctx, PROJECT, ENV, [
-      { build: B2, weight: 95 },
-      { build: B3, weight: 5 },
+    const update = await setCurrentBuild(clock.ctx, PROJECT, "warned", frozen);
+    expect(update.warnings.map((warning) => warning.code)).toEqual([
+      "build-not-runtime-configurable",
     ]);
-
-    expect(record.alias).toEqual(before.alias);
-    const rolled = await rollbackAlias(clock.ctx, PROJECT, ENV);
-    expect(rolled.alias).toMatchObject({ build: B1, previous: B2 });
-    expect(rolled.split).not.toBeNull();
   });
 
-  it("refuses weights that do not sum to 100", async () => {
-    for (const weight of [39, 41]) {
-      const error = await rejectsWith(
-        () =>
-          setSplit(clock.ctx, PROJECT, ENV, [
-            { build: B1, weight: 60 },
-            { build: B2, weight },
-          ]),
-        "invalid-input",
-      );
-      expect(error.status).toBe(400);
-    }
-  });
+  it("does not retry a stale current-marker write after its lock authority is lost", async () => {
+    const successor = "bbbbbbbb";
+    await createBuild(clock.ctx, PROJECT, { id: successor, runtimeConfigurable: true });
+    const inner = clock.ctx.store;
+    const controller = new AbortController();
+    const lost = new ScafoError("lease-lost", "Pointer lock was lost");
+    let collide = true;
+    clock.ctx.store = {
+      get: (key) => inner.get(key),
+      getBytes: (key) => inner.getBytes(key),
+      put: async (key, body, cas) => {
+        if (
+          collide &&
+          key === environmentKey(PROJECT, ENV) &&
+          typeof body === "string" &&
+          (JSON.parse(body) as { alias?: { build?: string } }).alias?.build === BUILD
+        ) {
+          collide = false;
+          controller.abort(lost);
+          await setCurrentBuild({ ...clock.ctx, store: inner }, PROJECT, ENV, successor);
+        }
+        return inner.put(key, body, cas);
+      },
+      del: (key) => inner.del(key),
+      list: (prefix) => inner.list(prefix),
+    };
 
-  it("refuses fewer than two legs, and weights that are not whole and positive", async () => {
-    const single = await rejectsWith(
-      () => setSplit(clock.ctx, PROJECT, ENV, [{ build: B1, weight: 100 }]),
-      "invalid-input",
-    );
-    expect(single.detail).toContain("at least two builds");
-
-    await rejectsWith(() => setSplit(clock.ctx, PROJECT, ENV, []), "invalid-input");
-    await rejectsWith(
-      () =>
-        setSplit(clock.ctx, PROJECT, ENV, [
-          { build: B1, weight: 99.5 },
-          { build: B2, weight: 0.5 },
-        ]),
-      "invalid-input",
-    );
-    await rejectsWith(
-      () =>
-        setSplit(clock.ctx, PROJECT, ENV, [
-          { build: B1, weight: 100 },
-          { build: B2, weight: 0 },
-        ]),
-      "invalid-input",
-    );
-  });
-
-  it("refuses a leg pointing at a build that is not there", async () => {
-    await rejectsWith(
-      () =>
-        setSplit(clock.ctx, PROJECT, ENV, [
-          { build: B1, weight: 50 },
-          { build: "deadbeef", weight: 50 },
-        ]),
-      "not-found",
-    );
-    expect((await getEnvironment(clock.ctx, PROJECT, ENV)).split).toBeNull();
-  });
-
-  it("clears the split when passed null", async () => {
-    await setSplit(clock.ctx, PROJECT, ENV, [
-      { build: B1, weight: 50 },
-      { build: B2, weight: 50 },
-    ]);
-    const cleared = await setSplit(clock.ctx, PROJECT, ENV, null);
-    expect(cleared.split).toBeNull();
-  });
-});
-
-describe("the runtime-configurable warning", () => {
-  const frozen = (builtWith?: string): BuildInput =>
-    build(FROZEN, { runtimeConfigurable: false, builtWithVarset: builtWith });
-
-  it("warns when a frozen build cannot pick the environment varset up", async () => {
-    await createEnvironment(clock.ctx, PROJECT, { name: "warned", varset: "bbbbbbbb" });
-    await createBuild(clock.ctx, PROJECT, frozen("aaaaaaaa"));
-
-    const { warnings } = await flipAlias(clock.ctx, PROJECT, "warned", FROZEN);
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0].code).toBe("build-not-runtime-configurable");
-    expect(warnings[0].detail).toContain(FROZEN);
-  });
-
-  it("stays quiet for a runtime-configurable build", async () => {
-    await createEnvironment(clock.ctx, PROJECT, { name: "quiet", varset: "bbbbbbbb" });
-    const { warnings } = await flipAlias(clock.ctx, PROJECT, "quiet", B1);
-    expect(warnings).toEqual([]);
-  });
-
-  it("stays quiet when the varsets match", async () => {
-    await createEnvironment(clock.ctx, PROJECT, { name: "matched", varset: "aaaaaaaa" });
-    await createBuild(clock.ctx, PROJECT, frozen("aaaaaaaa"));
-
-    const { warnings } = await flipAlias(clock.ctx, PROJECT, "matched", FROZEN);
-    expect(warnings).toEqual([]);
+    await expect(
+      setCurrentBuild(clock.ctx, PROJECT, ENV, BUILD, { signal: controller.signal }),
+    ).rejects.toBe(lost);
+    await expect(getEnvironment(clock.ctx, PROJECT, ENV)).resolves.toMatchObject({
+      alias: { build: successor },
+    });
   });
 });
 
 describe("setEnvironmentVarset", () => {
-  it("requires the varset to have been stored first", async () => {
+  it("requires the varset to exist", async () => {
     await rejectsWith(() => setEnvironmentVarset(clock.ctx, PROJECT, ENV, "deadbeef"), "not-found");
-    expect((await getEnvironment(clock.ctx, PROJECT, ENV)).varset).toBeUndefined();
   });
 
-  it("points the environment at the varset and re-checks the serving build", async () => {
+  it("updates the environment and checks its current build", async () => {
+    const frozen = "bbbbbbbb";
     const key = await importVarsetKey(crypto.getRandomValues(new Uint8Array(32)));
     const sealed = await sealVarset({ TOKEN: { value: "t", secret: true } }, key);
     await putVarset(clock.ctx, PROJECT, sealed);
-    await createBuild(clock.ctx, PROJECT, build(FROZEN, { runtimeConfigurable: false }));
-    await flipAlias(clock.ctx, PROJECT, ENV, FROZEN);
+    await createBuild(clock.ctx, PROJECT, { id: frozen, runtimeConfigurable: false });
+    await setCurrentBuild(clock.ctx, PROJECT, ENV, frozen);
 
-    const { environment, warnings } = await setEnvironmentVarset(
-      clock.ctx,
-      PROJECT,
-      ENV,
-      sealed.id,
-    );
-
-    expect(environment.varset).toBe(sealed.id);
-    expect(warnings.map((warning) => warning.code)).toEqual(["build-not-runtime-configurable"]);
-  });
-
-  it("raises no warning while nothing is serving yet", async () => {
-    const key = await importVarsetKey(crypto.getRandomValues(new Uint8Array(32)));
-    const sealed = await sealVarset({ TOKEN: { value: "t", secret: true } }, key);
-    await putVarset(clock.ctx, PROJECT, sealed);
-
-    const { warnings } = await setEnvironmentVarset(clock.ctx, PROJECT, ENV, sealed.id);
-    expect(warnings).toEqual([]);
+    const update = await setEnvironmentVarset(clock.ctx, PROJECT, ENV, sealed.id);
+    expect(update.environment.varset).toBe(sealed.id);
+    expect(update.warnings.map((warning) => warning.code)).toEqual([
+      "build-not-runtime-configurable",
+    ]);
   });
 });

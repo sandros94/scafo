@@ -6,8 +6,8 @@
  * boundary:
  *
  * WHAT A CALLER MAY DO — {@link assertProjectScope} — at the point an
- * operator-authed call NAMES a project, in a path, in a deploy's meta, or in the
- * body of a flip. Every route of the node API that takes a project goes through
+ * operator-authed call NAMES a project, in a path or in deploy metadata. Every
+ * route of the node API that takes a project goes through
  * it, and no route that does not take one has anything to ask.
  *
  * WHAT A CALLER MAY LEARN — {@link scopedState} — at the point a route hands

@@ -129,27 +129,11 @@ export function placementKey(project: string, env: string): string {
   return `${placementPrefix(project)}${env}.json`;
 }
 
-/**
- * Where wake stamps live: one per environment, one per woken superseded build.
- * The environment stamp and the build stamps share the environment's segment
- * (`<env>.json` beside `<env>/builds/…`), so one listing under the project
- * finds everything a reaper or a desired-state read could want.
- */
+/** Where the last wake of one environment lives. */
 export function envWakeKey(project: string, env: string): string {
   assertSlug(project);
   assertSlug(env);
   return `${ROOT}/wake/${project}/${env}.json`;
-}
-
-export function buildWakesPrefix(project: string, env: string): string {
-  assertSlug(project);
-  assertSlug(env);
-  return `${ROOT}/wake/${project}/${env}/builds/`;
-}
-
-export function buildWakeKey(project: string, env: string, build: string): string {
-  assertId(build);
-  return `${buildWakesPrefix(project, env)}${build}.json`;
 }
 
 /**
@@ -296,13 +280,6 @@ export function varsetsPrefix(project: string): string {
 export function varsetKey(project: string, id: string): string {
   assertId(id);
   return `${varsetsPrefix(project)}${id}.json`;
-}
-
-/** Where a build's uploaded bundle lives. Outside `_scafo/`: it is not a record. */
-export function artifactKey(project: string, buildId: string): string {
-  assertSlug(project);
-  assertId(buildId);
-  return `artifacts/${project}/${buildId}.tar.zst`;
 }
 
 /**

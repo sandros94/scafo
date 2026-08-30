@@ -8,6 +8,7 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import type { DaemonContext } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { type Coordinator, createCoordinator } from "../src/daemon/coordinator.ts";
@@ -16,7 +17,6 @@ import {
   createBuild,
   createEnvironment,
   createProject,
-  flipAlias,
   getEnvironment,
   readJson,
 } from "../src/core/registry/index.ts";
@@ -46,7 +46,7 @@ beforeEach(async () => {
     idleTtlS: IDLE_TTL_S,
   });
   await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
-  await flipAlias(clock.ctx, PROJECT, "preview", BUILD);
+  await setCurrentBuild(clock.ctx, PROJECT, "preview", BUILD);
 });
 
 describe("createCoordinator", () => {

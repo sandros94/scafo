@@ -14,6 +14,7 @@ import type { H3 } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it } from "vitest";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import { type DaemonContext, type DaemonState, createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { type Coordinator, createCoordinator } from "../src/daemon/coordinator.ts";
@@ -24,7 +25,6 @@ import {
   createBuild,
   createEnvironment,
   createProject,
-  flipAlias,
   getEnvironment,
   readJson,
   registerNode,
@@ -80,7 +80,7 @@ beforeEach(async () => {
     idleTtlS: 900,
   });
   await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
-  await flipAlias(clock.ctx, PROJECT, ENVIRONMENT, BUILD);
+  await setCurrentBuild(clock.ctx, PROJECT, ENVIRONMENT, BUILD);
 });
 
 describe("DELETE /v1/environments/:project/:env", () => {

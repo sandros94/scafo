@@ -3,12 +3,19 @@
 import { ScafoError } from "../error.ts";
 import type { CasHeaders } from "../types/store.ts";
 import { type RetryOptions, withRetry } from "../utils/backoff.ts";
+import { isCasConflict } from "./_shared.ts";
 import type { RegistryContext } from "./context.ts";
 
 /** A parsed document plus the ETag needed to condition the next write on it. */
 export interface Versioned<T> {
   value: T;
   etag: string;
+}
+
+/** Retry controls for a read-modify-write, plus authority to keep mutating. */
+export interface UpdateJsonOptions extends RetryOptions {
+  /** Stops before another read or conditional write once the caller loses authority. */
+  signal?: AbortSignal;
 }
 
 /** Reads and parses `key`, or null when it does not exist. */
@@ -65,14 +72,27 @@ export async function updateJson<T>(
   ctx: RegistryContext,
   key: string,
   mutate: (current: T) => T | Promise<T>,
-  opts?: RetryOptions,
+  opts?: UpdateJsonOptions,
 ): Promise<Versioned<T>> {
-  return withRetry(async () => {
-    const current = await requireJson<T>(ctx, key);
-    const next = await mutate(current.value);
-    const { etag } = await putJson(ctx, key, next, { ifMatch: current.etag });
-    return { value: next, etag };
-  }, opts);
+  const { signal, isRetryable, ...retry } = opts ?? {};
+  return withRetry(
+    async () => {
+      throwIfAborted(signal);
+      const current = await requireJson<T>(ctx, key);
+      throwIfAborted(signal);
+      const next = await mutate(current.value);
+      throwIfAborted(signal);
+      const { etag } = await putJson(ctx, key, next, { ifMatch: current.etag });
+      return { value: next, etag };
+    },
+    {
+      ...retry,
+      isRetryable: (error): boolean => {
+        throwIfAborted(signal);
+        return isRetryable?.(error) ?? isCasConflict(error);
+      },
+    },
+  );
 }
 
 /**
@@ -87,4 +107,8 @@ export async function deleteKey(ctx: RegistryContext, key: string): Promise<void
 
 function serialize(value: unknown): string {
   return JSON.stringify(value, undefined, 2);
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted === true) throw signal.reason;
 }

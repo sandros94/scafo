@@ -185,46 +185,11 @@ describe("converging a server that already has routes", () => {
   });
 });
 
-describe("a host divided between several backends", () => {
-  /*
-   * The shape below is not taken from the documentation. It was PINNED against
-   * `caddy:2` (v2.11.4) through the admin API: posted verbatim, read back
-   * unchanged, and measured — 200 requests over a two-upstream `[90, 10]` split
-   * arrived 180/20, exactly. `weights` is positional, so it lines up with
-   * `upstreams` index by index.
-   */
-  it("writes weighted_round_robin with one weight per upstream, in order", () => {
-    expect(
-      renderCaddyRoutes(
-        split(HOST, [
-          [42_000, 90],
-          [42_002, 10],
-        ]),
-      ),
-    ).toEqual([
-      {
-        "@id": `${ROUTE_ID_PREFIX}${HOST}`,
-        "match": [{ host: [HOST] }],
-        "handle": [
-          {
-            handler: "reverse_proxy",
-            upstreams: [{ dial: "127.0.0.1:42000" }, { dial: "127.0.0.1:42002" }],
-            load_balancing: {
-              selection_policy: { policy: "weighted_round_robin", weights: [90, 10] },
-            },
-          },
-        ],
-        "terminal": true,
-      },
-    ]);
-  });
-
-  it("says nothing about load balancing when there is only one upstream", () => {
-    /* Nothing to choose between, and a policy written anyway would be a field to
-       compare and rewrite on every pass for no gain. */
+describe("a host's backend", () => {
+  it("renders one plain reverse-proxy upstream", () => {
     const [route] = renderCaddyRoutes(desired([[HOST, 42_000]]));
 
-    expect(proxyOf(route).load_balancing).toBeUndefined();
+    expect(proxyOf(route).upstreams).toEqual([{ dial: "127.0.0.1:42000" }]);
     expect(Object.keys(route.handle[0])).toEqual(["handler", "upstreams"]);
   });
 
@@ -234,71 +199,6 @@ describe("a host divided between several backends", () => {
     const [route] = renderCaddyRoutes(desired([[HOST, 42_000]]), "10.83.0.1");
 
     expect(proxyOf(route).upstreams).toEqual([{ dial: "10.83.0.1:42000" }]);
-  });
-
-  it("keeps the weights and the upstreams the same length, whatever the split", () => {
-    for (const legs of [
-      [[42_000, 50] as [number, number], [42_002, 50] as [number, number]],
-      [
-        [42_000, 34] as [number, number],
-        [42_002, 33] as [number, number],
-        [42_004, 33] as [number, number],
-      ],
-    ]) {
-      const [route] = renderCaddyRoutes(split(HOST, legs));
-      const handle = proxyOf(route);
-
-      /* Caddy accepts a mismatch without complaint, which is exactly why the
-         renderer may never produce one. */
-      expect(handle.load_balancing?.selection_policy.weights).toHaveLength(handle.upstreams.length);
-    }
-  });
-
-  it("converges a host that gains a second backend, in place", async () => {
-    await driver.apply(desired([[HOST, 42_000]]));
-    calls = [];
-
-    await driver.apply(
-      split(HOST, [
-        [42_000, 90],
-        [42_002, 10],
-      ]),
-    );
-
-    /* The host keeps its `@id`, so the split arrives as a patch rather than as a
-       withdrawal followed by a fresh route. */
-    expect(methods()).toEqual(["GET", "PATCH"]);
-    expect(routes).toHaveLength(1);
-    expect(routes[0]).toMatchObject({
-      handle: [
-        {
-          upstreams: [{ dial: "127.0.0.1:42000" }, { dial: "127.0.0.1:42002" }],
-          load_balancing: {
-            selection_policy: { policy: "weighted_round_robin", weights: [90, 10] },
-          },
-        },
-      ],
-    });
-  });
-
-  it("rewrites a host whose weights moved and leaves one whose did not", async () => {
-    const ninetyTen = split(HOST, [
-      [42_000, 90],
-      [42_002, 10],
-    ]);
-    await driver.apply(ninetyTen);
-    calls = [];
-
-    await driver.apply(ninetyTen);
-    expect(methods()).toEqual(["GET"]);
-
-    await driver.apply(
-      split(HOST, [
-        [42_000, 50],
-        [42_002, 50],
-      ]),
-    );
-    expect(methods()).toEqual(["GET", "GET", "PATCH"]);
   });
 });
 
@@ -560,20 +460,8 @@ function desired(entries: Array<[string, number]>): IngressDesired {
   return {
     routes: entries.map(([host, port]) => ({
       host,
-      backends: [{ backend: backend(port), weight: 100 }],
+      backend: backend(port),
     })),
-  };
-}
-
-/** One host divided between several builds, as a split renders it. */
-function split(host: string, legs: Array<[number, number]>): IngressDesired {
-  return {
-    routes: [
-      {
-        host,
-        backends: legs.map(([port, weight]) => ({ backend: backend(port), weight })),
-      },
-    ],
   };
 }
 

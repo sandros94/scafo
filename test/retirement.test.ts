@@ -9,6 +9,7 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import {
   acquireLease,
   createBuild,
@@ -16,7 +17,6 @@ import {
   createProject,
   DEFAULT_RETIREMENT_GRACE_MS,
   deleteEnvironment,
-  flipAlias,
   getEnvironment,
   type LeaseHandle,
   retireEnvironment,
@@ -45,7 +45,7 @@ beforeEach(async () => {
   await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
   await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
   await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true });
-  await flipAlias(clock.ctx, PROJECT, "prod", BUILD);
+  await setCurrentBuild(clock.ctx, PROJECT, "prod", BUILD);
 
   const acquired = await acquireLease(clock.ctx, "node-a");
   if (acquired === null) throw new Error("the fixture could not take the lease");

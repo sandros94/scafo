@@ -114,11 +114,8 @@ export function createExecutor(deps: ExecutorDeps): Executor {
    * THE FLEET POINTER IS ONE POINTER PER ENVIRONMENT, AND A PROCESS READS IT
    * ONCE — while it starts. So the activation that names a build and the start
    * that loads it MUST NOT BE SEPARATED, and above all must not be batched with
-   * another build's: activate A, activate B, start A, start B would start BOTH
-   * processes against the pointer B left behind, and an environment split
-   * between two builds would run one build twice. Nothing downstream would
-   * notice — the registry, the routing and the process ids would all still say
-   * there are two legs.
+   * another writer's pointer move. The transitional build-keyed overlap means
+   * the old process may still be draining while its replacement starts.
    *
    * This function is that pairing, and the planner emits one action per build so
    * it cannot be taken apart from the outside. It runs to the end or stops at
@@ -386,8 +383,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     /*
      * A process this rollout started has never answered a request, so stopping
      * it costs nothing and frees its id for another attempt — whatever was
-     * serving the environment before keeps serving it, and a split leg that
-     * cannot come up leaves its share with the legs that are up.
+     * serving the environment before keeps serving it.
      *
      * TODO: a build that never passes its gate is started and stopped once per
      * pass. Backing that off belongs with the failure accounting that reports it.

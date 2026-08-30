@@ -4,6 +4,7 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import {
   acquireLease,
   checkDomain,
@@ -12,7 +13,6 @@ import {
   createEnvironment,
   createProject,
   deleteEnvironment,
-  flipAlias,
   getEnvironment,
   type LeaseHandle,
 } from "../src/core/registry/index.ts";
@@ -49,7 +49,7 @@ beforeEach(async () => {
   await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
   await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true, idleTtlS: 900 });
   await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
-  await flipAlias(clock.ctx, PROJECT, "preview", BUILD);
+  await setCurrentBuild(clock.ctx, PROJECT, "preview", BUILD);
 
   for (const key of [...FLEET_KEYS, ...SURVIVORS]) await store.put(key, "{}");
 
@@ -92,7 +92,7 @@ describe("deleteEnvironment", () => {
 
   it("deletes an environment however recently it was used", async () => {
     /* No idleness question is asked: the order to delete IS the decision, and
-       this environment was flipped a moment ago. */
+       this environment was deployed a moment ago. */
     const { deleted } = await deleteEnvironment(clock.ctx, PROJECT, "preview", lease);
 
     expect(deleted).toContain(environmentKey(PROJECT, "preview"));

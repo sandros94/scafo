@@ -268,7 +268,6 @@ describe("the encoder seam", () => {
       type: "wake.admitted",
       id: "aaaa",
       host: `shop.${DOMAIN}`,
-      kind: "environment",
       project: "shop",
       env: "production",
       inFlight: 1,

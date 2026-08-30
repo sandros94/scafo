@@ -22,6 +22,7 @@
 
 import type { H3 } from "h3";
 import { beforeEach, describe, expect, it } from "vitest";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import { createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { readDesired } from "../src/daemon/_desired.ts";
@@ -32,7 +33,6 @@ import {
   createBuild,
   createEnvironment,
   createProject,
-  flipAlias,
   registerNode,
   unblockProject,
 } from "../src/core/registry/index.ts";
@@ -68,7 +68,7 @@ beforeEach(async () => {
     await createProject(registry, { slug });
     await createEnvironment(registry, slug, { name: ENVIRONMENT });
     await createBuild(registry, slug, { id: BUILD, runtimeConfigurable: true });
-    await flipAlias(registry, slug, ENVIRONMENT, BUILD);
+    await setCurrentBuild(registry, slug, ENVIRONMENT, BUILD);
   }
   await claimDomain(registry, CUSTOM_DOMAIN, PROJECT, ENVIRONMENT);
 
@@ -127,7 +127,7 @@ describe("what a node reads as its work", () => {
     expect(state.environments.map((entry) => entry.project).sort()).toEqual([NEIGHBOUR, PROJECT]);
     expect(
       state.environments.find((entry) => entry.project === PROJECT)?.builds.map((leg) => leg.role),
-    ).toEqual(["alias"]);
+    ).toEqual(["current"]);
   });
 });
 

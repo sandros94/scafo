@@ -32,6 +32,7 @@ import type { H3 } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it } from "vitest";
+import { setCurrentBuild } from "../src/core/registry/_current.ts";
 import { createNodeApp, type DaemonState } from "../src/daemon/app.ts";
 import type { AssignmentResult } from "../src/daemon/_assign.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
@@ -47,7 +48,6 @@ import {
   createBuild,
   createEnvironment,
   createProject,
-  flipAlias,
   registerNode,
 } from "../src/core/registry/index.ts";
 import { getOperator } from "../src/core/registry/operators.ts";
@@ -119,7 +119,7 @@ beforeEach(async () => {
     await createProject(clock.ctx, { slug: project });
     await createEnvironment(clock.ctx, project, { name: ENVIRONMENT });
     await createBuild(clock.ctx, project, { id: BUILD, runtimeConfigurable: true });
-    await flipAlias(clock.ctx, project, ENVIRONMENT, BUILD);
+    await setCurrentBuild(clock.ctx, project, ENVIRONMENT, BUILD);
   }
 
   deploys = stubDeploys();

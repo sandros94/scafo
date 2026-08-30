@@ -28,7 +28,7 @@ export interface CreditPlacementWorkload {
   project: string;
   env: string;
   replicas: ReplicaCount;
-  /** Processes each selected node must keep for this environment (alias, split and recalls). */
+  /** Processes each selected node must keep for this environment. */
   processes: number;
   selector?: NodeSelector;
   /** Last committed node ids. Preserved in the same order if this proposal cannot fit. */
