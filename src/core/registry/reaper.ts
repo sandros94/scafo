@@ -75,8 +75,8 @@ export interface DeleteEnvironmentOptions extends RetirementOptions {
  * decommission and the grace is the whole of the wait it asked for. Or it is
  * ephemeral, has an `idleTtlS`, and has been idle for longer. A non-ephemeral
  * environment nobody retired is never a candidate. A build qualifies only when
- * no environment of its project names it as current and it is older than the
- * configured retention.
+ * it is older than the configured retention. Build records are deployment
+ * history, not runtime pointers.
  */
 export async function planReap(ctx: RegistryContext, opts?: ReapOptions): Promise<ReapPlan> {
   const plan: ReapPlan = { environments: [], builds: [] };
@@ -92,11 +92,7 @@ export async function planReap(ctx: RegistryContext, opts?: ReapOptions): Promis
     }
 
     if (maxAgeMs === undefined) continue;
-    const referenced = referencedBuilds(environments);
-
     for (const id of await listBuilds(ctx, project)) {
-      if (referenced.has(id)) continue;
-
       const build = await readJson<BuildRecord>(ctx, buildKey(project, id));
       if (build === null) continue;
 
@@ -105,7 +101,7 @@ export async function planReap(ctx: RegistryContext, opts?: ReapOptions): Promis
       plan.builds.push({
         project,
         id,
-        reason: `unreferenced and ${String(Math.floor(age / 1000))}s old`,
+        reason: `${String(Math.floor(age / 1000))}s old`,
       });
     }
   }
@@ -170,12 +166,6 @@ export async function executeReap(
     const found = await readJson<BuildRecord>(ctx, key);
     if (found === null) {
       result.skipped.push({ target: key, reason: "build no longer exists" });
-      continue;
-    }
-
-    const referenced = referencedBuilds(await readEnvironments(ctx, target.project));
-    if (referenced.has(target.id)) {
-      result.skipped.push({ target: key, reason: "build is referenced by an environment" });
       continue;
     }
 
@@ -305,16 +295,6 @@ async function readEnvironments(
   return environments;
 }
 
-function referencedBuilds(environments: EnvironmentRecord[]): Set<string> {
-  const referenced = new Set<string>();
-  for (const environment of environments) {
-    if (environment.alias !== null) {
-      referenced.add(environment.alias.build);
-    }
-  }
-  return referenced;
-}
-
 /**
  * Why this environment may be reaped, or null when it may not. Retirement is
  * asked first because it is an explicit order and idleness is an inference: an
@@ -355,10 +335,7 @@ async function idleReason(
 
   const lastActive =
     activity === undefined ? null : await activity.lastActiveAt(project, environment.name);
-  const since =
-    lastActive === null
-      ? Date.parse(environment.alias?.flippedAt ?? environment.createdAt)
-      : lastActive.getTime();
+  const since = lastActive === null ? Date.parse(environment.createdAt) : lastActive.getTime();
   if (!Number.isFinite(since)) return null;
 
   const idleMs = now - since;

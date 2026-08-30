@@ -109,12 +109,6 @@ export const sailArgs: ArgsDef = {
     type: "string",
     description: "Seconds a cell may sit idle before eviction frees its memory (0 = never)",
   },
-  "pointer-hold-ms": {
-    type: "string",
-    description:
-      "Milliseconds a rollout holds the deployment pointer past the spawn; " +
-      "size it to the store's worst request stall (0 = release at the spawn)",
-  },
   ...creditArgs,
   "artifact-bytes": {
     type: "string",
@@ -385,23 +379,15 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   );
   daemon.artifactStager = createFileArtifactStager();
 
-  /* The driver writes deployment pointers through the same store the registry
-     uses, so a configured key prefix applies to fleets exactly as it does to
-     records. */
   const driver = createCelldDriver({
     binPath: config.runtime.binPath,
-    store: registry.store,
     durability: config.runtime.durability,
     cellIdleEvictS: config.runtime.cellIdleEvictS,
     probeHost: upstreamHost,
     ...(config.runtime.celldEnv === undefined ? {} : { operatorEnv: config.runtime.celldEnv }),
   });
-  /* The hold is the operator's, because it is sized to THEIR store: it is how
-     long a rollout keeps the environment's deployment pointer after the spawn,
-     for the one read the new process makes of it. */
   const reconciler = createReconciler(daemon, driver, {
     baseEnv,
-    pointerLock: { holdMs: config.runtime.pointerHoldMs },
   });
   daemon.reconciler = reconciler;
 

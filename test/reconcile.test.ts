@@ -1,119 +1,103 @@
-/* The pure single-current-build reconcile contract and its rollout overlap. */
+/* The pure environment-owned runtime reconcile contract. */
 
 import { describe, expect, it } from "vitest";
-import { formatProcessId } from "../src/core/placement/ids.ts";
+import { formatProcessId, parseProcessId } from "../src/core/placement/ids.ts";
 import {
   type DesiredEnvironment,
   planReconcile,
   type PortView,
   type ReconcileAction,
 } from "../src/core/placement/reconcile.ts";
-import type { BuildRecord } from "../src/core/types/registry.ts";
 import type { RuntimeProcess } from "../src/core/types/runtime.ts";
 
 const PORT_START = 42_000;
 const RUNNING_PORT = 43_000;
-const BUILD_ONE = "1111aaaa";
-const BUILD_TWO = "2222bbbb";
 const CREATED_AT = "2026-01-01T00:00:00.000Z";
-const FLIPPED_AT = "2026-01-02T00:00:00.000Z";
 
-describe("a current build with nothing running", () => {
-  it("rolls it out as one pointer-and-process action", () => {
+describe("an environment with nothing running", () => {
+  it("starts one environment-owned process", () => {
     const ports = countingPorts();
-
-    expect(
-      planReconcile({ desired: [desired("shop", "prod", BUILD_ONE)], actual: [], ports }),
-    ).toEqual([
+    expect(planReconcile({ desired: [desired("shop", "prod", 1)], actual: [], ports })).toEqual([
       {
-        type: "rollout",
+        type: "start",
         project: "shop",
         env: "prod",
-        build: BUILD_ONE,
+        revision: 1,
         ports: { public: PORT_START, internal: PORT_START + 1 },
       },
     ]);
     expect(ports.calls).toBe(1);
-  });
-
-  it("uses the build-keyed transitional process id", () => {
-    const action = planReconcile({
-      desired: [desired("shop", "prod", BUILD_ONE)],
-      actual: [],
-      ports: countingPorts(),
-    })[0] as Extract<ReconcileAction, { type: "rollout" }>;
-
-    expect(formatProcessId(action)).toBe(`shop--prod--${BUILD_ONE}`);
+    expect(formatProcessId({ project: "shop", env: "prod" })).toBe("shop--prod");
+    expect(parseProcessId("shop--prod")).toEqual({ project: "shop", env: "prod" });
+    expect(parseProcessId("shop--prod--aaaaaaaa")).toBeNull();
   });
 });
 
-describe("an internal replacement overlap", () => {
-  it("gates the new process without stopping the old ready process", () => {
-    const old = runtimeProcess("shop", "prod", BUILD_ONE, { ready: true });
-    const replacement = runtimeProcess("shop", "prod", BUILD_TWO, { ready: false });
-
+describe("a deployment revision", () => {
+  it("adopts a newer revision in place", () => {
+    const running = runtimeProcess("shop", "prod", 1, true);
     expect(
       planReconcile({
-        desired: [desired("shop", "prod", BUILD_TWO)],
-        actual: [old, replacement],
+        desired: [desired("shop", "prod", 2)],
+        actual: [running],
         ports: countingPorts(),
       }),
-    ).toEqual([{ type: "await-ready", processId: replacement.processId }]);
+    ).toEqual([{ type: "adopt", processId: running.processId, revision: 2 }]);
   });
 
-  it("retires the old process only after the current one is ready", () => {
-    const old = runtimeProcess("shop", "prod", BUILD_ONE, { ready: true });
-    const replacement = runtimeProcess("shop", "prod", BUILD_TWO, { ready: true });
-
+  it("gates an unready process already at the current revision", () => {
+    const running = runtimeProcess("shop", "prod", 2, false);
     expect(
       planReconcile({
-        desired: [desired("shop", "prod", BUILD_TWO)],
-        actual: [replacement, old],
+        desired: [desired("shop", "prod", 2)],
+        actual: [running],
+        ports: countingPorts(),
+      }),
+    ).toEqual([{ type: "await-ready", processId: running.processId }]);
+  });
+
+  it("retries a pending teardown before adopting a newer revision", () => {
+    const running = { ...runtimeProcess("shop", "prod", 1, false), teardownPending: true as const };
+    expect(
+      planReconcile({
+        desired: [desired("shop", "prod", 2)],
+        actual: [running],
         ports: countingPorts(),
       }),
     ).toEqual([
       {
         type: "stop",
-        processId: old.processId,
-        reason: `superseded by build "${BUILD_TWO}"`,
+        processId: running.processId,
+        reason: "runtime teardown is pending",
       },
     ]);
   });
 
-  it("keeps the old process while a missing current process is rolled out", () => {
-    const old = runtimeProcess("shop", "prod", BUILD_ONE, { ready: true });
-
-    const plan = planReconcile({
-      desired: [desired("shop", "prod", BUILD_TWO)],
-      actual: [old],
-      ports: countingPorts(),
-    });
-
-    expect(plan).toHaveLength(1);
-    expect(plan[0]).toMatchObject({ type: "rollout", build: BUILD_TWO });
-  });
-
-  it("gates duplicate unready attempts in deterministic id order", () => {
-    const first = runtimeProcess("shop", "prod", BUILD_TWO, { ready: false });
-    const retry = runtimeProcess("shop", "prod", BUILD_TWO, { ready: false, retry: 1 });
-
+  it("adopts a newer revision even when the preceding generation is unready", () => {
+    const running = runtimeProcess("shop", "prod", 1, false);
     expect(
       planReconcile({
-        desired: [desired("shop", "prod", BUILD_TWO)],
-        actual: [retry, first],
+        desired: [desired("shop", "prod", 2)],
+        actual: [running],
         ports: countingPorts(),
       }),
-    ).toEqual([
-      { type: "await-ready", processId: first.processId },
-      { type: "await-ready", processId: retry.processId },
-    ]);
+    ).toEqual([{ type: "adopt", processId: running.processId, revision: 2 }]);
+  });
+
+  it("does nothing when the environment process is current and ready", () => {
+    expect(
+      planReconcile({
+        desired: [desired("shop", "prod", 2)],
+        actual: [runtimeProcess("shop", "prod", 2, true)],
+        ports: countingPorts(),
+      }),
+    ).toEqual([]);
   });
 });
 
 describe("placement removal", () => {
-  it("stops every process for an environment no longer assigned to this node", () => {
-    const running = runtimeProcess("shop", "prod", BUILD_ONE, { ready: true });
-
+  it("stops an environment no longer assigned to this node", () => {
+    const running = runtimeProcess("shop", "prod", 1, true);
     expect(planReconcile({ desired: [], actual: [running], ports: countingPorts() })).toEqual([
       {
         type: "stop",
@@ -123,51 +107,25 @@ describe("placement removal", () => {
     ]);
   });
 
-  it("plans moves before stops across environments", () => {
-    const removed = runtimeProcess("archive", "old", BUILD_ONE, { ready: true });
-
+  it("plans starts before stops across environments", () => {
+    const removed = runtimeProcess("archive", "old", 1, true);
     const plan = planReconcile({
-      desired: [desired("shop", "prod", BUILD_TWO)],
+      desired: [desired("shop", "prod", 1)],
       actual: [removed],
       ports: countingPorts(),
     });
-
-    expect(plan.map((action) => action.type)).toEqual(["rollout", "stop"]);
+    expect(plan.map((action) => action.type)).toEqual(["start", "stop"]);
   });
 
   it("orders environments and leftover stops independently of input order", () => {
-    const z = runtimeProcess("zulu", "prod", BUILD_ONE, { ready: true });
-    const a = runtimeProcess("alpha", "prod", BUILD_ONE, { ready: true });
-
+    const z = runtimeProcess("zulu", "prod", 1, true);
+    const a = runtimeProcess("alpha", "prod", 1, true);
     const plan = planReconcile({
-      desired: [desired("zulu", "new", BUILD_TWO), desired("alpha", "new", BUILD_TWO)],
+      desired: [desired("zulu", "new", 1), desired("alpha", "new", 1)],
       actual: [z, a],
       ports: countingPorts(),
     });
-
     expect(plan.map(subject)).toEqual(["alpha/new", "zulu/new", a.processId, z.processId]);
-  });
-});
-
-describe("a settled environment", () => {
-  it("does nothing when its one current process is ready", () => {
-    const running = runtimeProcess("shop", "prod", BUILD_ONE, { ready: true });
-
-    expect(
-      planReconcile({
-        desired: [desired("shop", "prod", BUILD_ONE)],
-        actual: [running],
-        ports: countingPorts(),
-      }),
-    ).toEqual([]);
-  });
-
-  it("carries the varset id without changing planning identity", () => {
-    const wanted = desired("shop", "prod", BUILD_ONE, "vars-1234");
-    expect(wanted.varsetId).toBe("vars-1234");
-    expect(
-      planReconcile({ desired: [wanted], actual: [], ports: countingPorts() })[0],
-    ).toMatchObject({ project: "shop", env: "prod", build: BUILD_ONE });
   });
 });
 
@@ -189,56 +147,40 @@ function countingPorts(): CountingPorts {
   return ports;
 }
 
-function desired(
-  project: string,
-  env: string,
-  build: string,
-  varsetId?: string,
-): DesiredEnvironment {
+function desired(project: string, env: string, revision: number): DesiredEnvironment {
   return {
     project,
     env: {
       v: 1,
       name: env,
       prefix: `fleets/${project}/${env}`,
-      alias: { build, flippedAt: FLIPPED_AT },
+      deployment: { revision, deployedAt: CREATED_AT },
       domains: [],
       placement: "auto",
       ephemeral: false,
       createdAt: CREATED_AT,
     },
-    builds: [{ build: buildRecord(build), role: "current" }],
-    ...(varsetId === undefined ? {} : { varsetId }),
-  };
-}
-
-function buildRecord(id: string): BuildRecord {
-  return {
-    v: 1,
-    id,
-    celldVersionId: `version-${id}`,
-    runtimeConfigurable: true,
-    createdAt: CREATED_AT,
   };
 }
 
 function runtimeProcess(
   project: string,
   env: string,
-  build: string,
-  opts: { ready: boolean; retry?: number },
+  revision: number,
+  ready: boolean,
 ): RuntimeProcess {
   return {
-    processId: formatProcessId({ project, env, build, retry: opts.retry }),
+    processId: formatProcessId({ project, env }),
     project,
     env,
-    build,
+    attemptedRevision: revision,
+    appliedRevision: revision,
     port: RUNNING_PORT,
     internalPort: RUNNING_PORT + 1,
-    ready: opts.ready,
+    ready,
   };
 }
 
 function subject(action: ReconcileAction): string {
-  return action.type === "rollout" ? `${action.project}/${action.env}` : action.processId;
+  return action.type === "start" ? `${action.project}/${action.env}` : action.processId;
 }

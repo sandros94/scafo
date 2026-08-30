@@ -773,7 +773,8 @@ function environment(
       v: 1,
       name,
       prefix: `fleets/${project}/${name}`,
-      alias: build === undefined ? null : { build, flippedAt: "2026-01-01T00:00:00.000Z" },
+      deployment:
+        build === undefined ? null : { revision: 1, deployedAt: "2026-01-01T00:00:00.000Z" },
       domains,
       placement: "auto",
       ephemeral: false,
@@ -785,10 +786,12 @@ function environment(
 /** Ready by construction: an unready process is not routed and has no parity to prove. */
 function process(project: string, env: string, build: string, port: number): RuntimeProcess {
   return {
-    processId: `${project}--${env}--${build}`,
+    processId: `${project}--${env}`,
     project,
     env,
-    build,
+    attemptedRevision: 1,
+    appliedRevision: 1,
+    deployment: { version: build, prefix: `deployments/main/${build}`, generation: 1 },
     port,
     internalPort: port + 1,
     ready: true,

@@ -9,7 +9,7 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { setCurrentBuild } from "../src/core/registry/_current.ts";
+import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import { runAssignment } from "../src/daemon/_assign.ts";
 import { drainThisNode } from "../src/cli/_bootstrap.ts";
 import {
@@ -230,7 +230,7 @@ describe("drainThisNode, as a shutdown calls it", () => {
 /** An environment with a build to serve, so it is a real placement target. */
 async function deployed(name: string): Promise<void> {
   await createEnvironment(clock.ctx, PROJECT, { name });
-  await setCurrentBuild(clock.ctx, PROJECT, name, BUILD);
+  await recordDeployment(clock.ctx, PROJECT, name, BUILD);
 }
 
 /** Registers `id` as a node that has just beaten, exactly as a boot does. */

@@ -14,7 +14,7 @@ import type { H3 } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it } from "vitest";
-import { setCurrentBuild } from "../src/core/registry/_current.ts";
+import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import { type DaemonContext, type DaemonState, createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { type Coordinator, createCoordinator } from "../src/daemon/coordinator.ts";
@@ -80,7 +80,7 @@ beforeEach(async () => {
     idleTtlS: 900,
   });
   await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
-  await setCurrentBuild(clock.ctx, PROJECT, ENVIRONMENT, BUILD);
+  await recordDeployment(clock.ctx, PROJECT, ENVIRONMENT, BUILD);
 });
 
 describe("DELETE /v1/environments/:project/:env", () => {
@@ -390,7 +390,6 @@ function daemonConfig(): DaemonConfig {
       bindHost: "127.0.0.1",
       durability: "bucket",
       cellIdleEvictS: 900,
-      pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },

@@ -5,7 +5,7 @@
  */
 
 import { beforeAll, describe, expect, it } from "vitest";
-import { setCurrentBuild } from "../src/core/registry/_current.ts";
+import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import {
   acquireLease,
   checkDomain,
@@ -62,19 +62,19 @@ beforeAll(async () => {
 
 const FLOWS: Flow[] = [
   {
-    name: "createBuild then setCurrentBuild",
+    name: "createBuild then recordDeployment",
     seed: async ({ ctx }) => {
       await createProject(ctx, { slug: PROJECT });
       await createEnvironment(ctx, PROJECT, { name: "prod" });
     },
     run: async ({ ctx }) => {
       await createBuild(ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
-      await setCurrentBuild(ctx, PROJECT, "prod", BUILD);
+      await recordDeployment(ctx, PROJECT, "prod", BUILD);
     },
     settled: async ({ ctx }) => {
       await expect(getBuild(ctx, PROJECT, BUILD)).resolves.toMatchObject({ id: BUILD });
       await expect(getEnvironment(ctx, PROJECT, "prod")).resolves.toMatchObject({
-        alias: { build: BUILD },
+        deployment: { revision: 1 },
       });
     },
   },

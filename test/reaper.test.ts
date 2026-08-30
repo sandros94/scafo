@@ -1,7 +1,7 @@
 /* The reaper only ever deletes what nothing points at, and re-checks that under fault. */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { setCurrentBuild } from "../src/core/registry/_current.ts";
+import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import {
   acquireLease,
   type ActivitySource,
@@ -85,8 +85,8 @@ beforeEach(async () => {
     await createBuild(clock.ctx, PROJECT, { id, runtimeConfigurable: true });
   }
 
-  await setCurrentBuild(clock.ctx, PROJECT, "prod", B1);
-  await setCurrentBuild(clock.ctx, PROJECT, "preview", B1);
+  await recordDeployment(clock.ctx, PROJECT, "prod", B1);
+  await recordDeployment(clock.ctx, PROJECT, "preview", B1);
 
   for (const key of [...FLEET_KEYS, ...SURVIVORS]) await store.put(key, "{}");
 
@@ -102,20 +102,20 @@ beforeEach(async () => {
 });
 
 describe("planReap", () => {
-  it("proposes only the idle ephemeral environment and the unreferenced build", async () => {
+  it("proposes the idle environment and every build past retention", async () => {
     const plan = await planReap(clock.ctx, opts);
 
     expect(plan.environments.map((target) => target.env)).toEqual(["preview"]);
-    expect(plan.builds.map((target) => target.id)).toEqual([B4]);
+    expect(plan.builds.map((target) => target.id)).toEqual([B1, B4]);
     expect(plan.environments[0].reason).toContain("idle");
-    expect(plan.builds[0].reason).toContain("unreferenced");
+    expect(plan.builds[0].reason).toContain("old");
   });
 
-  it("never proposes an environment's current build", async () => {
+  it("does not treat build history as a runtime pointer", async () => {
     const plan = await planReap(clock.ctx, opts);
     const proposed = plan.builds.map((target) => target.id);
 
-    expect(proposed).not.toContain(B1);
+    expect(proposed).toContain(B1);
   });
 
   it("proposes no build at all without a retention window", async () => {
@@ -150,6 +150,7 @@ describe("executeReap", () => {
     expect(result.deleted).toEqual([
       ...FLEET_KEYS,
       environmentKey(PROJECT, "preview"),
+      buildKey(PROJECT, B1),
       buildKey(PROJECT, B4),
     ]);
     expect(result.skipped).toEqual([]);
@@ -157,23 +158,18 @@ describe("executeReap", () => {
     await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, "preview"), "not-found");
     for (const key of SURVIVORS) await expect(store.get(key)).resolves.not.toBeNull();
     await expect(getEnvironment(clock.ctx, PROJECT, "prod")).resolves.toMatchObject({
-      alias: { build: B1 },
+      deployment: { revision: 1 },
     });
     await invariants(store);
   });
 
-  it("skips a build that picked up a reference between planning and deleting", async () => {
+  it("does not pin history when another deployment is recorded", async () => {
     const plan = await planReap(clock.ctx, opts);
-    await setCurrentBuild(clock.ctx, PROJECT, "prod", B4);
+    await recordDeployment(clock.ctx, PROJECT, "prod", B4);
 
     const result = await executeReap(clock.ctx, plan, lease, opts);
 
-    expect(result.deleted).not.toContain(buildKey(PROJECT, B4));
-    expect(result.skipped).toContainEqual({
-      target: buildKey(PROJECT, B4),
-      reason: expect.stringContaining("referenced"),
-    });
-    await expect(store.get(buildKey(PROJECT, B4))).resolves.not.toBeNull();
+    expect(result.deleted).toContain(buildKey(PROJECT, B4));
     await invariants(store);
   });
 
@@ -276,6 +272,7 @@ describe("the wake stamps an environment leaves behind", () => {
       ...FLEET_KEYS,
       envWakeKey(PROJECT, "preview"),
       environmentKey(PROJECT, "preview"),
+      buildKey(PROJECT, B1),
       buildKey(PROJECT, B4),
     ]);
     /* Before the record, like everything else that names it: a run cut short

@@ -1,8 +1,7 @@
-/* Environment records and their single current-build marker. */
+/* Environment records and their monotonic deployment notice. */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { ScafoError } from "../src/core/error.ts";
-import { setCurrentBuild } from "../src/core/registry/_current.ts";
+import { deploymentRevision, recordDeployment } from "../src/core/registry/_deployment.ts";
 import {
   createBuild,
   createEnvironment,
@@ -33,12 +32,12 @@ beforeEach(async () => {
 });
 
 describe("environment records", () => {
-  it("fixes the fleet prefix and begins without a current build", async () => {
+  it("fixes the fleet prefix and begins without a deployment notice", async () => {
     expect(await getEnvironment(clock.ctx, PROJECT, ENV)).toMatchObject({
       v: 1,
       name: ENV,
       prefix: fleetPrefix(PROJECT, ENV),
-      alias: null,
+      deployment: null,
     });
   });
 
@@ -73,12 +72,12 @@ describe("environment records", () => {
   });
 });
 
-describe("current build", () => {
-  it("records only the current build and timestamp", async () => {
-    const update = await setCurrentBuild(clock.ctx, PROJECT, ENV, BUILD);
-    expect(update.environment.alias).toEqual({
-      build: BUILD,
-      flippedAt: new Date(clock.nowMs()).toISOString(),
+describe("deployment revision", () => {
+  it("records only a monotonic revision and timestamp", async () => {
+    const update = await recordDeployment(clock.ctx, PROJECT, ENV, BUILD);
+    expect(update.environment.deployment).toEqual({
+      revision: 1,
+      deployedAt: new Date(clock.nowMs()).toISOString(),
     });
     expect(update.warnings).toEqual([]);
   });
@@ -91,18 +90,16 @@ describe("current build", () => {
       runtimeConfigurable: false,
       builtWithVarset: "dddddddd",
     });
-    const update = await setCurrentBuild(clock.ctx, PROJECT, "warned", frozen);
+    const update = await recordDeployment(clock.ctx, PROJECT, "warned", frozen);
     expect(update.warnings.map((warning) => warning.code)).toEqual([
       "build-not-runtime-configurable",
     ]);
   });
 
-  it("does not retry a stale current-marker write after its lock authority is lost", async () => {
+  it("commutes concurrent records into consecutive revisions", async () => {
     const successor = "bbbbbbbb";
     await createBuild(clock.ctx, PROJECT, { id: successor, runtimeConfigurable: true });
     const inner = clock.ctx.store;
-    const controller = new AbortController();
-    const lost = new ScafoError("lease-lost", "Pointer lock was lost");
     let collide = true;
     clock.ctx.store = {
       get: (key) => inner.get(key),
@@ -112,11 +109,10 @@ describe("current build", () => {
           collide &&
           key === environmentKey(PROJECT, ENV) &&
           typeof body === "string" &&
-          (JSON.parse(body) as { alias?: { build?: string } }).alias?.build === BUILD
+          (JSON.parse(body) as { deployment?: { revision?: number } }).deployment?.revision === 1
         ) {
           collide = false;
-          controller.abort(lost);
-          await setCurrentBuild({ ...clock.ctx, store: inner }, PROJECT, ENV, successor);
+          await recordDeployment({ ...clock.ctx, store: inner }, PROJECT, ENV, successor);
         }
         return inner.put(key, body, cas);
       },
@@ -124,12 +120,39 @@ describe("current build", () => {
       list: (prefix) => inner.list(prefix),
     };
 
-    await expect(
-      setCurrentBuild(clock.ctx, PROJECT, ENV, BUILD, { signal: controller.signal }),
-    ).rejects.toBe(lost);
+    await recordDeployment(clock.ctx, PROJECT, ENV, BUILD);
     await expect(getEnvironment(clock.ctx, PROJECT, ENV)).resolves.toMatchObject({
-      alias: { build: successor },
+      deployment: { revision: 2 },
     });
+  });
+
+  it("refuses malformed and exhausted revisions instead of wrapping them", async () => {
+    const environment = await getEnvironment(clock.ctx, PROJECT, ENV);
+    expect(() =>
+      deploymentRevision({
+        ...environment,
+        deployment: { revision: 0, deployedAt: environment.createdAt },
+      }),
+    ).toThrow(expect.objectContaining({ code: "invalid-input" }));
+    expect(() =>
+      deploymentRevision({
+        ...environment,
+        deployment: { revision: 1, deployedAt: "not-a-date" },
+      }),
+    ).toThrow(expect.objectContaining({ code: "invalid-input" }));
+
+    await clock.ctx.store.put(
+      environmentKey(PROJECT, ENV),
+      JSON.stringify({
+        ...environment,
+        deployment: {
+          revision: Number.MAX_SAFE_INTEGER,
+          deployedAt: environment.createdAt,
+        },
+      }),
+      {},
+    );
+    await rejectsWith(() => recordDeployment(clock.ctx, PROJECT, ENV, BUILD), "invalid-input");
   });
 });
 
@@ -138,18 +161,16 @@ describe("setEnvironmentVarset", () => {
     await rejectsWith(() => setEnvironmentVarset(clock.ctx, PROJECT, ENV, "deadbeef"), "not-found");
   });
 
-  it("updates the environment and checks its current build", async () => {
+  it("updates the environment without claiming which build is current", async () => {
     const frozen = "bbbbbbbb";
     const key = await importVarsetKey(crypto.getRandomValues(new Uint8Array(32)));
     const sealed = await sealVarset({ TOKEN: { value: "t", secret: true } }, key);
     await putVarset(clock.ctx, PROJECT, sealed);
     await createBuild(clock.ctx, PROJECT, { id: frozen, runtimeConfigurable: false });
-    await setCurrentBuild(clock.ctx, PROJECT, ENV, frozen);
+    await recordDeployment(clock.ctx, PROJECT, ENV, frozen);
 
     const update = await setEnvironmentVarset(clock.ctx, PROJECT, ENV, sealed.id);
     expect(update.environment.varset).toBe(sealed.id);
-    expect(update.warnings.map((warning) => warning.code)).toEqual([
-      "build-not-runtime-configurable",
-    ]);
+    expect(update.warnings).toEqual([]);
   });
 });

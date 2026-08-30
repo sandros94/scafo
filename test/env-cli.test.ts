@@ -12,7 +12,7 @@
 import { generateJWK } from "unjwt/jwk";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { beforeEach, describe, expect, it } from "vitest";
-import { setCurrentBuild } from "../src/core/registry/_current.ts";
+import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import { createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import {
@@ -80,7 +80,7 @@ beforeEach(async () => {
   }
   await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
   await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true });
-  await setCurrentBuild(clock.ctx, PROJECT, "prod", BUILD);
+  await recordDeployment(clock.ctx, PROJECT, "prod", BUILD);
 });
 
 /* Both transports must answer the same questions the same way, so the retire and
@@ -583,7 +583,6 @@ function daemonConfig(): DaemonConfig {
       bindHost: "127.0.0.1",
       durability: "bucket",
       cellIdleEvictS: 900,
-      pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },

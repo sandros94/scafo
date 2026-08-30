@@ -22,7 +22,7 @@
 
 import type { H3 } from "h3";
 import { beforeEach, describe, expect, it } from "vitest";
-import { setCurrentBuild } from "../src/core/registry/_current.ts";
+import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import { createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { readDesired } from "../src/daemon/_desired.ts";
@@ -68,7 +68,7 @@ beforeEach(async () => {
     await createProject(registry, { slug });
     await createEnvironment(registry, slug, { name: ENVIRONMENT });
     await createBuild(registry, slug, { id: BUILD, runtimeConfigurable: true });
-    await setCurrentBuild(registry, slug, ENVIRONMENT, BUILD);
+    await recordDeployment(registry, slug, ENVIRONMENT, BUILD);
   }
   await claimDomain(registry, CUSTOM_DOMAIN, PROJECT, ENVIRONMENT);
 
@@ -121,13 +121,11 @@ describe("what a node reads as its work", () => {
       mode: "legacy-fallback",
     });
 
-    /* THE WHOLE POINT OF THE VERB. Nothing was deleted, so nothing has to be
-       rebuilt: the alias still names the build and the pass simply wants it
-       again. */
+    /* Nothing was deleted, so the pass simply wants the environment again. */
     expect(state.environments.map((entry) => entry.project).sort()).toEqual([NEIGHBOUR, PROJECT]);
-    expect(
-      state.environments.find((entry) => entry.project === PROJECT)?.builds.map((leg) => leg.role),
-    ).toEqual(["current"]);
+    expect(state.environments.find((entry) => entry.project === PROJECT)?.env.name).toBe(
+      ENVIRONMENT,
+    );
   });
 });
 
@@ -235,7 +233,6 @@ function daemonConfig(): DaemonConfig {
       bindHost: "127.0.0.1",
       durability: "bucket",
       cellIdleEvictS: 900,
-      pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },

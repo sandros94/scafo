@@ -413,7 +413,7 @@ function environment(opts: { ephemeral: boolean; replicas?: ReplicaCount }): Env
     v: 1,
     name: "prod",
     prefix: `fleets/${PROJECT}/prod`,
-    alias: null,
+    deployment: null,
     domains: [],
     placement: "auto",
     ephemeral: opts.ephemeral,

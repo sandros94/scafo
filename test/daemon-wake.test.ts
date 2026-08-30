@@ -22,7 +22,7 @@ import type { H3 } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it } from "vitest";
-import { setCurrentBuild } from "../src/core/registry/_current.ts";
+import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import type { ParkedEnvironment } from "../src/daemon/_desired.ts";
 import { type DaemonContext, type DaemonState, createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
@@ -449,7 +449,7 @@ describe("waking what this node has parked", () => {
 });
 
 describe("what a woken host is answered with", () => {
-  it("answers an environment with its current build while the preceding one still runs", async () => {
+  it("answers an environment through its stable ready process", async () => {
     /*
      * THE REPLACEMENT WINDOW, and it is minutes wide rather than milliseconds: a
      * process is stopped only once every desired leg is ready, so the preceding
@@ -464,7 +464,7 @@ describe("what a woken host is answered with", () => {
       expect((await ask(PARKED_HOST, path)).status, path).toBe(200);
     }
 
-    expect(dialled()).toEqual([42_004, 42_004, 42_004]);
+    expect(dialled()).toEqual([42_006, 42_006, 42_006]);
   });
 
   it("answers a custom domain with the same leg its environment's own hosts get", async () => {
@@ -472,27 +472,15 @@ describe("what a woken host is answered with", () => {
 
     expect((await ask(CUSTOM, "/")).status).toBe(200);
 
-    expect(dialled()).toEqual([42_004]);
+    expect(dialled()).toEqual([42_006]);
   });
 
-  it("holds rather than answering with a build the routing has moved off", async () => {
-    /* The current marker has moved and its build is still coming up. What is left
-       running is the preceding build, which the ingress sends nothing — so this
-       sends it nothing either: the request waits for the leg that IS routed. */
+  it("keeps the ready generation available while adoption is pending", async () => {
     loop.processes = [ready(PREVIEW, SUPERSEDED, 42_006)];
 
-    const held = ask(PARKED_HOST, "/");
-    await sleep(WAKE_POLL_INTERVAL_MS / 2);
-    expect(upstream).toEqual([]);
-
-    loop.processes = [...loop.processes, ready(PREVIEW, BUILD, 42_004)];
-
-    expect((await held).status).toBe(200);
-    /* And the wake path it fell through to is the ordinary one: stamped, kicked,
-       held until the routed leg passed its gate. */
-    expect(dialled()).toEqual([42_004]);
+    expect((await ask(PARKED_HOST, "/")).status).toBe(200);
+    expect(dialled()).toEqual([42_006]);
     expect(loop.kicks).toBe(1);
-    await expect(readEnvironmentWake(clock.ctx, PROJECT, PREVIEW)).resolves.not.toBeNull();
   });
 });
 
@@ -1036,10 +1024,12 @@ function fakeReconciler(): FakeReconciler {
 /** A process that has passed its gate, which is the only kind a wake is handed to. */
 function ready(env: string, build: string, port: number): RuntimeProcess {
   return {
-    processId: `${PROJECT}--${env}--${build}`,
+    processId: `${PROJECT}--${env}`,
     project: PROJECT,
     env,
-    build,
+    attemptedRevision: 1,
+    appliedRevision: 1,
+    deployment: { version: build, prefix: `deployments/main/${build}`, generation: 1 },
     port,
     internalPort: port + 1,
     ready: true,
@@ -1064,10 +1054,10 @@ async function seed(): Promise<void> {
   /* Recorded before builds said which fleet holds their code: not wakeable. */
   await createBuild(clock.ctx, PROJECT, { id: ORPHAN_BUILD, runtimeConfigurable: true });
 
-  await setCurrentBuild(clock.ctx, PROJECT, PREVIEW, SUPERSEDED);
-  await setCurrentBuild(clock.ctx, PROJECT, PREVIEW, BUILD);
-  await setCurrentBuild(clock.ctx, PROJECT, OTHER_PREVIEW, BUILD);
-  await setCurrentBuild(clock.ctx, PROJECT, RETIRED, BUILD);
+  await recordDeployment(clock.ctx, PROJECT, PREVIEW, SUPERSEDED);
+  await recordDeployment(clock.ctx, PROJECT, PREVIEW, BUILD);
+  await recordDeployment(clock.ctx, PROJECT, OTHER_PREVIEW, BUILD);
+  await recordDeployment(clock.ctx, PROJECT, RETIRED, BUILD);
   await claimDomain(clock.ctx, CUSTOM, PROJECT, PREVIEW);
   await retireEnvironment(clock.ctx, PROJECT, RETIRED);
 
@@ -1095,7 +1085,6 @@ function daemonConfig(bindHost = "127.0.0.1", apiPublic = true): DaemonConfig {
       bindHost,
       durability: "bucket",
       cellIdleEvictS: 900,
-      pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
     api: { public: apiPublic, jsonBytes: 65_536 },

@@ -1,85 +1,46 @@
-/*
- * Turns desired state — what the registry says each environment should serve —
- * into the actions that get this node there.
- *
- * Pure: every input is supplied by the caller, including the port pairs, so the
- * same inputs always plan the same actions in the same order.
- */
+/* Pure planning for one environment-owned runtime process per assigned node. */
 
-import type { BuildRecord, EnvironmentRecord } from "../types/registry.ts";
+import type { EnvironmentRecord } from "../types/registry.ts";
 import type { RuntimeProcess } from "../types/runtime.ts";
 
-/** The current build an environment should have a process for. */
-export interface DesiredBuild {
-  build: BuildRecord;
-  role: "current";
-}
-
-/** One environment as the registry wants it served, with its builds resolved. */
+/** One environment as the registry wants it served. */
 export interface DesiredEnvironment {
   project: string;
   env: EnvironmentRecord;
-  /**
-   * Exactly one entry while this transitional build-keyed rollout remains.
-   */
-  builds: DesiredBuild[];
   varsetId?: string;
 }
 
-/** Hands out the loopback port pair a new process listens on. */
 export interface PortView {
   nextPorts(): { public: number; internal: number };
 }
 
 export interface ReconcileInput {
   desired: DesiredEnvironment[];
-  /** Processes running on this node right now. */
   actual: RuntimeProcess[];
   ports: PortView;
 }
 
-/** One step towards desired state. */
 export type ReconcileAction =
-  /**
-   * Bring one build into service: point the fleet at it, start a process, and
-   * gate that process — as ONE indivisible, ordered step. See
-   * {@link planReconcile} for why it may not be taken apart.
-   */
   | {
-      type: "rollout";
+      type: "start";
       project: string;
       env: string;
-      build: string;
+      revision: number;
       ports: { public: number; internal: number };
     }
+  | { type: "adopt"; processId: string; revision: number }
   | { type: "await-ready"; processId: string }
   | { type: "stop"; processId: string; reason: string };
 
-/**
- * Plans this node's next move.
- *
- * THE FLEET POINTER IS ONE POINTER, AND A PROCESS READS IT ONCE — AT STARTUP.
- * {@link ReconcileAction} `rollout` keeps pointer activation and process start
- * paired, expressed as a
- * single action the executor cannot interleave. A restart of a crashed leg goes
- * through the same action, so the pointer flips to that leg for the length of
- * its start and lands wherever the last rollout of the pass left it — which is
- * correct, because nothing reads it again until the next process starts.
- *
- * THE OTHER RULE, unchanged in substance and generalized in reach: a process
- * that still serves an environment is never planned for a stop until EVERY build
- * that environment is wanted at has a process that has passed its readiness
- * gate. Never reduce serving capacity while the current build is still proving
- * itself. Stopping the old process first would drop every request the new one
- * cannot answer yet.
- *
- * Actions come back in execution order: each environment's current build, then every stop.
- */
+/** Plans starts and in-place adoption before unrelated placement stops. */
 export function planReconcile(input: ReconcileInput): ReconcileAction[] {
   const moves: ReconcileAction[] = [];
   const stops: ReconcileAction[] = [];
-
-  const running = byEnvironment(input.actual);
+  const running = new Map(
+    [...input.actual]
+      .sort((a, b) => compare(a.processId, b.processId))
+      .map((process) => [placementKey(process.project, process.env), process]),
+  );
   const desired = [...input.desired].sort((a, b) =>
     compare(placementKey(a.project, a.env.name), placementKey(b.project, b.env.name)),
   );
@@ -87,89 +48,43 @@ export function planReconcile(input: ReconcileInput): ReconcileAction[] {
   for (const wanted of desired) {
     const project = wanted.project;
     const env = wanted.env.name;
+    const revision = wanted.env.deployment?.revision;
+    if (revision === undefined) continue;
 
-    /* Taken out of the map as it is handled: what is left over at the end runs
-       for an environment the registry no longer lists. */
     const key = placementKey(project, env);
-    const processes = running.get(key) ?? [];
+    const process = running.get(key);
     running.delete(key);
 
-    const legs = wanted.builds.map((entry) => entry.build.id);
-    let proven = true;
-
-    for (const build of legs) {
-      const serving = processes.filter((process) => process.build === build);
-
-      if (serving.length === 0) {
-        /* Nothing runs this build yet. Pointing the fleet at it and starting the
-           process that loads it are one action, for the reason above. Anything
-           serving another build keeps running until every leg is ready. */
-        moves.push({ type: "rollout", project, env, build, ports: input.ports.nextPorts() });
-        proven = false;
-        continue;
-      }
-
-      if (!serving.some((process) => process.ready)) {
-        /* The leg exists but has not proven itself. Gate it, and leave every
-           other process alone for now. */
-        for (const process of serving) {
-          moves.push({ type: "await-ready", processId: process.processId });
-        }
-        proven = false;
-      }
-    }
-
-    if (!proven) continue;
-
-    /* The current build is served and ready: retire the internal rollout overlap. */
-    for (const process of processes) {
-      if (legs.includes(process.build)) continue;
-      stops.push({ type: "stop", processId: process.processId, reason: supersededBy(legs) });
+    if (process === undefined) {
+      moves.push({ type: "start", project, env, revision, ports: input.ports.nextPorts() });
+    } else if (process.teardownPending === true) {
+      moves.push({
+        type: "stop",
+        processId: process.processId,
+        reason: "runtime teardown is pending",
+      });
+    } else if (process.attemptedRevision !== revision) {
+      moves.push({ type: "adopt", processId: process.processId, revision });
+    } else if (!process.ready) {
+      moves.push({ type: "await-ready", processId: process.processId });
     }
   }
 
   for (const key of [...running.keys()].sort(compare)) {
-    for (const process of running.get(key) ?? []) {
-      stops.push({
-        type: "stop",
-        processId: process.processId,
-        /* Two things reach here and the wording covers both: an environment that
-           was undeployed, and one that is still deployed but has been placed on
-           other nodes. The planner cannot tell them apart — desired state is
-           already filtered to this node when it arrives — and claiming the first
-           would send an operator looking for a deletion that never happened. */
-        reason: "environment is no longer served by this node",
-      });
-    }
+    const process = running.get(key) as RuntimeProcess;
+    stops.push({
+      type: "stop",
+      processId: process.processId,
+      reason: "environment is no longer served by this node",
+    });
   }
-
   return [...moves, ...stops];
-}
-
-/** Why a process was retired, naming what serves its environment instead. */
-function supersededBy(legs: string[]): string {
-  const names = legs.map((build) => `"${build}"`).join(", ");
-  return legs.length === 1 ? `superseded by build ${names}` : `superseded by builds ${names}`;
-}
-
-/** Groups running processes by the environment they serve, each group sorted by id. */
-function byEnvironment(actual: RuntimeProcess[]): Map<string, RuntimeProcess[]> {
-  const grouped = new Map<string, RuntimeProcess[]>();
-
-  for (const process of [...actual].sort((a, b) => compare(a.processId, b.processId))) {
-    const key = placementKey(process.project, process.env);
-    const group = grouped.get(key);
-    if (group === undefined) grouped.set(key, [process]);
-    else group.push(process);
-  }
-  return grouped;
 }
 
 function placementKey(project: string, env: string): string {
   return `${project}/${env}`;
 }
 
-/* Code-unit ordering, so a plan does not depend on the node's locale. */
 function compare(a: string, b: string): number {
   if (a === b) return 0;
   return a < b ? -1 : 1;

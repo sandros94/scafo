@@ -12,18 +12,13 @@ import { planReconcile, type ReconcileAction } from "../core/placement/reconcile
 import { countingRegistry, storeOpsOf } from "../core/registry/counting.ts";
 import type { ProbeOptions, RuntimeDriver, RuntimeProcess } from "../core/types/runtime.ts";
 import { type ParkedEnvironment, type PlacementView, readDesired } from "./_desired.ts";
-import {
-  createExecutor,
-  failureOf,
-  type PointerLockOptions,
-  type ReconcileFailure,
-} from "./_execute.ts";
+import { createExecutor, failureOf, type ReconcileFailure } from "./_execute.ts";
 import { applyIngress } from "./_ingress.ts";
 import type { DaemonContext } from "./app.ts";
 import { DEFAULT_RUNTIME_CREDIT_MB } from "./_credit-controller.ts";
 
 export type { ParkedEnvironment, PlacementView } from "./_desired.ts";
-export type { PointerLockOptions, ReconcileFailure } from "./_execute.ts";
+export type { ReconcileFailure } from "./_execute.ts";
 
 /** One parked environment as a status reports it: the name is all that is read there. */
 export interface ParkedView {
@@ -110,12 +105,6 @@ export interface ReconcilerOptions {
    * daemon's own environment.
    */
   baseEnv?: Record<string, string>;
-  /**
-   * How long a rollout holds the environment's deployment pointer past the
-   * spawn, and how long it waits to take that lock at all. The defaults are the
-   * ones a fleet wants; a test that spawns nothing shortens both.
-   */
-  pointerLock?: PointerLockOptions;
 }
 
 /**
@@ -159,7 +148,6 @@ export function createReconciler(
     driver,
     probe: { path: daemon.config.runtime.probePath, ...opts?.probe },
     baseEnv: opts?.baseEnv ?? runtimeBaseEnv(globalThis.process?.env ?? {}),
-    ...(opts?.pointerLock === undefined ? {} : { pointerLock: opts.pointerLock }),
     known,
   });
 
@@ -234,7 +222,28 @@ export function createReconciler(
           start: daemon.config.runtime.portRangeStart,
         }),
       });
-      await executor.execute(plan, desired, pending, abort.signal);
+
+      await executor.execute(
+        plan,
+        desired,
+        pending,
+        abort.signal,
+        daemon.ingress === undefined
+          ? undefined
+          : async (processId): Promise<void> => {
+              /* Reserved transition credit is already held when this runs.
+                 Withdraw the route before celld swaps generations; the final
+                 convergence below restores a rejected reload or publishes a
+                 newly gated one. */
+              await applyIngress(daemon, {
+                desired,
+                processes: executor
+                  .currentProcesses()
+                  .filter((process) => process.processId !== processId),
+                parked,
+              });
+            },
+      );
 
       if (!abort.signal.aborted) {
         try {

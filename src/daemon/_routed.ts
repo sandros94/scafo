@@ -1,5 +1,5 @@
 /*
- * Internal: whether a build is being served, asked of the node that was actually
+ * Internal: whether a deployment revision is being served, asked of the node that was actually
  * given the environment.
  *
  * A deploy is accepted by whichever node the caller happened to reach, and
@@ -39,7 +39,9 @@ import type { DaemonContext } from "./app.ts";
 export interface RoutedTarget {
   project: string;
   env: string;
-  build: string;
+  revision: number;
+  /** Exact celld version this deploy published. */
+  version: string;
 }
 
 /** A repeatable look at whether the build is being served, wherever it was placed. */
@@ -131,7 +133,8 @@ function serves(process: RuntimeProcess, target: RoutedTarget): boolean {
     process.ready &&
     process.project === target.project &&
     process.env === target.env &&
-    process.build === target.build
+    process.appliedRevision >= target.revision &&
+    process.deployment?.version === target.version
   );
 }
 

@@ -438,7 +438,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   );
 
   it(
-    "settles on exactly one running process, serving the current build",
+    "settles on exactly one environment-owned runtime process",
     async () => {
       const state = await wait(
         "the node to report a single running process",

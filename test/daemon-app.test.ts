@@ -11,7 +11,7 @@ import { H3, HTTPError } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { setCurrentBuild } from "../src/core/registry/_current.ts";
+import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import { type DaemonState, createNodeApp, type EnvironmentResult } from "../src/daemon/app.ts";
 import type { AssignmentFailure } from "../src/daemon/_assign.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
@@ -589,14 +589,14 @@ describe("GET /v1/ingress/ask", () => {
      */
     await deployable();
     await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
-    await setCurrentBuild(clock.ctx, PROJECT, ENVIRONMENT, BUILD);
+    await recordDeployment(clock.ctx, PROJECT, ENVIRONMENT, BUILD);
     const real = await app.request(`/v1/ingress/ask?domain=${PROJECT}--${ENVIRONMENT}.apps.test`);
     expect(real.status).toBe(200);
 
     const directBuild = await app.request(`/v1/ingress/ask?domain=${PROJECT}--${BUILD}.apps.test`);
     expect(directBuild.status).toBe(404);
 
-    /* An environment that EXISTS but never had a current build is the same refusal as
+    /* An environment that EXISTS but never had a deployment is the same refusal as
        one that never existed: nothing serves it, nothing wakes for it, and a
        name that answers nothing has no business holding a certificate. */
     await createEnvironment(clock.ctx, PROJECT, { name: "unflipped" });
@@ -847,7 +847,6 @@ function daemonConfig(): DaemonConfig {
       bindHost: "127.0.0.1",
       durability: "bucket",
       cellIdleEvictS: 900,
-      pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },

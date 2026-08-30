@@ -1,8 +1,8 @@
 /* Internal: what the registry says THIS node should be serving. */
 
 import { ScafoError } from "../core/error.ts";
-import type { DesiredBuild, DesiredEnvironment } from "../core/placement/reconcile.ts";
-import { getBuild } from "../core/registry/builds.ts";
+import type { DesiredEnvironment } from "../core/placement/reconcile.ts";
+import { deploymentRevision } from "../core/registry/_deployment.ts";
 import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { listEnvironments } from "../core/registry/environments.ts";
@@ -63,7 +63,7 @@ export interface DesiredFailure {
 
 /** What one read of the registry told this node. */
 export interface DesiredState {
-  /** Environments this node should serve, with their builds resolved. */
+  /** Deployed environments this node should serve. */
   environments: DesiredEnvironment[];
   /**
    * The placement decisions this node read, one per environment that HAS one.
@@ -98,10 +98,9 @@ export interface DesiredState {
 export type PlacementReadMode = "required" | "legacy-fallback";
 
 /**
- * Every environment this node has something to serve for, with its current
- * build already resolved.
+ * Every deployed environment this node has something to serve for.
  *
- * An environment without a current build is left out — there is nothing to run
+ * An environment without a deployment is left out — there is nothing to run
  * for it. So is one whose placement record names
  * other nodes: that is a reassignment taking effect, and the caller stops
  * whatever it still runs for it while the nodes named pick it up on their own
@@ -142,7 +141,7 @@ export type PlacementReadMode = "required" | "legacy-fallback";
  * EVERY READ THIS DOES IS BOUNDED BY ONE GATE, and the whole pass shares it. A
  * pass is a read per environment plus the reads that resolve it, and on a
  * hundred-millisecond store one after another that is seconds of latency in
- * front of every wake and every rollout. They are independent of each other, so
+ * front of every wake and every start. They are independent of each other, so
  * they overlap — but the bound is fleet-wide rather than per project or per
  * environment, because those nest and the product is what would reach the store.
  * What comes back does NOT depend on the order it came back in: results are
@@ -294,7 +293,7 @@ async function readEnvironment(
   }
   if (!servedHere(placement, environment, nodeId, requirePlacement)) return state;
 
-  const wanted = await resolveEnvironmentBuilds(registry, project, environment, state);
+  const wanted = await resolveEnvironmentDeployment(registry, project, environment, state);
   if (wanted !== null) state.environments.push(wanted);
   return state;
 }
@@ -316,23 +315,23 @@ function servedHere(
 }
 
 /**
- * Resolves the environment's single current build. Null when it has nothing to serve.
+ * Resolves whether an environment has a current celld deployment.
  *
  * PARKED-NESS IS DERIVED HERE AND STORED NOWHERE. An ephemeral environment that
- * has gone longer than its policy allows without a wake is parked: none of its
- * current build is desired, so the next pass stops it and its hosts stop
+ * has gone longer than its policy allows without a wake is parked: its runtime
+ * is not desired, so the next pass stops it and its hosts stop
  * resolving. It is reported in {@link DesiredState.parked}
  * rather than merely dropped.
  *
- * The current build is not treated that way and must not be: it is the whole of
- * what the environment serves, so a missing one is not a
- * gap in an environment, it is an environment nothing can be planned for. It
- * raises, the pass records it and plans nothing at all, and nothing is stopped.
+ * The deployment notice is not treated that way and must not be: it says only
+ * whether the environment has something to serve. A missing notice means there
+ * is nothing to plan; a malformed one rejects the read rather than becoming a
+ * runtime decision.
  *
  * One environment's reads run in sequence because parkedness decides whether
- * its current build should be read at all.
+ * its deployment should be considered at all.
  */
-export async function resolveEnvironmentBuilds(
+export async function resolveEnvironmentDeployment(
   registry: RegistryContext,
   project: string,
   env: EnvironmentRecord,
@@ -351,24 +350,20 @@ export async function resolveEnvironmentBuilds(
    * bringing the environment back through its unconstrained fallback.
    */
   if (env.retiredAt !== undefined) return null;
+  const revision = deploymentRevision(env);
 
   const policy = resolveParkPolicy(env);
   const parked = policy.afterS > 0 && (await isParked(registry, project, env, policy.afterS));
   /* Reported only when there is something the clock is keeping stopped: an
-     environment without a current build serves nothing either way, and
+     environment without a deployment serves nothing either way, and
      calling it parked would promise that a request wakes something. */
-  if (parked && env.alias !== null) state.parked.push({ project, env });
+  if (parked && revision !== null) state.parked.push({ project, env });
 
-  const aliased = parked ? undefined : env.alias?.build;
-  if (aliased === undefined) return null;
-  const builds: DesiredBuild[] = [
-    { build: await getBuild(registry, project, aliased), role: "current" },
-  ];
+  if (parked || revision === null) return null;
 
   return {
     project,
     env,
-    builds,
     varsetId: env.varset,
   };
 }
@@ -376,12 +371,10 @@ export async function resolveEnvironmentBuilds(
 /**
  * Whether the environment has gone without a wake for longer than `afterS`.
  *
- * The base is its wake stamp, and the FALLBACK for one that has never been
- * stamped is the reaper's — the current deployment, then the creation — so an
- * environment deployed before there were stamps does not read as parked the
- * instant a node that knows about parking picks it up. A base that cannot be
- * read at all keeps the environment awake: nothing here should stop an
- * application over a timestamp it could not parse.
+ * The base is its wake stamp, falling back to creation for one never stamped.
+ * Deploying is not activity and cannot wake or extend an already parked
+ * environment. A base that cannot be read keeps the environment awake: nothing
+ * here should stop an application over a timestamp it could not parse.
  */
 async function isParked(
   registry: RegistryContext,
@@ -390,8 +383,7 @@ async function isParked(
   afterS: number,
 ): Promise<boolean> {
   const woken = await readEnvironmentWake(registry, project, env.name);
-  const since =
-    woken === null ? Date.parse(env.alias?.flippedAt ?? env.createdAt) : woken.getTime();
+  const since = woken === null ? Date.parse(env.createdAt) : woken.getTime();
   if (!Number.isFinite(since)) return false;
 
   return nowDate(registry).getTime() - since >= afterS * 1000;

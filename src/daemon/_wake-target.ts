@@ -3,6 +3,7 @@
 import { isScafoError } from "../core/error.ts";
 import { platformLabel } from "../core/placement/hosts.ts";
 import { APEX_ENVIRONMENT } from "../core/placement/routes.ts";
+import { deploymentRevision } from "../core/registry/_deployment.ts";
 import { readJson } from "../core/registry/cas.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
 import { type ResolvedParkPolicy, resolveParkPolicy } from "../core/registry/park.ts";
@@ -65,6 +66,6 @@ async function readEnvironment(
 }
 
 function wakeableEnvironment(project: string, env: EnvironmentRecord): WakeTarget | null {
-  if (env.retiredAt !== undefined || env.alias === null) return null;
+  if (env.retiredAt !== undefined || deploymentRevision(env) === null) return null;
   return { kind: "environment", project, env, policy: resolveParkPolicy(env) };
 }

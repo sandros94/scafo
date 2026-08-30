@@ -11,7 +11,7 @@
 
 import { S3Client } from "uns3";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { setCurrentBuild } from "../../src/core/registry/_current.ts";
+import { recordDeployment } from "../../src/core/registry/_deployment.ts";
 import {
   acquireLease,
   checkDomain,
@@ -228,8 +228,8 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
         expect(build.id).toBe(buildId);
 
         await createEnvironment(ctx, project, { name: "prod" });
-        const flipped = await setCurrentBuild(ctx, project, "prod", buildId);
-        expect(flipped.environment.alias).toMatchObject({ build: buildId });
+        const flipped = await recordDeployment(ctx, project, "prod", buildId);
+        expect(flipped.environment.deployment).toMatchObject({ revision: 1 });
         expect(flipped.warnings).toEqual([]);
 
         const key = await importVarsetKey(crypto.getRandomValues(new Uint8Array(32)));

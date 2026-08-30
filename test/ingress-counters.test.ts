@@ -16,7 +16,6 @@ import {
 } from "../src/daemon/access-counters.ts";
 import { applyIngress } from "../src/daemon/_ingress.ts";
 import type { DaemonContext } from "../src/daemon/app.ts";
-import type { DesiredEnvironment } from "../src/core/placement/reconcile.ts";
 import { API_DENIED_PREFIXES } from "../src/core/placement/routes.ts";
 import type { IngressDesired, IngressRoute } from "../src/core/types/ingress.ts";
 import type { EnvironmentRecord } from "../src/core/types/registry.ts";
@@ -44,7 +43,7 @@ describe("what a host is counted as", () => {
   it("takes a custom domain from the routing, which is the only thing that knows", () => {
     const counters = counting();
     counters.observeRouting({
-      routes: [route("shop.example.com", "shop", "production", "aaaa1111")],
+      routes: [route("shop.example.com", "shop", "production")],
       claims: [{ host: "shop.example.com", project: "shop", environment: "production" }],
     });
 
@@ -71,7 +70,7 @@ describe("what a host is counted as", () => {
   it("lets the routing win over the platform-host grammar", () => {
     const counters = counting();
     counters.observeRouting({
-      routes: [route("shop.apps.test", "shop", "staging", "aaaa1111")],
+      routes: [route("shop.apps.test", "shop", "staging")],
       claims: [],
     });
 
@@ -290,9 +289,9 @@ describe("what the reconcile pass hands over", () => {
       ingressCounters: counters,
     } as unknown as DaemonContext;
 
-    const env = environment("production", ["shop.example.com"], "aaaa1111");
+    const env = environment("production", ["shop.example.com"]);
     await applyIngress(daemon, {
-      desired: [{ project: "shop", env, builds: [] }] as unknown as DesiredEnvironment[],
+      desired: [{ project: "shop", env }],
       processes: [process_("shop", "production", "aaaa1111", 9101)],
       parked: [],
     });
@@ -365,17 +364,17 @@ function line(over: { host: string; status?: number; size?: number; durationMs?:
   });
 }
 
-function route(host: string, project: string, env: string, build: string): IngressRoute {
-  return { host, backend: { project, env, build, port: 9101 } };
+function route(host: string, project: string, env: string): IngressRoute {
+  return { host, backend: { project, env, port: 9101 } };
 }
 
 /** An environment record carrying only what the routing is rendered from. */
-function environment(name: string, domains: string[], build: string): EnvironmentRecord {
+function environment(name: string, domains: string[]): EnvironmentRecord {
   return {
     v: 1,
     name,
     prefix: `fleets/shop/${name}`,
-    alias: { build, flippedAt: new Date(CLOCK_START_MS).toISOString() },
+    deployment: { revision: 1, deployedAt: new Date(CLOCK_START_MS).toISOString() },
     domains,
     placement: "auto",
     ephemeral: false,
@@ -386,10 +385,12 @@ function environment(name: string, domains: string[], build: string): Environmen
 /** A ready process, which is the only kind the routing ever names. */
 function process_(project: string, env: string, build: string, port: number): RuntimeProcess {
   return {
-    processId: `${project}--${env}--${build}`,
+    processId: `${project}--${env}`,
     project,
     env,
-    build,
+    attemptedRevision: 1,
+    appliedRevision: 1,
+    deployment: { version: build, prefix: `deployments/main/${build}`, generation: 1 },
     port,
     internalPort: port + 1,
     ready: true,

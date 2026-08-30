@@ -232,7 +232,7 @@ export interface ProjectRecord {
    * A FULL STOP AND A REVERSIBLE ONE. A blocked project is served nowhere — no
    * node runs a process for it, no route names it, no certificate is issued for
    * its domains — its hosts are not woken, and deploys into it are refused. The
-   * environment, build, alias, domain and placement records are all left exactly
+   * environment, build, deployment, domain and placement records are all left exactly
    * as they stand, which is what makes the way back one call: the next reconcile
    * pass wants everything it wanted before.
    *
@@ -310,10 +310,12 @@ export interface BuildInput {
   oidc?: OidcActor;
 }
 
-/** Which build an environment currently runs. */
-export interface AliasState {
-  build: string;
-  flippedAt: string;
+/** Monotonic notice that celld's current deployment changed. */
+export interface DeploymentRevision {
+  /** Increased once for every successful celld publication. */
+  revision: number;
+  /** When this revision was recorded. */
+  deployedAt: string;
 }
 
 /**
@@ -342,8 +344,8 @@ export interface EnvironmentRecord {
   name: string;
   /** Bucket prefix the environment's fleet state lives under (`fleets/<project>/<name>`). */
   prefix: string;
-  /** Current build marker; `null` until the first successful deploy. */
-  alias: AliasState | null;
+  /** Deployment notice; `null` until the first successful deploy. Never names a version. */
+  deployment: DeploymentRevision | null;
   varset?: string;
   domains: string[];
   placement: PlacementStrategy;

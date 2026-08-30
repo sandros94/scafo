@@ -1,16 +1,12 @@
 /*
- * Runtime driver for celld 0.2.x: the process that serves an environment's
- * cells, the pointer that decides which version it loads, and the gate that
- * says when it may take traffic.
+ * Runtime driver for celld: one environment-owned process, in-place deployment
+ * adoption, and the gate that says when it may take traffic.
  */
 
 import { ScafoError } from "../../core/error.ts";
 import { assertPositiveSafeInteger } from "../../core/utils/number.ts";
 import { formatProcessId } from "../../core/placement/ids.ts";
-import { readJson } from "../../core/registry/cas.ts";
-import type { RegistryContext } from "../../core/registry/context.ts";
 import { fleetPrefix } from "../../core/registry/paths.ts";
-import type { CasStore } from "../../core/types/store.ts";
 import type {
   ProbeOptions,
   RuntimeDriver,
@@ -18,15 +14,7 @@ import type {
   RuntimeSpecInput,
 } from "../../core/types/runtime.ts";
 import type { ProcessSpec } from "../../core/types/supervisor.ts";
-import { withRetry } from "../../core/utils/backoff.ts";
-import {
-  type DeployPointer,
-  deployPointerKey,
-  pointAtVersion,
-  readFleetPointer,
-  scriptNameOf,
-  versionPrefix,
-} from "./_deploy-pointer.ts";
+import { createCelldInternalClient } from "./_celld-internal.ts";
 
 /** Command run when the caller does not name one. */
 export const DEFAULT_CELLD_BIN: string = "celld";
@@ -127,12 +115,6 @@ export interface CelldDriverOptions {
   /** Executable to run; resolved against `PATH` unless it is a path. */
   binPath?: string;
   /**
-   * Store over the bucket the fleets live in, with the same key prefix the rest
-   * of this installation uses. Activation reads and writes celld's deployment
-   * pointer through it.
-   */
-  store: CasStore;
-  /**
    * Grace a caller gives one of these processes between `SIGTERM` and `SIGKILL`.
    * The drain configured on the process is derived from it and always stays
    * below it, so a process finishes draining before it is killed. Must leave
@@ -159,6 +141,8 @@ export interface CelldDriverOptions {
    * process is ever called ready.
    */
   probeHost?: string;
+  /** Fetch implementation for the colocated internal operator API. */
+  internalFetch?: typeof fetch;
   /**
    * Variables the operator hands EVERY process this driver spawns, on top of
    * the environment it is given and under everything the driver writes itself.
@@ -186,7 +170,6 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
   const durability = opts.durability ?? "bucket";
   const probeHost = opts.probeHost ?? "127.0.0.1";
   const cellIdleEvictS = opts.cellIdleEvictS ?? 0;
-  const ctx: RegistryContext = { store: opts.store };
 
   if (!Number.isInteger(graceMs) || graceMs < MIN_DRAIN_MS + DRAIN_HEADROOM_MS) {
     throw new ScafoError("invalid-input", "Stop grace is too short", {
@@ -212,11 +195,7 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
       const internalListen = `${bindHost}:${String(input.ports.internal)}`;
 
       return {
-        id: formatProcessId({
-          project: input.project,
-          env: input.env.name,
-          build: input.build.id,
-        }),
+        id: formatProcessId({ project: input.project, env: input.env.name }),
         command: binPath,
         args: [
           "--bucket",
@@ -239,52 +218,39 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
       };
     },
 
-    async activateVersion(prefix: string, celldVersionId: string): Promise<void> {
-      const fleetKey = deployPointerKey(prefix);
-      const current = await readFleetPointer(ctx, prefix);
-      const script = scriptNameOf(current.value, fleetKey);
-      const namedKey = deployPointerKey(prefix, script);
+    async adoptCurrent(process, callOpts) {
+      const client = internalClient(process, probeHost, opts.internalFetch);
+      const result = await client.reload(callOpts);
+      if (result.outcome === "failed") {
+        return {
+          outcome: "rejected",
+          version: result.version,
+          prefix: result.prefix,
+          error: result.error,
+        };
+      }
+      if (result.outcome === "unavailable") {
+        throw new ScafoError("capability-missing", "Runtime did not adopt its deployment", {
+          status: 502,
+          detail: `celld reload ${result.outcome}: ${result.error}`,
+        });
+      }
+      const deployment = await confirmedDeployment(client, callOpts);
+      if (
+        deployment.version !== result.version ||
+        deployment.generation !== result.generation ||
+        (result.prefix !== undefined && deployment.prefix !== result.prefix)
+      ) {
+        throw new ScafoError("capability-missing", "Runtime deployment confirmation disagreed", {
+          status: 502,
+          detail: "celld /reload and /state reported different deployments",
+        });
+      }
+      return { outcome: "confirmed", deployment };
+    },
 
-      /*
-       * ALREADY ACTIVE: BOTH pointers select this version, so there is nothing
-       * to move. Activation is planned again on every pass until a process for
-       * the build is running — a repeated wake of one build is the common case,
-       * not the exception — and the sequence below already declines to rewrite
-       * identical bytes. What this skips is the READS that would establish that
-       * one object at a time: four round trips to conclude the bucket says what
-       * it already said, in front of every process a wake starts.
-       *
-       * SOUND BECAUSE IT RUNS UNDER THE ENVIRONMENT'S POINTER LOCK, which is
-       * where every writer of these two objects is serialized. Nothing may move
-       * them between the reads and the decision not to write, so the state read
-       * here is still the state the process spawned next reads.
-       *
-       * ANY DOUBT TAKES THE FULL SEQUENCE. A fleet pointer naming another
-       * version or another directory, a named pointer that is missing or names
-       * either: each of them writes exactly as it did before. A fleet nothing
-       * was ever deployed to, or a pointer nothing can read, raises here as it
-       * always did — the reads that would have raised are the same reads, only
-       * made sooner. The upload assertion is skipped on this path alone, and
-       * only because nothing moves: the pointer it would refuse to write is the
-       * one already standing, and raising cannot unwrite it.
-       */
-      if (await alreadyActive(ctx, current.value, namedKey, script, celldVersionId)) return;
-
-      await assertVersionUploaded(ctx, prefix, script, celldVersionId);
-
-      /*
-       * celld writes the named pointer before the fleet-wide one, so a writer
-       * that loses the race loses it on the object that actually selects the
-       * application rather than half-way through. Activation keeps that order.
-       */
-      const template = current.value;
-      const write = async (key: string): Promise<void> => {
-        await withRetry(() =>
-          pointAtVersion(ctx, key, { script, version: celldVersionId, template }),
-        );
-      };
-      await write(namedKey);
-      await write(fleetKey);
+    async currentDeployment(process, callOpts) {
+      return confirmedDeployment(internalClient(process, probeHost, opts.internalFetch), callOpts);
     },
 
     async probeReady(process: RuntimeProcess, probe?: ProbeOptions): Promise<boolean> {
@@ -314,6 +280,25 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
       return false;
     },
   };
+}
+
+function internalClient(process: RuntimeProcess, host: string, fetchFn?: typeof fetch) {
+  const endpoint = `http://${host}:${String(process.internalPort)}`;
+  return createCelldInternalClient(endpoint, fetchFn === undefined ? undefined : { fetchFn });
+}
+
+async function confirmedDeployment(
+  client: ReturnType<typeof createCelldInternalClient>,
+  callOpts?: { signal?: AbortSignal },
+) {
+  const state = await client.state(callOpts);
+  if ("error" in state) {
+    throw new ScafoError("capability-missing", "Runtime has no active deployment", {
+      status: 502,
+      detail: "celld /state reported actor_stopped",
+    });
+  }
+  return state.deployment;
 }
 
 /** What the driver's own options put into every process it spawns. */
@@ -409,56 +394,6 @@ function checkedExtraEnv(extraEnv?: Record<string, string>): Record<string, stri
     });
   }
   return extraEnv;
-}
-
-/**
- * Whether both of an environment's pointers already select `version`, which is
- * the whole of what an activation would leave behind.
- *
- * The named one is read because it is the object celld resolves the application
- * through: a fleet-wide pointer that agrees with it is not evidence about it,
- * and a writer interrupted between the two — they are moved named-first — leaves
- * exactly that disagreement.
- */
-async function alreadyActive(
-  ctx: RegistryContext,
-  fleet: DeployPointer,
-  namedKey: string,
-  script: string,
-  version: string,
-): Promise<boolean> {
-  if (!pointsAt(fleet, script, version)) return false;
-
-  const named = await readJson<DeployPointer>(ctx, namedKey);
-  return named !== null && pointsAt(named.value, script, version);
-}
-
-/**
- * Whether one pointer selects `version`. `prefix` is the load-bearing half — it
- * is what the runtime resolves modules under — and matching both is the same
- * question {@link pointAtVersion} asks before declining to rewrite an object.
- */
-function pointsAt(pointer: DeployPointer, script: string, version: string): boolean {
-  return pointer.version === version && pointer.prefix === versionPrefix(script, version);
-}
-
-/**
- * Refuses to point a fleet at a version whose modules are not in the bucket: the
- * pointer is read once, while a process starts, so a wrong one is only found out
- * by the next process that fails to boot.
- */
-async function assertVersionUploaded(
-  ctx: RegistryContext,
-  prefix: string,
-  script: string,
-  version: string,
-): Promise<void> {
-  const key = `${prefix}/${versionPrefix(script, version)}/manifest.json`;
-  if ((await ctx.store.get(key)) === null) {
-    throw new ScafoError("not-found", "Version was never uploaded", {
-      detail: `"${key}" does not exist, so version "${version}" cannot be activated`,
-    });
-  }
 }
 
 /** Joins the installation's key prefix to a fleet prefix. */

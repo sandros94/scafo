@@ -192,7 +192,7 @@ export function createWakeService(daemon: DaemonContext): WakeService {
    * is.
    *
    * An environment is answered with the same current ready backend the ingress
-   * renders, never with any ready process left over from an internal rollout.
+   * renders, including the ready generation retained during in-place adoption.
    * That distinction matters while the old process overlaps its replacement.
    */
   function servingPort(target: WakeTarget): number | undefined {

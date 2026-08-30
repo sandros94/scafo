@@ -445,7 +445,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   );
 
   it(
-    "settles on exactly one running process, serving the current build",
+    "settles on exactly one environment-owned runtime process",
     async () => {
       const state = await until(
         "the node to report a single running process",
@@ -539,7 +539,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       observed.workloadDeployOutput = result.output;
 
       expectCleanExit(result);
-      /* Accepted (202), then carried the whole way: build, current marker and a process
+      /* Accepted (202), then carried the whole way: build, deployment notice and a process
          through its readiness gate. Every poll re-presented the same token,
          which a workload token — unlike a node token — survives. */
       expect(result.output, daemonLogTail()).toContain("routed");
@@ -554,7 +554,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
 
       /* The environment the CI job named did not exist before this deploy. */
       const environment = await getEnvironment(registry, PROJECT, CI_ENVIRONMENT);
-      expect(environment.alias).toMatchObject({ build: buildCi });
+      expect(environment.deployment).toMatchObject({ revision: 2 });
 
       /* And production is untouched: a token scoped to one project deploying a
          new environment of it must not disturb what was already running. */
@@ -584,9 +584,9 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expect(result.output).toContain("urn:scafo:trust-mismatch");
       expect(result.output).toContain(HOSTILE_SUBJECT);
 
-      /* Nothing was built and the alias did not move. */
+      /* Nothing was built and the deployment notice did not advance. */
       const environment = await getEnvironment(registry, PROJECT, CI_ENVIRONMENT);
-      expect(environment.alias).toMatchObject({ build: buildCi });
+      expect(environment.deployment).toMatchObject({ revision: 2 });
       await untilServes(ciHost(), "v3");
     },
     STEP_TIMEOUT_MS,

@@ -840,7 +840,6 @@ function daemonConfig(): DaemonConfig {
       bindHost: "127.0.0.1",
       durability: "bucket",
       cellIdleEvictS: 900,
-      pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },

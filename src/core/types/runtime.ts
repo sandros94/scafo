@@ -6,20 +6,25 @@
  */
 
 import type { CapacityPlan } from "../capacity/compute.ts";
-import type { BuildRecord, EnvironmentRecord, PlainVarset } from "./registry.ts";
+import type { EnvironmentRecord, PlainVarset } from "./registry.ts";
 import type { ProcessSpec } from "./supervisor.ts";
 
 /** One runtime process of an environment, as the planner sees it. */
 export interface RuntimeProcess {
   /**
-   * Id the process runs under in the supervisor: `project--env--build`, with an
-   * `--r<n>` suffix when an earlier attempt at the same three parts is still around.
+   * Id the process runs under in the supervisor: `project--env`.
    */
   processId: string;
   project: string;
   env: string;
-  /** Build this process serves. Fixed at spawn: serving another one takes another process. */
-  build: string;
+  /** Latest Scafo deployment revision for which adoption reached a conclusive outcome. */
+  attemptedRevision: number;
+  /** Latest Scafo deployment revision whose exact celld state was confirmed. */
+  appliedRevision: number;
+  /** Celld's confirmed current deployment; absent until its state was read successfully. */
+  deployment?: RuntimeDeployment;
+  /** A failed supervisor stop must be retried before any other lifecycle action. */
+  teardownPending?: true;
   /** Loopback port serving public traffic. */
   port: number;
   /** Loopback port reserved for node-to-node traffic. */
@@ -27,6 +32,18 @@ export interface RuntimeProcess {
   /** True once the process has passed its readiness gate. */
   ready: boolean;
 }
+
+/** Deployment identity reported by celld's internal `/state`. */
+export interface RuntimeDeployment {
+  version: string;
+  prefix: string;
+  generation: number;
+}
+
+/** Conclusive result of asking a runtime to adopt the pointer it sees. */
+export type RuntimeAdoption =
+  | { outcome: "confirmed"; deployment: RuntimeDeployment }
+  | { outcome: "rejected"; version: string; prefix: string; error: string };
 
 /** The bucket a runtime process reads its fleet from, and how peers reach this node. */
 export interface RuntimeNodeInput {
@@ -59,8 +76,6 @@ export interface RuntimeNodeInput {
 export interface RuntimeSpecInput {
   project: string;
   env: EnvironmentRecord;
-  /** Build to serve; the process loads it once, while it starts. */
-  build: BuildRecord;
   /** Opened varset of the environment; null when it has none or its key is not held. */
   vars: PlainVarset | null;
   ports: { public: number; internal: number };
@@ -116,14 +131,15 @@ export interface RuntimeDriver {
    * process with, so a process always finishes draining before it is killed.
    */
   readonly stopGraceMs: number;
-  /** Materializes the spec that runs one environment's build on this node. */
+  /** Materializes the spec that runs one environment on this node. */
   processSpec(input: RuntimeSpecInput): ProcessSpec;
-  /**
-   * Points the fleet's activation pointer at a version, so the NEXT process
-   * started against that fleet serves it. Running processes are unaffected: they
-   * read the pointer once, while they start.
-   */
-  activateVersion(fleetPrefix: string, celldVersionId: string): Promise<void>;
+  /** Asks a running process to adopt celld's current deployment in place. */
+  adoptCurrent(process: RuntimeProcess, opts?: { signal?: AbortSignal }): Promise<RuntimeAdoption>;
+  /** Reads the exact deployment a process currently serves. */
+  currentDeployment(
+    process: RuntimeProcess,
+    opts?: { signal?: AbortSignal },
+  ): Promise<RuntimeDeployment>;
   /** Whether a running process passes its readiness gate. */
   probeReady(process: RuntimeProcess, opts?: ProbeOptions): Promise<boolean>;
 }

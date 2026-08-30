@@ -32,7 +32,7 @@ import type { H3 } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it } from "vitest";
-import { setCurrentBuild } from "../src/core/registry/_current.ts";
+import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import { createNodeApp, type DaemonState } from "../src/daemon/app.ts";
 import type { AssignmentResult } from "../src/daemon/_assign.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
@@ -119,7 +119,7 @@ beforeEach(async () => {
     await createProject(clock.ctx, { slug: project });
     await createEnvironment(clock.ctx, project, { name: ENVIRONMENT });
     await createBuild(clock.ctx, project, { id: BUILD, runtimeConfigurable: true });
-    await setCurrentBuild(clock.ctx, project, ENVIRONMENT, BUILD);
+    await recordDeployment(clock.ctx, project, ENVIRONMENT, BUILD);
   }
 
   deploys = stubDeploys();
@@ -431,7 +431,7 @@ describe("GET /v1/state is filtered to what the caller reaches", () => {
 
     expect(state.placements.map((entry) => entry.project)).toEqual([MINE]);
     expect(state.parked.map((entry) => entry.project)).toEqual([MINE]);
-    expect(state.processes.map((entry) => entry.id)).toEqual([`${MINE}--${ENVIRONMENT}--${BUILD}`]);
+    expect(state.processes.map((entry) => entry.id)).toEqual([`${MINE}--${ENVIRONMENT}`]);
     expect(state.coordinator?.unplaced?.map((entry) => entry.target)).toEqual([
       `${MINE}/${ENVIRONMENT}`,
     ]);
@@ -613,7 +613,7 @@ async function fileKey(
 /** One running process per project, named the way the supervisor names them. */
 function bothProjectsRunning(): Supervisor {
   const processes: ProcessStatus[] = [MINE, THEIRS].map((project) => ({
-    id: `${project}--${ENVIRONMENT}--${BUILD}`,
+    id: `${project}--${ENVIRONMENT}`,
     state: "running",
     pid: 4321,
     startedAt: "2026-01-01T00:00:00.000Z",
@@ -636,10 +636,12 @@ function bothProjectsReconciled(): Reconciler {
     lastActions: [],
     failures: [],
     processes: [MINE, THEIRS].map((project) => ({
-      processId: `${project}--${ENVIRONMENT}--${BUILD}`,
+      processId: `${project}--${ENVIRONMENT}`,
       project,
       env: ENVIRONMENT,
-      build: BUILD,
+      attemptedRevision: 1,
+      appliedRevision: 1,
+      deployment: { version: BUILD, prefix: `deployments/main/${BUILD}`, generation: 1 },
       port: 42_001,
       internalPort: 42_002,
       ready: true,
@@ -773,7 +775,6 @@ function daemonConfig(): DaemonConfig {
       bindHost: "127.0.0.1",
       durability: "bucket",
       cellIdleEvictS: 900,
-      pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },

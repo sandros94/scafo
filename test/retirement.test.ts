@@ -9,7 +9,7 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { setCurrentBuild } from "../src/core/registry/_current.ts";
+import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import {
   acquireLease,
   createBuild,
@@ -45,7 +45,7 @@ beforeEach(async () => {
   await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
   await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
   await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true });
-  await setCurrentBuild(clock.ctx, PROJECT, "prod", BUILD);
+  await recordDeployment(clock.ctx, PROJECT, "prod", BUILD);
 
   const acquired = await acquireLease(clock.ctx, "node-a");
   if (acquired === null) throw new Error("the fixture could not take the lease");
@@ -61,7 +61,7 @@ describe("retiring and taking it back", () => {
     expect(retired).toEqual({ ...before, retiredAt: new Date(clock.nowMs()).toISOString() });
     /* Its build, its domains and its varset are untouched: retirement takes an
        environment out of service, it does not begin taking it apart. */
-    expect(retired.alias?.build).toBe(BUILD);
+    expect(retired.deployment?.revision).toBe(1);
   });
 
   it("keeps the FIRST timestamp when it is retired again", async () => {

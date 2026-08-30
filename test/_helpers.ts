@@ -11,7 +11,6 @@ import {
   domainKey,
   domainsPrefix,
   environmentKey,
-  listBuilds,
   listEnvironments,
   listProjects,
   readJson,
@@ -247,18 +246,10 @@ export async function invariants(store: CasStore, opts?: InvariantOptions): Prom
   const ctx: RegistryContext = { store };
 
   for (const project of await listProjects(ctx)) {
-    const builds = await listBuilds(ctx, project);
-
     for (const name of await listEnvironments(ctx, project)) {
       const found = await readJson<EnvironmentRecord>(ctx, environmentKey(project, name));
       if (found === null) continue;
       const environment = found.value;
-
-      const pointers = [environment.alias?.build];
-      for (const build of pointers) {
-        if (build === undefined) continue;
-        expect(builds, `${project}/${name} points at build "${build}"`).toContain(build);
-      }
 
       for (const host of environment.domains) {
         const claim = await readJson<DomainClaim>(ctx, domainKey(host));

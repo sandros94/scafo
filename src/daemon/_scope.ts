@@ -138,7 +138,7 @@ export function scopedState(caller: TrustedOperator | null, state: DaemonState):
             failures: reconcile.failures.filter((entry) => reaches(subjectProject(entry.subject))),
             lastActions: reconcile.lastActions.filter((action) =>
               reaches(
-                action.type === "rollout"
+                action.type === "start"
                   ? action.project
                   : (parseProcessId(action.processId)?.project ?? null),
               ),

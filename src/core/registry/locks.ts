@@ -11,7 +11,7 @@
  * A family is a {@link LockSpace} — where its records live, and the three
  * durations it waits on. There are two: `tls-lock.ts`, whose names come from the
  * colocated ingress storing its issuance state through this node, and
- * `pointer-lock.ts`, which is the fleet's own.
+ * fleet-owned locks, which live under a separate prefix.
  */
 
 import { ScafoError } from "../error.ts";

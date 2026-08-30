@@ -4,7 +4,7 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { setCurrentBuild } from "../src/core/registry/_current.ts";
+import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import {
   acquireLease,
   checkDomain,
@@ -49,7 +49,7 @@ beforeEach(async () => {
   await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
   await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true, idleTtlS: 900 });
   await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
-  await setCurrentBuild(clock.ctx, PROJECT, "preview", BUILD);
+  await recordDeployment(clock.ctx, PROJECT, "preview", BUILD);
 
   for (const key of [...FLEET_KEYS, ...SURVIVORS]) await store.put(key, "{}");
 

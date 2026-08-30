@@ -5,11 +5,10 @@
  * with the routing it renders after every pass.
  */
 
-/** One routable backend: a ready runtime process serving a build. */
+/** One routable backend: a ready runtime process serving an environment. */
 export interface IngressBackend {
   project: string;
   env: string;
-  build: string;
   /** Loopback port the process answers public traffic on. */
   port: number;
 }

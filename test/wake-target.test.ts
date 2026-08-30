@@ -1,7 +1,7 @@
 /* Wake targets are environments; builds have no independently addressable host. */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { setCurrentBuild } from "../src/core/registry/_current.ts";
+import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import {
   blockProject,
   claimDomain,
@@ -27,7 +27,7 @@ beforeEach(async () => {
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, { name: PREVIEW, ephemeral: true });
   await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
-  await setCurrentBuild(clock.ctx, PROJECT, PREVIEW, BUILD);
+  await recordDeployment(clock.ctx, PROJECT, PREVIEW, BUILD);
 });
 
 describe("resolveWakeTarget", () => {
@@ -35,13 +35,13 @@ describe("resolveWakeTarget", () => {
     await expect(target(`shop--${PREVIEW}.apps.test`)).resolves.toMatchObject({
       kind: "environment",
       project: PROJECT,
-      env: { name: PREVIEW, alias: { build: BUILD } },
+      env: { name: PREVIEW, deployment: { revision: 1 } },
     });
   });
 
   it("resolves production from the project apex", async () => {
     await createEnvironment(clock.ctx, PROJECT, { name: "production" });
-    await setCurrentBuild(clock.ctx, PROJECT, "production", BUILD);
+    await recordDeployment(clock.ctx, PROJECT, "production", BUILD);
     await expect(target("shop.apps.test")).resolves.toMatchObject({
       env: { name: "production" },
     });
@@ -64,7 +64,7 @@ describe("resolveWakeTarget", () => {
     await expect(target(`shop--${PREVIEW}.apps.test`)).resolves.toBeNull();
 
     await createEnvironment(clock.ctx, PROJECT, { name: "other" });
-    await setCurrentBuild(clock.ctx, PROJECT, "other", BUILD);
+    await recordDeployment(clock.ctx, PROJECT, "other", BUILD);
     await blockProject(clock.ctx, PROJECT);
     await expect(target("shop--other.apps.test")).resolves.toBeNull();
   });

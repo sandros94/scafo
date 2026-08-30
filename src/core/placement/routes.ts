@@ -53,7 +53,7 @@ export interface RenderRoutesInput {
   /** Apex domains the platform serves wildcard subdomains under. */
   platformDomains: string[];
   /**
-   * Every environment the node serves, with its current-build marker.
+   * Every deployed environment the node serves.
    */
   environments: Array<{ project: string; env: EnvironmentRecord }>;
   /** Processes running on this node right now; only ready ones are routable. */
@@ -105,8 +105,7 @@ export interface RenderRoutesInput {
  * A process that has not passed its readiness gate is never routed: sending it
  * traffic is exactly what the gate exists to prevent.
  *
- * An environment's hosts resolve only to the ready process serving its current
- * build. Processes left over during replacement are never independently routed.
+ * An environment's hosts resolve only to its ready environment-owned process.
  */
 export function renderRoutes(input: RenderRoutesInput): IngressDesired {
   const ready = readyProcesses(input.processes);
@@ -250,11 +249,9 @@ function currentBackend(
   env: EnvironmentRecord,
   ready: RuntimeProcess[],
 ): IngressBackend | undefined {
-  const build = env.alias?.build;
-  if (build === undefined) return undefined;
+  if (env.deployment === null) return undefined;
   const process = ready.find(
-    (candidate) =>
-      candidate.project === project && candidate.env === env.name && candidate.build === build,
+    (candidate) => candidate.project === project && candidate.env === env.name,
   );
   return process === undefined ? undefined : backendOf(process);
 }
@@ -292,7 +289,6 @@ function backendOf(process: RuntimeProcess): IngressBackend {
   return {
     project: process.project,
     env: process.env,
-    build: process.build,
     port: process.port,
   };
 }

@@ -22,8 +22,7 @@ import {
   releaseLock,
   withLock,
 } from "../src/core/registry/locks.ts";
-import { locksPrefix, pointerLockKey, tlsLockKey } from "../src/core/registry/paths.ts";
-import { POINTER_LOCK_SPACE, pointerLockName } from "../src/core/registry/pointer-lock.ts";
+import { locksPrefix, tlsLockKey } from "../src/core/registry/paths.ts";
 import { TLS_LOCK_SPACE } from "../src/core/registry/tls-lock.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { CLOCK_START_MS, ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
@@ -230,7 +229,7 @@ describe("waiting for a lock somebody else has", () => {
     }
 
     /* The other half of the same rule: a jump backwards must not buy the waiter
-       time either, or a rollout told to give up in five seconds holds its pass
+       time either, or work told to give up in five seconds holds its pass
        up for as long as the clock went back. */
     expect(performance.now() - started).toBeLessThan(timeoutMs * 5);
   });
@@ -371,28 +370,13 @@ describe("keeping a lock while the work runs", () => {
 });
 
 describe("where a lock lives", () => {
-  it("keeps the fleet's own locks apart from the ones an ingress takes", () => {
-    /* The names under the TLS prefix come from a caller through
-       `/v1/storage/locks`; these are the fleet's own, and no caller may reach
-       across into them. */
-    expect(pointerLockKey("shop", "prod")).toBe("_scafo/locks/pointer/shop/prod.json");
+  it("keeps the ingress lock namespace apart from fleet-owned locks", () => {
     expect(tlsLockKey("issue/example.com")).toBe("_scafo/tls/locks/issue/example.com");
-    expect(pointerLockKey("shop", "prod").startsWith("_scafo/tls/")).toBe(false);
     expect(tlsLockKey("locks/pointer/shop/prod.json").startsWith(locksPrefix())).toBe(false);
   });
 
-  it("addresses one environment's pointer lock, and nothing else", () => {
-    expect(POINTER_LOCK_SPACE.keyOf(pointerLockName("shop", "prod"))).toBe(
-      pointerLockKey("shop", "prod"),
-    );
-
-    for (const name of ["shop", "shop/prod/extra", "Shop/prod", "shop/PROD", ""]) {
-      expect(() => POINTER_LOCK_SPACE.keyOf(name), name).toThrow(ScafoError);
-    }
-  });
-
   it("waits on the same durations wherever it is taken", () => {
-    for (const space of [POINTER_LOCK_SPACE, TLS_LOCK_SPACE]) {
+    for (const space of [TLS_LOCK_SPACE]) {
       expect({ ...space, keyOf: undefined }).toEqual({
         keyOf: undefined,
         refreshMs: LOCK_REFRESH_MS,

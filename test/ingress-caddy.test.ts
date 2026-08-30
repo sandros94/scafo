@@ -486,8 +486,8 @@ function nodeRoute(id: string, match: string): Record<string, unknown> {
   };
 }
 
-function backend(port: number): { project: string; env: string; build: string; port: number } {
-  return { project: "shop", env: "production", build: `build${String(port)}`, port };
+function backend(port: number): { project: string; env: string; port: number } {
+  return { project: "shop", env: "production", port };
 }
 
 /**

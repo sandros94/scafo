@@ -335,7 +335,7 @@ describe("planCreditPlacement", () => {
     expect(drained.placements[0]?.nodes).toEqual(["b"]);
   });
 
-  it("allows one protected-surge rollout but refuses a larger transition", async () => {
+  it("allows one protected-surge transition but refuses a larger one", async () => {
     const planned = await planCreditPlacement({
       nodes: [node("a", 100, undefined, 20), node("b", 70, { tier: "fast" }, 20)],
       workloads: [

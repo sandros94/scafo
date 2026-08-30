@@ -308,18 +308,6 @@ export function locksPrefix(): string {
 }
 
 /**
- * Lock every writer of one environment's DEPLOYMENT POINTER takes: the
- * reconciler rolling a build out on any node, and the deploy service publishing
- * an artifact on any node. One key per project and environment, because that is
- * the granularity of the pointer they contend for.
- */
-export function pointerLockKey(project: string, env: string): string {
-  assertSlug(project);
-  assertSlug(env);
-  return `${locksPrefix()}pointer/${project}/${env}.json`;
-}
-
-/**
  * Prefix the TLS material an ingress persists through this node lives under:
  * its certificates, its account keys, and anything else it must keep across
  * restarts. The keys beneath it are the CALLER's, not the registry's — nothing

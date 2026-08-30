@@ -9,18 +9,11 @@
 
 import { describeError, isScafoError, ScafoError } from "../core/error.ts";
 import { createBuild } from "../core/registry/builds.ts";
-import { setCurrentBuild } from "../core/registry/_current.ts";
+import { recordDeployment } from "../core/registry/_deployment.ts";
 import { createEnvironment, getEnvironment } from "../core/registry/environments.ts";
-import { lockHolder, withLock } from "../core/registry/locks.ts";
 import { fleetPrefix } from "../core/registry/paths.ts";
 import { setNodeSelector, setReplicas } from "../core/registry/placement.ts";
-import {
-  DEPLOY_LOCK_TIMEOUT_MS,
-  POINTER_LOCK_SPACE,
-  pointerLockName,
-} from "../core/registry/pointer-lock.ts";
 import { assertProjectUnblocked, createProject } from "../core/registry/projects.ts";
-import { stampEnvironmentWake } from "../core/registry/wake.ts";
 import {
   DEFAULT_ARTIFACT_BYTES,
   type DeployRunner,
@@ -125,11 +118,6 @@ export interface DeployServiceOptions {
   pollMs?: number;
   /** Defaults to {@link DEFAULT_HISTORY}. */
   history?: number;
-  /**
-   * Longest a publish waits for the environment's deployment pointer before it
-   * fails. Defaults to {@link DEPLOY_LOCK_TIMEOUT_MS}.
-   */
-  lockTimeoutMs?: number;
   scheduler?: Omit<DeploySchedulerOptions, "credits" | "creditMb"> &
     Partial<Pick<DeploySchedulerOptions, "credits" | "creditMb">>;
 }
@@ -172,8 +160,6 @@ export function createDeployService(
   const routedTimeoutMs = opts?.routedTimeoutMs ?? DEFAULT_ROUTED_TIMEOUT_MS;
   const pollMs = opts?.pollMs ?? DEFAULT_POLL_MS;
   const history = Math.max(1, opts?.history ?? DEFAULT_HISTORY);
-  const lockTimeoutMs = opts?.lockTimeoutMs ?? DEPLOY_LOCK_TIMEOUT_MS;
-  const holder = lockHolder(daemon.nodeId);
   const deploy = daemon.config.deploy;
   const schedulerOptions = opts?.scheduler;
   const credits = schedulerOptions?.credits ?? daemon.credits;
@@ -217,20 +203,6 @@ export function createDeployService(
   }
 
   /**
-   * Marks the environment awake, because a deploy is a wake: what a deploy has
-   * just brought into service must not park for having had no request yet.
-   *
-   * A stamp that fails is IGNORED, and deliberately: the deploy has succeeded —
-   * the build exists, and the current-build marker points at it — while
-   * the stamp only delays parking, and the next wake or the next deploy writes
-   * it again. Failing the deploy over it would report a failure that did not
-   * happen.
-   */
-  async function stampAwake(meta: DeployMeta): Promise<void> {
-    await stampEnvironmentWake(daemon.registry, meta.project, meta.environment).catch(() => {});
-  }
-
-  /**
    * Waits for the new build to be reported serving traffic.
    *
    * WATCHED WHERE IT WAS PLACED, NOT WHERE IT WAS UPLOADED. A deploy is accepted
@@ -241,25 +213,24 @@ export function createDeployService(
    * happened to choose spent its whole budget watching a node that was never
    * going to start anything.
    *
-   * Running out of time is a warning and never a failure: the build exists and
-   * the current marker points at it, so the loop will keep trying to start it long after
-   * this deploy stopped watching.
+   * Running out of time is a warning and never a failure: the build exists,
+   * celld published it and the deployment notice was recorded, so the loop will
+   * keep trying long after this deploy stopped watching.
    */
   async function awaitRouted(
     id: string,
     meta: DeployMeta,
-    build: string,
+    target: { build: string; celldVersionId: string; revision: number },
     signal: AbortSignal,
   ): Promise<void> {
     const giveUp = async (detail: string): Promise<void> => {
-      await stampAwake(meta);
       update(id, { state: "deployed" });
       warn(id, { code: "deploy-not-routed", detail });
     };
 
     if (daemon.reconciler === undefined) {
       await giveUp(
-        `build "${build}" was deployed and made current, but this node runs no ` +
+        `build "${target.build}" was deployed and made current, but this node runs no ` +
           `reconcile loop, so nothing here will start it`,
       );
       return;
@@ -268,7 +239,8 @@ export function createDeployService(
     const watch = createRoutedWatch(daemon, {
       project: meta.project,
       env: meta.environment,
-      build,
+      revision: target.revision,
+      version: target.celldVersionId,
     });
 
     /* A duration rather than a moment in time, so it is measured monotonically
@@ -279,13 +251,12 @@ export function createDeployService(
     for (;;) {
       throwIfStopped(signal);
       if (await watch.routed()) {
-        await stampAwake(meta);
         update(id, { state: "routed" });
         return;
       }
       if (remaining() <= 0) {
         await giveUp(
-          `build "${build}" was deployed and made current, but no process serving it ` +
+          `build "${target.build}" was deployed and made current, but no process serving it ` +
             `had passed its readiness gate after ${String(routedTimeoutMs)}ms` +
             /* Named, because a deploy that was watching another node entirely is
                the one case where "nothing was ready" is not about this node. */
@@ -302,102 +273,84 @@ export function createDeployService(
     meta: DeployMeta,
     artifact: StagedArtifact,
     signal: AbortSignal,
-  ): Promise<BuildRecord> {
+  ): Promise<{ build: BuildRecord; celldVersionId: string; revision: number }> {
     update(id, { state: "uploading" });
     const bucket = daemon.config.bucket;
-    /*
-     * PUBLISHING MOVES THE FLEET'S DEPLOYMENT POINTER, so it holds the
-     * environment's pointer lock for the whole shell-out — the bundling and
-     * the upload included, because the pointer moves at the end of them and
-     * the lock has to have been held since before whoever else wants it could
-     * have started. It therefore waits behind an in-flight rollout of this
-     * environment, on this node or any other, and makes those rollouts wait
-     * behind it: that IS the serialization, and it is what it costs.
-     *
-     * Recording the build and current marker is part of that same serialized
-     * change. Only the routing watch stays outside: it waits on the reconcile
-     * loop, whose rollout needs this lock, so holding it there would deadlock.
-     */
     let celldVersionId: string | undefined;
     try {
-      const build = await withLock(
-        daemon.registry,
+      const published = await runner.run(
         {
-          space: POINTER_LOCK_SPACE,
-          name: pointerLockName(meta.project, meta.environment),
-          holder,
-          timeoutMs: lockTimeoutMs,
-          signal,
+          project: meta.project,
+          environment: meta.environment,
+          script: meta.script,
+          artifact,
+          target: {
+            endpoint: bucket.endpoint,
+            region: bucket.region,
+            bucket: bucket.bucket,
+            prefix: joinPrefix(bucket.prefix, fleetPrefix(meta.project, meta.environment)),
+            accessKey: bucket.accessKey,
+            secretKey: bucket.secretKey,
+          },
         },
-        async (signal) => {
-          const published = await runner.run(
-            {
-              project: meta.project,
-              environment: meta.environment,
-              script: meta.script,
-              artifact,
-              target: {
-                endpoint: bucket.endpoint,
-                region: bucket.region,
-                bucket: bucket.bucket,
-                prefix: joinPrefix(bucket.prefix, fleetPrefix(meta.project, meta.environment)),
-                accessKey: bucket.accessKey,
-                secretKey: bucket.secretKey,
-              },
-            },
-            { signal },
-          );
-          celldVersionId = published.celldVersionId;
-
-          throwIfStopped(signal);
-          const build = await createBuild(daemon.registry, meta.project, {
-            id: meta.buildId ?? celldVersionId,
-            celldVersionId,
-            runtimeConfigurable: meta.runtimeConfigurable,
-            ...(meta.builtWithVarset === undefined
-              ? {}
-              : { builtWithVarset: meta.builtWithVarset }),
-            ...(meta.source === undefined ? {} : { source: meta.source }),
-            ...(meta.oidc === undefined ? {} : { oidc: meta.oidc }),
-          });
-          update(id, { build: build.id });
-          throwIfStopped(signal);
-          const current = await setCurrentBuild(
-            daemon.registry,
-            meta.project,
-            meta.environment,
-            build.id,
-            { signal },
-          );
-          for (const warning of current.warnings) warn(id, warning);
-          return build;
-        },
+        { signal },
       );
-      /* The lock stops listening while it releases its record. A task deadline or
-         shutdown can land in that final window, so check the task's authority
-         once more before handing a successful result back to the scheduler. */
+      celldVersionId = published.celldVersionId;
+
       throwIfStopped(signal);
-      return build;
+      const build = await createBuild(daemon.registry, meta.project, {
+        id: meta.buildId ?? published.celldVersionId,
+        celldVersionId: published.celldVersionId,
+        runtimeConfigurable: meta.runtimeConfigurable,
+        ...(meta.builtWithVarset === undefined ? {} : { builtWithVarset: meta.builtWithVarset }),
+        ...(meta.source === undefined ? {} : { source: meta.source }),
+        ...(meta.oidc === undefined ? {} : { oidc: meta.oidc }),
+      });
+      update(id, { build: build.id });
+      throwIfStopped(signal);
+      const current = await recordDeployment(
+        daemon.registry,
+        meta.project,
+        meta.environment,
+        build.id,
+        { signal },
+      );
+      for (const warning of current.warnings) warn(id, warning);
+      throwIfStopped(signal);
+      return { build, celldVersionId: published.celldVersionId, revision: current.revision };
     } catch (error) {
       if (celldVersionId === undefined) throw error;
       throw new Error(
         `celld published version "${celldVersionId}", but Scafo could not confirm or finish ` +
-          `recording it as the environment's current build: ${boundedDetail(error)}`,
+          `recording its deployment revision: ${boundedDetail(error)}`,
         { cause: error },
       );
     }
   }
 
-  async function finish(id: string, meta: DeployMeta, build: BuildRecord): Promise<void> {
+  async function finish(
+    id: string,
+    meta: DeployMeta,
+    published: { build: BuildRecord; celldVersionId: string; revision: number },
+  ): Promise<void> {
     try {
       /* Starting, gating and routing the new build is the reconcile loop's job;
          this only watches for it to happen, and settles the state either way. */
-      await awaitRouted(id, meta, build.id, stopping.signal);
+      await awaitRouted(
+        id,
+        meta,
+        {
+          build: published.build.id,
+          celldVersionId: published.celldVersionId,
+          revision: published.revision,
+        },
+        stopping.signal,
+      );
     } catch (error) {
       update(id, {
         state: "failed",
         detail:
-          `celld published and Scafo recorded build "${build.id}" as current, but stopped ` +
+          `celld published and Scafo recorded build "${published.build.id}", but stopped ` +
           `before its routing watch finished: ${boundedDetail(error)}`,
       });
     }

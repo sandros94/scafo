@@ -100,13 +100,8 @@ export type ObservedEvent =
       listOps: number;
       durationMs: number;
     }
-  /* The moment a runtime process exists. Everything a wake is waiting for
-     starts here, and the pointer hold it was spawned under runs past it. */
-  | { at: string; type: "rollout.spawned"; processId: string; build: string }
-  /* The pointer hold is over and the rollout has given the environment's lock
-     back. It may well land AFTER the gate below: the hold guards the pointer,
-     not the gate, and the two deliberately overlap. */
-  | { at: string; type: "rollout.holdEnded"; processId: string }
+  | { at: string; type: "runtime.started"; processId: string; revision: number }
+  | { at: string; type: "runtime.adopted"; processId: string; revision: number }
   | {
       at: string;
       type: "gate.passed";

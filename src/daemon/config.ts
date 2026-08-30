@@ -13,7 +13,6 @@ import { assertPositiveSafeInteger } from "../core/utils/number.ts";
 import { DEFAULT_ARCHIVE_ENTRIES, DEFAULT_ARTIFACT_BYTES } from "../core/types/deploy.ts";
 import { DEFAULT_PORT_RANGE_START } from "../core/placement/ports.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
-import { POINTER_READ_HOLD_MS } from "../core/registry/pointer-lock.ts";
 import type { TransportConfig, TransportMode } from "../core/types/transport.ts";
 import { assertEnvVars, parseEnvVars } from "../core/utils/env.ts";
 import { assertHost, isHost, parseInterfaceAddress } from "../core/utils/host.ts";
@@ -348,22 +347,6 @@ export interface RuntimeConfig {
    * default set when eviction was still unsafe; here it is on.
    */
   cellIdleEvictS: number;
-  /**
-   * Milliseconds a rollout keeps holding the environment's deployment pointer
-   * AFTER the process has been spawned, so that process's single read of the
-   * pointer cannot be raced by another writer. `0` gives the lock back at the
-   * spawn, which is only right where nothing else writes that pointer.
-   *
-   * Size it to THIS STORE'S WORST SINGLE-REQUEST STALL, not to its usual
-   * round-trip: a bucket that answers in milliseconds still stalls individual
-   * requests for seconds under load, and the stalled read is exactly what the
-   * hold must outlive. Raising it slows every rollout leg, on every node, by
-   * that much — rollouts of one environment serialize on this window. Lowering
-   * it below the store's real stall ceiling reopens the race the lock exists to
-   * close, which is a process serving another build's code under the right
-   * process id. `src/core/registry/pointer-lock.ts` is what this bounds.
-   */
-  pointerHoldMs: number;
   /** Whole MiB one serving runtime reserves once runtime wiring lands. */
   creditMb?: number;
   /**
@@ -559,7 +542,6 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
       bindHost: resolveBindHost(sources) ?? tunnelHost ?? DEFAULT_BIND_HOST,
       durability: resolveDurability(sources) ?? DEFAULT_DURABILITY,
       cellIdleEvictS: resolveCellIdleEvict(sources),
-      pointerHoldMs: resolvePointerHold(sources),
       creditMb: resolvePositiveSafeInteger("runtimeCreditMb", sources, DEFAULT_RUNTIME_CREDIT_MB),
       ...(celldEnv === undefined ? {} : { celldEnv }),
     },
@@ -706,11 +688,6 @@ const ORIGINS = {
     flag: "cell-idle-evict",
     env: ["SCAFO_CELL_IDLE_EVICT"],
     file: "runtime.cellIdleEvictS",
-  },
-  pointerHoldMs: {
-    flag: "pointer-hold-ms",
-    env: ["SCAFO_POINTER_HOLD_MS"],
-    file: "runtime.pointerHoldMs",
   },
   memoryFraction: {
     flag: "memory-fraction",
@@ -1080,27 +1057,6 @@ function resolveCellIdleEvict(sources: Sources): number {
       detail:
         `"${origin.file}" must be a whole number of seconds, ` +
         `with 0 meaning cells are never evicted for being idle, got ${JSON.stringify(raw)}`,
-    });
-  }
-  return value;
-}
-
-/**
- * How long a rollout holds the deployment pointer past the spawn, in
- * milliseconds, `0` to give it back at once, defaulted when unnamed.
- */
-function resolvePointerHold(sources: Sources): number {
-  const origin: Origin = ORIGINS.pointerHoldMs;
-  const raw = flagOrEnv(origin, sources) ?? fileValue(sources.file, origin.file);
-  if (raw === undefined || raw === null || raw === "") return POINTER_READ_HOLD_MS;
-
-  const value = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN;
-  if (!Number.isInteger(value) || value < 0) {
-    throw new ScafoError("invalid-input", "Invalid configuration value", {
-      detail:
-        `"${origin.file}" must be a whole number of milliseconds, ` +
-        `with 0 giving the pointer back as soon as the process is spawned, ` +
-        `got ${JSON.stringify(raw)}`,
     });
   }
   return value;

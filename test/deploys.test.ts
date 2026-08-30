@@ -31,12 +31,9 @@ import {
   blockProject,
   createEnvironment,
   createProject,
-  envWakeKey,
-  environmentKey,
   getBuild,
   getEnvironment,
   placementKey,
-  pointerLockKey,
   readEnvironmentWake,
   registerNode,
   setTrustPolicy,
@@ -49,7 +46,6 @@ import type {
   StagedArtifact,
 } from "../src/core/types/deploy.ts";
 import type { NodeRecord } from "../src/core/types/registry.ts";
-import type { CasStore } from "../src/core/types/store.ts";
 import type { RuntimeProcess } from "../src/core/types/runtime.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { packDirectory } from "../src/drivers/archive/tar-zst.ts";
@@ -730,116 +726,7 @@ describe("what happens to an accepted deploy", () => {
     expect(build).toMatchObject({ celldVersionId: VERSION_ID, runtimeConfigurable: false });
 
     const environment = await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
-    expect(environment.alias?.build).toBe(VERSION_ID);
-  });
-
-  it("serializes Celld publication and the current marker across concurrent deploys", async () => {
-    const buildA = "aaaa1111";
-    const buildB = "bbbb2222";
-    const markerStarted = Promise.withResolvers<void>();
-    const releaseMarker = Promise.withResolvers<void>();
-    const inner = clock.ctx.store;
-    clock.ctx.store = {
-      get: (key) => inner.get(key),
-      getBytes: (key) => inner.getBytes(key),
-      put: async (key, body, cas) => {
-        if (
-          key === environmentKey(PROJECT, ENVIRONMENT) &&
-          typeof body === "string" &&
-          (JSON.parse(body) as { alias?: { build?: string } }).alias?.build === buildA
-        ) {
-          markerStarted.resolve();
-          await releaseMarker.promise;
-        }
-        return inner.put(key, body, cas);
-      },
-      del: (key) => inner.del(key),
-      list: (prefix) => inner.list(prefix),
-    };
-
-    const versions = [buildA, buildB];
-    publish = () => Promise.resolve({ celldVersionId: versions.shift() as string });
-    running = [readyProcess(buildA), readyProcess(buildB)];
-    daemon.deploys = createDeployService(daemon, fakeRunner(), {
-      scheduler: {
-        artifactBytes: artifactBytes.byteLength,
-        activeTasks: 2,
-        projectActiveTasks: 2,
-        queuedTasks: 2,
-        projectQueuedTasks: 2,
-        stagedBytes: artifactBytes.byteLength * 2,
-        projectStagedBytes: artifactBytes.byteLength * 2,
-        receiveTimeoutMs: 60_000,
-        queueTimeoutMs: 60_000,
-        taskTimeoutMs: 60_000,
-      },
-      routedTimeoutMs: 100,
-      pollMs: 1,
-    });
-
-    const first = (await responseId(await upload(await operatorToken()))) as string;
-    await markerStarted.promise;
-    const second = (await responseId(await upload(await operatorToken()))) as string;
-    await Promise.resolve();
-
-    /* The second Celld publish cannot begin while the first one's registry
-       marker is held: both effects are one serialized current-build change. */
-    expect(runs).toHaveLength(1);
-
-    releaseMarker.resolve();
-    await expect(settled(first)).resolves.toMatchObject({ state: "routed", build: buildA });
-    await expect(settled(second)).resolves.toMatchObject({ state: "routed", build: buildB });
-    await expect(getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toMatchObject({
-      alias: { build: buildB },
-    });
-  });
-
-  it("reports possible publication when cancellation races with releasing the pointer lock", async () => {
-    const releaseReadStarted = Promise.withResolvers<void>();
-    const releaseRead = Promise.withResolvers<void>();
-    const inner = clock.ctx.store;
-    const lockKey = pointerLockKey(PROJECT, ENVIRONMENT);
-    let markerLanded = false;
-    clock.ctx.store = {
-      get: async (key) => {
-        if (key === lockKey && markerLanded) {
-          releaseReadStarted.resolve();
-          await releaseRead.promise;
-        }
-        return inner.get(key);
-      },
-      getBytes: (key) => inner.getBytes(key),
-      put: async (key, body, cas) => {
-        const result = await inner.put(key, body, cas);
-        if (
-          key === environmentKey(PROJECT, ENVIRONMENT) &&
-          typeof body === "string" &&
-          (JSON.parse(body) as { alias?: { build?: string } }).alias?.build === VERSION_ID
-        ) {
-          markerLanded = true;
-        }
-        return result;
-      },
-      del: (key) => inner.del(key),
-      list: (prefix) => inner.list(prefix),
-    };
-
-    const service = daemon.deploys!;
-    const id = (await responseId(await upload(await operatorToken()))) as string;
-    await releaseReadStarted.promise;
-    const stopping = service.stop(new Error("node stopping"));
-    releaseRead.resolve();
-    await stopping;
-
-    expect(service.get(id)).toMatchObject({
-      state: "failed",
-      build: VERSION_ID,
-      detail: expect.stringContaining(`celld published version "${VERSION_ID}"`),
-    });
-    expect(service.get(id)?.detail).toContain("could not confirm or finish recording");
-    await expect(getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toMatchObject({
-      alias: { build: VERSION_ID },
-    });
+    expect(environment.deployment?.revision).toBe(1);
   });
 
   it("deploys into an ephemeral environment somebody else created", async () => {
@@ -980,20 +867,48 @@ describe("what happens to an accepted deploy", () => {
 
     await expect(settled(id)).resolves.toMatchObject({ state: "routed", build: VERSION_ID });
     const environment = await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
-    expect(environment.alias?.build).toBe(VERSION_ID);
+    expect(environment.deployment?.revision).toBe(1);
+  });
+
+  it("does not call a superseding celld version the deployment it published", async () => {
+    running = [
+      {
+        ...readyProcess("bbbbbbbb"),
+        attemptedRevision: 2,
+        appliedRevision: 2,
+      },
+    ];
+
+    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
+
+    await expect(settled(id)).resolves.toMatchObject({ state: "deployed", build: VERSION_ID });
+  });
+
+  it("does not acknowledge an exact celld version before its marker was applied", async () => {
+    running = [
+      {
+        ...readyProcess(VERSION_ID),
+        attemptedRevision: 0,
+        appliedRevision: 0,
+      },
+    ];
+
+    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
+
+    await expect(settled(id)).resolves.toMatchObject({ state: "deployed", build: VERSION_ID });
   });
 
   it("stops at deployed with a warning when nothing becomes ready in time", async () => {
     const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
 
     const status = await settled(id);
-    /* Never an error: the build exists and the alias points at it, so the loop
+    /* Never an error: the build exists and celld published it, so the loop
        goes on trying long after the deploy stopped watching. */
     expect(status.state).toBe("deployed");
     expect(status.warnings.map((warning) => warning.code)).toEqual(["deploy-not-routed"]);
   });
 
-  it("carries current-build warnings through to the status", async () => {
+  it("carries deploy-time build warnings through to the status", async () => {
     running = [readyProcess(VERSION_ID)];
     await createEnvironment(clock.ctx, PROJECT, { name: ENVIRONMENT, varset: "a1b2c3d4" });
 
@@ -1123,7 +1038,7 @@ describe("watching a build the coordinator placed somewhere else", () => {
     const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
 
     const status = await settled(id);
-    /* The build exists and the alias points at it; an unreachable peer says
+    /* The build exists and celld published it; an unreachable peer says
        nothing about either, and a deploy is never failed over one. */
     expect(status.state).toBe("deployed");
     expect(status.warnings.map((warning) => warning.code)).toEqual(["deploy-not-routed"]);
@@ -1143,61 +1058,33 @@ describe("watching a build the coordinator placed somewhere else", () => {
   });
 });
 
-describe("the wake a deploy is", () => {
-  it("stamps the environment awake once the new build is serving traffic", async () => {
+describe("deploying a parked environment", () => {
+  it("does not stamp activity once the new build is serving traffic", async () => {
     running = [readyProcess(VERSION_ID)];
     await expect(readEnvironmentWake(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toBeNull();
 
     const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
 
-    /* A deploy IS a wake: what has just been brought into service must not park
-       for having had no request of its own yet. */
     await expect(settled(id)).resolves.toMatchObject({ state: "routed" });
-    await expect(readEnvironmentWake(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toEqual(
-      new Date(clock.nowMs()),
-    );
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toBeNull();
   });
 
-  it("stamps it awake when it becomes current", async () => {
+  it("does not stamp activity when it becomes current", async () => {
     /* The build exists and is startable, which is the whole of what this deploy
        asked for; the environment is no less freshly deployed for it. */
     const id = (await responseId(await upload(await operatorToken()))) as string;
 
     await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
-    await expect(readEnvironmentWake(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toEqual(
-      new Date(clock.nowMs()),
-    );
+    await expect(readEnvironmentWake(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toBeNull();
   });
 
-  it("stamps it awake even when it gives up waiting for the routing", async () => {
-    /* Missing the deadline is a warning and never a failure — the alias points
-       at the build and the loop keeps trying — so the environment it is trying
-       for must not park out from under it in the meantime. */
+  it("does not stamp activity when it gives up waiting for routing", async () => {
+    /* Missing the deadline is a warning and never a failure: celld published
+       the build and the loop keeps trying. Deployment itself is not activity. */
     const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
 
     const status = await settled(id);
     expect(status.warnings.map((warning) => warning.code)).toEqual(["deploy-not-routed"]);
-    await expect(readEnvironmentWake(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toEqual(
-      new Date(clock.nowMs()),
-    );
-  });
-
-  it("carries the deploy through a stamp the bucket refused", async () => {
-    /*
-     * The deploy succeeded: the build exists and the alias points at it. A stamp
-     * only delays parking, and the next wake or the next deploy writes it again
-     * — so failing the deploy over one would report a failure that did not
-     * happen and send a pipeline into a retry that changes nothing.
-     */
-    running = [readyProcess(VERSION_ID)];
-    daemon.registry = { ...clock.ctx, store: refusingWakeStamps(clock.ctx.store) };
-
-    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
-
-    await expect(settled(id)).resolves.toMatchObject({ state: "routed", build: VERSION_ID });
-    await expect(getBuild(clock.ctx, PROJECT, VERSION_ID)).resolves.toMatchObject({
-      id: VERSION_ID,
-    });
     await expect(readEnvironmentWake(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toBeNull();
   });
 });
@@ -1261,7 +1148,6 @@ function daemonConfig(): DaemonConfig {
       bindHost: "127.0.0.1",
       durability: "bucket",
       cellIdleEvictS: 900,
-      pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },
@@ -1378,27 +1264,14 @@ function fakeRunner(): DeployRunner {
   };
 }
 
-/** A store that refuses the wake stamp alone, and answers every other write. */
-function refusingWakeStamps(inner: CasStore): CasStore {
-  const stamp = envWakeKey(PROJECT, ENVIRONMENT);
-  return {
-    get: (key) => inner.get(key),
-    getBytes: (key) => inner.getBytes(key),
-    put: (key, body, cas) =>
-      key === stamp
-        ? Promise.reject(new Error("the bucket refused the stamp"))
-        : inner.put(key, body, cas),
-    del: (key) => inner.del(key),
-    list: (prefix) => inner.list(prefix),
-  };
-}
-
 function readyProcess(build: string): RuntimeProcess {
   return {
-    processId: `${PROJECT}--${ENVIRONMENT}--${build}`,
+    processId: `${PROJECT}--${ENVIRONMENT}`,
     project: PROJECT,
     env: ENVIRONMENT,
-    build,
+    attemptedRevision: 1,
+    appliedRevision: 1,
+    deployment: { version: build, prefix: `deployments/main/${build}`, generation: 1 },
     port: 42_000,
     internalPort: 42_001,
     ready: true,

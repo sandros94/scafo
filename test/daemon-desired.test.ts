@@ -8,7 +8,7 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { setCurrentBuild } from "../src/core/registry/_current.ts";
+import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import { type DesiredState, readDesired } from "../src/daemon/_desired.ts";
 import {
   acquireLease,
@@ -257,7 +257,7 @@ describe("an environment that carries a node selector", () => {
 });
 
 describe("what is left out for reasons other than placement", () => {
-  it("leaves out an environment without a current build, placed or not", async () => {
+  it("leaves out an environment without a deployment notice, placed or not", async () => {
     await createEnvironment(registry, PROJECT, { name: "fresh" });
     await writePlacement(registry, PROJECT, "fresh", [SELF], lease);
 
@@ -302,7 +302,7 @@ describe("what is left out for reasons other than placement", () => {
        environment, so nothing has to be rebuilt to serve it again. */
     const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
-    expect(state.environments[0].builds.map((leg) => leg.build.id)).toEqual([BUILD]);
+    expect(state.environments[0].env.deployment?.revision).toBe(1);
   });
 
   it("leaves a retired environment out on every node, not just this one", async () => {
@@ -366,7 +366,7 @@ describe("an ephemeral environment that has gone quiet", () => {
     const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     /*
-     * Its current build stops with the environment. The next pass stops it, and because
+     * Its runtime stops with the environment. The next pass stops it, and because
      * the routing is rendered from what this node actually runs, its own hosts
      * stop resolving with them.
      */
@@ -378,17 +378,17 @@ describe("an ephemeral environment that has gone quiet", () => {
     expect(state.failures).toEqual([]);
   });
 
-  it("counts the wait from the current deployment when nothing has ever stamped it", async () => {
+  it("does not let a deployment reset an environment's activity clock", async () => {
     await createEnvironment(registry, PROJECT, { name: PREVIEW, ephemeral: true });
     clock.tick(PARK_AFTER_MS);
-    await setCurrentBuild(registry, PROJECT, PREVIEW, BUILD);
+    await recordDeployment(registry, PROJECT, PREVIEW, BUILD);
 
     /* Created long ago, deployed a moment ago. An environment that predates
        wake stamps must not read as parked the instant a node that knows about
        parking picks it up. */
-    expect((await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" })).parked).toEqual(
-      [],
-    );
+    expect(
+      parkedNames(await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" })),
+    ).toEqual([{ project: PROJECT, env: PREVIEW }]);
 
     clock.tick(PARK_AFTER_MS);
     expect(
@@ -397,7 +397,7 @@ describe("an ephemeral environment that has gone quiet", () => {
   });
 
   it("counts the wait from its creation when it has neither a stamp nor a deployment", async () => {
-    /* Nothing of an environment without a current build is served. */
+    /* Nothing of an environment without a deployment notice is served. */
     await createEnvironment(registry, PROJECT, { name: PREVIEW, ephemeral: true });
     clock.tick(PARK_AFTER_MS);
 
@@ -407,17 +407,14 @@ describe("an ephemeral environment that has gone quiet", () => {
     expect(state.parked).toEqual([]);
   });
 
-  it("keeps it awake when the timestamp it would count from cannot be read", async () => {
-    /* Nothing here should stop an application over a timestamp it could not
-       parse: a damaged record is not evidence that anything has gone quiet. */
+  it("refuses a malformed deployment marker", async () => {
     await parkable(PREVIEW);
     await damageCurrentTimestamp(PREVIEW);
     clock.tick(PARK_AFTER_MS * 100);
 
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
-
-    expect(state.environments.map((entry) => entry.env.name)).toEqual([PREVIEW, "prod"]);
-    expect(state.parked).toEqual([]);
+    await expect(
+      readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" }),
+    ).rejects.toMatchObject({ code: "invalid-input" });
   });
 
   it("never parks one whose window is 0, which is how a preview is kept warm", async () => {
@@ -427,7 +424,7 @@ describe("an ephemeral environment that has gone quiet", () => {
 
     const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
-    expect(await legsOf(PREVIEW)).toEqual([{ id: BUILD, role: "current" }]);
+    expect(await isDesired(PREVIEW)).toBe(true);
     expect(state.parked).toEqual([]);
   });
 
@@ -454,7 +451,7 @@ describe("how a pass reads all of that", () => {
   /*
    * A pass is a read per environment plus the reads that resolve it, and on a
    * hundred-millisecond store one after another that is seconds in front of
-   * every wake and every rollout. What is asserted here is that overlapping
+   * every wake and every runtime start. What is asserted here is that overlapping
    * them changes the LATENCY and nothing else: the same answer, in the same
    * order, with the same failure — and never more of the store at once than the
    * node said it would take.
@@ -515,16 +512,16 @@ describe("how a pass reads all of that", () => {
   });
 });
 
-/** An environment with a current build, ready to be served. */
+/** An environment with a deployment notice, ready to be served. */
 async function deployed(project: string, name: string): Promise<void> {
   await createEnvironment(registry, project, { name });
-  await setCurrentBuild(registry, project, name, BUILD);
+  await recordDeployment(registry, project, name, BUILD);
 }
 
 /** The same, ephemeral: the only kind of environment that parks on a clock. */
 async function parkable(name: string): Promise<void> {
   await createEnvironment(registry, PROJECT, { name, ephemeral: true });
-  await setCurrentBuild(registry, PROJECT, name, BUILD);
+  await recordDeployment(registry, PROJECT, name, BUILD);
 }
 
 /** The parked environments by name; the state carries their whole records. */
@@ -532,11 +529,10 @@ function parkedNames(state: DesiredState): Array<{ project: string; env: string 
   return state.parked.map((entry) => ({ project: entry.project, env: entry.env.name }));
 }
 
-/** The builds this node would run for `name`, in the order it would roll them out. */
-async function legsOf(name: string): Promise<Array<{ id: string; role: string }>> {
+/** Whether this node would run `name`. */
+async function isDesired(name: string): Promise<boolean> {
   const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
-  const wanted = state.environments.find((entry) => entry.env.name === name);
-  return (wanted?.builds ?? []).map((leg) => ({ id: leg.build.id, role: leg.role }));
+  return state.environments.some((entry) => entry.env.name === name);
 }
 
 /** Rewrites an environment record in the bucket, as another writer would leave it. */
@@ -569,7 +565,7 @@ async function watchedInstallation(): Promise<{
   const names = Array.from({ length: 12 }, (_, index) => `env-${String(index).padStart(2, "0")}`);
   for (const name of names) {
     await createEnvironment(ctx, PROJECT, { name });
-    await setCurrentBuild(ctx, PROJECT, name, BUILD);
+    await recordDeployment(ctx, PROJECT, name, BUILD);
     await writePlacement(ctx, PROJECT, name, [SELF], taken);
   }
   return { ctx, observing, names };
@@ -578,8 +574,8 @@ async function watchedInstallation(): Promise<{
 /** Leaves the environment with a current-deployment timestamp nothing can read. */
 async function damageCurrentTimestamp(name: string): Promise<void> {
   const current = await readJson<EnvironmentRecord>(registry, environmentKey(PROJECT, name));
-  const alias = current?.value.alias;
+  const deployment = current?.value.deployment;
   await writeRecord(name, {
-    alias: { ...(alias as NonNullable<typeof alias>), flippedAt: "whenever" },
+    deployment: { ...(deployment as NonNullable<typeof deployment>), deployedAt: "whenever" },
   });
 }

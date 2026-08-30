@@ -4,7 +4,6 @@ import { ScafoError } from "../error.ts";
 import { assertReplicas } from "../placement/replicas.ts";
 import { assertSelector } from "../placement/selector.ts";
 import type {
-  BuildRecord,
   EnvironmentRecord,
   NodeSelector,
   PlacementStrategy,
@@ -12,11 +11,10 @@ import type {
   ScafoWarning,
   VarsetEnvelope,
 } from "../types/registry.ts";
-import { varsetWarnings } from "./_varset-warning.ts";
 import { deepEqual, isCasConflict, namesFromKeys } from "./_shared.ts";
-import { createJson, readJson, requireJson, updateJson } from "./cas.ts";
+import { createJson, requireJson, updateJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
-import { buildKey, environmentKey, environmentsPrefix, fleetPrefix, varsetKey } from "./paths.ts";
+import { environmentKey, environmentsPrefix, fleetPrefix, varsetKey } from "./paths.ts";
 import { getProject } from "./projects.ts";
 
 export interface CreateEnvironmentInput {
@@ -66,7 +64,7 @@ export async function createEnvironment(
     v: 1,
     name: input.name,
     prefix: fleetPrefix(project, input.name),
-    alias: null,
+    deployment: null,
     domains: [],
     placement: input.placement ?? "auto",
     ephemeral: input.ephemeral ?? false,
@@ -108,8 +106,7 @@ export async function listEnvironments(ctx: RegistryContext, project: string): P
 }
 
 /**
- * Points the environment at an existing varset. Warns when the build currently
- * serving traffic cannot pick the new values up without a rebuild.
+ * Points the environment at an existing varset.
  */
 export async function setEnvironmentVarset(
   ctx: RegistryContext,
@@ -125,16 +122,11 @@ export async function setEnvironmentVarset(
     (current) => ({ ...current, varset: varsetId }),
   );
 
-  const aliased = updated.value.alias?.build;
-  if (aliased === undefined) return { environment: updated.value, warnings: [] };
-
-  const build = await readJson<BuildRecord>(ctx, buildKey(project, aliased));
-  const warnings = build === null ? [] : varsetWarnings(updated.value, build.value);
-  return { environment: updated.value, warnings };
+  return { environment: updated.value, warnings: [] };
 }
 
 /* Set at creation and never rewritten, so they identify the record. Everything
-   else (alias, domains, varset, placement, idleTtlS, replicas,
+   else (deployment, domains, varset, placement, idleTtlS, replicas,
    nodeSelector) is mutable state and must not break create-retry idempotency. */
 function identity(
   record: EnvironmentRecord,

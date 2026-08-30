@@ -11,7 +11,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { setCurrentBuild } from "../src/core/registry/_current.ts";
+import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import { loadDaemonConfig } from "../src/daemon/config.ts";
 import { decodeVarsetKey, readVarsetKeyFile, VARSET_KEY_BYTES } from "../src/cli/_varset-key.ts";
 import {
@@ -270,9 +270,7 @@ describe("the round trip an environment's variables make", () => {
     });
   });
 
-  it("reports the build that cannot pick the new variables up", async () => {
-    /* The warning `setEnvironmentVarset` raises is the operator's only sign that
-       sealing the file changed nothing about what is running. */
+  it("does not infer runtime configurability from historical builds", async () => {
     const world = await seededRegistry({ runtimeConfigurable: false });
 
     const result = await setVarset(world.registry, {
@@ -282,9 +280,7 @@ describe("the round trip an environment's variables make", () => {
       key: world.key,
     });
 
-    expect(result.warnings.map((warning) => warning.code)).toEqual([
-      "build-not-runtime-configurable",
-    ]);
+    expect(result.warnings).toEqual([]);
   });
 
   it("refuses the wrong key rather than reporting an environment with no variables", async () => {
@@ -367,7 +363,7 @@ interface World {
   raw: Uint8Array;
 }
 
-/** A registry holding one project, one environment and the build its alias points at. */
+/** A registry holding one project, one deployed environment and its build history. */
 async function seededRegistry(opts?: { runtimeConfigurable?: boolean }): Promise<World> {
   const { ctx } = ctxWith(new MemoryCasStore());
   await createProject(ctx, { slug: PROJECT });
@@ -377,7 +373,7 @@ async function seededRegistry(opts?: { runtimeConfigurable?: boolean }): Promise
     runtimeConfigurable: opts?.runtimeConfigurable ?? true,
     celldVersionId: `version-${BUILD}`,
   });
-  await setCurrentBuild(ctx, PROJECT, ENVIRONMENT, BUILD);
+  await recordDeployment(ctx, PROJECT, ENVIRONMENT, BUILD);
 
   const raw = crypto.getRandomValues(new Uint8Array(VARSET_KEY_BYTES));
   return { registry: ctx, key: await importVarsetKey(raw), raw };

@@ -658,13 +658,13 @@ describe("what the traces come to", () => {
       ...wakeTimeline("8f3a", CLOCK_START_MS - 10 * MINUTE_MS),
       event("node-a", CLOCK_START_MS - 9 * MINUTE_MS, {
         type: "gate.passed",
-        processId: "shop--production--b1b1b1b1",
+        processId: "shop--production",
         attempts: 2,
         durationMs: 700,
       }),
       event("node-a", CLOCK_START_MS - 8 * MINUTE_MS, {
         type: "gate.passed",
-        processId: "blog--production--c2c2c2c2",
+        processId: "blog--production",
         attempts: 1,
         durationMs: 100,
       }),
@@ -677,7 +677,7 @@ describe("what the traces come to", () => {
     const selection = selectTraces(records, { project: "shop" });
 
     /* The five wake events — only the first of which names the project — plus
-       the rollout gate, which names it through the process id. The reconcile
+       the runtime gate, which names it through the process id. The reconcile
        pass belongs to the node rather than to any project. */
     expect(selection.events).toHaveLength(6);
     expect(selection.events.every((record) => record.type !== "reconcile.pass.start")).toBe(true);

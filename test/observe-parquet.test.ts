@@ -129,10 +129,10 @@ const EVERY_EVENT: ObserveEventRecord[] = [
     listOps: 3,
     durationMs: 412,
   }),
-  event({ type: "rollout.spawned", processId: "shop--prod--b1b1b1b1", build: "b1b1b1b1" }),
-  event({ type: "rollout.holdEnded", processId: "shop--prod--b1b1b1b1" }),
-  event({ type: "gate.passed", processId: "shop--prod--b1b1b1b1", attempts: 3, durationMs: 900 }),
-  event({ type: "gate.failed", processId: "shop--prod--b1b1b1b1", attempts: 5 }),
+  event({ type: "runtime.started", processId: "shop--prod", revision: 1 }),
+  event({ type: "runtime.adopted", processId: "shop--prod", revision: 2 }),
+  event({ type: "gate.passed", processId: "shop--prod", attempts: 3, durationMs: 900 }),
+  event({ type: "gate.failed", processId: "shop--prod", attempts: 5 }),
   event({
     type: "operator.trusted",
     actor: "op-aaaa1111",
@@ -197,7 +197,7 @@ describe("the wide schema a flush declares", () => {
       host: "string?",
       project: "string?",
       env: "string?",
-      build: "string?",
+      revision: "i64?",
       inFlight: "i64?",
       storeOps: "i64?",
       listOps: "i64?",
@@ -355,8 +355,8 @@ describe("what one record becomes", () => {
         "reconcile.pass.start",
         "placement.pending",
         "reconcile.pass.end",
-        "rollout.spawned",
-        "rollout.holdEnded",
+        "runtime.started",
+        "runtime.adopted",
         "gate.passed",
         "gate.failed",
         "operator.trusted",
@@ -364,10 +364,7 @@ describe("what one record becomes", () => {
       ]),
     );
 
-    /* Both admitted environments leave the rollout build column null, and a
-       `wake.resolved` that reported no cost leaves `storeOps` null. */
-    expect(rows[0].build).toBeUndefined();
-    expect(rows[1].build).toBeUndefined();
+    /* A `wake.resolved` that reported no cost leaves `storeOps` null. */
     expect(rows[3].storeOps).toBe(4);
     expect(rows[4].storeOps).toBeUndefined();
     expect(rows[9].kicked).toBe(true);
@@ -637,8 +634,8 @@ describe.skipIf(DUCKDB === undefined)("what DuckDB makes of a flush", () => {
     expect(
       query(
         file,
-        `SELECT count(*) FROM read_parquet('$FILE') WHERE "type" = 'wake.admitted' ` +
-          `AND "build" IS NULL`,
+        `SELECT count(*) FROM read_parquet('$FILE') ` +
+          `WHERE "type" IN ('runtime.started', 'runtime.adopted') AND "revision" IS NOT NULL`,
       ),
     ).toBe("2");
 

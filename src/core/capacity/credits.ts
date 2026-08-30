@@ -19,7 +19,7 @@ export interface CreditAccountInput {
   surgeMb: number;
   /** Serving runtime processes. */
   runtime?: CreditReservation[];
-  /** Runtime starts, wakes and rollouts that may consume surge credit. */
+  /** Runtime starts, wakes and in-place adoptions that may consume surge credit. */
   transition?: CreditReservation[];
   /** Active deploy builders; these cannot consume surge credit. */
   deploy?: CreditReservation[];

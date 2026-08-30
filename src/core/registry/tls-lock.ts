@@ -10,7 +10,7 @@
  *
  * The names are the CALLER's — free-form keys under `_scafo/tls/locks/`, checked
  * only for being addressable — which is why they live apart from the fleet's own
- * locks in `pointer-lock.ts`.
+ * fleet-owned locks.
  */
 
 import type { RegistryContext } from "./context.ts";

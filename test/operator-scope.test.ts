@@ -21,7 +21,7 @@ import type { H3 } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it } from "vitest";
-import { setCurrentBuild } from "../src/core/registry/_current.ts";
+import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import { createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import type { DeployMeta, DeployService, DeployStatus } from "../src/daemon/deploys.ts";
@@ -95,7 +95,7 @@ beforeEach(async () => {
     for (const id of [BUILD, OTHER_BUILD]) {
       await createBuild(clock.ctx, project, { id, runtimeConfigurable: true });
     }
-    await setCurrentBuild(clock.ctx, project, ENVIRONMENT, BUILD);
+    await recordDeployment(clock.ctx, project, ENVIRONMENT, BUILD);
   }
 
   deploys = stubDeploys();
@@ -672,7 +672,6 @@ function daemonConfig(): DaemonConfig {
       bindHost: "127.0.0.1",
       durability: "bucket",
       cellIdleEvictS: 900,
-      pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },

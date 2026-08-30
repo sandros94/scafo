@@ -8,7 +8,7 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { setCurrentBuild } from "../src/core/registry/_current.ts";
+import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import type { DaemonContext } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { type Coordinator, createCoordinator } from "../src/daemon/coordinator.ts";
@@ -575,7 +575,7 @@ describe("one fleet-wide credit plan", () => {
     await createProject(clock.ctx, { slug: other });
     await createBuild(clock.ctx, other, { id: BUILD, runtimeConfigurable: true });
     await createEnvironment(clock.ctx, other, { name: "prod" });
-    await setCurrentBuild(clock.ctx, other, "prod", BUILD);
+    await recordDeployment(clock.ctx, other, "prod", BUILD);
     await setReplicas(clock.ctx, other, "prod", 1);
     await registerNode(clock.ctx, {
       v: 1,
@@ -608,7 +608,7 @@ describe("one fleet-wide credit plan", () => {
       await createProject(clock.ctx, { slug: project });
       await createBuild(clock.ctx, project, { id: BUILD, runtimeConfigurable: true });
       await createEnvironment(clock.ctx, project, { name: "prod" });
-      await setCurrentBuild(clock.ctx, project, "prod", BUILD);
+      await recordDeployment(clock.ctx, project, "prod", BUILD);
       await setReplicas(clock.ctx, project, "prod", 1);
     }
     await register(NODE_A, undefined, {
@@ -883,7 +883,7 @@ async function environmentNamed(
     ...(opts?.idleTtlS === undefined ? {} : { idleTtlS: opts.idleTtlS }),
     ...(opts?.nodeSelector === undefined ? {} : { nodeSelector: opts.nodeSelector }),
   });
-  await setCurrentBuild(clock.ctx, PROJECT, name, BUILD);
+  await recordDeployment(clock.ctx, PROJECT, name, BUILD);
 }
 
 /** Registers `id` as a node that has just beaten, carrying `labels` if any. */
@@ -936,7 +936,6 @@ function daemonConfig(nodeId: string): DaemonConfig {
       bindHost: "127.0.0.1",
       durability: "bucket",
       cellIdleEvictS: 900,
-      pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },

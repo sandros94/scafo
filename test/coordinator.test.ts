@@ -8,7 +8,7 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { setCurrentBuild } from "../src/core/registry/_current.ts";
+import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import type { DaemonContext } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { type Coordinator, createCoordinator } from "../src/daemon/coordinator.ts";
@@ -46,7 +46,7 @@ beforeEach(async () => {
     idleTtlS: IDLE_TTL_S,
   });
   await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
-  await setCurrentBuild(clock.ctx, PROJECT, "preview", BUILD);
+  await recordDeployment(clock.ctx, PROJECT, "preview", BUILD);
 });
 
 describe("createCoordinator", () => {
@@ -276,7 +276,6 @@ function daemonConfig(nodeId: string): DaemonConfig {
       bindHost: "127.0.0.1",
       durability: "bucket",
       cellIdleEvictS: 900,
-      pointerHoldMs: 3_000,
     },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },

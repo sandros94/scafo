@@ -21,7 +21,6 @@ import {
   parseHostPort,
   runtimeDialHost,
 } from "../src/daemon/config.ts";
-import { POINTER_READ_HOLD_MS } from "../src/core/registry/pointer-lock.ts";
 import { DEFAULT_ARCHIVE_ENTRIES, DEFAULT_ARTIFACT_BYTES } from "../src/core/types/deploy.ts";
 import {
   DEFAULT_ACTIVE_TASKS,
@@ -628,66 +627,6 @@ describe("how long a cell may sit idle", () => {
       );
 
       expect(error.detail, bad).toContain("runtime.cellIdleEvictS");
-    }
-  });
-});
-
-describe("how long a rollout holds the deployment pointer", () => {
-  it("holds for the bound the lock ships with until an operator states their own", async () => {
-    const config = await loadDaemonConfig({ env: REQUIRED_ENV });
-
-    /* The bound is sized to a store's stall ceiling, and stores differ: the
-       default is the one the lock is written around, nothing more. */
-    expect(config.runtime.pointerHoldMs).toBe(POINTER_READ_HOLD_MS);
-    expect(config.runtime.pointerHoldMs).toBe(3_000);
-  });
-
-  it("takes the hold from a flag, the environment or the file", async () => {
-    const file = JSON.stringify({ runtime: { pointerHoldMs: 1_500 } });
-
-    const fromFlag = await loadDaemonConfig({
-      configPath: CONFIG_PATH,
-      readFile: fileAt(CONFIG_PATH, file),
-      env: { ...REQUIRED_ENV, SCAFO_POINTER_HOLD_MS: "6000" },
-      flags: { "pointer-hold-ms": "9000" },
-    });
-    const fromEnv = await loadDaemonConfig({
-      configPath: CONFIG_PATH,
-      readFile: fileAt(CONFIG_PATH, file),
-      env: { ...REQUIRED_ENV, SCAFO_POINTER_HOLD_MS: "6000" },
-    });
-    const fromFile = await loadDaemonConfig({
-      configPath: CONFIG_PATH,
-      readFile: fileAt(CONFIG_PATH, file),
-      env: REQUIRED_ENV,
-    });
-
-    expect([
-      fromFlag.runtime.pointerHoldMs,
-      fromEnv.runtime.pointerHoldMs,
-      fromFile.runtime.pointerHoldMs,
-    ]).toEqual([9_000, 6_000, 1_500]);
-  });
-
-  it("takes zero, which gives the pointer back at the spawn", async () => {
-    /* Legitimate rather than a mistake: a store with no tail worth outliving,
-       and every test whose rollout spawns nothing that reads a pointer. */
-    const config = await loadDaemonConfig({
-      env: { ...REQUIRED_ENV, SCAFO_POINTER_HOLD_MS: "0" },
-    });
-
-    expect(config.runtime.pointerHoldMs).toBe(0);
-  });
-
-  it("refuses a hold that is not a whole number of milliseconds", async () => {
-    for (const bad of ["-1", "1.5", "soon"]) {
-      const error = await rejectsWith(
-        () => loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_POINTER_HOLD_MS: bad } }),
-        "invalid-input",
-      );
-
-      expect(error.detail, bad).toContain("runtime.pointerHoldMs");
-      expect(error.detail, bad).toContain("whole number of milliseconds");
     }
   });
 });
