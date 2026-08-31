@@ -57,6 +57,11 @@ buckets and host or VM security boundaries.
   those credentials as isolated from trusted workload code. Celld documents the
   bucket as its fleet authority in its
   [security guidance](https://github.com/denoland/celld/blob/main/docs/security.md).
+- The S3-compatible bucket is an availability boundary as well as the durable
+  registry: it must honour conditional writes and remain reliably reachable for
+  registry and lease traffic. Intermittent latency or errors can prevent a Celld
+  node lease from renewing; that process self-fences, exits, and restarts. Scafo
+  does not turn an unreliable object store into a highly available control plane.
 - Deploy admission bounds compressed and expanded artifact bytes, archive
   entries, retained builder output, node and project concurrency and queue
   depth, node and project staged bytes, and receive, queue, and task deadlines.
@@ -91,6 +96,9 @@ buckets and host or VM security boundaries.
   traffic.
 - Give each installation one narrowly scoped bucket and protect bucket, node,
   storage-token, and deployment credentials as administrative secrets.
+- Choose an object store with conditional-write semantics and reliable,
+  low-latency access from every node; test its failure behaviour before relying
+  on it for production traffic.
 - Use external host, VM, or container resource controls for CPU, memory,
   process, filesystem, network, and cleanup limits.
 - Configure upstream runtime policy through `runtime.celldEnv`, `--celld-env`,

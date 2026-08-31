@@ -197,6 +197,59 @@ cluster by design — it accepts deploys and commands that node. Reach it with
 the cluster against `scafo-nodes:7400`. Any node accepts the call; work that only
 the coordinator may do is forwarded to whichever node holds the lease.
 
+## Operating the example
+
+### Resource sizing
+
+The node container requests `500m` CPU and `512Mi` memory, has no CPU limit,
+and has a `2Gi` memory limit. This is a starter profile for Scafo and one light
+deployed environment, not node-wide capacity or a deployment-admission
+guarantee. One Scafo node may supervise several environment-owned Celld
+processes; increase requests and limits for the concurrent or heavier
+environments you expect. The profile covers only the node container: size the
+Traefik sidecar separately when the cluster requires guaranteed sidecar
+capacity. Scafo does not infer placement or deploy admission from the pod
+cgroup.
+
+In the reference Celld 0.4.0 run on a two-vCPU K3s node capped at 2.5 GiB, the
+node container used about 49–69 MiB anonymous RSS without resident cells and
+107–110 MiB with 64 cells retaining 256 KiB each. Those conditions explain the
+starter request; they do not predict a different application's heap, SQLite
+state, traffic, or number of assigned environments.
+
+### Optional idle eviction
+
+Celld's idle behavior is unchanged by default. To reclaim idle Celld cells after
+60 seconds, opt in for every runtime the node starts with
+`SCAFO_CELLD_ENV: "CELLD_IDLE_EVICT_S=60"` in the `scafo-node` ConfigMap. This
+evicts idle cells; it does not stop the environment-owned Celld process. The
+first later request activates the cell again, so choose the interval for the
+memory/re-activation trade-off your workload accepts.
+
+In the same reference run, all 64 cells were evicted and Celld RSS fell by about
+35–40 MiB. The first request after eviction succeeded in about 167 ms through
+the complete K3s ingress path; subsequent requests took about 19–29 ms. Treat
+these as conditioned reference numbers, not a latency promise.
+
+ConfigMap values from `envFrom` are read only when a container starts. After
+adding the setting to `node.yaml`, apply it and roll the Deployment:
+
+```sh
+kubectl apply -f node.yaml
+kubectl rollout restart deploy/scafo-node
+kubectl rollout status deploy/scafo-node
+```
+
+### Object-store reliability
+
+The bucket is a continuously used control-plane dependency, not only backup
+storage. It must honour `If-Match` / `If-None-Match` conditional writes and have
+reliable, suitably low-latency access from every node. Intermittent latency or
+errors can prevent a Celld node lease from renewing; that process self-fences,
+exits, and restarts. Size Kubernetes resources separately from that availability
+requirement. Celld documents the storage contract in its
+[guarantees](https://github.com/denoland/celld/blob/main/docs/guarantees.md).
+
 ## Three rules that must not be violated
 
 **The stop grace stays at 50 seconds or more.** On SIGTERM a node writes that it

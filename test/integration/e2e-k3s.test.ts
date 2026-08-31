@@ -384,38 +384,21 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
       expect(single.code, single.output).toBe(0);
       expect(single.output).toContain("deployed");
 
-      const placement = await until("a one-node placement", DEADLINE_MS, async () => {
-        const record = await readJson<PlacementRecord>(registry, placementKey(PROJECT, "single"));
-        return record?.value.nodes.length === 1 ? record.value : null;
+      const placed = await settledSinglePlacement("single");
+      expect(placed.placement.nodes).toHaveLength(1);
+      const { owner, nonOwner } = placed;
+      await assignedServes("single", "v1");
+      const owned = await podGet(owner.pod, 8000, "/", {
+        host: `${PROJECT}--single.${PLATFORM_DOMAIN}`,
       });
-      expect(placement.nodes).toHaveLength(1);
-      await serves(`${PROJECT}--single.${PLATFORM_DOMAIN}`, "v1");
-
-      const states = await Promise.all(
-        (await nodes()).map(async (pod) => ({ pod, state: await stateOf(pod) })),
-      );
-      const owner = states.find(({ state }) => state.node?.id === placement.nodes[0]);
-      const nonOwner = states.find(({ state }) => state.node?.id !== placement.nodes[0]);
-      expect(owner?.state.processes.some((process) => process.id === `${PROJECT}--single`)).toBe(
-        true,
-      );
-      expect(nonOwner?.state.processes.some((process) => process.id === `${PROJECT}--single`)).toBe(
-        false,
-      );
-      const forwarded = await until(
-        "the non-owner to forward the single placement",
-        DEADLINE_MS,
-        async () => {
-          if (nonOwner === undefined) return null;
-          const answer = await podGet(nonOwner.pod, 8000, "/", {
-            host: `${PROJECT}--single.${PLATFORM_DOMAIN}`,
-          });
-          return answer.exitCode === 0 ? answer : null;
-        },
-      );
-      expect(forwarded.output).toContain('"v1"');
-      const leaving = (await nodes()).find((pod) => pod.metadata?.name !== controlPodName);
-      if (leaving === undefined) throw new Error("the control pod is the only scafo pod");
+      expect(owned.exitCode, owned.output).toBe(0);
+      expect(owned.output).toContain('"v1"');
+      const unmatched = await podGet(nonOwner.pod, 8000, "/", {
+        host: `${PROJECT}--single.${PLATFORM_DOMAIN}`,
+      });
+      expect(unmatched.exitCode, unmatched.output).not.toBe(0);
+      expect(unmatched.output).toContain("404");
+      const leaving = owner.pod;
       const leavingState = await stateOf(leaving);
       const leavingId = leavingState.node?.id;
       expect(leavingId).toBeDefined();
@@ -427,14 +410,13 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
         const record = await readJson<NodeRecord>(registry, nodeKey(leavingId as string));
         return record?.value.drainingAt === undefined ? null : record;
       });
-      await serves(`${PROJECT}--single.${PLATFORM_DOMAIN}`, "v1");
       const replacement = await until("the Deployment replacement", DEADLINE_MS, async () => {
         const pods = await nodes();
         return pods.length === 2 && pods.every((pod) => pod.metadata?.uid !== oldUid) ? pods : null;
       });
       expect(replacement).toHaveLength(2);
-      const victim = (await nodes()).find((pod) => pod.metadata?.name !== controlPodName);
-      if (victim === undefined) throw new Error("the control pod is the only scafo pod");
+      await assignedServes("single", "v1");
+      const victim = (await settledSinglePlacement("single")).owner.pod;
       const name = victim.metadata?.name as string;
       const before =
         victim.status?.containerStatuses?.find((status) => status.name === "node")?.restartCount ??
@@ -462,7 +444,7 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
           ? pod
           : null;
       });
-      await serves(`${PROJECT}--single.${PLATFORM_DOMAIN}`, "v1");
+      await assignedServes("single", "v1");
     },
     SCENARIO_TIMEOUT_MS,
   );
@@ -555,6 +537,41 @@ async function serves(host: string, version: string): Promise<void> {
   await until(`${host} through K3s Traefik`, DEADLINE_MS, async () => {
     const answer = await httpGet(ingressPort, "/", { host });
     return answer.status === 200 && answer.body.includes(`"${version}"`) ? answer : null;
+  });
+}
+
+async function assignedServes(env: string, version: string): Promise<void> {
+  const { owner } = await settledSinglePlacement(env);
+  await until(`${env}'s assigned node to serve through its sidecar`, DEADLINE_MS, async () => {
+    const answer = await podGet(owner.pod, 8000, "/", {
+      host: `${PROJECT}--${env}.${PLATFORM_DOMAIN}`,
+    });
+    return answer.exitCode === 0 && answer.output.includes(`"${version}"`) ? answer : null;
+  });
+}
+
+async function settledSinglePlacement(env: string): Promise<{
+  placement: PlacementRecord;
+  owner: { pod: k8s.V1Pod; state: DaemonState };
+  nonOwner: { pod: k8s.V1Pod; state: DaemonState };
+}> {
+  return until(`a settled one-node placement for ${env}`, DEADLINE_MS, async () => {
+    const placement = await readJson<PlacementRecord>(registry, placementKey(PROJECT, env));
+    if (placement?.value.nodes.length !== 1) return null;
+    const states = await Promise.all(
+      (await nodes()).map(async (pod) => ({ pod, state: await stateOf(pod) })),
+    );
+    const owner = states.find(({ state }) => state.node?.id === placement.value.nodes[0]);
+    const nonOwner = states.find(({ state }) => state.node?.id !== placement.value.nodes[0]);
+    const processId = `${PROJECT}--${env}`;
+    if (
+      owner === undefined ||
+      nonOwner === undefined ||
+      !owner.state.processes.some((process) => process.id === processId) ||
+      nonOwner.state.processes.some((process) => process.id === processId)
+    )
+      return null;
+    return { placement: placement.value, owner, nonOwner };
   });
 }
 

@@ -63,6 +63,18 @@ describe("lifecycle containment artifacts", () => {
       failureThreshold: 3,
     });
   });
+
+  it("uses the documented starter resources without making CPU a hard limit", async () => {
+    const deployment = await deploymentManifest();
+    const node = deployment.spec?.template?.spec?.containers?.find(
+      (container) => container.name === "node",
+    );
+
+    expect(node?.resources).toEqual({
+      requests: { cpu: "500m", memory: "512Mi" },
+      limits: { memory: "2Gi" },
+    });
+  });
 });
 
 /** Renders the installer's node unit without fetching or installing anything. */
@@ -123,9 +135,15 @@ interface KubernetesDeployment extends KubernetesDocument {
 
 interface KubernetesContainer {
   name?: string;
+  resources?: KubernetesResources;
   startupProbe?: KubernetesHealthProbe;
   readinessProbe?: KubernetesHealthProbe;
   livenessProbe?: KubernetesHealthProbe;
+}
+
+interface KubernetesResources {
+  requests?: Record<string, string>;
+  limits?: Record<string, string>;
 }
 
 interface KubernetesHealthProbe {

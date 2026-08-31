@@ -259,28 +259,32 @@ spec:
             periodSeconds: 20
             failureThreshold: 3
           resources:
-            # THESE ARE KUBERNETES LIMITS, NOT SCAFO PLACEMENT INPUTS.
+            # THESE ARE KUBERNETES RESOURCE REQUESTS AND LIMITS, NOT SCAFO
+            # PLACEMENT INPUTS.
             #
-            # Scafo does not derive placement or deploy admission from this
-            # cgroup. Kubernetes enforces the pod's CPU and memory boundary;
-            # celld-specific resource policy, when needed, belongs in
-            # SCAFO_CELLD_ENV (or runtime.celldEnv in the config file).
+            # This is a starter profile for the node container and one light
+            # deployed environment; it does not size the Traefik sidecar below.
+            # It is neither node-wide capacity nor an admission guarantee: a
+            # node may supervise several environment-owned Celld processes, so
+            # increase requests and limits for expected concurrent or heavier
+            # environments.
             #
             # A CPU REQUEST IS A SHARE RATHER THAN A CEILING. Add `limits.cpu`
             # if the process must be throttled at a fixed CPU allocation; this
             # example leaves it burstable and caps memory at 2Gi.
             #
-            # SIZE THIS AGAINST THE BUCKET'S LATENCY, NOT ONLY THE WORKLOAD. A
-            # small node running several runtime processes against a store with
-            # a long latency tail can stall inside one of that store's slow
-            # spells for longer than the runtime's lease renewal allows: the
-            # process fences itself, exits, and is restarted. Serving mostly
-            # survives that — it comes back, and the other nodes never stopped
-            # answering — but the node churns. Fewer, larger nodes and a bucket
-            # close to them is the fix.
+            # Scafo does not derive placement or deploy admission from this
+            # cgroup. Kubernetes enforces the pod's CPU and memory boundary;
+            # Celld-specific resource policy belongs in SCAFO_CELLD_ENV (or
+            # runtime.celldEnv in the config file).
+            #
+            # STORE RELIABILITY IS A SEPARATE REQUIREMENT. The bucket must
+            # honour conditional writes and sustain lease traffic; intermittent
+            # latency or errors can prevent a Celld node lease from renewing;
+            # that process self-fences, exits, and is restarted.
             requests:
               cpu: "500m"
-              memory: "1Gi"
+              memory: "512Mi"
             limits:
               memory: "2Gi"
         - name: traefik
