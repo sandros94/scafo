@@ -96,16 +96,11 @@ const ENVIRONMENT = "production";
 const NODE_ID = "node-e2e-traefik";
 
 /**
- * The routers this node publishes whatever it is serving: the catch-all that
- * hands unmatched names under the platform domain to the daemon, and the pair
- * that answers the fleet's API at the domain's own apex — the second of which
+ * The routers this node publishes whatever it is serving: the pair that answers
+ * the fleet's API at the domain's own apex — the second of which
  * is what keeps `/v1/storage` off that public name.
  */
-const STANDING_ROUTERS = [
-  `scafo_catchall_${PLATFORM_DOMAIN}`,
-  `scafo_api_${PLATFORM_DOMAIN}`,
-  `scafo_apideny_${PLATFORM_DOMAIN}`,
-];
+const STANDING_ROUTERS = [`scafo_api_${PLATFORM_DOMAIN}`, `scafo_apideny_${PLATFORM_DOMAIN}`];
 
 let store: StartedStore;
 let traefik: StartedTestContainer;
@@ -335,11 +330,8 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       /*
        * The ROUTERS are waited for FIRST, through Traefik's API and before any
        * request touches a host — and that ordering is load-bearing twice over.
-       * The catch-all answers for these hosts the moment the processes are
-       * ready, polls or no polls, so a request-side wait would pass through the
-       * WAKE surface while Traefik still holds only the catch-all — proving
-       * nothing about the routing this test is about. Routing first, traffic
-       * second.
+       * A request-side wait alone would not prove which provider snapshot
+       * Traefik holds. Routing first, traffic second.
        */
       const expected = [
         ...[envHost(), apexHost()].map((host) => `scafo_${host}`),
@@ -504,18 +496,8 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
        * the 5s interval), and Traefik's next poll (up to the 2s this fixture
        * sets). Only the second half is what choosing a polled ingress costs.
        */
-      /*
-       * The snapshot never empties any more: the catch-alls that hand unmatched
-       * platform hosts to the daemon, and the routers that answer the fleet's API
-       * at this domain's own apex, stay whatever is retired — so "nothing
-       * served" reads as "nothing but the standing routers". The empty-document
-       * spelling the driver keeps is for the node that has no platform domains
-       * at all.
-       *
-       * SAFE TO REQUEST: a retired environment is a 404 the wake surface answers
-       * without stamping anything, so the poll
-       * cannot keep alive what it is watching leave.
-       */
+      /* Only the fleet API routers remain; unknown application hosts fall
+         through to Traefik's native 404. */
       const settledAt = await wait(
         "the node to publish nothing but the standing routers",
         DEADLINE_MS,
@@ -528,21 +510,18 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
         const answer = await httpGet(httpPort, "/", { host: envHost() });
         return answer.status === 404 ? answer : null;
       });
-      observed.retireToCatchAllSnapshotMs = settledAt - retiredAt;
+      observed.retireToStandingSnapshotMs = settledAt - retiredAt;
       observed.retireToUnroutedMs = Date.now() - retiredAt;
-      /* From the daemon, in the same problem document every refusal wears. */
-      expect(gone.body).toContain("urn:scafo:not-found");
+      expect(gone.body).toContain("404 page not found");
 
       /* The apex goes with it. */
       for (const host of [apexHost()]) {
         const answer = await httpGet(httpPort, "/", { host });
         expect(answer.status, host).toBe(404);
-        expect(answer.body, host).toContain("urn:scafo:not-found");
+        expect(answer.body, host).toContain("404 page not found");
       }
 
-      /* Read from both ends: Traefik holds nothing of this node but the standing
-         routers — the catch-alls keeping its platform domains answered, and the
-         fleet's API at the domain's own apex, which no environment owns. */
+      /* Read from both ends: Traefik holds only the fleet API routers. */
       const remaining = await scafoRouters();
       expect(remaining.sort()).toEqual([...STANDING_ROUTERS].map((name) => `${name}@http`).sort());
 

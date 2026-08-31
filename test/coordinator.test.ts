@@ -17,8 +17,10 @@ import {
   createBuild,
   createEnvironment,
   createProject,
+  DEFAULT_RETIREMENT_GRACE_MS,
   getEnvironment,
   readJson,
+  retireEnvironment,
 } from "../src/core/registry/index.ts";
 import { buildKey, coordinatorKey } from "../src/core/registry/paths.ts";
 import type { CoordinatorLease } from "../src/core/types/registry.ts";
@@ -29,7 +31,6 @@ import { ctxWith, FaultStore, type ManualClock, rejectsWith } from "./_helpers.t
 const PROJECT = "app";
 const BUILD = "b1b1b1b1";
 const TTL_MS = 15_000;
-const IDLE_TTL_S = 900;
 const HOUR_MS = 3_600_000;
 
 let store: FaultStore;
@@ -43,7 +44,6 @@ beforeEach(async () => {
   await createEnvironment(clock.ctx, PROJECT, {
     name: "preview",
     ephemeral: true,
-    idleTtlS: IDLE_TTL_S,
   });
   await createBuild(clock.ctx, PROJECT, { id: BUILD });
   await recordDeployment(clock.ctx, PROJECT, "preview", BUILD);
@@ -77,14 +77,16 @@ describe("createCoordinator", () => {
     expect(Date.parse(second.acquiredAt)).toBeGreaterThan(Date.parse(first.acquiredAt));
   });
 
-  it("reaps what is idle while it holds the lease", async () => {
+  it("does not reap an ephemeral environment merely because it is old", async () => {
     const coordinator = coordinatorFor("node-a");
     await coordinator.runOnce();
 
-    clock.tick(IDLE_TTL_S * 1000 + 1);
+    clock.tick(HOUR_MS);
     await coordinator.runOnce();
 
-    await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, "preview"), "not-found");
+    await expect(getEnvironment(clock.ctx, PROJECT, "preview")).resolves.toMatchObject({
+      name: "preview",
+    });
     expect(coordinator.status().lastReapFailure).toBeNull();
     expect(coordinator.status().lastReapAt).not.toBeNull();
   });
@@ -93,8 +95,8 @@ describe("createCoordinator", () => {
     const coordinator = coordinatorFor("node-a");
     await coordinator.runOnce();
 
-    /* Long enough that the environment is reapable AND this node's lease has
-       gone stale, so another node takes it over between two renewals. */
+    /* Long enough that this node's lease has gone stale, so another node takes
+       it over between two renewals. */
     clock.tick(HOUR_MS);
     const stolen = await acquireLease(clock.ctx, "node-b", { ttlMs: TTL_MS });
     expect(stolen).not.toBeNull();
@@ -103,10 +105,8 @@ describe("createCoordinator", () => {
     await coordinator.runOnce();
 
     /*
-     * The fencing rule. The reap was due on this very tick and the environment
-     * was reapable, so the only reason nothing was deleted is that the loop
-     * found out it is no longer the coordinator and stopped before doing any
-     * coordinator-only work — node-b is already reaping against this registry.
+     * The fencing rule. The loop found out it is no longer the coordinator and
+     * stopped before doing any coordinator-only work.
      */
     expect(coordinator.status().holding).toBe(false);
     expect(coordinator.handle()).toBeNull();
@@ -137,7 +137,8 @@ describe("createCoordinator", () => {
   it("keeps the lease when a reap fails, and reaps again on the next tick", async () => {
     const coordinator = coordinatorFor("node-a");
     await coordinator.runOnce();
-    clock.tick(IDLE_TTL_S * 1000 + 1);
+    await retireEnvironment(clock.ctx, PROJECT, "preview");
+    clock.tick(DEFAULT_RETIREMENT_GRACE_MS + 1);
 
     /* The renewal goes through and the delete after it does not, so the reap is
        what fails rather than the lease. */
@@ -161,7 +162,7 @@ describe("createCoordinator", () => {
   it("gives the lease up when the bucket will not take the renewal", async () => {
     const coordinator = coordinatorFor("node-a");
     await coordinator.runOnce();
-    clock.tick(IDLE_TTL_S * 1000 + 1);
+    clock.tick(TTL_MS / 3);
 
     /* Not a takeover — the store simply refused the write. The loop cannot tell
        the two apart from here, and the safe reading of both is the same: a
@@ -220,10 +221,11 @@ describe("createCoordinator", () => {
 
   it("reaps nothing at all when no build retention is configured", async () => {
     /* An installation that has never said how long it keeps builds is not one
-       whose builds should start disappearing; the environment still goes. */
+       whose builds should start disappearing; a retired environment still goes. */
     const coordinator = coordinatorFor("node-a", { buildRetentionMs: undefined });
     await coordinator.runOnce();
-    clock.tick(IDLE_TTL_S * 1000 + 1);
+    await retireEnvironment(clock.ctx, PROJECT, "preview");
+    clock.tick(DEFAULT_RETIREMENT_GRACE_MS + 1);
     await coordinator.runOnce();
 
     await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, "preview"), "not-found");

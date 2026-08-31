@@ -190,9 +190,8 @@ export interface ObservabilityConfig {
    * File the operator's ingress writes its JSON access log to, when the node
    * should count the requests it records.
    *
-   * A SEPARATE SWITCH, AND IT IS OPT-IN BY PRESENCE. The daemon sees only the
-   * requests it wakes — once a process is up, traffic goes ingress → process and
-   * never touches the node — so per-request numbers can only come off the
+   * A SEPARATE SWITCH, AND IT IS OPT-IN BY PRESENCE. Application traffic goes
+   * ingress → process and never touches the node API, so per-request numbers can only come off the
    * ingress's own log, and only an operator knows where their ingress writes it
    * or whether it writes one at all. Absent means no adapter, no error and no
    * warning: bringing your own ingress is simply never naming this.
@@ -581,11 +580,8 @@ export function advertisedAddress(node: DaemonConfig["node"]): HostPort {
  * — a process bound to a tunnel address alone answers nothing on `127.0.0.1`,
  * however local the caller is.
  *
- * BOTH DIALERS ASK THIS QUESTION AND MUST GET THE SAME ANSWER: the ingress the
- * routes are rendered for (`upstreamHost` on both ingress drivers), and the wake
- * surface's hop down to the process it has just brought up. A node whose
- * processes bind a wildcard cannot tell them apart, which is why this is one
- * function rather than two expressions.
+ * The ingress routes are rendered against this address (`upstreamHost` on both
+ * ingress drivers).
  */
 export function runtimeDialHost(runtime: DaemonConfig["runtime"]): string {
   return WILDCARD_BIND_HOSTS.includes(runtime.bindHost) ? DEFAULT_BIND_HOST : runtime.bindHost;

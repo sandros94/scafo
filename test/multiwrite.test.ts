@@ -19,6 +19,7 @@ import {
   importVarsetKey,
   planReap,
   putVarset,
+  retireEnvironment,
   type ReapOptions,
   sealVarset,
   setEnvironmentVarset,
@@ -117,13 +118,13 @@ const FLOWS: Flow[] = [
       await createEnvironment(clock.ctx, PROJECT, {
         name: "preview",
         ephemeral: true,
-        idleTtlS: 900,
       });
       await claimDomain(clock.ctx, HOST, PROJECT, "preview");
+      await retireEnvironment(clock.ctx, PROJECT, "preview");
       for (const suffix of ["node-a.json", "state/routes.json"]) {
         await clock.ctx.store.put(`${fleetPrefix(PROJECT, "preview")}/${suffix}`, "{}");
       }
-      clock.tick(HOUR_MS);
+      clock.tick(86_400_001);
     },
     run: async ({ ctx }) => {
       const lease = await acquireLease(ctx, "node-a");
@@ -134,8 +135,6 @@ const FLOWS: Flow[] = [
     settled: async ({ ctx }) => {
       await rejectsWith(() => getEnvironment(ctx, PROJECT, "preview"), "not-found");
     },
-    /* The environment record goes before its claims, so a killed run orphans the claim. */
-    invariantOptions: { allowOrphanClaims: true },
   },
 ];
 

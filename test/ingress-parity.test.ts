@@ -31,19 +31,16 @@ import {
   API_ID_PREFIX,
   type CaddyMatch,
   type CaddyRoute,
-  CATCHALL_ID_PREFIX,
   renderCaddyRoutes,
   ROUTE_ID_PREFIX,
 } from "../src/drivers/ingress/caddy.ts";
 import {
   API_DENY_PRIORITY,
   API_PRIORITY,
-  CATCHALL_PRIORITY,
   NOOP_SERVICE,
   renderTraefikConfig,
   TRAEFIK_API_DENY_PREFIX,
   TRAEFIK_API_PREFIX,
-  TRAEFIK_CATCHALL_PREFIX,
   TRAEFIK_KEY_PREFIX,
   type TraefikDynamicConfig,
   type TraefikService,
@@ -55,7 +52,6 @@ const PROJECT = "shop";
 const OTHER_PROJECT = "blog";
 const BUILD = "aaaa1111";
 const OTHER_BUILD = "bbbb2222";
-const THIRD_BUILD = "cccc3333";
 const CUSTOM_DOMAIN = "shop.example.com";
 
 /** Where the node's own daemon answers, for the routing that falls through to it. */
@@ -134,57 +130,6 @@ const FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
 ];
 
 /**
- * The same states, with a daemon for the traffic nothing else answers: a node
- * holding a parked environment's hosts open, and the platform domains whose
- * unmatched names fall through to it.
- */
-const WAKE_FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
-  {
-    name: "a node serving nothing and holding its domains open",
-    desired: renderRoutes({
-      platformDomains: [DOMAIN, OTHER_DOMAIN],
-      environments: [],
-      processes: [],
-      claims: [],
-      wake: { port: NODE_PORT, parked: [] },
-    }),
-  },
-  {
-    name: "one parked environment, on its label and its apex",
-    desired: renderRoutes({
-      platformDomains: [DOMAIN],
-      environments: [],
-      processes: [],
-      claims: [],
-      wake: { port: NODE_PORT, parked: [environment(PROJECT, APEX_ENVIRONMENT, BUILD)] },
-    }),
-  },
-  {
-    name: "a parked environment with a custom domain, beside one that is serving",
-    desired: renderRoutes({
-      platformDomains: [DOMAIN, OTHER_DOMAIN],
-      environments: [environment(OTHER_PROJECT, APEX_ENVIRONMENT, BUILD)],
-      processes: [process(OTHER_PROJECT, APEX_ENVIRONMENT, BUILD, 42_000)],
-      claims: [],
-      wake: {
-        port: NODE_PORT,
-        parked: [environment(PROJECT, "preview", OTHER_BUILD, [CUSTOM_DOMAIN])],
-      },
-    }),
-  },
-  {
-    name: "a serving environment beside a parked environment, under two platform domains",
-    desired: renderRoutes({
-      platformDomains: [DOMAIN, OTHER_DOMAIN],
-      environments: [environment(PROJECT, APEX_ENVIRONMENT, BUILD, [CUSTOM_DOMAIN])],
-      processes: [process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000)],
-      claims: [{ host: CUSTOM_DOMAIN, project: PROJECT, environment: APEX_ENVIRONMENT }],
-      wake: { port: NODE_PORT, parked: [environment(OTHER_PROJECT, "preview", THIRD_BUILD)] },
-    }),
-  },
-];
-
-/**
  * The same states again, with the fleet's API published at the platform
  * domains' own apexes — which is what a node renders by default.
  */
@@ -196,7 +141,6 @@ const API_FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
       environments: [],
       processes: [],
       claims: [],
-      wake: { port: NODE_PORT, parked: [] },
       api: { port: NODE_PORT },
     }),
   },
@@ -207,23 +151,21 @@ const API_FIXTURES: Array<{ name: string; desired: IngressDesired }> = [
       environments: [environment(PROJECT, APEX_ENVIRONMENT, BUILD)],
       processes: [process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000)],
       claims: [],
-      wake: { port: NODE_PORT, parked: [] },
       api: { port: NODE_PORT },
     }),
   },
   {
-    name: "an apex beside a claimed domain and a parked environment",
+    name: "an apex beside a claimed domain",
     desired: renderRoutes({
       platformDomains: [DOMAIN, OTHER_DOMAIN],
       environments: [environment(PROJECT, APEX_ENVIRONMENT, BUILD, [CUSTOM_DOMAIN])],
       processes: [process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000)],
       claims: [{ host: CUSTOM_DOMAIN, project: PROJECT, environment: APEX_ENVIRONMENT }],
-      wake: { port: NODE_PORT, parked: [environment(OTHER_PROJECT, "preview", THIRD_BUILD)] },
       api: { port: NODE_PORT },
     }),
   },
   {
-    name: "the API without a wake surface at all",
+    name: "the API beside an application host",
     desired: renderRoutes({
       platformDomains: [DOMAIN],
       environments: [environment(PROJECT, "staging", BUILD)],
@@ -256,65 +198,6 @@ describe("the two drivers say the same thing about the same routing", () => {
   });
 });
 
-describe("the two drivers agree on what reaches the daemon", () => {
-  for (const { name, desired } of WAKE_FIXTURES) {
-    it(`agrees on ${name}`, () => {
-      const caddy = caddyUpstreams(renderCaddyRoutes(desired));
-      const traefik = traefikUpstreams(renderTraefikConfig(desired));
-
-      /* One vocabulary for both: a Caddy `*.<domain>` host matcher and the
-         single-label `HostRegexp` Traefik is given cover the same set of names,
-         so both are reduced to `*.<domain>` and compared like any other host. */
-      expect(traefik).toEqual(caddy);
-      expect(caddy).toEqual(essenceOf(desired));
-    });
-  }
-
-  it("names the same wake hosts and the same catch-all domains, at the same daemon", () => {
-    for (const { name, desired } of WAKE_FIXTURES) {
-      const caddy = nodeSurface(caddyUpstreams(renderCaddyRoutes(desired)));
-      const traefik = nodeSurface(traefikUpstreams(renderTraefikConfig(desired)));
-
-      /* The port is DERIVED from each document rather than assumed, so a driver
-         that dialled the wrong daemon would fail here rather than agree. */
-      expect(traefik, name).toEqual(caddy);
-      expect(caddy, name).toEqual({
-        daemon: [`127.0.0.1:${String(NODE_PORT)}`],
-        hosts: [...(desired.wake?.hosts ?? [])].sort(),
-        domains: [...(desired.wake?.domains ?? [])].sort(),
-      });
-    }
-  });
-
-  it("consults its catch-alls last, in whatever way its own format ranks", () => {
-    /*
-     * PRECEDENCE IS THE WHOLE CONTRACT, and the two formats keep it in opposite
-     * ways: Caddy matches in array order, so the catch-alls are rendered last;
-     * Traefik scores rules and would rank a domain regexp ABOVE a host under it,
-     * so the rank is stated outright. Getting it wrong does not misroute one
-     * host — it sends a whole platform domain's live traffic to the daemon.
-     */
-    for (const { name, desired } of WAKE_FIXTURES) {
-      const caddy = renderCaddyRoutes(desired);
-      const first = caddy.findIndex((route) => route["@id"].startsWith(CATCHALL_ID_PREFIX));
-
-      expect(first, name).toBeGreaterThanOrEqual(0);
-      expect(
-        caddy.slice(first).every((route) => route["@id"].startsWith(CATCHALL_ID_PREFIX)),
-        name,
-      ).toBe(true);
-
-      for (const [key, router] of Object.entries(
-        renderTraefikConfig(desired).http?.routers ?? {},
-      )) {
-        expect(router.priority, `${name}: ${key}`).toBe(
-          key.startsWith(TRAEFIK_CATCHALL_PREFIX) ? CATCHALL_PRIORITY : undefined,
-        );
-      }
-    }
-  });
-});
-
 describe("the two drivers agree on the fleet's API at a platform apex", () => {
   for (const { name, desired } of API_FIXTURES) {
     it(`agrees on ${name}`, () => {
@@ -329,7 +212,7 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
     });
   }
 
-  it("routes the BARE apex, which no catch-all covers, to the same daemon", () => {
+  it("routes the bare apex to the same daemon", () => {
     for (const { name, desired } of API_FIXTURES) {
       const apexes = desired.api?.hosts ?? [];
       expect(apexes, name).toEqual([...apexes].sort());
@@ -346,13 +229,6 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
             served.map((leg) => leg.upstream),
             `${name}: ${apex}`,
           ).toEqual([`127.0.0.1:${String(NODE_PORT)}`]);
-          /* And it is an entry of its own rather than the catch-all widening:
-             `*.<domain>` is still there, matching one label and never the bare
-             name. */
-          expect(
-            driver.some((leg) => leg.host === `*.${apex}`),
-            `${name}: ${apex}`,
-          ).toBe(desired.wake !== undefined);
         }
       }
     }
@@ -398,7 +274,7 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
     for (const { name, desired } of API_FIXTURES) {
       /* Caddy matches in array order and every route is terminal, so the denial
          is simply written first — and both sit after every host route and
-         before the catch-alls that must lose to them. */
+         after every application host route. */
       const caddy = renderCaddyRoutes(desired).map((route) => route["@id"]);
       for (const apex of desired.api?.hosts ?? []) {
         const deny = caddy.indexOf(`${API_DENY_ID_PREFIX}${apex}`);
@@ -408,30 +284,16 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
         expect(deny, `${name}: ${apex}`).toBeLessThan(api);
       }
       const firstTail = caddy.findIndex(
-        (id) =>
-          id.startsWith(API_ID_PREFIX) ||
-          id.startsWith(API_DENY_ID_PREFIX) ||
-          id.startsWith(CATCHALL_ID_PREFIX),
+        (id) => id.startsWith(API_ID_PREFIX) || id.startsWith(API_DENY_ID_PREFIX),
       );
       const lastHost = caddy.reduce(
         (at, id, index) =>
-          id.startsWith(API_ID_PREFIX) ||
-          id.startsWith(API_DENY_ID_PREFIX) ||
-          id.startsWith(CATCHALL_ID_PREFIX)
-            ? at
-            : index,
+          id.startsWith(API_ID_PREFIX) || id.startsWith(API_DENY_ID_PREFIX) ? at : index,
         -1,
       );
       expect(firstTail, name).toBeGreaterThan(lastHost);
-      const firstCatchAll = caddy.findIndex((id) => id.startsWith(CATCHALL_ID_PREFIX));
-      const catchAlls = firstCatchAll === -1 ? [] : caddy.slice(firstCatchAll);
-      expect(
-        catchAlls.every((id) => id.startsWith(CATCHALL_ID_PREFIX)),
-        name,
-      ).toBe(true);
-
       /* Traefik scores rules rather than reading an array, so the rank is
-         stated: the denial above the apex, both above the catch-all. */
+         stated: the denial above the apex. */
       for (const [key, router] of Object.entries(
         renderTraefikConfig(desired).http?.routers ?? {},
       )) {
@@ -439,13 +301,10 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
           ? API_DENY_PRIORITY
           : key.startsWith(TRAEFIK_API_PREFIX)
             ? API_PRIORITY
-            : key.startsWith(TRAEFIK_CATCHALL_PREFIX)
-              ? CATCHALL_PRIORITY
-              : undefined;
+            : undefined;
         expect(router.priority, `${name}: ${key}`).toBe(expected);
       }
       expect(API_DENY_PRIORITY).toBeGreaterThan(API_PRIORITY);
-      expect(API_PRIORITY).toBeGreaterThan(CATCHALL_PRIORITY);
     }
   });
 
@@ -475,7 +334,6 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
       environments: [environment(PROJECT, APEX_ENVIRONMENT, BUILD, [DOMAIN])],
       processes: [process(PROJECT, APEX_ENVIRONMENT, BUILD, 42_000)],
       claims: [{ host: DOMAIN, project: PROJECT, environment: APEX_ENVIRONMENT }],
-      wake: { port: NODE_PORT, parked: [] },
       api: { port: NODE_PORT },
     });
 
@@ -493,7 +351,7 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
   it("publishes nothing at any apex when the routing carries no api at all", () => {
     /* `api.public` off: byte-identical to the routing scafo rendered before the
        apex answered anything. */
-    for (const { name, desired } of [...FIXTURES, ...WAKE_FIXTURES]) {
+    for (const { name, desired } of FIXTURES) {
       expect(desired.api, name).toBeUndefined();
 
       const ids = renderCaddyRoutes(desired).map((route) => route["@id"]);
@@ -512,7 +370,7 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
 });
 
 describe("both renders are deterministic", () => {
-  for (const { name, desired } of [...FIXTURES, ...WAKE_FIXTURES, ...API_FIXTURES]) {
+  for (const { name, desired } of [...FIXTURES, ...API_FIXTURES]) {
     it(`renders ${name} identically twice`, () => {
       expect(renderCaddyRoutes(desired)).toEqual(renderCaddyRoutes(desired));
       expect(renderTraefikConfig(desired)).toEqual(renderTraefikConfig(desired));
@@ -577,13 +435,8 @@ describe("neither namespace can collide with a host", () => {
  * What a routing MEANS, straight off the input both drivers were handed — what
  * each of them is then held to.
  *
- * A wake host and a catch-all are upstreams like any other: they name a host and
- * reach the node's own daemon, and a whole platform domain is written the way
- * Caddy writes it, `*.<domain>`.
  */
 function essenceOf(desired: IngressDesired): Upstream[] {
-  const wake = desired.wake;
-  const daemon = wake === undefined ? "" : `127.0.0.1:${String(wake.port)}`;
   const api = desired.api;
   const denied = [...(api?.denied ?? [])].sort().join(",");
 
@@ -591,16 +444,6 @@ function essenceOf(desired: IngressDesired): Upstream[] {
     ...desired.routes.map((route) => ({
       host: route.host,
       upstream: `127.0.0.1:${String(route.backend.port)}`,
-      paths: "all",
-    })),
-    ...(wake?.hosts ?? []).map((host) => ({
-      host,
-      upstream: daemon,
-      paths: "all",
-    })),
-    ...(wake?.domains ?? []).map((domain) => ({
-      host: `*.${domain}`,
-      upstream: daemon,
       paths: "all",
     })),
     /* Two entries per apex, and both are load-bearing: what the API answers for,
@@ -614,29 +457,6 @@ function essenceOf(desired: IngressDesired): Upstream[] {
       },
     ]),
   ].sort(byUpstream);
-}
-
-/**
- * The wake surface of a rendered routing, read back without being told where the
- * daemon is: the catch-alls say which upstream that is, and everything else
- * dialling it is a host being held open.
- */
-function nodeSurface(upstreams: Upstream[]): {
-  daemon: string[];
-  hosts: string[];
-  domains: string[];
-} {
-  const caught = upstreams.filter((leg) => leg.host.startsWith("*."));
-  const daemon = [...new Set(caught.map((leg) => leg.upstream))].sort();
-
-  return {
-    daemon,
-    hosts: upstreams
-      .filter((leg) => !leg.host.startsWith("*.") && daemon.includes(leg.upstream))
-      .map((leg) => leg.host)
-      .sort(),
-    domains: caught.map((leg) => leg.host.slice("*.".length)).sort(),
-  };
 }
 
 /**
@@ -727,21 +547,15 @@ function traefikUpstreams(config: TraefikDynamicConfig): Upstream[] {
  * What a Traefik rule matches, said in the vocabulary both formats share: the
  * name, and which paths reach that router through it.
  *
- * A `Host` rule is the name itself. The single-label `HostRegexp` a catch-all
- * carries covers exactly the set Caddy's `*.<domain>` matcher does, and is read
- * back as that — reading it any other way would be comparing the two drivers'
- * SYNTAX rather than what either of them routes. What follows the host is the
- * path half: `Path`/`PathPrefix` pairs, negated on the API apex and asserted on
+ * A `Host` rule is the name itself. What follows the host is the path half:
+ * `Path`/`PathPrefix` pairs, negated on the API apex and asserted on
  * the denial guarding it, collapsed to the prefixes they name.
  */
 function ruleOf(rule: string): { host: string; paths: string } {
   const exact = /^Host\(`(?<host>[^`]+)`\)(?<rest>.*)$/.exec(rule)?.groups;
   if (exact !== undefined) return { host: exact.host, paths: rulePaths(exact.rest) };
 
-  const domain = /^HostRegexp\(`\^\[\^\.\]\+\\\.(?<domain>.+)\$`\)$/.exec(rule)?.groups?.domain;
-  if (domain === undefined) throw new Error(`rule "${rule}" is neither a host nor a catch-all`);
-
-  return { host: `*.${domain.replaceAll("\\.", ".")}`, paths: "all" };
+  throw new Error(`rule "${rule}" is not a host`);
 }
 
 /** The path half of a rule, read down to the prefixes it names. */

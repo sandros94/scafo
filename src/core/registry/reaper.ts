@@ -14,14 +14,7 @@ import { listBuilds } from "./builds.ts";
 import { releaseDomain } from "./domains.ts";
 import { listEnvironments } from "./environments.ts";
 import { type LeaseHandle, verifyLease } from "./lease.ts";
-import {
-  buildKey,
-  domainKey,
-  environmentKey,
-  envWakeKey,
-  fleetPrefix,
-  placementKey,
-} from "./paths.ts";
+import { buildKey, domainsPrefix, environmentKey, fleetPrefix, placementKey } from "./paths.ts";
 import { listProjects } from "./projects.ts";
 import {
   assertDeletable,
@@ -29,15 +22,8 @@ import {
   type RetirementOptions,
   retirementState,
 } from "./retirement.ts";
-import type { WakeStamp } from "./wake.ts";
-
-/** Where last-request timestamps come from; the registry itself does not track them. */
-export interface ActivitySource {
-  lastActiveAt(project: string, env: string): Promise<Date | null>;
-}
 
 export interface ReapOptions extends RetirementOptions {
-  activity?: ActivitySource;
   /** Without `maxAgeMs` no build is ever a candidate. */
   buildRetention?: { maxAgeMs?: number };
 }
@@ -70,13 +56,10 @@ export interface DeleteEnvironmentOptions extends RetirementOptions {
  * Lists what is currently reapable. The plan is advisory: {@link executeReap}
  * re-checks every item against fresh state before deleting anything.
  *
- * An environment qualifies two ways. It is RETIRED and its grace has run out —
- * whether or not it is ephemeral, because retirement is an explicit order to
- * decommission and the grace is the whole of the wait it asked for. Or it is
- * ephemeral, has an `idleTtlS`, and has been idle for longer. A non-ephemeral
- * environment nobody retired is never a candidate. A build qualifies only when
- * it is older than the configured retention. Build records are deployment
- * history, not runtime pointers.
+ * An environment qualifies only when it is retired and its grace has run out,
+ * whether or not it is ephemeral. A build qualifies only when it is older than
+ * the configured retention. Build records are deployment history, not runtime
+ * pointers.
  */
 export async function planReap(ctx: RegistryContext, opts?: ReapOptions): Promise<ReapPlan> {
   const plan: ReapPlan = { environments: [], builds: [] };
@@ -87,7 +70,7 @@ export async function planReap(ctx: RegistryContext, opts?: ReapOptions): Promis
     const environments = await readEnvironments(ctx, project);
 
     for (const environment of environments) {
-      const reason = await reapReason(ctx, project, environment, now, opts);
+      const reason = reapReason(environment, now, opts);
       if (reason !== null) plan.environments.push({ project, env: environment.name, reason });
     }
 
@@ -117,9 +100,6 @@ export async function planReap(ctx: RegistryContext, opts?: ReapOptions): Promis
  * Each item is re-read and re-checked first; anything that changed since
  * planning is skipped. Deletions go references-before-referents so a crash
  * mid-run never leaves a pointer to something gone.
- *
- * Pass the same `opts` used for planning so the re-check sees the same activity
- * source; without it, idleness falls back to the record's own timestamps.
  */
 export async function executeReap(
   ctx: RegistryContext,
@@ -144,11 +124,11 @@ export async function executeReap(
        into service, and it must survive the run that was already going to
        delete it. */
     const now = nowDate(ctx).getTime();
-    const reason = await reapReason(ctx, target.project, found.value, now, opts);
+    const reason = reapReason(found.value, now, opts);
     if (reason === null) {
       result.skipped.push({
         target: key,
-        reason: "environment is no longer idle, nor retired past its grace",
+        reason: "environment is no longer retired past its grace",
       });
       continue;
     }
@@ -187,10 +167,8 @@ export async function executeReap(
 /**
  * Deletes one environment on an operator's explicit order, under the coordinator
  * lease. This is the reaper's machinery run against a named target instead of a
- * plan, so the deletion order and the fencing are the same; what it does NOT do
- * is ask whether the environment is idle. The order to delete is the decision,
- * and an environment nothing has called in months is precisely the one an
- * operator deletes by hand.
+ * plan, so the deletion order and the fencing are the same. The order to delete
+ * is the decision.
  *
  * Which environments it will act on is {@link assertDeletable}'s to decide:
  * ephemeral ones, ones retired for longer than the grace, and — bypassing both —
@@ -223,9 +201,9 @@ export async function deleteEnvironment(
 
 /**
  * Deletes one environment's records in the only safe order: the domain claims
- * that name it, then its fleet state, then its wake stamp, then its placement
- * decision, then the environment record itself. `guard` runs before every
- * destructive step and aborts the rest by throwing.
+ * that name it, then its fleet state, then its placement decision, then the
+ * environment record itself. `guard` runs before every destructive step and
+ * aborts the rest by throwing.
  *
  * A run cut short — by a crash or by a lost lease — therefore leaves the
  * environment record in place, so the next pass finds it again and the deletion
@@ -240,8 +218,11 @@ async function purgeEnvironment(
 ): Promise<string[]> {
   const deleted: string[] = [];
 
-  for (const host of environment.domains) {
-    const claimKey = domainKey(host);
+  /* Scan claims rather than trusting the environment's mirror. `releaseDomain`
+     removes the mirror before the claim; if a crash lands between those writes,
+     the next run must still find and finish the claim. */
+  const claims = domainsPrefix();
+  for (const claimKey of await ctx.store.list(claims)) {
     const claim = await readJson<DomainClaim>(ctx, claimKey);
     if (claim === null) continue;
     /* Only claims still naming this environment: one that has moved on belongs
@@ -249,7 +230,7 @@ async function purgeEnvironment(
     if (claim.value.project !== project || claim.value.environment !== environment.name) continue;
 
     await guard();
-    await releaseDomain(ctx, host);
+    await releaseDomain(ctx, claimKey.slice(claims.length, -".json".length));
     deleted.push(claimKey);
   }
 
@@ -259,13 +240,6 @@ async function purgeEnvironment(
     deleted.push(fleetKey);
   }
 
-  /* A wake stamp is named after an environment nothing will iterate again. */
-  const wake = envWakeKey(project, environment.name);
-  if ((await readJson<WakeStamp>(ctx, wake)) !== null) {
-    await guard();
-    await deleteKey(ctx, wake);
-    deleted.push(wake);
-  }
   /* Before the record, because it points AT the record: a placement left behind
      names an environment that is gone, and the only thing that would ever have
      cleaned it up is the coordinator noticing the same absence a tick later. */
@@ -295,19 +269,12 @@ async function readEnvironments(
   return environments;
 }
 
-/**
- * Why this environment may be reaped, or null when it may not. Retirement is
- * asked first because it is an explicit order and idleness is an inference: an
- * environment that is both retired and idle is being decommissioned, and the
- * reason recorded against its deletion should say so.
- */
-async function reapReason(
-  ctx: RegistryContext,
-  project: string,
+/** Why this environment may be reaped, or null when it may not. */
+function reapReason(
   environment: EnvironmentRecord,
   now: number,
   opts?: ReapOptions,
-): Promise<string | null> {
+): string | null {
   const retired = retirementState(environment, new Date(now), opts);
   if (retired?.expired === true) {
     return (
@@ -315,32 +282,7 @@ async function reapReason(
       `past its ${formatDuration(opts?.graceMs ?? DEFAULT_RETIREMENT_GRACE_MS)} grace`
     );
   }
-  /* Retired but still within the grace: an operator may yet take it back, so
-     nothing reaps it — not even when it is also an idle ephemeral one, because
-     retiring an environment must never make it disappear SOONER. */
-  if (retired !== null) return null;
-
-  return idleReason(ctx, project, environment, now, opts?.activity);
-}
-
-async function idleReason(
-  ctx: RegistryContext,
-  project: string,
-  environment: EnvironmentRecord,
-  now: number,
-  activity?: ActivitySource,
-): Promise<string | null> {
-  const ttlS = environment.idleTtlS;
-  if (!environment.ephemeral || ttlS === undefined) return null;
-
-  const lastActive =
-    activity === undefined ? null : await activity.lastActiveAt(project, environment.name);
-  const since = lastActive === null ? Date.parse(environment.createdAt) : lastActive.getTime();
-  if (!Number.isFinite(since)) return null;
-
-  const idleMs = now - since;
-  if (idleMs < ttlS * 1000) return null;
-  return `ephemeral and idle for ${String(Math.floor(idleMs / 1000))}s (idleTtlS ${String(ttlS)})`;
+  return null;
 }
 
 async function assertLease(ctx: RegistryContext, lease: LeaseHandle): Promise<void> {

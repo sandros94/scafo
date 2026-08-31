@@ -533,11 +533,8 @@ describe("the address runtime processes bind", () => {
 
   /*
    * Where this node DIALS its own processes, derived from where they bind and
-   * from nothing else. Three dialers take it — the readiness gate, the ingress,
-   * and the wake surface's hop down to a process it has just brought up — and
-   * they take it from HERE rather than each mapping it themselves, because a
-   * dialer that gets a different answer from the other two does all the work of
-   * a wake and then cannot deliver the request.
+   * from nothing else. The ingress takes it from HERE rather than mapping the
+   * bind address itself.
    */
   it("dials a wildcard bind on loopback, and every other bind exactly as configured", async () => {
     const dialled = async (bindHost?: string): Promise<string> => {
@@ -1260,7 +1257,7 @@ describe("whether the fleet's API answers at the platform apexes", () => {
 
 describe("the ingress access log the node counts requests off", () => {
   it("is ABSENT unless an operator names one, and that is not a warning", async () => {
-    /* The daemon sees only the requests it wakes, so per-request numbers can only
+    /* Application requests bypass the node API, so per-request numbers can only
        come off the ingress's own log — and where that is, or whether there is
        one at all, is the operator's to say. There is no default to guess. */
     const config = await loadDaemonConfig({

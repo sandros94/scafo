@@ -1,7 +1,6 @@
 /*
  * `scafo env`: taking an environment out of service, putting it back, saying
- * how it scales to zero, and deleting it
- * once it is really meant to go.
+ * which nodes may serve it, and deleting it once it is really meant to go.
  *
  * Retiring and deleting are two commands rather than one because they are two
  * decisions. Retirement stops an environment being served and is reversible for
@@ -18,13 +17,11 @@ import { nodeBaseUrl, operatorSigner } from "../_node.ts";
 import { createRegistry } from "../_bootstrap.ts";
 import {
   nodeOps,
-  describeParkChange,
   describeRetirement,
   describeSelectorChange,
   directOps,
   type EnvironmentOps,
   type EnvironmentTarget,
-  readParkFlags,
   readSelectorFlags,
 } from "../_environments.ts";
 import { resolveOperatorHome } from "../_home.ts";
@@ -75,16 +72,6 @@ const selectorArgs: ArgsDef = {
   clear: { type: "boolean", description: "Let it run on every node again" },
 };
 
-const parkArgs: ArgsDef = {
-  ...targetArgs,
-  "after": {
-    type: "string",
-    description: "Seconds an ephemeral environment runs past its last wake before it parks",
-  },
-  "wake-deadline": { type: "string", description: "Seconds a request held for a wake may wait" },
-  "clear": { type: "boolean", description: "Fall back to what the environment's kind implies" },
-};
-
 const retire: CommandDef = defineCommand({
   meta: { name: "retire", description: "Stop serving an environment, reversibly" },
   args: targetArgs,
@@ -133,24 +120,12 @@ const selector: CommandDef = defineCommand({
   },
 });
 
-const park: CommandDef = defineCommand({
-  meta: { name: "park", description: "Say how an environment scales to zero" },
-  args: parkArgs,
-  async run({ args }): Promise<void> {
-    try {
-      await runPark(args as Record<string, unknown>);
-    } catch (error) {
-      reportFailure(error);
-    }
-  },
-});
-
 export const env: CommandDef = defineCommand({
   meta: {
     name: "env",
-    description: "Retire, restore, target, park and delete environments",
+    description: "Retire, restore, target and delete environments",
   },
-  subCommands: { retire, unretire, selector, park, delete: remove },
+  subCommands: { retire, unretire, selector, delete: remove },
 });
 
 async function runRetire(flags: Record<string, unknown>): Promise<void> {
@@ -183,19 +158,6 @@ async function runSelector(flags: Record<string, unknown>): Promise<void> {
   const ops = await opsFor(flags);
 
   console.log(describeSelectorChange(target, await ops.setSelector(target, wanted)));
-}
-
-async function runPark(flags: Record<string, unknown>): Promise<void> {
-  const target = environmentTarget(flags);
-  /* Read before anything is contacted, so a malformed number costs no request. */
-  const wanted = readParkFlags({
-    after: text(flags.after),
-    wakeDeadline: text(flags["wake-deadline"]),
-    clear: flags.clear === true,
-  });
-  const ops = await opsFor(flags);
-
-  console.log(describeParkChange(target, await ops.setPark(target, wanted)));
 }
 
 async function runDelete(flags: Record<string, unknown>): Promise<void> {

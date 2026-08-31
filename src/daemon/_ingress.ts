@@ -7,7 +7,6 @@ import type { DesiredEnvironment } from "../core/placement/reconcile.ts";
 import { renderRoutes, type RouteClaim } from "../core/placement/routes.ts";
 import type { IngressDriver, PullingIngressDriver } from "../core/types/ingress.ts";
 import type { RuntimeProcess } from "../core/types/runtime.ts";
-import type { ParkedEnvironment } from "./_desired.ts";
 import type { DaemonContext } from "./app.ts";
 import { parseHostPort } from "./config.ts";
 
@@ -27,18 +26,12 @@ export function isPullingIngress(driver: IngressDriver): driver is PullingIngres
 export interface IngressInput {
   /** Environments this node serves, with the builds it resolved for them. */
   desired: DesiredEnvironment[];
-  /** Processes this node is running; only the ready ones are routable. */
+  /** Processes this node is running and routes. */
   processes: RuntimeProcess[];
-  /**
-   * Environments this node reads as parked. Their hosts are routed to the node's
-   * own daemon instead of to a process, so that the request asking for one is
-   * what wakes it.
-   */
-  parked: ParkedEnvironment[];
 }
 
 /**
- * Renders the routing for what this node has ready and converges the ingress on
+ * Renders the routing for what this node has running and converges the ingress on
  * it. Does nothing when the node has no ingress configured — its processes still
  * run, they are simply not reachable from outside the node.
  *
@@ -46,16 +39,13 @@ export interface IngressInput {
  * `IngressDriver.apply` is idempotent, and a pass that re-states the routing is
  * also what repairs an ingress that was restarted or edited underneath the node.
  *
- * The routing always carries the daemon's own port, because the daemon is what
- * answers for a parked host and for every host under a platform domain that
- * nothing else claims. Only the PORT travels: an ingress that routes to this
- * node's daemon is on this node, so the host is always loopback.
+ * The routing carries the daemon's own port only when the fleet API is public.
  */
 export async function applyIngress(daemon: DaemonContext, input: IngressInput): Promise<void> {
   const ingress = daemon.ingress;
   if (ingress === undefined) return;
 
-  const { desired, processes, parked } = input;
+  const { desired, processes } = input;
 
   /* An environment record mirrors every domain claimed for it, so the custom
      domains come along with the desired state and cost no extra registry reads.
@@ -74,7 +64,6 @@ export async function applyIngress(daemon: DaemonContext, input: IngressInput): 
     environments: desired.map((entry) => ({ project: entry.project, env: entry.env })),
     processes,
     claims,
-    wake: { port, parked },
     /* The same daemon, at the same port, reached under a different contract: the
        platform apexes serve the fleet's API rather than an application, and the
        ingress keeps the colocated prefixes off them. Omitted outright when the

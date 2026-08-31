@@ -1,11 +1,11 @@
 /*
- * The seam between placement and whatever puts a node's ready processes on the
+ * The seam between placement and whatever puts a node's running processes on the
  * public network. Core describes the contract; a driver
  * (`scafo/drivers/ingress/caddy`) implements it, and the reconcile loop calls it
  * with the routing it renders after every pass.
  */
 
-/** One routable backend: a ready runtime process serving an environment. */
+/** One routable backend: a running runtime process serving an environment. */
 export interface IngressBackend {
   project: string;
   env: string;
@@ -19,24 +19,13 @@ export interface IngressRoute {
   backend: IngressBackend;
 }
 
-/** Traffic that must reach the node's own daemon: hosts to wake, and whole domains to answer for. */
-export interface WakeRouting {
-  /** Loopback port the daemon answers on. */
-  port: number;
-  /** Fully qualified hosts routed to the daemon outright — parked environments' hosts and their custom domains. */
-  hosts: string[];
-  /** Platform domains whose UNMATCHED subdomain hosts fall through to the daemon, after every explicit route. */
-  domains: string[];
-}
-
 /**
  * The fleet's own API, served at each platform domain's BARE APEX so that a CI
  * job, a CLI or a dashboard reaches any node of the installation at one
  * well-known name — the registry is in the bucket, so any node answers any call.
  *
- * AN EXPLICIT ROUTE PER APEX, never a widening of the catch-all: a `*.<domain>`
- * matcher covers exactly one label and therefore never the domain itself, which
- * is also why the apex has no wildcard certificate and mints its own.
+ * AN EXPLICIT ROUTE PER APEX, which is also why the apex has no wildcard
+ * certificate and mints its own.
  *
  * {@link ApiRouting.denied} IS THE SECURITY RULE OF THIS SURFACE AND A DRIVER
  * MUST ENFORCE IT AT THE INGRESS, not by trusting the daemon behind it: a request
@@ -62,41 +51,12 @@ export interface IngressDesired {
    */
   routes: IngressRoute[];
   /**
-   * Where a request nothing above answers goes. Absent when the node has no
-   * daemon address to send one to, which is the routing scafo rendered before
-   * scale-to-zero existed.
-   *
-   * PRECEDENCE IS THE WHOLE CONTRACT, AND IT IS ONE RULE: every explicit route
-   * beats the catch-all. A {@link IngressDesired.routes} entry is explicit
-   * because a ready process answers on it, a {@link WakeRouting.hosts} entry is
-   * explicit because a parked environment answers on it once woken, and a
-   * {@link WakeRouting.domains} entry is the catch-all that must never shadow
-   * either. A driver MUST therefore order or prioritize its catch-alls so they
-   * are consulted last, whatever its format calls that — an array position for
-   * an ingress that matches top-down, an explicit rank for one that scores
-   * rules. Getting it wrong does not misroute one host: it sends a whole
-   * platform domain's live traffic to the daemon.
-   *
-   * The two kinds of entry are separate because they fail differently. A wake
-   * host is a name scafo KNOWS about and is holding open, so a request to one
-   * is answered by starting something; an unmatched host under a platform
-   * domain is a name scafo knows nothing about, and the daemon answers it 404 —
-   * which is why the domains are routed at all rather than left to whatever the
-   * ingress does with a host it has no route for.
-   */
-  wake?: WakeRouting;
-  /**
    * The platform apexes serving the fleet's API, when this node publishes it.
    * Absent when `api.public` is off, which is the routing scafo renders when the
    * apex answers nothing at all.
    *
-   * PRECEDENCE, IN BOTH DIRECTIONS. These entries sit BELOW every
-   * {@link IngressDesired.routes} host and every {@link WakeRouting.hosts} entry
-   * — a renderer leaves an apex out of them entirely when either already answers
-   * on it — and ABOVE the {@link WakeRouting.domains} catch-alls, which matters
-   * whenever one platform domain is a subdomain of another (`dev.example.com`
-   * under `example.com`): the catch-all for the outer domain matches the inner
-   * one's apex, and the API must win.
+   * These entries sit below every {@link IngressDesired.routes} host: a renderer
+   * leaves an apex out entirely when an application already answers on it.
    */
   api?: ApiRouting;
 }

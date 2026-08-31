@@ -17,12 +17,7 @@ import {
   releaseLease,
   renewLease,
 } from "../core/registry/lease.ts";
-import {
-  type ActivitySource,
-  executeReap,
-  planReap,
-  type ReapOptions,
-} from "../core/registry/reaper.ts";
+import { executeReap, planReap, type ReapOptions } from "../core/registry/reaper.ts";
 import type { CoordinatorLease } from "../core/types/registry.ts";
 import { type AssignmentResult, runAssignment } from "./_assign.ts";
 import type { DaemonContext } from "./app.ts";
@@ -82,8 +77,6 @@ export interface CoordinatorOptions {
    * whose builds should start disappearing.
    */
   buildRetentionMs?: number;
-  /** Where the reaper reads last-request times; absent falls back to record timestamps. */
-  activity?: ActivitySource;
   /** How long a node counts as live for placement; defaults to three heartbeats. */
   livenessWindowMs?: number;
 }
@@ -103,12 +96,10 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
   const reapIntervalMs = opts?.reapIntervalMs ?? DEFAULT_REAP_INTERVAL_MS;
   const assignOptions =
     opts?.livenessWindowMs === undefined ? {} : { livenessWindowMs: opts.livenessWindowMs };
-  const reapOptions: ReapOptions = {
-    ...(opts?.activity === undefined ? {} : { activity: opts.activity }),
-    ...(opts?.buildRetentionMs === undefined
+  const reapOptions: ReapOptions =
+    opts?.buildRetentionMs === undefined
       ? {}
-      : { buildRetention: { maxAgeMs: opts.buildRetentionMs } }),
-  };
+      : { buildRetention: { maxAgeMs: opts.buildRetentionMs } };
 
   let held: LeaseHandle | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;

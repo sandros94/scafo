@@ -91,29 +91,6 @@ function event(body: Record<string, unknown>): ObserveEventRecord {
 
 /** Representative events in the order the seam declares them. */
 const EVERY_EVENT: ObserveEventRecord[] = [
-  event({
-    type: "wake.admitted",
-    id: "w1",
-    host: "shop.apps.test",
-    project: "shop",
-    env: "production",
-    inFlight: 3,
-  }),
-  event({
-    type: "wake.admitted",
-    id: "w2",
-    host: "shop--production.apps.test",
-    project: "shop",
-    env: "production",
-    inFlight: 1,
-  }),
-  event({ type: "wake.refused", id: "w3", host: "shop.apps.test" }),
-  event({ type: "wake.resolved", id: "w1", storeOps: 4 }),
-  event({ type: "wake.resolved", id: "w2" }),
-  event({ type: "wake.stamped", id: "w1" }),
-  event({ type: "wake.kicked", id: "w1" }),
-  event({ type: "wake.served", id: "w1", port: 41_001, status: 200 }),
-  event({ type: "wake.failed", id: "w3", reason: "deadline" }),
   event({ type: "reconcile.pass.start", kicked: true }),
   event({
     type: "placement.pending",
@@ -142,6 +119,8 @@ const EVERY_EVENT: ObserveEventRecord[] = [
     subject: "op-bbbb2222",
     role: "operator",
   }),
+  event({ type: "project.blocked", actor: "op-aaaa1111", project: "shop" }),
+  event({ type: "project.unblocked", actor: "op-aaaa1111", project: "shop" }),
 ];
 
 /** Rows written straight through the wide schema, bypassing the record mapping. */
@@ -190,15 +169,10 @@ describe("the wide schema a flush declares", () => {
 
       /* The event union, flattened. */
       type: "string?",
-      id: "string?",
-      host: "string?",
       project: "string?",
       env: "string?",
-      inFlight: "i64?",
       storeOps: "i64?",
       listOps: "i64?",
-      port: "i64?",
-      status: "i64?",
       reason: "string?",
       kicked: "bool?",
       actions: "i64?",
@@ -298,18 +272,6 @@ describe("what one record becomes", () => {
     });
   });
 
-  it("keeps the bare `status` column for an event's HTTP status", () => {
-    /* Two fields share the name `status` in the record union: the counters
-       object, which flattens above, and a `wake.served`'s response code, which is
-       already a number and keeps the column. */
-    const row = observeParquetRow(
-      event({ type: "wake.served", id: "w1", port: 41_001, status: 503 }),
-    );
-
-    expect(row.status).toBe(503);
-    expect(row.status_2xx).toBeUndefined();
-  });
-
   it("reads both timestamps as instants rather than as the strings they were written as", () => {
     const row = observeParquetRow(counters());
 
@@ -320,15 +282,15 @@ describe("what one record becomes", () => {
   it("leaves a column the record says nothing about ABSENT, which is a real null", () => {
     /* Absent is not zero: a record that counts no requests and one that counted
        zero are different answers, and a reader must be able to tell them apart. */
-    const row = observeParquetRow(event({ type: "wake.kicked", id: "w1" }));
+    const row = observeParquetRow(event({ type: "runtime.started", processId: "shop--prod" }));
 
     expect(row).toEqual({
       v: OBSERVE_RECORD_VERSION,
       record: "event",
       node: NODE,
       at: CLOCK_START_MS,
-      type: "wake.kicked",
-      id: "w1",
+      type: "runtime.started",
+      processId: "shop--prod",
     });
     expect(Object.hasOwn(row, "requests")).toBe(false);
   });
@@ -340,26 +302,19 @@ describe("what one record becomes", () => {
     expect(rows.every((row) => row.record === "event" && row.at === CLOCK_START_MS)).toBe(true);
     expect(new Set(rows.map((row) => row.type))).toEqual(
       new Set([
-        "wake.admitted",
-        "wake.refused",
-        "wake.resolved",
-        "wake.stamped",
-        "wake.kicked",
-        "wake.served",
-        "wake.failed",
         "reconcile.pass.start",
         "placement.pending",
         "reconcile.pass.end",
         "runtime.started",
         "operator.trusted",
         "operator.revoked",
+        "project.blocked",
+        "project.unblocked",
       ]),
     );
 
-    /* A `wake.resolved` that reported no cost leaves `storeOps` null. */
-    expect(rows[3].storeOps).toBe(4);
-    expect(rows[4].storeOps).toBeUndefined();
-    expect(rows[9].kicked).toBe(true);
+    expect(rows[0].kicked).toBe(true);
+    expect(rows[2].storeOps).toBe(11);
   });
 
   it("refuses a record whose timestamp is not an instant rather than writing a guess", async () => {
@@ -392,12 +347,12 @@ describe("the file a flush encodes to", () => {
     const records: ObserveRecord[] = [flush(), ...EVERY_EVENT, counters()];
     const { bytes } = PARQUET_CODEC.encode(records);
 
-    /* A footer for 45 columns is the floor whatever the rows say, and 17 rows of
+    /* A footer for the wide schema is the floor whatever the rows say, and ten rows of
        mostly-null columns cannot reach 64 KiB. Loose on purpose: this is a sanity
        bound on the encoder, not a golden size to be updated on every change. */
     expect(bytes.length).toBeGreaterThan(1000);
     expect(bytes.length).toBeLessThan(65_536);
-    expect(records).toHaveLength(17);
+    expect(records).toHaveLength(10);
   });
 
   it("compresses every data page, and says in the file which codec it used", () => {
@@ -441,14 +396,14 @@ describe("reading it back", () => {
   });
 
   it("keeps a null column absent rather than reading it back as a zero", () => {
-    const kicked = event({ type: "wake.kicked", id: "w1" });
+    const kicked = event({ type: "runtime.started", processId: "shop--prod" });
 
     const [read] = PARQUET_CODEC.decode(PARQUET_CODEC.encode([kicked]).bytes).records;
 
     /* Every column but six is null in this row, and none of them may reappear:
        an environment that counted no requests and one that counted zero are
        different answers. */
-    expect(Object.keys(read).sort()).toEqual(["at", "id", "node", "record", "type", "v"]);
+    expect(Object.keys(read).sort()).toEqual(["at", "node", "processId", "record", "type", "v"]);
   });
 
   it("reads the flush header's optional totals back only when the node counted", () => {
@@ -465,7 +420,7 @@ describe("reading it back", () => {
     /* Written through the same schema, which is the only way such a row can
        exist: a kind this build does not know, and a node id that is not one. */
     const bytes = writeRows([
-      observeParquetRow(event({ type: "wake.kicked", id: "kept" })),
+      observeParquetRow(event({ type: "runtime.started", processId: "shop--kept" })),
       { v: 1, record: "invented", node: NODE, at: CLOCK_START_MS },
       { v: 1, record: "event", node: "not a node id", at: CLOCK_START_MS },
     ]);
@@ -564,7 +519,6 @@ describe.skipIf(DUCKDB === undefined)("what DuckDB makes of a flush", () => {
     expect(declared).toContain("at INT64 REQUIRED TIMESTAMP_MILLIS");
     expect(declared).toContain("since INT64 OPTIONAL TIMESTAMP_MILLIS");
     expect(declared).toContain("kicked BOOLEAN OPTIONAL -");
-    expect(declared).toContain("status INT64 OPTIONAL -");
     expect(declared).toContain("status_2xx INT64 OPTIONAL -");
     expect(declared).toContain("durations_gt_3000ms INT64 OPTIONAL -");
     expect(declared).toContain("reason BYTE_ARRAY OPTIONAL UTF8");
@@ -588,13 +542,13 @@ describe.skipIf(DUCKDB === undefined)("what DuckDB makes of a flush", () => {
        query names them quoted — the column is the record's own field name and
        stays that, because a schema that renamed fields to please one reader would
        stop matching the records it encodes. */
-    expect(query(file, "SELECT count(*) FROM read_parquet('$FILE')")).toBe("17");
+    expect(query(file, "SELECT count(*) FROM read_parquet('$FILE')")).toBe("10");
     expect(
       query(
         file,
         `SELECT "record", count(*) FROM read_parquet('$FILE') GROUP BY "record" ORDER BY "record"`,
       ),
-    ).toBe(["counters,1", "event,15", "flush,1"].join("\n"));
+    ).toBe(["counters,1", "event,8", "flush,1"].join("\n"));
 
     /* A counter snapshot reads as the numbers it was written from, timestamp
        included — which is what makes these files answerable without scafo. */
@@ -619,10 +573,7 @@ describe.skipIf(DUCKDB === undefined)("what DuckDB makes of a flush", () => {
         `SELECT count(*) FROM read_parquet('$FILE') WHERE "record" = 'event' ` +
           `AND "requests" IS NULL`,
       ),
-    ).toBe("15");
-    expect(
-      query(file, `SELECT "status" FROM read_parquet('$FILE') WHERE "type" = 'wake.served'`),
-    ).toBe("200");
+    ).toBe("8");
     expect(
       query(file, `SELECT count(*) FROM read_parquet('$FILE') WHERE "type" = 'runtime.started'`),
     ).toBe("1");

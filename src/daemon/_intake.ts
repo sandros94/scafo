@@ -8,7 +8,7 @@ import { assertReplicas } from "../core/placement/replicas.ts";
 import { assertSelector } from "../core/placement/selector.ts";
 import { assertId } from "../core/registry/paths.ts";
 import { assertProjectScope } from "./_scope.ts";
-import type { BuildSource, NodeSelector, ParkPolicy } from "../core/types/registry.ts";
+import type { BuildSource, NodeSelector } from "../core/types/registry.ts";
 import { assertSlug } from "../core/utils/slug.ts";
 import { fromBase64Url, toBase64Url } from "../core/utils/base64.ts";
 import { stableStringify } from "../core/utils/json.ts";
@@ -43,12 +43,6 @@ export type DeployMetadata = Partial<Omit<DeployMeta, "project" | "oidc">>;
 export interface SelectorRequest {
   /** Labels a node must carry to serve the environment; null clears the constraint. */
   selector: NodeSelector | null;
-}
-
-/** What `POST /v1/environments/:project/:env/park` is asked to set. */
-export interface ParkRequest {
-  /** How the environment scales to zero; null clears the policy it carries. */
-  policy: ParkPolicy | null;
 }
 
 /**
@@ -194,31 +188,6 @@ export async function readSelectorRequest(
   }
   assertSelector(selector);
   return { selector };
-}
-
-/**
- * Reads the JSON body of a park-policy change: `{"policy": {...}}` to state how
- * the environment scales to zero, `{"policy": null}` to clear it and fall back
- * to what its kind implies.
- *
- * Read exactly as the selector above is, and a MISSING `policy` is refused for
- * the same reason: it is a request that forgot to say what it wanted, and
- * clearing a policy is not what an omission should default to. Only the SHAPE is
- * checked here — what a field may hold belongs to the registry, so the refusal
- * an operator reads is the same one they would get writing to the bucket.
- */
-export async function readParkRequest(
-  event: H3Event,
-  opts?: JsonBodyOptions,
-): Promise<ParkRequest> {
-  const body = asObject(await readJsonBody(event, opts), "the body");
-
-  const policy = body.policy;
-  if (policy === null) return { policy: null };
-  if (policy === undefined) {
-    throw invalid(`"policy" must be given: the fields to set, or null to clear it`);
-  }
-  return { policy: asObject(policy, `"policy"`) as ParkPolicy };
 }
 
 function parseMeta(parsed: unknown, project: string): DeployMeta {

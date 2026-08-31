@@ -54,31 +54,9 @@ export const DEFAULT_ENTRY_POINT: string = "web";
 export const TRAEFIK_KEY_PREFIX: string = "scafo_";
 
 /**
- * Namespace of the catch-all routers, which is {@link TRAEFIK_KEY_PREFIX} plus a
- * segment no host's key can carry.
- *
- * Every other key is `scafo_` followed by a host, or a host and a build id; an
- * underscore cannot occur in either, so `scafo_catchall_<domain>` can never be
- * the key of a router or a service for a host.
- */
-export const TRAEFIK_CATCHALL_PREFIX: string = `${TRAEFIK_KEY_PREFIX}catchall_`;
-
-/**
- * Rank of every catch-all router, and it is stated rather than left out.
- *
- * TRAEFIK RANKS BY RULE LENGTH WHEN A ROUTER NAMES NO PRIORITY, and the longest
- * rule wins. A `HostRegexp` for a whole platform domain is easily longer than a
- * `Host` for one name under it — `^[^.]+\.apps\.test$` against `shop.apps.test`
- * — so the default ranking would have the catch-all answer for a host an
- * explicit router was written for. `1` is the lowest a priority may be, which
- * puts every explicit router ahead of it whatever its rule turns out to be.
- */
-export const CATCHALL_PRIORITY: number = 1;
-
-/**
  * Namespace of the router serving the fleet's API at one platform apex, and of
  * the one denying the excluded prefixes there. Both follow
- * {@link TRAEFIK_CATCHALL_PREFIX}'s reading: an underscore occurs in neither a
+ * {@link TRAEFIK_KEY_PREFIX}'s reading: an underscore occurs in neither a
  * host nor a build id, so neither can ever be the key of a router for a host,
  * and neither is a prefix of the other.
  */
@@ -92,9 +70,7 @@ export const TRAEFIK_API_DENY_PREFIX: string = `${TRAEFIK_KEY_PREFIX}apideny_`;
  * THE DENIAL MUST OUTRANK THE APEX and rule length cannot be trusted to say so:
  * the two rules name the same host and differ only in how they speak about the
  * same paths, so which one is longer is an accident of punctuation. Both sit
- * above {@link CATCHALL_PRIORITY} because one platform domain may be a subdomain
- * of another, and the outer domain's catch-all regexp matches the inner one's
- * apex; both sit below the length-ranked default of an ordinary host router,
+ * below the length-ranked default of an ordinary host router,
  * which is harmless because no ordinary router matches a bare apex — a renderer
  * that finds one already answering there emits no API entry for it at all.
  */
@@ -123,7 +99,7 @@ export interface TraefikRouter {
   /**
    * Rank among routers whose rules both match. Omitted by every router matching
    * one host, where Traefik's default — the rule's length — cannot pick wrong,
-   * and set to {@link CATCHALL_PRIORITY} by the ones that must lose.
+   * while the API pair sets it explicitly to preserve denial precedence.
    */
   priority?: number;
 }
@@ -210,13 +186,6 @@ export function createTraefikDriver(opts?: TraefikDriverOptions): TraefikDriver 
  * would for a pushed ingress, because Traefik hashes the body it polls and does
  * no work at all when the bytes have not changed.
  *
- * WHAT REACHES THE DAEMON is rendered the same way and ranked differently. A
- * host waiting to be woken is an ordinary router over an ordinary service — it
- * names one host and dials the daemon instead of a runtime process — while a
- * platform domain's catch-all is a `HostRegexp` carrying an explicit
- * {@link CATCHALL_PRIORITY}, because Traefik's default ranking is rule length
- * and a regexp for a domain outruns a `Host` for a name under it.
- *
  * THE FLEET'S API AT A PLATFORM APEX IS TWO ROUTERS, and the pair is the whole
  * of how `/v1/storage` is kept off a public name. The apex router dials the
  * daemon for every path EXCEPT the denied prefixes, which its rule negates
@@ -269,35 +238,6 @@ export function renderTraefikConfig(
     };
   }
 
-  const wake = desired.wake;
-  if (wake !== undefined) {
-    const daemon = `http://127.0.0.1:${String(wake.port)}`;
-
-    for (const host of [...wake.hosts].sort(compare)) {
-      /* Asserted for the same reason every routed host is: a rule is a language
-         carried in a string, and a host holding a backtick would be a different
-         rule rather than a malformed name. */
-      assertHost(host);
-
-      const key = traefikKey(host);
-      routers[key] = { rule: `Host(\`${host}\`)`, service: key, entryPoints: [...entryPoints] };
-      services[key] = { loadBalancer: { servers: [{ url: daemon }] } };
-    }
-
-    for (const domain of [...wake.domains].sort(compare)) {
-      assertHost(domain);
-
-      const key = traefikCatchAllKey(domain);
-      routers[key] = {
-        rule: `HostRegexp(\`${subdomainPattern(domain)}\`)`,
-        service: key,
-        entryPoints: [...entryPoints],
-        priority: CATCHALL_PRIORITY,
-      };
-      services[key] = { loadBalancer: { servers: [{ url: daemon }] } };
-    }
-  }
-
   const api = desired.api;
   if (api !== undefined) {
     const daemon = `http://127.0.0.1:${String(api.port)}`;
@@ -332,7 +272,7 @@ export function renderTraefikConfig(
     }
   }
 
-  /* NEVER AN EMPTY MAP — see above. A node serving nothing and waking nothing
+  /* NEVER AN EMPTY MAP — see above. A node serving nothing
      publishes an empty document, which is the only thing Traefik reads as "this
      provider routes nothing". */
   if (Object.keys(routers).length === 0) return {};
@@ -345,11 +285,6 @@ export function traefikKey(host: string): string {
   return `${TRAEFIK_KEY_PREFIX}${host}`;
 }
 
-/** The router and service name one platform domain's catch-all is written under. */
-export function traefikCatchAllKey(domain: string): string {
-  return `${TRAEFIK_CATCHALL_PREFIX}${domain}`;
-}
-
 /** The router and service name the API at one platform apex is written under. */
 export function traefikApiKey(domain: string): string {
   return `${TRAEFIK_API_PREFIX}${domain}`;
@@ -358,19 +293,6 @@ export function traefikApiKey(domain: string): string {
 /** The router name the denial guarding one platform apex is written under. */
 export function traefikApiDenyKey(domain: string): string {
   return `${TRAEFIK_API_DENY_PREFIX}${domain}`;
-}
-
-/**
- * A Go regular expression matching any SINGLE-LABEL subdomain of `domain`, and
- * never the domain itself.
- *
- * One label, so that it means exactly what Caddy's `*.<domain>` host matcher
- * means and the two ingresses fall through on the same set of names. The dots of
- * the domain are escaped because a bare `.` in a regexp matches anything, which
- * would have this router claim names under domains nobody configured.
- */
-function subdomainPattern(domain: string): string {
-  return `^[^.]+\\.${domain.replaceAll(".", "\\.")}$`;
 }
 
 /**

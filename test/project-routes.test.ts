@@ -3,7 +3,7 @@
  *
  * The write verbs here are ADMIN-ONLY, and that is the whole posture of the
  * surface. Blocking a project is a full stop — it refuses serving, deploys and
- * wakes at once — so it is the fleet's decision about a tenant rather than the
+ * stops service and deploys at once — so it is the fleet's decision about a tenant rather than the
  * tenant's about itself. An operator-tier key that reaches the project in every
  * other way is refused here, because the alternative is a tenant who can lift
  * the block that was put on them.

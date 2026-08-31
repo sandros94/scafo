@@ -26,7 +26,6 @@ import {
   registerNode,
   retireEnvironment,
   setNodeSelector,
-  setParkPolicy,
   setReplicas,
   unretireEnvironment,
 } from "../src/core/registry/index.ts";
@@ -386,12 +385,13 @@ describe("what the coordinator refuses to decide", () => {
   });
 
   it("keeps the lease and reaps anyway when the assignment fails", async () => {
-    await environmentNamed("preview", { ephemeral: true, idleTtlS: 900 });
+    await environmentNamed("preview", { ephemeral: true });
+    await retireEnvironment(clock.ctx, PROJECT, "preview");
     const coordinator = coordinatorFor(NODE_A);
     await coordinator.runOnce();
 
     /* Long enough that the environment is reapable and both nodes are stale. */
-    clock.tick(3_600_000);
+    clock.tick(86_400_001);
     await coordinator.runOnce();
 
     expect(coordinator.status().holding).toBe(true);
@@ -547,10 +547,9 @@ describe("credit demand follows resolved process multiplicity", () => {
     await heartbeatNode(clock.ctx, NODE_A);
   });
 
-  it("charges parked and no-build environments zero", async () => {
-    await register(NODE_A, undefined, { allocatableMb: 40, runtimeMb: 20, deployMb: 1 });
+  it("charges deployed ephemeral environments and not environments with no build", async () => {
+    await register(NODE_A, undefined, { allocatableMb: 60, runtimeMb: 20, deployMb: 1 });
     await environmentNamed("a", { ephemeral: true });
-    await setParkPolicy(clock.ctx, PROJECT, "a", { afterS: 1 });
     await createEnvironment(clock.ctx, PROJECT, { name: "b" });
     await environmentNamed("c");
     for (const env of ["a", "b", "c"]) await setReplicas(clock.ctx, PROJECT, env, 1);
@@ -560,10 +559,11 @@ describe("credit demand follows resolved process multiplicity", () => {
     const coordinator = coordinatorFor(NODE_A);
     await coordinator.runOnce();
 
-    for (const env of ["a", "b", "c"]) {
+    for (const env of ["a", "c"]) {
       expect((await readPlacement(clock.ctx, PROJECT, env))?.nodes).toEqual([NODE_A]);
     }
-    expect(coordinator.status().lastAssignment?.accounts[0]?.steady.runtimeMb).toBe(20);
+    expect((await readPlacement(clock.ctx, PROJECT, "b"))?.nodes).toEqual([NODE_A]);
+    expect(coordinator.status().lastAssignment?.accounts[0]?.steady.runtimeMb).toBe(40);
   });
 });
 
@@ -875,12 +875,11 @@ function daemonFor(nodeId: string, observability?: DaemonContext["observability"
 /** An environment with a build to serve, so it is a real placement target. */
 async function environmentNamed(
   name: string,
-  opts?: { ephemeral?: boolean; idleTtlS?: number; nodeSelector?: NodeSelector },
+  opts?: { ephemeral?: boolean; nodeSelector?: NodeSelector },
 ): Promise<void> {
   await createEnvironment(clock.ctx, PROJECT, {
     name,
     ...(opts?.ephemeral === undefined ? {} : { ephemeral: opts.ephemeral }),
-    ...(opts?.idleTtlS === undefined ? {} : { idleTtlS: opts.idleTtlS }),
     ...(opts?.nodeSelector === undefined ? {} : { nodeSelector: opts.nodeSelector }),
   });
   await recordDeployment(clock.ctx, PROJECT, name, BUILD);

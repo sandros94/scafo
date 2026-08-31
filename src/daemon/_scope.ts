@@ -12,7 +12,7 @@
  *
  * WHAT A CALLER MAY LEARN — {@link scopedState} — at the point a route hands
  * back a document that names projects it was never asked about. `GET /v1/state`
- * reports every placement, every parked environment, every process and every
+ * reports every placement, every process and every
  * unplaced environment this node knows of, and on a multi-tenant fleet that is
  * the tenant list. A boundary that refuses to act on another tenant's project
  * while reporting that the project exists is half a boundary.
@@ -79,14 +79,9 @@ export function assertProjectScope(identity: NodeIdentity, project: string): voi
  * peers would be a deploy that never completes.
  *
  * WHAT STAYS, AND WHY. The node's own record, the coordinator lease, who holds
- * it, and the wake counters are facts about this MACHINE — which node this is,
- * whether it is coordinating, how much it has been woken for. None of them names
- * a project, none of them is another tenant's, and an operator who cannot see
- * them cannot tell a fleet that is idle from one that is broken. The wake
- * counters are pure totals rather than a breakdown by host or project, so there
- * is no row in them to narrow.
+ * it are facts about this MACHINE. None names another tenant.
  *
- * WHAT GOES. Placements, parked environments, running processes and the
+ * WHAT GOES. Placements, running processes and the
  * environments the last assignment pass could not place — in the top-level
  * document and again inside `reconcile`, which is the same reads reported at
  * more length. A process is matched by parsing its supervisor id, and one whose
@@ -118,7 +113,6 @@ export function scopedState(caller: TrustedOperator | null, state: DaemonState):
       reaches(parseProcessId(entry.id)?.project ?? null),
     ),
     placements: byProject(state.placements),
-    parked: byProject(state.parked),
     ...(reconcile === undefined
       ? {}
       : {
@@ -126,7 +120,6 @@ export function scopedState(caller: TrustedOperator | null, state: DaemonState):
             ...reconcile,
             processes: byProject(reconcile.processes),
             placements: byProject(reconcile.placements),
-            parked: byProject(reconcile.parked),
             /*
              * A failure whose subject names NO project — the ingress's own
              * convergence, or one recorded before there was a subject to record

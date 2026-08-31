@@ -7,7 +7,7 @@
  */
 
 import { isScafoError } from "../error.ts";
-import type { ApiRouting, IngressBackend, IngressDesired, WakeRouting } from "../types/ingress.ts";
+import type { ApiRouting, IngressBackend, IngressDesired } from "../types/ingress.ts";
 import type { EnvironmentRecord } from "../types/registry.ts";
 import type { RuntimeProcess } from "../types/runtime.ts";
 import { formatHostLabel } from "../utils/slug.ts";
@@ -60,15 +60,6 @@ export interface RenderRoutesInput {
   processes: RuntimeProcess[];
   claims: RouteClaim[];
   /**
-   * The daemon's own loopback port and the environments this node reads as
-   * parked, when there is a daemon for a request to fall through to.
-   *
-   * Omitted, and the routing then carries no `wake` at all, by a caller that has
-   * no daemon address to hand out — which is exactly the routing scafo rendered
-   * before scale-to-zero existed.
-   */
-  wake?: { port: number; parked: Array<{ project: string; env: EnvironmentRecord }> };
-  /**
    * The daemon's own loopback port again, by a node publishing the fleet's API at
    * its platform domains' bare apexes (`api.public`).
    *
@@ -89,18 +80,9 @@ export interface RenderRoutesInput {
  *    to serve it, plus `<project>.<domain>` when that environment is
  *    {@link APEX_ENVIRONMENT}.
  * 2. Each claimed custom domain whose environment has a process running.
- * 3. The hosts of every PARKED environment — its label under each domain, its
- *    apex when it is {@link APEX_ENVIRONMENT}, and every custom domain its
- *    record claims — which no process answers on and which therefore go to the
- *    node's own daemon instead, to be woken by the request that asked for them.
- *    These are reported in `wake` rather than in `routes`, because they name a
- *    daemon rather than a backend, and a host that already has a route above is
- *    never among them: mid-transition, the running process wins.
- * 4. The BARE APEX of every platform domain, when this node publishes the
+ * 3. The BARE APEX of every platform domain, when this node publishes the
  *    fleet's API there — reported in `api`, on the same precedence rule: an apex
- *    that an application or wake route already answers on is left out. A `*.<domain>`
- *    matcher covers exactly one label, so an apex is never a catch-all's
- *    business and needs an explicit route of its own.
+ *    that an application already answers on is left out.
  *
  * An environment's hosts resolve only to its running environment-owned process.
  */
@@ -142,18 +124,13 @@ export function renderRoutes(input: RenderRoutesInput): IngressDesired {
     add(claim.host, served.get(placement(claim.project, claim.environment)));
   }
 
-  const wake =
-    input.wake === undefined ? undefined : wakeRouting(input.wake, input.platformDomains, routes);
   const api =
-    input.api === undefined
-      ? undefined
-      : apiRouting(input.api, input.platformDomains, routes, wake);
+    input.api === undefined ? undefined : apiRouting(input.api, input.platformDomains, routes);
 
   return {
     routes: [...routes.keys()]
       .sort(compare)
       .map((host) => ({ host, backend: routes.get(host) as IngressBackend })),
-    ...(wake === undefined ? {} : { wake }),
     ...(api === undefined ? {} : { api }),
   };
 }
@@ -163,10 +140,7 @@ export function renderRoutes(input: RenderRoutesInput): IngressDesired {
  * {@link renderRoutes} gives its label, its apex and its custom domains, and an
  * empty list when no supervised process serves it.
  *
- * EXPORTED SO THAT WHAT ANSWERS AN ENVIRONMENT IS DECIDED IN ONE PLACE. The
- * daemon's wake surface answers every host the ingress has no explicit route for,
- * which is more of the traffic than it looks: a parked or starting environment,
- * and every host of every environment while a router propagates. A second
+ * EXPORTED SO THAT WHAT ANSWERS AN ENVIRONMENT IS DECIDED IN ONE PLACE. A second
  * reading of "what serves this environment" would be a second routing, and two
  * routings drift — the one that drifted served a build a deployment had already
  * superseded. There is one, and it is this.
@@ -180,59 +154,20 @@ export function servingBackend(
 }
 
 /**
- * What the node's own daemon is given: the hosts of every parked environment,
- * and the platform domains it answers for whatever else is asked of them.
- *
- * A host `routes` already answers on is left out rather than listed in both. The
- * two overlap for a whole pass whenever an environment is waking — the record
- * still reads parked to a node that has not re-read it, while the process it
- * started is already running — and the running process is the better answer of
- * the two, since routing it to the daemon would hold a request for something
- * that is already up.
- */
-function wakeRouting(
-  wake: { port: number; parked: Array<{ project: string; env: EnvironmentRecord }> },
-  platformDomains: string[],
-  routes: Map<string, IngressBackend>,
-): WakeRouting {
-  const hosts = new Set<string>();
-  const claim = (host: string | null): void => {
-    if (host === null || routes.has(host)) return;
-    hosts.add(host);
-  };
-
-  for (const { project, env } of wake.parked) {
-    for (const domain of platformDomains) {
-      claim(hostUnder(domain, project, env.name));
-      if (env.name === APEX_ENVIRONMENT) claim(hostUnder(domain, project));
-    }
-    /* The record mirrors every domain claimed for the environment, and a parked
-       environment is reached by its custom names exactly as it is by its own. */
-    for (const host of env.domains) claim(host);
-  }
-
-  return { port: wake.port, hosts: [...hosts].sort(compare), domains: [...platformDomains] };
-}
-
-/**
  * The apexes this node answers the fleet's API at: every platform domain, bare.
  *
  * A domain something else already answers on is left out rather than listed
- * twice — an environment that claimed the platform apex as a custom domain, or a
- * parked one holding it open. The rule is the same one the routes themselves are
- * built on: the first thing to claim a host keeps it, and an application an
+ * twice — an environment that claimed the platform apex as a custom domain. The
+ * rule is the same one the routes themselves are built on: the first thing to
+ * claim a host keeps it, and an application an
  * operator deliberately put at the apex is not displaced by the API.
  */
 function apiRouting(
   api: { port: number },
   platformDomains: string[],
   routes: Map<string, IngressBackend>,
-  wake: WakeRouting | undefined,
 ): ApiRouting {
-  const held = new Set(wake?.hosts ?? []);
-  const hosts = new Set(
-    platformDomains.filter((domain) => !routes.has(domain) && !held.has(domain)),
-  );
+  const hosts = new Set(platformDomains.filter((domain) => !routes.has(domain)));
 
   return { port: api.port, hosts: [...hosts].sort(compare), denied: [...API_DENIED_PREFIXES] };
 }

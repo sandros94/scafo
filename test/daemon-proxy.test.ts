@@ -77,7 +77,6 @@ beforeEach(async () => {
   await createEnvironment(clock.ctx, PROJECT, {
     name: ENVIRONMENT,
     ephemeral: true,
-    idleTtlS: 900,
   });
   await createBuild(clock.ctx, PROJECT, { id: BUILD });
   await recordDeployment(clock.ctx, PROJECT, ENVIRONMENT, BUILD);

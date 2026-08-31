@@ -73,7 +73,7 @@ async function written(from: CasStore = store): Promise<ObserveRecord[]> {
 
 describe("what a flush carries", () => {
   it("writes the drained events, one record each, under the node that saw them", async () => {
-    observe.emit({ type: "wake.kicked", id: "aaaa" });
+    observe.emit({ type: "runtime.started", processId: "archive--old" });
     clock.tick(10);
     observe.emit({
       type: "runtime.started",
@@ -88,8 +88,8 @@ describe("what a flush carries", () => {
         record: "event",
         node: NODE,
         at: new Date(CLOCK_START_MS).toISOString(),
-        type: "wake.kicked",
-        id: "aaaa",
+        type: "runtime.started",
+        processId: "archive--old",
       },
       {
         v: OBSERVE_RECORD_VERSION,
@@ -103,7 +103,7 @@ describe("what a flush carries", () => {
   });
 
   it("heads the file with what it carried and what it lost", async () => {
-    observe.emit({ type: "wake.kicked", id: "aaaa" });
+    observe.emit({ type: "runtime.started", processId: "shop--prod" });
 
     await flusherWith().flush();
 
@@ -130,7 +130,7 @@ describe("what a flush carries", () => {
       now: (): Date => new Date(clock.nowMs()),
     });
     for (let index = 0; index < 5; index++)
-      observe.emit({ type: "wake.kicked", id: `id-${String(index)}` });
+      observe.emit({ type: "runtime.started", processId: `shop--env-${String(index)}` });
 
     await flusherWith().flush();
 
@@ -216,7 +216,7 @@ describe("where a flush lands", () => {
        show up in. */
     clock = ctxWith(store, Date.parse("2026-03-04T05:06:07.008Z"));
     observe = createObservability({ enabled: true, now: (): Date => new Date(clock.nowMs()) });
-    observe.emit({ type: "wake.kicked", id: "aaaa" });
+    observe.emit({ type: "runtime.started", processId: "shop--prod" });
 
     await flusherWith().flush();
 
@@ -234,9 +234,9 @@ describe("where a flush lands", () => {
 
   it("never writes two flushes to one key, even in the same millisecond", async () => {
     const flusher = flusherWith();
-    observe.emit({ type: "wake.kicked", id: "one" });
+    observe.emit({ type: "runtime.started", processId: "shop--one" });
     await flusher.flush();
-    observe.emit({ type: "wake.kicked", id: "two" });
+    observe.emit({ type: "runtime.started", processId: "shop--two" });
     await flusher.flush();
 
     expect(await store.list("_scafo/observe/")).toHaveLength(2);
@@ -261,12 +261,8 @@ describe("the encoder seam", () => {
       record: "event",
       node: NODE,
       at: new Date(CLOCK_START_MS).toISOString(),
-      type: "wake.admitted",
-      id: "aaaa",
-      host: `shop.${DOMAIN}`,
-      project: "shop",
-      env: "production",
-      inFlight: 1,
+      type: "runtime.started",
+      processId: "shop--production",
     },
     {
       v: OBSERVE_RECORD_VERSION,
@@ -304,7 +300,7 @@ describe("the encoder seam", () => {
     /* The bytes have to arrive intact — a columnar file is not UTF-8, so a store
        that took only text would hand back replacement characters and a
        `.parquet` object that is no longer a Parquet file. */
-    observe.emit({ type: "wake.kicked", id: "aaaa" });
+    observe.emit({ type: "runtime.started", processId: "shop--prod" });
     const counters = createIngressCounters({
       platformDomains: [DOMAIN],
       now: (): Date => new Date(clock.nowMs()),
@@ -330,7 +326,7 @@ describe("the encoder seam", () => {
   });
 
   it("compresses the flush, and reads it back only because the codec is registered", async () => {
-    observe.emit({ type: "wake.kicked", id: "aaaa" });
+    observe.emit({ type: "runtime.started", processId: "shop--prod" });
 
     await flusherWith().flush();
 
@@ -350,7 +346,7 @@ describe("the cadence", () => {
   it("flushes on the interval and not before it", async () => {
     const flusher = flusherWith({ intervalMs: 60_000, drainIntervalMs: 5_000 });
     flusher.start();
-    observe.emit({ type: "wake.kicked", id: "aaaa" });
+    observe.emit({ type: "runtime.started", processId: "shop--prod" });
 
     clock.tick(30_000);
     await flusher.tick();
@@ -367,7 +363,7 @@ describe("the cadence", () => {
     flusher.start();
 
     for (let index = 0; index < 3; index++)
-      observe.emit({ type: "wake.kicked", id: String(index) });
+      observe.emit({ type: "runtime.started", processId: `shop--${String(index)}` });
     /* Well inside the interval: the size bound is the other trigger, and it is
        what keeps a busy node's ring from overflowing between flushes. */
     clock.tick(5_000);
@@ -387,7 +383,7 @@ describe("the cadence", () => {
     flusher.start();
 
     for (let round = 0; round < 4; round++) {
-      observe.emit({ type: "wake.kicked", id: `round-${String(round)}` });
+      observe.emit({ type: "runtime.started", processId: `shop--round-${String(round)}` });
       clock.tick(5_000);
       await flusher.tick();
     }
@@ -413,13 +409,13 @@ describe("a flush that does not land", () => {
   it("keeps the events for the next attempt rather than losing them", async () => {
     const faults = new FaultStore(store);
     const flusher = flusherWith({}, faults);
-    observe.emit({ type: "wake.kicked", id: "one" });
+    observe.emit({ type: "runtime.started", processId: "shop--one" });
 
     faults.failAfter(0);
     expect(await flusher.flush()).toBe(false);
     expect(flusher.status().pending).toBe(1);
 
-    observe.emit({ type: "wake.kicked", id: "two" });
+    observe.emit({ type: "runtime.started", processId: "shop--two" });
     faults.clearFaults();
     expect(await flusher.flush()).toBe(true);
 
@@ -441,7 +437,7 @@ describe("a flush that does not land", () => {
     const flusher = flusherWith({ intervalMs: 60_000, drainIntervalMs: 5_000 }, faults);
     flusher.start();
     faults.failAfter(0);
-    observe.emit({ type: "wake.kicked", id: "one" });
+    observe.emit({ type: "runtime.started", processId: "shop--one" });
 
     clock.tick(60_000);
     await flusher.tick();
@@ -467,7 +463,7 @@ describe("a flush that does not land", () => {
     faults.failAfter(0);
 
     for (let index = 0; index < 6; index++) {
-      observe.emit({ type: "wake.kicked", id: `id-${String(index)}` });
+      observe.emit({ type: "runtime.started", processId: `shop--id-${String(index)}` });
       await flusher.flush();
     }
 
@@ -481,10 +477,10 @@ describe("a flush that does not land", () => {
     /* The three newest survived, the three oldest were dropped, and the header
        says how many — a bucket that never comes back must not take the node's
        memory with it, and it must not do so silently either. */
-    expect(records.map((record) => ("id" in record ? record.id : ""))).toEqual([
-      "id-3",
-      "id-4",
-      "id-5",
+    expect(records.map((record) => ("processId" in record ? record.processId : ""))).toEqual([
+      "shop--id-3",
+      "shop--id-4",
+      "shop--id-5",
     ]);
     expect(flushRecords(await written())[0].pendingDropped).toBe(3);
   });
@@ -555,12 +551,12 @@ describe("retention", () => {
 
     /* The first flush sweeps, so a node coming back from a long stop cleans up
        without waiting an hour for it. */
-    observe.emit({ type: "wake.kicked", id: "one" });
+    observe.emit({ type: "runtime.started", processId: "shop--one" });
     await flusher.flush();
     expect(flusher.status().swept).toBe(2);
 
     for (const id of ["two", "three"]) {
-      observe.emit({ type: "wake.kicked", id });
+      observe.emit({ type: "runtime.started", processId: `shop--${id}` });
       clock.tick(1);
       await flusher.flush();
     }

@@ -1,9 +1,8 @@
 /*
  * What the ingress served, counted per environment.
  *
- * THE INGRESS IS THE ONLY COMPLETE OBSERVER OF TENANT TRAFFIC. The daemon sees
- * the requests it wakes and nothing else: once a process is up, every request
- * for it goes ingress → process and never passes through the node's own
+ * THE INGRESS IS THE ONLY COMPLETE OBSERVER OF TENANT TRAFFIC. Every application request
+ * goes ingress → process and never passes through the node's own
  * surface. So the numbers a platform is measured by — requests, bytes, status,
  * latency, per project and environment — can only be read off the ingress's own
  * access log, which is what this counts.
@@ -88,10 +87,8 @@ export interface IngressCountersSnapshot {
  * BOTH HALVES ARE NEEDED AND THEY COVER DIFFERENT GAPS. `routes` is what the
  * ingress is actually serving, so it names every host with a ready process
  * behind it — an environment's label, its apex or a custom domain — and it
- * carries the environment each of them reaches. `claims`
- * is every custom domain an environment's record holds, ready or not, which is
- * what keeps a parked environment's own domain attributable while nothing is
- * running for it.
+ * carries the environment each of them reaches. `claims` is every custom domain
+ * an environment's record holds, preserving attribution across route changes.
  */
 export interface RoutingAttribution {
   routes: IngressRoute[];

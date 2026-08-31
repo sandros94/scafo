@@ -293,7 +293,6 @@ describe("what the reconcile pass hands over", () => {
     await applyIngress(daemon, {
       desired: [{ project: "shop", env }],
       processes: [process_("shop", "production", "aaaa1111", 9101)],
-      parked: [],
     });
 
     /* Exactly the hosts the ingress was told about, each read as the
@@ -328,16 +327,13 @@ describe("what the reconcile pass hands over", () => {
         },
       } as unknown as DaemonContext;
 
-      await applyIngress(daemon, { desired: [], processes: [], parked: [] });
+      await applyIngress(daemon, { desired: [], processes: [] });
 
       expect(applied[0].api, String(isPublic)).toEqual(
         isPublic
           ? { port: 7400, hosts: [...DOMAINS].sort(), denied: API_DENIED_PREFIXES }
           : undefined,
       );
-      /* The same daemon, the same port: the API and the wake surface are one
-         listener reached under two contracts. */
-      expect(applied[0].wake?.port, String(isPublic)).toBe(7400);
     }
   });
 });

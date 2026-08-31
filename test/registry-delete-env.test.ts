@@ -47,7 +47,7 @@ beforeEach(async () => {
 
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
-  await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true, idleTtlS: 900 });
+  await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true });
   await createBuild(clock.ctx, PROJECT, { id: BUILD });
   await recordDeployment(clock.ctx, PROJECT, "preview", BUILD);
 
@@ -90,9 +90,7 @@ describe("deleteEnvironment", () => {
     await invariants(store);
   });
 
-  it("deletes an environment however recently it was used", async () => {
-    /* No idleness question is asked: the order to delete IS the decision, and
-       this environment was deployed a moment ago. */
+  it("deletes an ephemeral environment without retirement", async () => {
     const { deleted } = await deleteEnvironment(clock.ctx, PROJECT, "preview", lease);
 
     expect(deleted).toContain(environmentKey(PROJECT, "preview"));

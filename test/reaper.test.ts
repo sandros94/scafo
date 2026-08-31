@@ -1,10 +1,9 @@
-/* The reaper only ever deletes what nothing points at, and re-checks that under fault. */
+/* The reaper only deletes retired environments and old deployment history. */
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import {
   acquireLease,
-  type ActivitySource,
   checkDomain,
   claimDomain,
   createBuild,
@@ -15,56 +14,27 @@ import {
   getEnvironment,
   type LeaseHandle,
   planReap,
-  readEnvironmentWake,
   type ReapOptions,
   retireEnvironment,
-  stampEnvironmentWake,
   unretireEnvironment,
-  wakeActivity,
 } from "../src/core/registry/index.ts";
-import {
-  buildKey,
-  domainKey,
-  environmentKey,
-  envWakeKey,
-  fleetPrefix,
-} from "../src/core/registry/paths.ts";
+import { buildKey, domainKey, environmentKey, fleetPrefix } from "../src/core/registry/paths.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, invariants, type ManualClock, rejectsWith } from "./_helpers.ts";
 
 const PROJECT = "app";
-const B1 = "b1b1b1b1";
-const B4 = "b4b4b4b4";
+const BUILD = "b1b1b1b1";
 const HOUR_MS = 3_600_000;
 const RETENTION_MS = 1_800_000;
-
 const FLEET_KEYS = [
   `${fleetPrefix(PROJECT, "preview")}/node-a.json`,
   `${fleetPrefix(PROJECT, "preview")}/state/routes.json`,
 ];
-/* Sibling prefixes must survive: `fleets/app/preview` is a prefix of `fleets/app/preview2`. */
-const SURVIVORS = [
-  `${fleetPrefix(PROJECT, "preview")}2/keep.json`,
-  `fleets/${PROJECT}/prod/keep.json`,
-];
-
-/** Last-request timestamps the reaper reads; unset environments fall back to their records. */
-class FakeActivity implements ActivitySource {
-  readonly #seen = new Map<string, Date>();
-
-  set(project: string, env: string, at: Date): void {
-    this.#seen.set(`${project}/${env}`, at);
-  }
-
-  lastActiveAt(project: string, env: string): Promise<Date | null> {
-    return Promise.resolve(this.#seen.get(`${project}/${env}`) ?? null);
-  }
-}
+const SURVIVOR = `${fleetPrefix(PROJECT, "preview")}2/keep.json`;
 
 let inner: MemoryCasStore;
 let store: FaultStore;
 let clock: ManualClock;
-let activity: FakeActivity;
 let lease: LeaseHandle;
 let opts: ReapOptions;
 
@@ -72,175 +42,115 @@ beforeEach(async () => {
   inner = new MemoryCasStore();
   store = new FaultStore(inner);
   clock = ctxWith(store);
-  activity = new FakeActivity();
 
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
-  await createEnvironment(clock.ctx, PROJECT, {
-    name: "preview",
-    ephemeral: true,
-    idleTtlS: 900,
-  });
-  for (const id of [B1, B4]) {
-    await createBuild(clock.ctx, PROJECT, { id });
-  }
-
-  await recordDeployment(clock.ctx, PROJECT, "prod", B1);
-  await recordDeployment(clock.ctx, PROJECT, "preview", B1);
-
-  for (const key of [...FLEET_KEYS, ...SURVIVORS]) await store.put(key, "{}");
+  await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true });
+  await createBuild(clock.ctx, PROJECT, { id: BUILD });
+  await recordDeployment(clock.ctx, PROJECT, "preview", BUILD);
+  for (const key of [...FLEET_KEYS, SURVIVOR]) await store.put(key, "{}");
 
   clock.tick(HOUR_MS);
-  activity.set(PROJECT, "prod", new Date(clock.nowMs() - HOUR_MS));
-  activity.set(PROJECT, "preview", new Date(clock.nowMs() - HOUR_MS));
-
   const acquired = await acquireLease(clock.ctx, "node-a");
   if (acquired === null) throw new Error("the reaper fixture could not take the lease");
   lease = acquired;
-
-  opts = { activity, buildRetention: { maxAgeMs: RETENTION_MS } };
+  opts = { buildRetention: { maxAgeMs: RETENTION_MS } };
 });
 
 describe("planReap", () => {
-  it("proposes the idle environment and every build past retention", async () => {
-    const plan = await planReap(clock.ctx, opts);
+  it("keeps every active environment, including old ephemeral ones", async () => {
+    clock.tick(365 * 24 * HOUR_MS);
 
-    expect(plan.environments.map((target) => target.env)).toEqual(["preview"]);
-    expect(plan.builds.map((target) => target.id)).toEqual([B1, B4]);
-    expect(plan.environments[0].reason).toContain("idle");
-    expect(plan.builds[0].reason).toContain("old");
-  });
-
-  it("does not treat build history as a runtime pointer", async () => {
-    const plan = await planReap(clock.ctx, opts);
-    const proposed = plan.builds.map((target) => target.id);
-
-    expect(proposed).toContain(B1);
-  });
-
-  it("proposes no build at all without a retention window", async () => {
-    const plan = await planReap(clock.ctx, { activity });
-
-    expect(plan.builds).toEqual([]);
-    expect(plan.environments.map((target) => target.env)).toEqual(["preview"]);
-  });
-
-  it("leaves the ephemeral environment alone while it is still being used", async () => {
-    activity.set(PROJECT, "preview", new Date(clock.nowMs()));
     const plan = await planReap(clock.ctx, opts);
 
     expect(plan.environments).toEqual([]);
   });
 
-  it("never proposes a non-ephemeral environment, however idle", async () => {
-    clock.tick(365 * 24 * HOUR_MS);
+  it("proposes a retired environment only after its grace", async () => {
+    await retireEnvironment(clock.ctx, PROJECT, "preview");
+    expect((await planReap(clock.ctx, opts)).environments).toEqual([]);
+
+    clock.tick(DEFAULT_RETIREMENT_GRACE_MS);
     const plan = await planReap(clock.ctx, opts);
 
-    expect(plan.environments.map((target) => target.env)).not.toContain("prod");
+    expect(plan.environments).toEqual([
+      expect.objectContaining({ env: "preview", reason: expect.stringContaining("retired at") }),
+    ]);
+  });
+
+  it("honours an explicitly shorter retirement grace", async () => {
+    await retireEnvironment(clock.ctx, PROJECT, "prod");
+    clock.tick(HOUR_MS);
+
+    const plan = await planReap(clock.ctx, { ...opts, graceMs: HOUR_MS });
+
+    expect(plan.environments.map((target) => target.env)).toEqual(["prod"]);
+  });
+
+  it("treats builds as immutable history governed only by retention", async () => {
+    expect((await planReap(clock.ctx)).builds).toEqual([]);
+    expect((await planReap(clock.ctx, opts)).builds).toEqual([
+      expect.objectContaining({ id: BUILD, reason: expect.stringContaining("old") }),
+    ]);
   });
 });
 
 describe("executeReap", () => {
-  it("deletes the environment, its fleet keys and the unreferenced build record", async () => {
-    const plan = await planReap(clock.ctx, opts);
+  async function retiredPlan(): Promise<Awaited<ReturnType<typeof planReap>>> {
+    await retireEnvironment(clock.ctx, PROJECT, "preview");
+    clock.tick(DEFAULT_RETIREMENT_GRACE_MS);
+    return planReap(clock.ctx, opts);
+  }
+
+  it("deletes references before the retired environment record", async () => {
+    const host = "preview.example.com";
+    await claimDomain(clock.ctx, host, PROJECT, "preview");
+    const plan = await retiredPlan();
+
     const result = await executeReap(clock.ctx, plan, lease, opts);
 
-    /* Fleet keys go first and the environment record last, so a crash mid-run
-       leaves the environment for the next plan to pick up again. */
     expect(result.deleted).toEqual([
+      domainKey(host),
       ...FLEET_KEYS,
       environmentKey(PROJECT, "preview"),
-      buildKey(PROJECT, B1),
-      buildKey(PROJECT, B4),
+      buildKey(PROJECT, BUILD),
     ]);
-    expect(result.skipped).toEqual([]);
-
+    await expect(checkDomain(clock.ctx, host)).resolves.toBeNull();
     await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, "preview"), "not-found");
-    for (const key of SURVIVORS) await expect(store.get(key)).resolves.not.toBeNull();
-    await expect(getEnvironment(clock.ctx, PROJECT, "prod")).resolves.toMatchObject({
-      deployment: { revision: 1 },
-    });
+    await expect(store.get(SURVIVOR)).resolves.not.toBeNull();
     await invariants(store);
   });
 
-  it("does not pin history when another deployment is recorded", async () => {
-    const plan = await planReap(clock.ctx, opts);
-    await recordDeployment(clock.ctx, PROJECT, "prod", B4);
-
-    const result = await executeReap(clock.ctx, plan, lease, opts);
-
-    expect(result.deleted).toContain(buildKey(PROJECT, B4));
-    await invariants(store);
-  });
-
-  it("skips an environment that took traffic between planning and deleting", async () => {
-    const plan = await planReap(clock.ctx, opts);
-    activity.set(PROJECT, "preview", new Date(clock.nowMs()));
+  it("re-checks retirement and spares an environment taken back", async () => {
+    const plan = await retiredPlan();
+    await unretireEnvironment(clock.ctx, PROJECT, "preview");
 
     const result = await executeReap(clock.ctx, plan, lease, opts);
 
     expect(result.deleted).not.toContain(environmentKey(PROJECT, "preview"));
     expect(result.skipped).toContainEqual({
       target: environmentKey(PROJECT, "preview"),
-      reason: expect.stringContaining("no longer idle"),
+      reason: expect.stringContaining("no longer retired past its grace"),
     });
-    for (const key of FLEET_KEYS) await expect(store.get(key)).resolves.not.toBeNull();
     await expect(getEnvironment(clock.ctx, PROJECT, "preview")).resolves.toMatchObject({
       name: "preview",
     });
-    await invariants(store);
   });
 
-  it("skips an environment somebody else already deleted", async () => {
-    const plan = await planReap(clock.ctx, opts);
+  it("skips an environment already removed by another actor", async () => {
+    const plan = await retiredPlan();
     await inner.del(environmentKey(PROJECT, "preview"));
 
     const result = await executeReap(clock.ctx, plan, lease, opts);
 
     expect(result.skipped).toContainEqual({
       target: environmentKey(PROJECT, "preview"),
-      reason: expect.stringContaining("no longer exists"),
+      reason: "environment no longer exists",
     });
   });
 
-  it("releases the domains of the environment it reaps", async () => {
-    const host = "preview.example.com";
-    await claimDomain(clock.ctx, host, PROJECT, "preview");
-    await invariants(store);
-
-    const plan = await planReap(clock.ctx, opts);
-    const result = await executeReap(clock.ctx, plan, lease, opts);
-
-    expect(result.deleted).toContain(environmentKey(PROJECT, "preview"));
-    expect(result.deleted).toContain(domainKey(host));
-    /* Claims are released before the environment record disappears, so a crash
-       mid-run never orphans a claim planReap would no longer revisit. */
-    expect(result.deleted.indexOf(domainKey(host))).toBeLessThan(
-      result.deleted.indexOf(environmentKey(PROJECT, "preview")),
-    );
-    await expect(checkDomain(clock.ctx, host)).resolves.toBeNull();
-    await invariants(store);
-  });
-
-  it("leaves a domain another environment took over alone", async () => {
-    const host = "preview.example.com";
-    await claimDomain(clock.ctx, host, PROJECT, "preview");
-    const plan = await planReap(clock.ctx, opts);
-
-    /* The claim moves on while the plan is in flight; the reaper must not delete it. */
-    await inner.put(
-      domainKey(host),
-      JSON.stringify({ v: 1, project: PROJECT, environment: "prod", claimedAt: "2026-01-01" }),
-    );
-
-    const result = await executeReap(clock.ctx, plan, lease, opts);
-    expect(result.deleted).not.toContain(domainKey(host));
-    await expect(checkDomain(clock.ctx, host)).resolves.toMatchObject({ environment: "prod" });
-  });
-
-  it("deletes nothing once the lease has been taken away", async () => {
-    const plan = await planReap(clock.ctx, opts);
-    clock.tick(HOUR_MS);
+  it("deletes nothing after the coordinator lease is superseded", async () => {
+    const plan = await retiredPlan();
     const stolen = await acquireLease(clock.ctx, "node-b");
     expect(stolen).not.toBeNull();
 
@@ -251,172 +161,5 @@ describe("executeReap", () => {
     await expect(getEnvironment(clock.ctx, PROJECT, "preview")).resolves.toMatchObject({
       name: "preview",
     });
-    await invariants(store);
-  });
-});
-
-describe("the wake stamps an environment leaves behind", () => {
-  it("deletes its own stamp", async () => {
-    await stampEnvironmentWake(clock.ctx, PROJECT, "preview");
-    await stampEnvironmentWake(clock.ctx, PROJECT, "prod");
-
-    const plan = await planReap(clock.ctx, opts);
-    const result = await executeReap(clock.ctx, plan, lease, opts);
-
-    /*
-     * On the same reading as the fleet keys: they are named after an environment
-     * nothing will ever iterate again, so one left behind is one nothing ever
-     * deletes.
-     */
-    expect(result.deleted).toEqual([
-      ...FLEET_KEYS,
-      envWakeKey(PROJECT, "preview"),
-      environmentKey(PROJECT, "preview"),
-      buildKey(PROJECT, B1),
-      buildKey(PROJECT, B4),
-    ]);
-    /* Before the record, like everything else that names it: a run cut short
-       leaves the environment for the next plan to find again. */
-    expect(result.deleted.indexOf(envWakeKey(PROJECT, "preview"))).toBeLessThan(
-      result.deleted.indexOf(environmentKey(PROJECT, "preview")),
-    );
-    await expect(readEnvironmentWake(clock.ctx, PROJECT, "preview")).resolves.toBeNull();
-    await expect(readEnvironmentWake(clock.ctx, PROJECT, "prod")).resolves.not.toBeNull();
-    await invariants(store);
-  });
-
-  it("deletes nothing extra for an environment nothing ever woke", async () => {
-    const plan = await planReap(clock.ctx, opts);
-    const result = await executeReap(clock.ctx, plan, lease, opts);
-
-    /* Absent keys are not deleted keys: the result names what was actually
-       removed, and an environment nobody ever asked for leaves no stamp. */
-    expect(result.deleted).not.toContain(envWakeKey(PROJECT, "preview"));
-    expect(result.deleted).toContain(environmentKey(PROJECT, "preview"));
-  });
-});
-
-describe("idleness read from the wake stamps", () => {
-  it("spares an environment a stamp says was asked for, and reaps the one nothing stamped", async () => {
-    await createEnvironment(clock.ctx, PROJECT, {
-      name: "sandbox",
-      ephemeral: true,
-      idleTtlS: 900,
-    });
-    clock.tick(900_000);
-    await stampEnvironmentWake(clock.ctx, PROJECT, "preview");
-
-    const plan = await planReap(clock.ctx, { activity: wakeActivity(clock.ctx) });
-
-    /* The stamps ARE the activity source once a node supplies one; the
-       environment that has none falls back to its own record's timestamps,
-       which is exactly what an installation with no stamps at all does. */
-    expect(plan.environments.map((target) => target.env)).toEqual(["sandbox"]);
-  });
-
-  it("reaps the stamped one too, once its stamp has aged past the window", async () => {
-    await stampEnvironmentWake(clock.ctx, PROJECT, "preview");
-    clock.tick(900_000);
-
-    const plan = await planReap(clock.ctx, { activity: wakeActivity(clock.ctx) });
-
-    expect(plan.environments.map((target) => target.env)).toEqual(["preview"]);
-    expect(plan.environments[0].reason).toContain("idle");
-  });
-});
-
-describe("retired environments", () => {
-  it("proposes a long-lived one once its grace has run out, saying that is why", async () => {
-    await retireEnvironment(clock.ctx, PROJECT, "prod");
-    clock.tick(DEFAULT_RETIREMENT_GRACE_MS);
-
-    const plan = await planReap(clock.ctx, opts);
-
-    /* Idleness is never asked about: `prod` is long-lived and would never
-       qualify on its own. Retirement is an explicit order to decommission, and
-       the grace is the whole of the wait it asked for. */
-    const proposed = plan.environments.find((target) => target.env === "prod");
-    expect(proposed?.reason).toContain("retired at");
-    expect(proposed?.reason).toContain("grace");
-  });
-
-  it("proposes an ephemeral one on the same terms, whatever its idle window says", async () => {
-    /* Retirement outranks the idle rule rather than sitting beside it: an
-       ephemeral environment retired and left alone is decommissioned, and the
-       reason recorded against its deletion should say so. */
-    await retireEnvironment(clock.ctx, PROJECT, "preview");
-    activity.set(PROJECT, "preview", new Date(clock.nowMs()));
-    clock.tick(DEFAULT_RETIREMENT_GRACE_MS);
-
-    const plan = await planReap(clock.ctx, opts);
-
-    expect(plan.environments.find((target) => target.env === "preview")?.reason).toContain(
-      "retired at",
-    );
-  });
-
-  it("proposes nothing while the grace still has time on it", async () => {
-    await retireEnvironment(clock.ctx, PROJECT, "prod");
-    clock.tick(DEFAULT_RETIREMENT_GRACE_MS - HOUR_MS);
-
-    const plan = await planReap(clock.ctx, opts);
-
-    expect(plan.environments.map((target) => target.env)).not.toContain("prod");
-  });
-
-  it("never makes an idle ephemeral environment disappear SOONER", async () => {
-    /*
-     * `preview` is already reapable for idleness in this fixture. Retiring it
-     * must not be the thing that deletes it: an operator retires an environment
-     * to be able to take it back, and a reap that ran a minute later would take
-     * that away from them.
-     */
-    expect((await planReap(clock.ctx, opts)).environments.map((t) => t.env)).toEqual(["preview"]);
-
-    await retireEnvironment(clock.ctx, PROJECT, "preview");
-
-    expect((await planReap(clock.ctx, opts)).environments).toEqual([]);
-  });
-
-  it("honours a grace the caller shortened", async () => {
-    await retireEnvironment(clock.ctx, PROJECT, "prod");
-    clock.tick(HOUR_MS * 2);
-
-    const plan = await planReap(clock.ctx, { ...opts, graceMs: HOUR_MS });
-
-    expect(plan.environments.map((target) => target.env)).toContain("prod");
-  });
-
-  it("re-checks retirement against fresh state, sparing one taken back since", async () => {
-    await retireEnvironment(clock.ctx, PROJECT, "prod");
-    clock.tick(DEFAULT_RETIREMENT_GRACE_MS);
-    const plan = await planReap(clock.ctx, opts);
-    expect(plan.environments.map((target) => target.env)).toContain("prod");
-
-    /* The operator changes their mind while the plan is in flight. */
-    await unretireEnvironment(clock.ctx, PROJECT, "prod");
-    const result = await executeReap(clock.ctx, plan, lease, opts);
-
-    expect(result.deleted).not.toContain(environmentKey(PROJECT, "prod"));
-    expect(result.skipped).toContainEqual({
-      target: environmentKey(PROJECT, "prod"),
-      reason: expect.stringContaining("retired past its grace"),
-    });
-    await expect(getEnvironment(clock.ctx, PROJECT, "prod")).resolves.toMatchObject({
-      name: "prod",
-    });
-    await invariants(store);
-  });
-
-  it("carries the deletion out when it is still retired at the second look", async () => {
-    await retireEnvironment(clock.ctx, PROJECT, "prod");
-    clock.tick(DEFAULT_RETIREMENT_GRACE_MS);
-    const plan = await planReap(clock.ctx, opts);
-
-    const result = await executeReap(clock.ctx, plan, lease, opts);
-
-    expect(result.deleted).toContain(environmentKey(PROJECT, "prod"));
-    await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, "prod"), "not-found");
-    await invariants(store);
   });
 });

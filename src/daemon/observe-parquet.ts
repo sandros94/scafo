@@ -101,13 +101,8 @@ export const OBSERVE_PARQUET_READER_CODECS: Partial<Record<CodecName, ReaderCode
  * ORDER IS THE FILE'S COLUMN ORDER, and it is grouped by record kind so a
  * `DESCRIBE` reads like the record union does: what everything carries, then the
  * flush header's, then an event's, then a counter snapshot's. The two shared
- * names sit with the kind that reaches them first — `project` and `env` are a
- * `wake.admitted`'s and a counters record's alike.
- *
- * `status` is an i64 and NOT the counters object: an event's `status` is the HTTP
- * status a `wake.served` answered with, while a counters record's is the five
- * class totals, which flatten into the `status_*` columns below. Two fields, one
- * name in the record union, two columns here — see {@link COLUMN_OF}.
+ * names sit with the kind that reaches them first — `project` and `env` are an
+ * operational event's and a counters record's alike.
  */
 const FIXED_COLUMNS = {
   /* Every record. */
@@ -127,15 +122,10 @@ const FIXED_COLUMNS = {
 
   /* ObserveEventRecord: the flattened ObservedEvent union. */
   type: { type: "string", optional: true },
-  id: { type: "string", optional: true },
-  host: { type: "string", optional: true },
   project: { type: "string", optional: true },
   env: { type: "string", optional: true },
-  inFlight: { type: "i64", optional: true },
   storeOps: { type: "i64", optional: true },
   listOps: { type: "i64", optional: true },
-  port: { type: "i64", optional: true },
-  status: { type: "i64", optional: true },
   reason: { type: "string", optional: true },
   kicked: { type: "bool", optional: true },
   actions: { type: "i64", optional: true },
@@ -237,14 +227,10 @@ const COLUMN_OF: Record<ObserveField, ObserveParquetColumn | typeof SPREAD> = {
 
   /* ObserveEventRecord. */
   type: "type",
-  id: "id",
-  host: "host",
   project: "project",
   env: "env",
-  inFlight: "inFlight",
   storeOps: "storeOps",
   listOps: "listOps",
-  port: "port",
   reason: "reason",
   kicked: "kicked",
   actions: "actions",
@@ -260,8 +246,7 @@ const COLUMN_OF: Record<ObserveField, ObserveParquetColumn | typeof SPREAD> = {
   requests: "requests",
   bytes: "bytes",
 
-  /* One name, two fields: an event's HTTP status keeps the `status` column, and a
-     counters record's class object flattens into the five `status_*` ones. */
+  /* The class object flattens into the five `status_*` columns. */
   status: SPREAD,
   /* One array, one column per band. */
   durations: SPREAD,
@@ -462,12 +447,6 @@ function putField(row: ObserveParquetRow, field: ObserveField, value: unknown): 
     return;
   }
 
-  /* The event's own HTTP status is a number and keeps the bare column; the
-     counters record's is the class object and spreads across five. */
-  if (typeof value === "number") {
-    row.status = value;
-    return;
-  }
   for (const [name, count] of Object.entries(value as StatusClassCounts)) {
     row[STATUS_COLUMN_OF[name as keyof StatusClassCounts]] = count;
   }
@@ -484,17 +463,12 @@ const SHARED_COLUMNS = new Set<string>(["record", "node", "at"]);
  * Derived from {@link COLUMN_OF} rather than written down beside it, so the two
  * directions cannot drift: a column the write side stops producing stops being
  * read, and one it starts producing is read without a second edit.
- *
- * The BARE `status` column is added back by hand, because the field it belongs to
- * is one of the two that spread and so has no entry to invert. It is an event's
- * HTTP status and nothing else — a counter snapshot's five classes are the
- * `status_*` columns — so it reads straight back into the field of that name.
  */
 const FIELD_OF: Map<string, ObserveField> = new Map(
   Object.entries(COLUMN_OF)
     .filter(([, column]) => column !== SPREAD)
     .map(([field, column]) => [column as ObserveParquetColumn, field as ObserveField]),
-).set("status", "status");
+);
 
 /** The class one `status_*` column carries: {@link STATUS_COLUMN_OF}, inverted. */
 const STATUS_CLASS_OF: Map<string, keyof StatusClassCounts> = new Map(
@@ -519,7 +493,7 @@ const EMPTY_STATUS: StatusClassCounts = { "2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0
  * One read value as the record holds it.
  *
  * The only conversion is `bigint` to `number`: every `i64` column here counts
- * something a node did in a minute — requests, bytes, milliseconds, attempts —
+ * something a node did in a minute — requests, bytes or milliseconds —
  * and none of them can reach `Number.MAX_SAFE_INTEGER`, while a record whose
  * counts were bigints would no longer be the record that was written.
  */

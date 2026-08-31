@@ -7,14 +7,12 @@
  * project record takes the project out of service. Unblocking is one call and
  * everything comes back on the next pass.
  *
- * It rides the machinery retirement and parking already ride rather than adding
- * one of its own. A blocked project contributes NOTHING to what a node reads as
+ * A blocked project contributes NOTHING to what a node reads as
  * its desired state, so its processes are stopped by the same leftover sweep
  * that stops a reassigned environment's, its hosts disappear from the routing
- * because the routing is rendered from what the node serves, and the wake
- * surface answers the same 404 it answers for a retired environment.
+ * because the routing is rendered from what the node serves.
  *
- * The three refusals a caller can see directly — deploy, wake, certificate — are
+ * The two refusals a caller can see directly — deploy and certificate — are
  * asserted here; that a process is really stopped and that the ingress really
  * loses the routes are asserted where the loop runs, in
  * `test/daemon-reconcile.test.ts`.
@@ -26,7 +24,6 @@ import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import { createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { readDesired } from "../src/daemon/_desired.ts";
-import { resolveWakeTarget } from "../src/daemon/_wake-target.ts";
 import {
   blockProject,
   claimDomain,
@@ -91,12 +88,6 @@ describe("what a node reads as its work", () => {
     });
 
     expect(state.environments.map((entry) => entry.project)).toEqual([NEIGHBOUR]);
-    /*
-     * Nothing is reported as parked either: parked promises that a request wakes
-     * it, and a blocked project's does not. The next pass's leftover sweep is
-     * what stops whatever was still running for it.
-     */
-    expect(state.parked).toEqual([]);
     expect(state.failures).toEqual([]);
   });
 
@@ -126,48 +117,6 @@ describe("what a node reads as its work", () => {
     expect(state.environments.find((entry) => entry.project === PROJECT)?.env.name).toBe(
       ENVIRONMENT,
     );
-  });
-});
-
-describe("the wake surface", () => {
-  it("refuses to wake anything of a blocked project", async () => {
-    await blockProject(registry, PROJECT);
-
-    const target = await resolveWakeTarget(registry, {
-      host: `${PROJECT}--${ENVIRONMENT}.${PLATFORM_DOMAIN}`,
-      platformDomains: [PLATFORM_DOMAIN],
-      parked: [],
-    });
-
-    /* Null is the one failure this surface has, and it is answered with the same
-       404 a retired environment gets: nothing here is worth telling one caller
-       about another's project. */
-    expect(target).toBeNull();
-  });
-
-  it("still wakes the neighbour, which nobody blocked", async () => {
-    await blockProject(registry, PROJECT);
-
-    const target = await resolveWakeTarget(registry, {
-      host: `${NEIGHBOUR}--${ENVIRONMENT}.${PLATFORM_DOMAIN}`,
-      platformDomains: [PLATFORM_DOMAIN],
-      parked: [],
-    });
-
-    expect(target).toMatchObject({ kind: "environment", project: NEIGHBOUR });
-  });
-
-  it("wakes it again once the block is lifted", async () => {
-    await blockProject(registry, PROJECT);
-    await unblockProject(registry, PROJECT);
-
-    const target = await resolveWakeTarget(registry, {
-      host: `${PROJECT}--${ENVIRONMENT}.${PLATFORM_DOMAIN}`,
-      platformDomains: [PLATFORM_DOMAIN],
-      parked: [],
-    });
-
-    expect(target).toMatchObject({ kind: "environment", project: PROJECT });
   });
 });
 

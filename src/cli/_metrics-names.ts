@@ -3,8 +3,7 @@
  *
  * A counting node attributes a host through the routing it published, and falls
  * back to a PURE, REGISTRY-FREE host grammar for everything the routing does not
- * name — a parked environment, one that is starting, one whose wake was
- * forwarded. That grammar cannot tell a build id from an environment name, nor a
+ * name. That grammar cannot tell a build id from an environment name, nor a
  * real project from a label a crawler invented, because only the registry can.
  * So the reader checks: three listings' worth of names, and every counted pair
  * held against them.

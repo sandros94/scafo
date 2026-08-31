@@ -11,4 +11,3 @@ export * from "./coordinator.ts";
 export * from "./heartbeat.ts";
 export * from "./deploys.ts";
 export * from "./storage.ts";
-export * from "./wake.ts";

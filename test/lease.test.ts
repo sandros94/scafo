@@ -13,6 +13,7 @@ import {
   registerNode,
   releaseLease,
   removeNode,
+  retireEnvironment,
   renewLease,
   verifyLease,
 } from "../src/core/registry/index.ts";
@@ -114,11 +115,12 @@ describe("a superseded holder", () => {
     const { ctx, tick } = ctxWith(store);
 
     await createProject(ctx, { slug: "app" });
-    await createEnvironment(ctx, "app", { name: "preview", ephemeral: true, idleTtlS: 900 });
+    await createEnvironment(ctx, "app", { name: "preview", ephemeral: true });
+    await retireEnvironment(ctx, "app", "preview");
     await registerNode(ctx, NODE);
 
     const stale = await held(acquireLease(ctx, "node-a", { ttlMs: TTL_MS }), "node-a");
-    tick(3_600_000);
+    tick(86_400_001);
     const plan = await planReap(ctx, { buildRetention: { maxAgeMs: 1000 } });
     expect(plan.environments).toHaveLength(1);
 

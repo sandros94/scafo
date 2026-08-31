@@ -426,17 +426,15 @@ describe("GET /v1/operators shows an operator its OWN LINEAGE and nothing else",
 /* ---------------------------------------------------------- 5. filtered state */
 
 describe("GET /v1/state is filtered to what the caller reaches", () => {
-  it("hides another tenant's placements, parked environments and processes", async () => {
+  it("hides another tenant's placements and processes", async () => {
     const state = await stateFor(TENANT_ID, tenant);
 
     expect(state.placements.map((entry) => entry.project)).toEqual([MINE]);
-    expect(state.parked.map((entry) => entry.project)).toEqual([MINE]);
     expect(state.processes.map((entry) => entry.id)).toEqual([`${MINE}--${ENVIRONMENT}`]);
     expect(state.coordinator?.unplaced?.map((entry) => entry.target)).toEqual([
       `${MINE}/${ENVIRONMENT}`,
     ]);
     expect(state.reconcile?.placements.map((entry) => entry.project)).toEqual([MINE]);
-    expect(state.reconcile?.parked.map((entry) => entry.project)).toEqual([MINE]);
     expect(state.reconcile?.processes.map((entry) => entry.project)).toEqual([MINE]);
   });
 
@@ -454,7 +452,6 @@ describe("GET /v1/state is filtered to what the caller reaches", () => {
       },
     ]);
     expect(state.coordinator?.overcommitted).toBe(false);
-    expect(state.wakes).toEqual({ inFlight: 0, admitted: 0, refused: 0, forwarded: 0 });
   });
 
   it("marks the answer as filtered whenever the caller is a non-admin operator", async () => {
@@ -477,7 +474,6 @@ describe("GET /v1/state is filtered to what the caller reaches", () => {
     const state = await stateFor(ORPHAN_ID, orphan);
 
     expect(state.placements).toEqual([]);
-    expect(state.parked).toEqual([]);
     expect(state.processes).toEqual([]);
     expect(state.coordinator?.unplaced).toBeUndefined();
   });
@@ -628,7 +624,7 @@ function bothProjectsRunning(): Supervisor {
   };
 }
 
-/** A reconcile loop that has read both projects and parked one environment in each. */
+/** A reconcile loop that has read both projects. */
 function bothProjectsReconciled(): Reconciler {
   const status: ReconcileStatus = {
     lastRunAt: "2026-01-01T00:00:00.000Z",
@@ -649,7 +645,6 @@ function bothProjectsReconciled(): Reconciler {
       nodes: [NODE_ID],
       self: true,
     })),
-    parked: [MINE, THEIRS].map((project) => ({ project, env: ENVIRONMENT })),
   };
 
   return {
@@ -659,7 +654,6 @@ function bothProjectsReconciled(): Reconciler {
     shutdown: () => Promise.resolve(),
     stop: () => {},
     status: (): ReconcileStatus => status,
-    parkedRecords: () => [],
   };
 }
 

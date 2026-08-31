@@ -28,7 +28,6 @@ import { startDaemon } from "../../daemon/serve.ts";
 import { createStorageService } from "../../daemon/storage.ts";
 import { DEFAULT_ARCHIVE_ENTRIES, DEFAULT_ARTIFACT_BYTES } from "../../core/types/deploy.ts";
 import { initRegistry, readMeta } from "../../core/registry/meta.ts";
-import { wakeActivity } from "../../core/registry/wake.ts";
 import { createDeployService } from "../../daemon/deploys.ts";
 import { assertCreditAdmission, createCreditController } from "../../daemon/_credit-controller.ts";
 import { createCelldDeployRunner } from "../../drivers/deploy/celld.ts";
@@ -296,9 +295,7 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
     );
   }
 
-  /* What every dialer of a process this node starts uses — the ingress here, the
-     ingress below, and the wake surface's own hop, which reads it off the
-     same configuration. */
+  /* What every ingress dialer of a process this node starts uses. */
   const upstreamHost = runtimeDialHost(config.runtime);
 
   const ingress = config.ingress;
@@ -389,12 +386,9 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   });
   daemon.reconciler = reconciler;
 
-  /* Every node runs one and competes for the same lease; all but one of them
-     stay candidates, and the loser takes over the moment the holder stops
-     renewing. Its reaper reads idleness off the wake stamps, which is the same
-     record parking is derived from: one notion of "last asked for", so an
-     environment is never reaped as idle while something is still waking it. */
-  const coordinator = createCoordinator(daemon, { activity: wakeActivity(registry) });
+  /* Every node runs one and competes for the same lease; all but one stay
+     candidates, and the loser takes over when the holder stops renewing. */
+  const coordinator = createCoordinator(daemon);
   daemon.coordinator = coordinator;
 
   /* What tells the coordinator this node is still there. Without it the node is
@@ -417,7 +411,7 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
 
   await untilSignalled(async () => {
     /* CLOSED SYNCHRONOUSLY, before the first shutdown await below. The bucket
-       and lease work can take time, and no timer, wake or credit release may
+       and lease work can take time, and no timer or credit release may
        start a process while this node is already leaving. */
     const reconcilerShutdown = reconciler.shutdown();
     /*

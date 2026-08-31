@@ -9,27 +9,21 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { recordDeployment } from "../src/core/registry/_deployment.ts";
-import { type DesiredState, readDesired } from "../src/daemon/_desired.ts";
+import { readDesired } from "../src/daemon/_desired.ts";
 import {
   acquireLease,
   createBuild,
   createEnvironment,
   createProject,
-  DEFAULT_EPHEMERAL_PARK_AFTER_S,
   deletePlacement,
   environmentKey,
   type LeaseHandle,
-  putJson,
-  readJson,
   retireEnvironment,
   setNodeSelector,
-  setParkPolicy,
-  stampEnvironmentWake,
   unretireEnvironment,
   writePlacement,
 } from "../src/core/registry/index.ts";
 import type { RegistryContext } from "../src/core/registry/context.ts";
-import type { EnvironmentRecord } from "../src/core/types/registry.ts";
 import { DEFAULT_CONCURRENCY } from "../src/core/utils/concurrency.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock, ObservingStore } from "./_helpers.ts";
@@ -40,9 +34,6 @@ const BUILD = "b1b1b1b1";
 const SELF = "node-a";
 const PEER = "node-b";
 const PREVIEW = "preview";
-const HOUR_MS = 3_600_000;
-/** How long an ephemeral environment runs past its last wake, by default. */
-const PARK_AFTER_MS = DEFAULT_EPHEMERAL_PARK_AFTER_S * 1000;
 
 let clock: ManualClock;
 let registry: RegistryContext;
@@ -340,110 +331,18 @@ describe("what is left out for reasons other than placement", () => {
     expect(await readDesired(empty, { nodeId: SELF, mode: "legacy-fallback" })).toEqual({
       environments: [],
       placements: [],
-      parked: [],
       failures: [],
     });
   });
 });
 
-describe("an ephemeral environment that has gone quiet", () => {
-  it("is served exactly as it always was while its wake is fresh", async () => {
-    await parkable(PREVIEW);
-    await stampEnvironmentWake(registry, PROJECT, PREVIEW);
-    clock.tick(PARK_AFTER_MS - 1);
-
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
-
-    expect(state.environments.map((entry) => entry.env.name)).toEqual([PREVIEW, "prod"]);
-    expect(state.parked).toEqual([]);
-  });
-
-  it("parks once nothing has woken it for as long as its policy allows", async () => {
-    await parkable(PREVIEW);
-    await stampEnvironmentWake(registry, PROJECT, PREVIEW);
-    clock.tick(PARK_AFTER_MS);
-
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
-
-    /*
-     * Its runtime stops with the environment. The next pass stops it, and because
-     * the routing is rendered from what this node actually runs, its own hosts
-     * stop resolving with them.
-     */
-    expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
-    /* Reported rather than merely left out: an environment nothing runs for
-       because it was never deployed looks exactly like one waiting to be woken,
-       and only one of them is answered by sending it a request. */
-    expect(parkedNames(state)).toEqual([{ project: PROJECT, env: PREVIEW }]);
-    expect(state.failures).toEqual([]);
-  });
-
-  it("does not let a deployment reset an environment's activity clock", async () => {
+describe("an old ephemeral environment", () => {
+  it("remains desired indefinitely", async () => {
     await createEnvironment(registry, PROJECT, { name: PREVIEW, ephemeral: true });
-    clock.tick(PARK_AFTER_MS);
     await recordDeployment(registry, PROJECT, PREVIEW, BUILD);
-
-    /* Created long ago, deployed a moment ago. An environment that predates
-       wake stamps must not read as parked the instant a node that knows about
-       parking picks it up. */
-    expect(
-      parkedNames(await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" })),
-    ).toEqual([{ project: PROJECT, env: PREVIEW }]);
-
-    clock.tick(PARK_AFTER_MS);
-    expect(
-      parkedNames(await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" })),
-    ).toEqual([{ project: PROJECT, env: PREVIEW }]);
-  });
-
-  it("counts the wait from its creation when it has neither a stamp nor a deployment", async () => {
-    /* Nothing of an environment without a deployment notice is served. */
-    await createEnvironment(registry, PROJECT, { name: PREVIEW, ephemeral: true });
-    clock.tick(PARK_AFTER_MS);
-
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
-
-    expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
-    expect(state.parked).toEqual([]);
-  });
-
-  it("refuses a malformed deployment marker", async () => {
-    await parkable(PREVIEW);
-    await damageCurrentTimestamp(PREVIEW);
-    clock.tick(PARK_AFTER_MS * 100);
-
-    await expect(
-      readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" }),
-    ).rejects.toMatchObject({ code: "invalid-input" });
-  });
-
-  it("never parks one whose window is 0, which is how a preview is kept warm", async () => {
-    await parkable(PREVIEW);
-    await setParkPolicy(registry, PROJECT, PREVIEW, { afterS: 0 });
-    clock.tick(PARK_AFTER_MS * 100);
-
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
+    clock.tick(365 * 24 * 60 * 60 * 1000);
 
     expect(await isDesired(PREVIEW)).toBe(true);
-    expect(state.parked).toEqual([]);
-  });
-
-  it("leaves a LONG-LIVED environment alone, whatever window its record carries", async () => {
-    /*
-     * The belt in `resolveParkPolicy`, seen from the node. A long-lived
-     * environment serves live traffic no wake stamp reflects — a stamp is
-     * written when something is woken, and a warm environment is never woken —
-     * so a record some other writer gave a window to must not take it off the
-     * air on a clock.
-     */
-    await writeRecord("prod", { park: { afterS: 60 } });
-    await stampEnvironmentWake(registry, PROJECT, "prod");
-    clock.tick(HOUR_MS);
-
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
-
-    expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
-    expect(state.parked).toEqual([]);
   });
 });
 
@@ -451,7 +350,7 @@ describe("how a pass reads all of that", () => {
   /*
    * A pass is a read per environment plus the reads that resolve it, and on a
    * hundred-millisecond store one after another that is seconds in front of
-   * every wake and every runtime start. What is asserted here is that overlapping
+   * every runtime start. What is asserted here is that overlapping
    * them changes the LATENCY and nothing else: the same answer, in the same
    * order, with the same failure — and never more of the store at once than the
    * node said it would take.
@@ -518,31 +417,10 @@ async function deployed(project: string, name: string): Promise<void> {
   await recordDeployment(registry, project, name, BUILD);
 }
 
-/** The same, ephemeral: the only kind of environment that parks on a clock. */
-async function parkable(name: string): Promise<void> {
-  await createEnvironment(registry, PROJECT, { name, ephemeral: true });
-  await recordDeployment(registry, PROJECT, name, BUILD);
-}
-
-/** The parked environments by name; the state carries their whole records. */
-function parkedNames(state: DesiredState): Array<{ project: string; env: string }> {
-  return state.parked.map((entry) => ({ project: entry.project, env: entry.env.name }));
-}
-
 /** Whether this node would run `name`. */
 async function isDesired(name: string): Promise<boolean> {
   const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
   return state.environments.some((entry) => entry.env.name === name);
-}
-
-/** Rewrites an environment record in the bucket, as another writer would leave it. */
-async function writeRecord(name: string, patch: Partial<EnvironmentRecord>): Promise<void> {
-  const key = environmentKey(PROJECT, name);
-  const current = await readJson<EnvironmentRecord>(registry, key);
-  await putJson<EnvironmentRecord>(registry, key, {
-    ...(current?.value as EnvironmentRecord),
-    ...patch,
-  });
 }
 
 /**
@@ -569,13 +447,4 @@ async function watchedInstallation(): Promise<{
     await writePlacement(ctx, PROJECT, name, [SELF], taken);
   }
   return { ctx, observing, names };
-}
-
-/** Leaves the environment with a current-deployment timestamp nothing can read. */
-async function damageCurrentTimestamp(name: string): Promise<void> {
-  const current = await readJson<EnvironmentRecord>(registry, environmentKey(PROJECT, name));
-  const deployment = current?.value.deployment;
-  await writeRecord(name, {
-    deployment: { ...(deployment as NonNullable<typeof deployment>), deployedAt: "whenever" },
-  });
 }

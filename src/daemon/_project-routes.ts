@@ -7,7 +7,7 @@
  * taken over must not be able to stop its installation's tenants.
  *
  * AND EVERY WRITE HERE IS ADMIN-ONLY, which is the part worth reading. Blocking
- * a project is a FULL STOP — it refuses serving, wakes and deploys at once — so
+ * a project is a FULL STOP — it refuses serving and deploys at once — so
  * it is the fleet's decision about a tenant rather than a tenant's about itself.
  * An operator-tier key that reaches the project for every other verb is refused
  * here, and the refusal is not a formality: a tenant who could lift their own

@@ -42,8 +42,6 @@ const NODE_ID = "node-a";
 const VERSION = "0.0.0-test";
 const PROJECT = "app";
 const ENVIRONMENT = "prod";
-/** The ephemeral environment beside it: the only kind that parks on a clock. */
-const PREVIEW = "preview";
 const CUSTOM_DOMAIN = "shop.example.com";
 /** The one platform domain this node serves; its bare apex is the fleet's API. */
 const PLATFORM_DOMAIN = "apps.test";
@@ -114,10 +112,6 @@ describe("GET /v1/state", () => {
       processes: PROCESSES,
       /* No reconcile loop has read any explicit coordinator decision. */
       placements: [],
-      /* No reconcile loop here, so nothing has been read as parked. */
-      parked: [],
-      /* Node-local counters, from a node that has been asked to wake nothing. */
-      wakes: { inFlight: 0, admitted: 0, refused: 0, forwarded: 0 },
     });
   });
 
@@ -355,83 +349,6 @@ describe("POST /v1/environments/:project/:env/selector", () => {
   });
 });
 
-describe("POST /v1/environments/:project/:env/park", () => {
-  it("states how the environment scales to zero, without any lease at all", async () => {
-    await parkable();
-
-    const body = await parkBody(PREVIEW, { policy: { afterS: 60 } });
-
-    /* A plain conditional update on one record, like the selector: what it
-       states is an intent, and parked-ness is never stored — every node derives
-       it from this policy and the wake stamps on its next pass. */
-    expect(body.environment.park).toEqual({ afterS: 60 });
-    expect(await getEnvironment(clock.ctx, PROJECT, PREVIEW)).toEqual(body.environment);
-  });
-
-  it("falls back to what the environment's kind implies when the body says null", async () => {
-    await parkable();
-    await parkBody(PREVIEW, { policy: { afterS: 60 } });
-
-    const body = await parkBody(PREVIEW, { policy: null });
-
-    expect("park" in body.environment).toBe(false);
-  });
-
-  it("refuses a body that says nothing about the policy", async () => {
-    await parkable();
-
-    /* Clearing a policy would put a whole preview fleet back to running around
-       the clock, so a missing field is neither "set" nor "clear". */
-    const response = await parkRequest(PREVIEW, {});
-
-    expect(response.status).toBe(400);
-    expect((await response.json()).detail).toContain("null to clear it");
-  });
-
-  it.each([{ policy: "900" }, { policy: 900 }, { policy: [] }])("refuses %p", async (sent) => {
-    await parkable();
-
-    const response = await parkRequest(PREVIEW, sent as Record<string, unknown>);
-
-    expect(response.status).toBe(400);
-    expect((await getEnvironment(clock.ctx, PROJECT, PREVIEW)).park).toBeUndefined();
-  });
-
-  it("relays the registry's refusal of a window on a long-lived environment", async () => {
-    /* Only the SHAPE is checked at the route; what a field may hold belongs to
-       the registry, so an operator reads the same refusal whichever way they
-       reached the installation. */
-    await deployable();
-
-    const response = await parkRequest(ENVIRONMENT, { policy: { afterS: 60 } });
-
-    expect(response.status).toBe(400);
-    expect((await response.json()).detail).toContain("live traffic");
-  });
-
-  it("refuses a caller with no token, exactly as the selector route does", async () => {
-    await parkable();
-
-    const response = await app.request(`/v1/environments/${PROJECT}/${PREVIEW}/park`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ policy: { afterS: 60 } }),
-    });
-
-    expect(response.status).toBe(401);
-    await expect(response.json()).resolves.toEqual(AUTH_INVALID_PROBLEM);
-    expect((await getEnvironment(clock.ctx, PROJECT, PREVIEW)).park).toBeUndefined();
-  });
-
-  it("answers a missing environment as a miss rather than as a policy", async () => {
-    await parkable();
-
-    const response = await parkRequest("ghost", { policy: { afterS: 60 } });
-
-    expect(response.status).toBe(404);
-  });
-});
-
 describe("GET /v1/state, on the node that is coordinating", () => {
   const UNPLACED = {
     target: `${PROJECT}/${ENVIRONMENT}`,
@@ -597,7 +514,7 @@ describe("GET /v1/ingress/ask", () => {
     expect(directBuild.status).toBe(404);
 
     /* An environment that EXISTS but never had a deployment is the same refusal as
-       one that never existed: nothing serves it, nothing wakes for it, and a
+       one that never existed: nothing serves it, and a
        name that answers nothing has no business holding a certificate. */
     await createEnvironment(clock.ctx, PROJECT, { name: "unflipped" });
     const unflipped = await app.request(`/v1/ingress/ask?domain=${PROJECT}--unflipped.apps.test`);
@@ -608,7 +525,7 @@ describe("GET /v1/ingress/ask", () => {
   });
 
   it("answers for a custom domain an environment has claimed", async () => {
-    await deployable();
+    await deployedEnvironment();
     await claimDomain(clock.ctx, CUSTOM_DOMAIN, PROJECT, ENVIRONMENT);
 
     const response = await app.request(`/v1/ingress/ask?domain=${CUSTOM_DOMAIN}`);
@@ -617,7 +534,7 @@ describe("GET /v1/ingress/ask", () => {
   });
 
   it("REFUSES a claim whose environment has been retired", async () => {
-    await deployable();
+    await deployedEnvironment();
     await claimDomain(clock.ctx, CUSTOM_DOMAIN, PROJECT, ENVIRONMENT);
     await retireEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
 
@@ -634,7 +551,7 @@ describe("GET /v1/ingress/ask", () => {
   });
 
   it("answers for it again once it is taken back", async () => {
-    await deployable();
+    await deployedEnvironment();
     await claimDomain(clock.ctx, CUSTOM_DOMAIN, PROJECT, ENVIRONMENT);
     await retireEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
     await unretireEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
@@ -645,7 +562,7 @@ describe("GET /v1/ingress/ask", () => {
   });
 
   it("refuses a claim left behind by an environment that is gone", async () => {
-    await deployable();
+    await deployedEnvironment();
     await claimDomain(clock.ctx, CUSTOM_DOMAIN, PROJECT, ENVIRONMENT);
     await deleteKey(clock.ctx, environmentKey(PROJECT, ENVIRONMENT));
 
@@ -723,17 +640,6 @@ describe("the fleet's API at the platform apex", () => {
 
     expect(state.status).toBe(401);
     await expect(state.json()).resolves.toMatchObject(AUTH_INVALID_PROBLEM);
-  });
-
-  it("leaves a project's own host under that domain to the host surface", async () => {
-    /* `<project>.<domain>` and `<project>--<env>.<domain>` are applications, not
-       the API: the same request there is never the daemon's health. */
-    for (const host of [`${PROJECT}.${PLATFORM_DOMAIN}`, `${PROJECT}--x.${PLATFORM_DOMAIN}`]) {
-      const response = await app.request("/v1/health", { headers: { host } });
-
-      expect(response.status, host).not.toBe(200);
-      await expect(response.json(), host).resolves.not.toMatchObject({ node: NODE_ID });
-    }
   });
 });
 
@@ -889,26 +795,10 @@ async function deployable(): Promise<void> {
   await createEnvironment(clock.ctx, PROJECT, { name: ENVIRONMENT });
 }
 
-/** One call to the park route with `sent` as the whole body. */
-async function parkRequest(env: string, sent: Record<string, unknown>): Promise<Response> {
-  return app.request(`/v1/environments/${PROJECT}/${env}/park`, {
-    method: "POST",
-    headers: { ...(await bearer()), "content-type": "application/json" },
-    body: JSON.stringify(sent),
-  });
-}
-
-/** The same call, asserted to have succeeded, with its body read back. */
-async function parkBody(env: string, sent: Record<string, unknown>): Promise<EnvironmentResult> {
-  const response = await parkRequest(env, sent);
-  expect(response.status, await response.clone().text()).toBe(200);
-  return (await response.json()) as EnvironmentResult;
-}
-
-/** An ephemeral environment: the only kind a window may be stated for. */
-async function parkable(): Promise<void> {
+async function deployedEnvironment(): Promise<void> {
   await deployable();
-  await createEnvironment(clock.ctx, PROJECT, { name: PREVIEW, ephemeral: true });
+  await createBuild(clock.ctx, PROJECT, { id: BUILD });
+  await recordDeployment(clock.ctx, PROJECT, ENVIRONMENT, BUILD);
 }
 
 /** One call to the selector route with `sent` as the whole body. */

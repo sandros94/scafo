@@ -1,6 +1,6 @@
 /*
- * Internal: what `scafo env retire|unretire|delete` does, and the two ways it
- * can reach the installation.
+ * Internal: what `scafo env retire|unretire|selector|delete` does, and the two
+ * ways it can reach the installation.
  *
  * Through a NODE (`--node`) is the ordinary one: the node is already running,
  * already holds the coordinator lease or knows who does, and the operator needs
@@ -14,15 +14,10 @@ import { ScafoError } from "../core/error.ts";
 import { describeSelector } from "../core/placement/selector.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
 import { acquireLease, type LeaseHandle, releaseLease } from "../core/registry/lease.ts";
-import {
-  type ResolvedParkPolicy,
-  resolveParkPolicy,
-  setParkPolicy,
-} from "../core/registry/park.ts";
 import { setNodeSelector } from "../core/registry/placement.ts";
 import { deleteEnvironment } from "../core/registry/reaper.ts";
 import { retireEnvironment, unretireEnvironment } from "../core/registry/retirement.ts";
-import type { EnvironmentRecord, NodeSelector, ParkPolicy } from "../core/types/registry.ts";
+import type { EnvironmentRecord, NodeSelector } from "../core/types/registry.ts";
 import { parseLabels } from "../core/utils/labels.ts";
 import { assertSlug } from "../core/utils/slug.ts";
 import { type NodeCallOptions, type NodeOptions, nodeRequest } from "./_node.ts";
@@ -49,8 +44,6 @@ export interface EnvironmentOps {
   unretire(target: EnvironmentTarget): Promise<EnvironmentRecord>;
   /** Constrains which nodes may serve the environment; null lifts the constraint. */
   setSelector(target: EnvironmentTarget, selector: NodeSelector | null): Promise<EnvironmentRecord>;
-  /** States how the environment scales to zero; null falls back to what its kind implies. */
-  setPark(target: EnvironmentTarget, policy: ParkPolicy | null): Promise<EnvironmentRecord>;
   /** Answers the store keys that were removed. */
   delete(target: EnvironmentTarget, opts?: DeleteOptions): Promise<string[]>;
 }
@@ -58,7 +51,7 @@ export interface EnvironmentOps {
 export type { NodeOptions };
 
 /**
- * The three commands as calls to a node's API.
+ * The environment commands as calls to a node's API.
  *
  * The node answers for the whole installation: retirement is a plain record
  * update any node carries out, and a deletion is forwarded to whichever node
@@ -105,17 +98,6 @@ export function nodeOps(opts: NodeOptions): EnvironmentOps {
       return ((await answer.json()) as { environment: EnvironmentRecord }).environment;
     },
 
-    async setPark(target, policy): Promise<EnvironmentRecord> {
-      const answer = await nodeRequest(at(target, "/park"), await opts.authorize(), {
-        ...call("POST"),
-        headers: { "content-type": "application/json" },
-        /* Spelled out for the same reason the selector is: the node refuses a
-           body that says nothing, because clearing a policy must be stated. */
-        body: JSON.stringify({ policy }),
-      });
-      return ((await answer.json()) as { environment: EnvironmentRecord }).environment;
-    },
-
     async delete(target, deleteOpts): Promise<string[]> {
       const query = deleteOpts?.force === true ? "?force=1" : "";
       const answer = await nodeRequest(at(target, query), await opts.authorize(), call("DELETE"));
@@ -130,7 +112,7 @@ export interface DirectOptions {
 }
 
 /**
- * The three commands as writes straight into the bucket.
+ * The environment commands as writes straight into the bucket.
  *
  * Retiring and unretiring are single conditional updates and need nothing else.
  * Deleting does: it is lease-gated — S3 has no conditional delete, so the lease
@@ -159,7 +141,6 @@ export function directOps(registry: RegistryContext, opts?: DirectOptions): Envi
     unretire: (target) => unretireEnvironment(registry, target.project, target.env),
     setSelector: (target, selector) =>
       setNodeSelector(registry, target.project, target.env, selector),
-    setPark: (target, policy) => setParkPolicy(registry, target.project, target.env, policy),
     async delete(target, deleteOpts): Promise<string[]> {
       const lease = await takeLease(registry, nodeId, target);
       try {
@@ -252,99 +233,6 @@ export function describeSelectorChange(
     `places it on the next assignment pass, and reports the environment as unplaced — leaving ` +
     `whatever serves it now running — if no live node carries them`
   );
-}
-
-/** The ways `scafo env park` can be told what an environment's scaling to zero is. */
-export interface ParkFlags {
-  /** Seconds without a wake before it parks, or undefined when `--after` was not given. */
-  after: string | undefined;
-  /** Seconds a request held for a wake may wait, `--wake-deadline`. */
-  wakeDeadline: string | undefined;
-  /** Whether `--clear` was given. */
-  clear: boolean;
-}
-
-/**
- * The park policy an invocation states: the fields it named, or null for
- * `--clear`.
- *
- * ONLY THE FIELDS THAT WERE GIVEN reach the record. A policy states an
- * operator's decisions and nothing else — every blank falls back to what the
- * environment's kind implies, and writing a resolved default into the record
- * would freeze today's default into an environment that never asked for it.
- *
- * `--clear` and a field are refused together, on the same reading as
- * {@link readSelectorFlags}: they are opposite intentions, so a command carrying
- * both says nothing about which was meant. NEITHER is refused too, rather than
- * read as "clear", because an accidental `scafo env park` that lifted a policy
- * would put a whole preview fleet back to running around the clock.
- */
-export function readParkFlags(flags: ParkFlags): ParkPolicy | null {
-  const stated: Array<[string, string | undefined]> = [
-    ["--after", flags.after],
-    ["--wake-deadline", flags.wakeDeadline],
-  ];
-  const given = stated.filter(([, value]) => value !== undefined).map(([name]) => name);
-
-  if (flags.clear && given.length > 0) {
-    throw new ScafoError("invalid-input", "Conflicting arguments", {
-      detail: `${given.join(", ")} and --clear ask for opposite things; pass one of them`,
-    });
-  }
-  if (flags.clear) return null;
-  if (given.length === 0) {
-    throw new ScafoError("invalid-input", "Missing required argument", {
-      detail:
-        `pass --after <seconds> or --wake-deadline <seconds> to state how this environment ` +
-        `scales to zero, or ` +
-        `--clear to fall back to what its kind implies`,
-    });
-  }
-
-  const policy: ParkPolicy = {};
-  if (flags.after !== undefined) policy.afterS = seconds(flags.after, "--after");
-  if (flags.wakeDeadline !== undefined) {
-    policy.wakeDeadlineS = seconds(flags.wakeDeadline, "--wake-deadline");
-  }
-  return policy;
-}
-
-/**
- * How a park change reads on the terminal: the RESOLVED policy rather than the
- * fields that were written, because the two differ in the case that surprises
- * people most — a long-lived environment never parks on a clock, whatever the
- * record says.
- */
-export function describeParkChange(
-  target: EnvironmentTarget,
-  environment: EnvironmentRecord,
-): string {
-  const name = `"${target.project}/${target.env}"`;
-  const described = describePark(resolveParkPolicy(environment));
-
-  if (environment.park === undefined) {
-    return `scafo: ${name} carries no park policy of its own; as its kind implies, it ${described}`;
-  }
-  return `scafo: ${name} ${described}`;
-}
-
-/** A resolved policy in words, in the order an environment goes through it. */
-function describePark(policy: ResolvedParkPolicy): string {
-  const parks =
-    policy.afterS === 0
-      ? "never parks on a clock"
-      : `parks ${String(policy.afterS)}s after its last wake`;
-  return `${parks}; a request waiting on a wake is held for up to ${String(policy.wakeDeadlineS)}s`;
-}
-
-/** A whole number of seconds, zero included; anything else is the operator's mistake. */
-function seconds(stated: string, flag: string): number {
-  if (!/^\d+$/.test(stated)) {
-    throw new ScafoError("invalid-input", "Malformed park policy", {
-      detail: `${flag} "${stated}" must be a whole number of seconds, zero or more`,
-    });
-  }
-  return Number(stated);
 }
 
 async function takeLease(

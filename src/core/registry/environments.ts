@@ -21,7 +21,6 @@ export interface CreateEnvironmentInput {
   placement?: PlacementStrategy;
   ephemeral?: boolean;
   varset?: string;
-  idleTtlS?: number;
   /**
    * How many nodes should serve it. Left absent the environment takes the
    * default its kind implies, which is what every environment created before
@@ -64,7 +63,6 @@ export async function createEnvironment(
     createdAt: nowIso(ctx),
   };
   if (input.varset !== undefined) record.varset = input.varset;
-  if (input.idleTtlS !== undefined) record.idleTtlS = input.idleTtlS;
   if (input.replicas !== undefined) record.replicas = input.replicas;
   if (input.nodeSelector !== undefined) record.nodeSelector = { ...input.nodeSelector };
 
@@ -119,8 +117,8 @@ export async function setEnvironmentVarset(
 }
 
 /* Set at creation and never rewritten, so they identify the record. Everything
-   else (deployment, domains, varset, placement, idleTtlS, replicas,
-   nodeSelector) is mutable state and must not break create-retry idempotency. */
+   else (deployment, domains, varset, placement, replicas, nodeSelector) is
+   mutable state and must not break create-retry idempotency. */
 function identity(
   record: EnvironmentRecord,
 ): Pick<EnvironmentRecord, "v" | "name" | "prefix" | "ephemeral"> {

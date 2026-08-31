@@ -11,7 +11,7 @@
  * does not interpret.
  *
  * BLOCKING IS THE ONE VERB THAT STOPS THINGS, and it is a full stop: a blocked
- * project is served nowhere, woken nowhere and deployed to by nobody, while
+ * project is served nowhere and deployed to by nobody, while
  * every record underneath it is left untouched. That asymmetry is the design —
  * core MEASURES and ACTUATES, and the policy that decides when to pull the lever
  * (an unpaid invoice, on a platform built over scafo) lives with whoever sends
@@ -82,8 +82,7 @@ export async function getProject(ctx: RegistryContext, slug: string): Promise<Pr
  *
  * The reading half of {@link getProject}, for the callers that ask about a
  * project they may well not find and have an answer for that case: the desired
- * state of a node reading a project deleted mid-pass, and the wake surface
- * resolving a host to a name nothing holds.
+ * state of a node reading a project deleted mid-pass, for example.
  */
 export async function findProject(
   ctx: RegistryContext,

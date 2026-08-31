@@ -4,16 +4,15 @@ import { H3, type H3Event } from "h3";
 import { createNodeVerifier, type NodeSigningKey } from "../core/auth/node-token.ts";
 import { createOidcVerifier } from "../core/auth/oidc.ts";
 import { ScafoError } from "../core/error.ts";
+import { APEX_ENVIRONMENT } from "../core/placement/routes.ts";
+import { deploymentRevision } from "../core/registry/_deployment.ts";
 import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { checkDomain } from "../core/registry/domains.ts";
 import { isProjectBlocked } from "../core/registry/projects.ts";
 import { isLeaseExpired } from "../core/registry/lease.ts";
-import { setParkPolicy } from "../core/registry/park.ts";
-import { APEX_ENVIRONMENT } from "../core/placement/routes.ts";
 import type { CreditAccount } from "../core/capacity/credits.ts";
 import type { CreditPlacementAccount } from "../core/placement/credits.ts";
-import { resolveWakeTarget } from "./_wake-target.ts";
 import { coordinatorKey, environmentKey, nodeKey } from "../core/registry/paths.ts";
 import { setNodeSelector } from "../core/registry/placement.ts";
 import { retireEnvironment, unretireEnvironment } from "../core/registry/retirement.ts";
@@ -27,14 +26,13 @@ import {
 import type { CoordinatorLease, EnvironmentRecord, NodeRecord } from "../core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../core/types/supervisor.ts";
 import { isHost } from "../core/utils/host.ts";
-import { assertSlug, formatHostLabel, parseHostLabel } from "../core/utils/slug.ts";
+import { assertSlug, parseHostLabel } from "../core/utils/slug.ts";
 import type { AssignmentFailure } from "./_assign.ts";
 import { deleteEnvironmentRequest } from "./_environments.ts";
 import { isPullingIngress } from "./_ingress.ts";
 import {
   type DeployVerifiers,
   readDeployMetadata,
-  readParkRequest,
   readSelectorRequest,
   verifyCaller,
 } from "./_intake.ts";
@@ -52,11 +50,10 @@ import { assertProjectScope, scopedState } from "./_scope.ts";
 import { registerOperatorRoutes } from "./_operator-routes.ts";
 import { registerProjectRoutes } from "./_project-routes.ts";
 import type { Observability } from "./observe.ts";
-import type { ParkedView, PlacementView, Reconciler, ReconcileStatus } from "./reconcile.ts";
+import type { PlacementView, Reconciler, ReconcileStatus } from "./reconcile.ts";
 import { registerStorageRoutes } from "./_storage-routes.ts";
 import type { StorageService } from "./storage.ts";
 import type { CreditController } from "./_credit-controller.ts";
-import { createWakeService, requestHost, type WakeCounters } from "./wake.ts";
 
 /** Everything the HTTP layer serves from; assembled once while the node boots. */
 export interface DaemonContext {
@@ -180,18 +177,6 @@ export interface DaemonState {
    * daemons deliberately start nothing until placement is explicit.
    */
   placements: PlacementView[];
-  /**
-   * Environments the last pass read as PARKED: nothing runs for them here, and a
-   * request for one of their hosts is what starts it again. Empty on a node that
-   * runs no reconcile loop.
-   */
-  parked: ParkedView[];
-  /**
-   * What this node has done about wakes since it booted. Node-local soft state,
-   * like the deploy map: it is in no registry, a restart counts from zero again,
-   * and each node of an installation reports only its own.
-   */
-  wakes: WakeCounters;
   /** Last pass of the reconcile loop; absent on a node that runs no loop. */
   reconcile?: ReconcileStatus;
   /**
@@ -239,25 +224,6 @@ export function createNodeApp(daemon: DaemonContext): H3 {
        console output would only duplicate it. */
     silent: true,
     onError: renderProblem,
-  });
-
-  /*
-   * HOST DISPATCH, AND IT COMES BEFORE EVERYTHING. A node's routing sends two
-   * kinds of traffic to this listener: the operator and peer calls the routes
-   * below answer, and every host the ingress had nothing else to do with — a
-   * parked environment's, or a name under a platform domain that nothing
-   * serves. The second kind is decided by the `Host` header
-   * alone and never reaches a route: no API path, no token, and no fall into an
-   * API 404 either, because a host on that surface is answered by the wake
-   * service whatever path it asks for.
-   *
-   * Global middleware, so it applies to routed and unrouted paths alike, and it
-   * short-circuits by returning a response — `next()` is never called for a
-   * host it takes.
-   */
-  const wake = createWakeService(daemon);
-  app.use((event): Promise<Response> => wake.handle(event), {
-    match: (event) => wake.handles(requestHost(event)),
   });
 
   /*
@@ -323,7 +289,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
 
   /*
    * WHAT THIS NODE BELIEVES, NARROWED TO WHAT THE CALLER MAY KNOW. Almost every
-   * section here names projects — placements, parked environments, processes,
+   * section here names projects — placements, processes,
    * the environments the last pass could not place — so on a multi-tenant fleet
    * the unfiltered document is the tenant list, handed to anyone holding any
    * trusted key. `scopedState` is where that is decided, beside the refusal an
@@ -352,8 +318,6 @@ export function createNodeApp(daemon: DaemonContext): H3 {
         /* From the reads the reconcile pass already made, rather than a second
            trip to the bucket for state this node has just been told. */
         placements: reconcile?.placements ?? [],
-        parked: reconcile?.parked ?? [],
-        wakes: wake.counters(),
         ...(reconcile === undefined ? {} : { reconcile }),
       };
 
@@ -408,27 +372,6 @@ export function createNodeApp(daemon: DaemonContext): H3 {
       const request = await readSelectorRequest(event, { maxBytes: daemon.config.api.jsonBytes });
       return {
         environment: await setNodeSelector(daemon.registry, project, name, request.selector),
-      };
-    },
-    { middleware: [authenticated] },
-  );
-
-  /*
-   * How an environment scales to zero, set or cleared. A plain CAS update on one
-   * record, so ANY node carries it out itself, exactly as the selector does.
-   *
-   * It states an intent and nothing more: parked-ness is never stored, so every
-   * node derives it from this policy and the environment's wake stamps on its
-   * next pass — and a policy that parks an environment already past its window
-   * takes effect there rather than here.
-   */
-  app.post(
-    "/v1/environments/:project/:env/park",
-    async (event): Promise<EnvironmentResult> => {
-      const [project, name] = await scopedTarget(daemon, event);
-      const request = await readParkRequest(event, { maxBytes: daemon.config.api.jsonBytes });
-      return {
-        environment: await setParkPolicy(daemon.registry, project, name, request.policy),
       };
     },
     { middleware: [authenticated] },
@@ -617,9 +560,7 @@ function coordinatorView(
  * step up: it answers nothing anywhere in the fleet, so a certificate for one of
  * its names would outlive the block. The check is made as soon as the host has
  * been resolved to a PROJECT — before the running processes are consulted,
- * because a pass may not have stopped them yet, and before the wake resolver,
- * which refuses a blocked project itself and is only reached for the hosts
- * nothing is running for.
+ * because a pass may not have stopped them yet.
  */
 async function servesHost(daemon: DaemonContext, host: string): Promise<boolean> {
   if (!isHost(host)) return false;
@@ -638,9 +579,8 @@ async function servesHost(daemon: DaemonContext, host: string): Promise<boolean>
   if (daemon.config.api.public && daemon.config.platformDomains.includes(host)) return true;
 
   /*
-   * A platform-domain host is approved only when the name resolves to
-   * something real: an environment that can be woken, or a process actually
-   * running one. A parseable label alone is NOT enough — the ask gates
+   * A platform-domain host is approved only when the name resolves to a
+   * deployed, unretired environment. A parseable label alone is NOT enough — the ask gates
    * CERTIFICATE ISSUANCE, and approving every well-formed name would let
    * anyone mint issuance attempts for junk labels until the CA's rate limit
    * starves the names that matter.
@@ -654,13 +594,11 @@ async function servesHost(daemon: DaemonContext, host: string): Promise<boolean>
     if (parsed === null) return false;
     if (await isProjectBlocked(daemon.registry, parsed.project)) return false;
 
-    if (servedLabel(daemon, label)) return true;
-    const target = await resolveWakeTarget(daemon.registry, {
-      host,
-      platformDomains: daemon.config.platformDomains,
-      parked: daemon.reconciler?.parkedRecords() ?? [],
-    });
-    return target !== null;
+    const environment = await readJson<EnvironmentRecord>(
+      daemon.registry,
+      environmentKey(parsed.project, parsed.ref ?? APEX_ENVIRONMENT),
+    );
+    return servesEnvironment(environment?.value);
   }
 
   const claim = await checkDomain(daemon.registry, host);
@@ -671,21 +609,15 @@ async function servesHost(daemon: DaemonContext, host: string): Promise<boolean>
     daemon.registry,
     environmentKey(claim.project, claim.environment),
   );
-  return environment !== null && environment.value.retiredAt === undefined;
+  return servesEnvironment(environment?.value);
 }
 
-/**
- * Whether a process this node is RUNNING answers to its environment label.
- * Running is what matters here — a
- * served host needs its certificate whatever its park policy says about
- * waking it later.
- */
-function servedLabel(daemon: DaemonContext, label: string): boolean {
-  const processes = daemon.reconciler?.status().processes ?? [];
-  return processes.some(
-    (process) =>
-      label === formatHostLabel(process.project, process.env) ||
-      (process.env === APEX_ENVIRONMENT && label === process.project),
+/** Whether an environment owns a currently serviceable public host. */
+function servesEnvironment(environment?: EnvironmentRecord): boolean {
+  return (
+    environment !== undefined &&
+    environment.retiredAt === undefined &&
+    deploymentRevision(environment) !== null
   );
 }
 

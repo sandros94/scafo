@@ -11,13 +11,10 @@ import type { IngressDesired, IngressDriver } from "../src/core/types/ingress.ts
 import {
   type CaddyProxyHandler,
   type CaddyRoute,
-  CATCHALL_ID_PREFIX,
-  catchAllId,
   createCaddyDriver,
   DEFAULT_SERVER_NAME,
   renderCaddyRoutes,
   ROUTE_ID_PREFIX,
-  routeId,
 } from "../src/drivers/ingress/caddy.ts";
 import { rejectsWith } from "./_helpers.ts";
 
@@ -25,15 +22,6 @@ const ADMIN = "http://caddy.test:2019";
 const ROUTES_URL = `${ADMIN}/config/apps/http/servers/${DEFAULT_SERVER_NAME}/routes`;
 const HOST = "shop.apps.test";
 const OTHER_HOST = "shop--staging.apps.test";
-
-/** The platform domains this node serves, and the host of something parked under one. */
-const DOMAIN = "apps.test";
-const OTHER_DOMAIN = "apps.example";
-const PARKED_HOST = "shop--preview.apps.test";
-
-/** Where the node's own daemon answers, and how a route is told to dial it. */
-const NODE_PORT = 7400;
-const NODE_DIAL = `127.0.0.1:${String(NODE_PORT)}`;
 
 /** One call the driver made, as the fake saw it. */
 interface AdminCall {
@@ -183,6 +171,25 @@ describe("converging a server that already has routes", () => {
     expect(methods()).toEqual(["GET"]);
     expect(routes).toHaveLength(2);
   });
+
+  it("deletes a legacy wake catch-all while preserving operator routes", async () => {
+    const staleId = `${ROUTE_ID_PREFIX}catchall_apps.test`;
+    routes.push(
+      {
+        "@id": staleId,
+        "match": [{ host: ["*.apps.test"] }],
+        "handle": [{ handler: "reverse_proxy", upstreams: [{ dial: "127.0.0.1:7400" }] }],
+        "terminal": true,
+      },
+      { ...OPERATOR_ROUTE },
+    );
+
+    await driver.apply({ routes: [] });
+
+    expect(methods()).toEqual(["GET", "DELETE"]);
+    expect(calls[1]?.url).toBe(`${ADMIN}/id/${staleId}`);
+    expect(routes).toEqual([OPERATOR_ROUTE]);
+  });
 });
 
 describe("a host's backend", () => {
@@ -199,219 +206,6 @@ describe("a host's backend", () => {
     const [route] = renderCaddyRoutes(desired([[HOST, 42_000]]), "10.83.0.1");
 
     expect(proxyOf(route).upstreams).toEqual([{ dial: "10.83.0.1:42000" }]);
-  });
-});
-
-describe("the routes that reach the node's own daemon", () => {
-  it("renders a parked host as an ordinary route, under the host's own id", async () => {
-    await driver.apply(waking([], { hosts: [PARKED_HOST], domains: [] }));
-
-    /* Same id a process-backed route for that host would carry, so waking is a
-       change of upstream rather than a change of route. */
-    expect(routes).toEqual([nodeRoute(routeId(PARKED_HOST), PARKED_HOST)]);
-  });
-
-  it("renders one catch-all per platform domain, wildcarding exactly ONE label", async () => {
-    await driver.apply(waking([], { domains: [DOMAIN, OTHER_DOMAIN] }));
-
-    /* A Caddy host matcher wildcard covers exactly one label, so `*.<domain>` is
-       every subdomain of a platform domain and never the domain itself — and
-       never a subdomain of a subdomain either. */
-    expect(methods()).toEqual(["GET", "POST", "POST"]);
-    expect(routes).toEqual([
-      nodeRoute(catchAllId(DOMAIN), `*.${DOMAIN}`),
-      nodeRoute(catchAllId(OTHER_DOMAIN), `*.${OTHER_DOMAIN}`),
-    ]);
-    expect(catchAllId(DOMAIN)).toBe(`${CATCHALL_ID_PREFIX}${DOMAIN}`);
-  });
-
-  it("renders everything explicit before any catch-all", () => {
-    /* The order is part of what is rendered rather than something `apply` sorts
-       out: Caddy matches top-down and every route here is terminal. */
-    const rendered = renderCaddyRoutes(
-      waking([[HOST, 42_000]], { hosts: [PARKED_HOST], domains: [DOMAIN, OTHER_DOMAIN] }),
-    );
-
-    expect(rendered.map((route) => route["@id"])).toEqual([
-      routeId(HOST),
-      routeId(PARKED_HOST),
-      catchAllId(DOMAIN),
-      catchAllId(OTHER_DOMAIN),
-    ]);
-  });
-});
-
-describe("the catch-alls sit after every route the driver owns", () => {
-  /*
-   * THE INVARIANT THIS SUITE EXISTS FOR. Caddy matches routes in ARRAY ORDER and
-   * each of these is terminal, so a catch-all reached first answers for a host an
-   * explicit route was written for — which is not one misrouted name but a whole
-   * platform domain's live traffic going to the daemon instead of to the processes
-   * serving it. `POST` appends, so it is asserted after every kind of converge.
-   */
-  const WAKE = { hosts: [PARKED_HOST], domains: [DOMAIN] };
-
-  it("on the first converge", async () => {
-    await driver.apply(
-      waking(
-        [
-          [HOST, 42_000],
-          [OTHER_HOST, 42_002],
-        ],
-        {
-          hosts: [PARKED_HOST],
-          domains: [DOMAIN, OTHER_DOMAIN],
-        },
-      ),
-    );
-
-    expect(ownedIds()).toEqual([
-      routeId(HOST),
-      routeId(OTHER_HOST),
-      routeId(PARKED_HOST),
-      catchAllId(DOMAIN),
-      catchAllId(OTHER_DOMAIN),
-    ]);
-  });
-
-  it("when a host is added later, which appends behind them", async () => {
-    await driver.apply(waking([[HOST, 42_000]], WAKE));
-    calls = [];
-
-    await driver.apply(
-      waking(
-        [
-          [HOST, 42_000],
-          [OTHER_HOST, 42_002],
-        ],
-        WAKE,
-      ),
-    );
-
-    /* The new route landed behind the catch-all, so they are taken away and put
-       back — the one place this driver removes before it adds, and the safe
-       direction: what a catch-all answers is a request nothing else routes. */
-    expect(methods()).toEqual(["GET", "POST", "DELETE", "POST"]);
-    expect(ownedIds()).toEqual([
-      routeId(HOST),
-      routeId(PARKED_HOST),
-      routeId(OTHER_HOST),
-      catchAllId(DOMAIN),
-    ]);
-  });
-
-  it("when a host is removed, without touching them at all", async () => {
-    await driver.apply(
-      waking(
-        [
-          [HOST, 42_000],
-          [OTHER_HOST, 42_002],
-        ],
-        WAKE,
-      ),
-    );
-    calls = [];
-
-    await driver.apply(waking([[HOST, 42_000]], WAKE));
-
-    /* A deletion from the middle keeps them last on its own, so the re-append is
-       not reached: one call, and the catch-all is never briefly absent. */
-    expect(methods()).toEqual(["GET", "DELETE"]);
-    expect(calls[1]?.url).toBe(`${ADMIN}/id/${routeId(OTHER_HOST)}`);
-    expect(ownedIds()).toEqual([routeId(HOST), routeId(PARKED_HOST), catchAllId(DOMAIN)]);
-  });
-
-  it("on a settled pass, which writes nothing whatsoever", async () => {
-    const routing = waking([[HOST, 42_000]], {
-      hosts: [PARKED_HOST],
-      domains: [DOMAIN, OTHER_DOMAIN],
-    });
-    await driver.apply(routing);
-    calls = [];
-
-    await driver.apply(routing);
-
-    /* Reading is not converging: a node whose wake set has not moved re-appends
-       none of its catch-alls. */
-    expect(methods()).toEqual(["GET"]);
-    expect(ownedIds()).toEqual([
-      routeId(HOST),
-      routeId(PARKED_HOST),
-      catchAllId(DOMAIN),
-      catchAllId(OTHER_DOMAIN),
-    ]);
-  });
-
-  it("while the operator's own routes stay exactly where they were", async () => {
-    routes.push({ ...OPERATOR_ROUTE }, UNNAMED_ROUTE);
-
-    await driver.apply(waking([[HOST, 42_000]], WAKE));
-    /* An append, which forces the catch-alls to be taken away and put back... */
-    await driver.apply(
-      waking(
-        [
-          [HOST, 42_000],
-          [OTHER_HOST, 42_002],
-        ],
-        WAKE,
-      ),
-    );
-    /* ...and a withdrawal, which does not. */
-    await driver.apply(waking([[HOST, 42_000]], WAKE));
-
-    expect(routes[0]).toEqual(OPERATOR_ROUTE);
-    expect(routes[1]).toEqual(UNNAMED_ROUTE);
-    expect(catchAllsLast()).toBe(true);
-  });
-});
-
-describe("a wake host is converged like any other host", () => {
-  const DOMAINS = { domains: [DOMAIN] };
-
-  it("patches in place when the environment wakes, and again when it parks", async () => {
-    await driver.apply(waking([], { hosts: [PARKED_HOST], ...DOMAINS }));
-    calls = [];
-
-    /* The environment came up: the same host now names a process. The `@id` is
-       the host's either way, so it arrives as a patch rather than as a
-       withdrawal followed by a fresh route. */
-    await driver.apply(waking([[PARKED_HOST, 42_004]], DOMAINS));
-
-    expect(methods()).toEqual(["GET", "PATCH"]);
-    expect(routes[0]).toMatchObject({
-      handle: [{ handler: "reverse_proxy", upstreams: [{ dial: "127.0.0.1:42004" }] }],
-    });
-
-    calls = [];
-    await driver.apply(waking([], { hosts: [PARKED_HOST], ...DOMAINS }));
-
-    expect(methods()).toEqual(["GET", "PATCH"]);
-    expect(routes[0]).toMatchObject({
-      handle: [{ handler: "reverse_proxy", upstreams: [{ dial: NODE_DIAL }] }],
-    });
-  });
-
-  it("is deleted by id once nothing holds it open", async () => {
-    await driver.apply(waking([], { hosts: [PARKED_HOST], ...DOMAINS }));
-    calls = [];
-
-    await driver.apply(waking([], DOMAINS));
-
-    expect(methods()).toEqual(["GET", "DELETE"]);
-    expect(calls[1]?.url).toBe(`${ADMIN}/id/${routeId(PARKED_HOST)}`);
-    expect(ownedIds()).toEqual([catchAllId(DOMAIN)]);
-  });
-
-  it("goes away with the catch-alls when the routing stops carrying a wake", async () => {
-    await driver.apply(waking([[HOST, 42_000]], { hosts: [PARKED_HOST], ...DOMAINS }));
-    calls = [];
-
-    /* A node with no daemon address to fall through to — the routing scafo
-       rendered before scale-to-zero existed. Only what a process answers is left. */
-    await driver.apply(desired([[HOST, 42_000]]));
-
-    expect(methods()).toEqual(["GET", "DELETE", "DELETE"]);
-    expect(ownedIds()).toEqual([routeId(HOST)]);
   });
 });
 
@@ -465,27 +259,6 @@ function desired(entries: Array<[string, number]>): IngressDesired {
   };
 }
 
-/** The same routing, plus the hosts and domains that fall through to the daemon. */
-function waking(
-  entries: Array<[string, number]>,
-  wake: { hosts?: string[]; domains?: string[] },
-): IngressDesired {
-  return {
-    ...desired(entries),
-    wake: { port: NODE_PORT, hosts: wake.hosts ?? [], domains: wake.domains ?? [DOMAIN] },
-  };
-}
-
-/** One route sending everything it matches to the node's own daemon. */
-function nodeRoute(id: string, match: string): Record<string, unknown> {
-  return {
-    "@id": id,
-    "match": [{ host: [match] }],
-    "handle": [{ handler: "reverse_proxy", upstreams: [{ dial: NODE_DIAL }] }],
-    "terminal": true,
-  };
-}
-
 function backend(port: number): { project: string; env: string; port: number } {
   return { project: "shop", env: "production", port };
 }
@@ -505,20 +278,6 @@ function proxyOf(route: CaddyRoute): CaddyProxyHandler {
 
 function methods(): string[] {
   return calls.map((call) => call.method);
-}
-
-/** The ids this driver owns, in the order Caddy is holding them. */
-function ownedIds(): string[] {
-  return routes
-    .map((route) => route["@id"])
-    .filter((id): id is string => typeof id === "string" && id.startsWith(ROUTE_ID_PREFIX));
-}
-
-/** Whether every catch-all sits after every other route this driver owns. */
-function catchAllsLast(): boolean {
-  const owned = ownedIds();
-  const first = owned.findIndex((id) => id.startsWith(CATCHALL_ID_PREFIX));
-  return first === -1 || owned.slice(first).every((id) => id.startsWith(CATCHALL_ID_PREFIX));
 }
 
 /** Answers the four calls Caddy's admin API does, over an array of routes. */

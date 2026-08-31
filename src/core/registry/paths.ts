@@ -129,13 +129,6 @@ export function placementKey(project: string, env: string): string {
   return `${placementPrefix(project)}${env}.json`;
 }
 
-/** Where the last wake of one environment lives. */
-export function envWakeKey(project: string, env: string): string {
-  assertSlug(project);
-  assertSlug(env);
-  return `${ROOT}/wake/${project}/${env}.json`;
-}
-
 /**
  * Prefix everything the nodes have flushed about themselves lives under.
  *

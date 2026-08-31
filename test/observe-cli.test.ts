@@ -39,7 +39,7 @@ import {
   readObservations,
   windowFrom,
 } from "../src/cli/_observe-read.ts";
-import { formatTraces, formatWakeTimeline, selectTraces } from "../src/cli/_traces.ts";
+import { formatTraces, selectTraces } from "../src/cli/_traces.ts";
 import { readMetricsNaming } from "../src/cli/_metrics-names.ts";
 import { traces } from "../src/cli/commands/traces.ts";
 import { createBuild, createEnvironment, createProject } from "../src/core/registry/index.ts";
@@ -114,16 +114,24 @@ function event(node: string, atMs: number, body: Record<string, unknown>): Obser
 describe("what a window reads", () => {
   it("takes the records inside it and leaves the rest, oldest first", async () => {
     await seed("node-a", CLOCK_START_MS - 2 * HOUR_MS, [
-      event("node-a", CLOCK_START_MS - 2 * HOUR_MS, { type: "wake.kicked", id: "old" }),
+      event("node-a", CLOCK_START_MS - 2 * HOUR_MS, {
+        type: "runtime.started",
+        processId: "shop--old",
+      }),
     ]);
     await seed("node-a", CLOCK_START_MS - 10 * MINUTE_MS, [
-      event("node-a", CLOCK_START_MS - 10 * MINUTE_MS, { type: "wake.kicked", id: "inside" }),
+      event("node-a", CLOCK_START_MS - 10 * MINUTE_MS, {
+        type: "runtime.started",
+        processId: "shop--inside",
+      }),
     ]);
 
     const window = { sinceMs: CLOCK_START_MS - HOUR_MS, untilMs: CLOCK_START_MS };
     const found = await readObservations(registry, { window });
 
-    expect(found.records.map((record) => ("id" in record ? record.id : ""))).toEqual(["inside"]);
+    expect(found.records.map((record) => ("processId" in record ? record.processId : ""))).toEqual([
+      "shop--inside",
+    ]);
     /* The nodes are reported whatever the window said, so an empty answer can
        tell "nobody ever wrote" from "nobody wrote lately". */
     expect(found.nodes).toEqual(["node-a"]);
@@ -133,7 +141,10 @@ describe("what a window reads", () => {
     /* A flush that had to be retried carries events far older than its own key,
        which is why the upper bound is on the RECORD and never on the file. */
     await seed("node-a", CLOCK_START_MS + 30 * MINUTE_MS, [
-      event("node-a", CLOCK_START_MS - 10 * MINUTE_MS, { type: "wake.kicked", id: "late-flush" }),
+      event("node-a", CLOCK_START_MS - 10 * MINUTE_MS, {
+        type: "runtime.started",
+        processId: "shop--late-flush",
+      }),
     ]);
 
     const window = { sinceMs: CLOCK_START_MS - HOUR_MS, untilMs: CLOCK_START_MS };
@@ -144,7 +155,10 @@ describe("what a window reads", () => {
 
   it("skips a file written long before the window without reading it", async () => {
     const stale = await seed("node-a", CLOCK_START_MS - 2 * OBSERVE_READ_SLACK_MS - HOUR_MS, [
-      event("node-a", CLOCK_START_MS - 30 * MINUTE_MS, { type: "wake.kicked", id: "impossible" }),
+      event("node-a", CLOCK_START_MS - 30 * MINUTE_MS, {
+        type: "runtime.started",
+        processId: "shop--impossible",
+      }),
     ]);
     expect(stale).toContain("_scafo/observe/node-a/");
 
@@ -158,10 +172,16 @@ describe("what a window reads", () => {
 
   it("interleaves two nodes by when things happened, not by how they were listed", async () => {
     await seed("node-b", CLOCK_START_MS, [
-      event("node-b", CLOCK_START_MS - 5 * MINUTE_MS, { type: "wake.kicked", id: "b-second" }),
+      event("node-b", CLOCK_START_MS - 5 * MINUTE_MS, {
+        type: "runtime.started",
+        processId: "shop--b-second",
+      }),
     ]);
     await seed("node-a", CLOCK_START_MS, [
-      event("node-a", CLOCK_START_MS - 9 * MINUTE_MS, { type: "wake.kicked", id: "a-first" }),
+      event("node-a", CLOCK_START_MS - 9 * MINUTE_MS, {
+        type: "runtime.started",
+        processId: "shop--a-first",
+      }),
     ]);
 
     const found = await readObservations(registry, {
@@ -172,7 +192,10 @@ describe("what a window reads", () => {
   });
 
   it("skips and counts the rows that are not records, keeping the file's good ones", async () => {
-    const good = event("node-a", CLOCK_START_MS - MINUTE_MS, { type: "wake.kicked", id: "kept" });
+    const good = event("node-a", CLOCK_START_MS - MINUTE_MS, {
+      type: "runtime.started",
+      processId: "shop--kept",
+    });
     const writer = createWriter(OBSERVE_PARQUET_SCHEMA, {
       codec: OBSERVE_PARQUET_WRITER_CODEC,
     }) as SyncParquetWriter;
@@ -208,7 +231,10 @@ describe("what a window reads", () => {
     /* A half-written object, or something else at that key. One of them must not
        take the whole window with it. */
     await seed("node-a", CLOCK_START_MS, [
-      event("node-a", CLOCK_START_MS - MINUTE_MS, { type: "wake.kicked", id: "kept" }),
+      event("node-a", CLOCK_START_MS - MINUTE_MS, {
+        type: "runtime.started",
+        processId: "shop--kept",
+      }),
     ]);
     await store.put(
       observeKey("node-a", new Date(CLOCK_START_MS), 99, OBSERVE_PARQUET_EXTENSION),
@@ -599,24 +625,6 @@ describe("whose traffic a counted host actually was", () => {
 describe("what the traces come to", () => {
   const window = { sinceMs: CLOCK_START_MS - HOUR_MS, untilMs: CLOCK_START_MS };
 
-  /** One request's whole life on a node, as the wake surface emits it. */
-  function wakeTimeline(id: string, startMs: number): ObserveEventRecord[] {
-    return [
-      event("node-a", startMs, {
-        type: "wake.admitted",
-        id,
-        host: "shop.apps.test",
-        project: "shop",
-        env: "production",
-        inFlight: 1,
-      }),
-      event("node-a", startMs + 3, { type: "wake.resolved", id, storeOps: 4 }),
-      event("node-a", startMs + 91, { type: "wake.stamped", id }),
-      event("node-a", startMs + 92, { type: "wake.kicked", id }),
-      event("node-a", startMs + 812, { type: "wake.served", id, port: 41_001, status: 200 }),
-    ];
-  }
-
   /** What a node emits on its own timer while nothing at all is happening. */
   function passes(count: number): ObserveEventRecord[] {
     return Array.from({ length: count }, (_unused, index) =>
@@ -631,30 +639,42 @@ describe("what the traces come to", () => {
     );
   }
 
+  /** Non-periodic runtime events a default trace listing should retain. */
+  function runtimeEvents(count: number, startMs: number): ObserveEventRecord[] {
+    return Array.from({ length: count }, (_unused, index) =>
+      event("node-a", startMs + index, {
+        type: "runtime.started",
+        processId: `shop--env-${String(index)}`,
+      }),
+    );
+  }
+
   it("shows the newest when there are more than the limit, and says how many it left out", () => {
     const events = Array.from({ length: 10 }, (_unused, index) =>
       event("node-a", CLOCK_START_MS - (10 - index) * MINUTE_MS, {
-        type: "wake.kicked",
-        id: `id-${String(index)}`,
+        type: "runtime.started",
+        processId: `shop--env-${String(index)}`,
       }),
     );
 
     const selection = selectTraces(events, { limit: 3 });
 
-    expect(selection.events.map((record) => ("id" in record ? record.id : ""))).toEqual([
-      "id-7",
-      "id-8",
-      "id-9",
-    ]);
+    expect(
+      selection.events.map((record) => ("processId" in record ? record.processId : "")),
+    ).toEqual(["shop--env-7", "shop--env-8", "shop--env-9"]);
     expect({ matched: selection.matched, omitted: selection.omitted }).toEqual({
       matched: 10,
       omitted: 7,
     });
   });
 
-  it("finds a project's whole request, not only the event that names it", () => {
+  it("finds a project directly and through a runtime process id", () => {
     const records: ObserveRecord[] = [
-      ...wakeTimeline("8f3a", CLOCK_START_MS - 10 * MINUTE_MS),
+      event("node-a", CLOCK_START_MS - 10 * MINUTE_MS, {
+        type: "project.blocked",
+        actor: "op-aaaa1111",
+        project: "shop",
+      }),
       event("node-a", CLOCK_START_MS - 9 * MINUTE_MS, {
         type: "runtime.started",
         processId: "shop--production",
@@ -671,10 +691,7 @@ describe("what the traces come to", () => {
 
     const selection = selectTraces(records, { project: "shop" });
 
-    /* The five wake events — only the first of which names the project — plus
-       the runtime start, which names it through the process id. The reconcile
-       pass belongs to the node rather than to any project. */
-    expect(selection.events).toHaveLength(6);
+    expect(selection.events).toHaveLength(2);
     expect(selection.events.every((record) => record.type !== "reconcile.pass.start")).toBe(true);
   });
 
@@ -695,33 +712,12 @@ describe("what the traces come to", () => {
     expect(selectTraces([own, other], { project: "shop" }).events).toEqual([own]);
   });
 
-  it("lays one request out against the moment it started", () => {
-    const timeline = wakeTimeline("8f3a", CLOCK_START_MS - 10 * MINUTE_MS);
-
-    const rendered = formatWakeTimeline("8f3a", selectTraces(timeline, { wake: "8f3a" }).events);
-    const lines = rendered.split("\n");
-
-    expect(lines[0]).toContain('wake "8f3a" on node-a, 5 event(s) over 812ms');
-    expect(lines[1]).toContain("+0ms");
-    expect(lines[1]).toContain("wake.admitted");
-    expect(lines[1]).toContain("host=shop.apps.test");
-    expect(lines.at(-1)).toContain("+812ms");
-    expect(lines.at(-1)).toContain("status=200");
-  });
-
-  it("says so when the id it was given is in nothing it read", () => {
-    const rendered = formatWakeTimeline("nope", []);
-
-    expect(rendered).toContain('nothing recorded for wake "nope"');
-    expect(rendered).toContain("observability.enabled");
-  });
-
   it("leaves the reconcile loop's own passes out of a listing nobody narrowed", () => {
     /* A node reconciles every 5s whether or not anything is happening, so a
        window of any length is mostly this — and it is the one thing in the
        catalog nobody is ever debugging when they run `scafo traces` with no
        arguments at all. */
-    const records = [...passes(40), ...wakeTimeline("8f3a", CLOCK_START_MS - MINUTE_MS)];
+    const records = [...passes(40), ...runtimeEvents(5, CLOCK_START_MS - MINUTE_MS)];
 
     const selection = selectTraces(records);
 
@@ -765,9 +761,9 @@ describe("what the traces come to", () => {
   });
 
   it("does not let the passes it hid take the window's room", () => {
-    /* The trap the default is for: 40 passes and 5 wake events under a limit of
-       10 used to show two of the wake events and thirty-eight passes. */
-    const records = [...passes(40), ...wakeTimeline("8f3a", CLOCK_START_MS - MINUTE_MS)];
+    /* The trap the default is for: periodic passes must not consume the room
+       reserved for operational events. */
+    const records = [...passes(40), ...runtimeEvents(5, CLOCK_START_MS - MINUTE_MS)];
 
     const selection = selectTraces(records, { limit: 10 });
 
@@ -776,7 +772,7 @@ describe("what the traces come to", () => {
   });
 
   it("shows them again when the caller asks for all of it", () => {
-    const records = [...passes(40), ...wakeTimeline("8f3a", CLOCK_START_MS - MINUTE_MS)];
+    const records = [...passes(40), ...runtimeEvents(5, CLOCK_START_MS - MINUTE_MS)];
 
     const selection = selectTraces(records, { all: true });
 
@@ -788,6 +784,7 @@ describe("what the traces come to", () => {
     /* The default hides events a node really did record, so the command has to
        carry the way back to them. */
     expect(traces.args).toHaveProperty("all");
+    expect(traces.args).not.toHaveProperty("wake");
   });
 
   it("renders every field an event carried, whatever the event is", () => {
@@ -815,13 +812,13 @@ describe("what the traces come to", () => {
   });
 
   it("reads a seeded bucket end to end", async () => {
-    await seed("node-a", CLOCK_START_MS, wakeTimeline("8f3a", CLOCK_START_MS - 3 * MINUTE_MS));
+    await seed("node-a", CLOCK_START_MS, runtimeEvents(5, CLOCK_START_MS - 3 * MINUTE_MS));
 
     const found = await readObservations(registry, { window });
-    const selection = selectTraces(found.records, { wake: "8f3a" });
+    const selection = selectTraces(found.records, { project: "shop" });
 
     expect(selection.events).toHaveLength(5);
-    expect(formatWakeTimeline("8f3a", selection.events)).toContain("+812ms");
+    expect(formatTraces(selection)).toContain("shop--env-4");
   });
 });
 
@@ -838,7 +835,10 @@ describe("nothing to show", () => {
 
   it("says the window is the problem when something was written outside it", async () => {
     await seed("node-a", CLOCK_START_MS - 10 * HOUR_MS, [
-      event("node-a", CLOCK_START_MS - 10 * HOUR_MS, { type: "wake.kicked", id: "old" }),
+      event("node-a", CLOCK_START_MS - 10 * HOUR_MS, {
+        type: "runtime.started",
+        processId: "shop--old",
+      }),
     ]);
     const found = await readObservations(registry, { window });
 
@@ -849,7 +849,12 @@ describe("nothing to show", () => {
   });
 
   it("names the access log when the nodes report on themselves but count nothing", () => {
-    const records = [event("node-a", CLOCK_START_MS, { type: "wake.kicked", id: "one" })];
+    const records = [
+      event("node-a", CLOCK_START_MS, {
+        type: "runtime.started",
+        processId: "shop--one",
+      }),
+    ];
 
     const said = noCounters(records);
     expect(said).toContain("nothing recorded");

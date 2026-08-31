@@ -32,7 +32,7 @@ import type {
   NodeSelector,
   ReplicaCount,
 } from "../core/types/registry.ts";
-import { resolveEnvironmentDeployment, type DesiredState } from "./_desired.ts";
+import { resolveEnvironmentDeployment } from "./_desired.ts";
 
 /**
  * Why one environment could not be placed on a pass, as a stable code.
@@ -175,8 +175,7 @@ async function runCreditAssignment(
       served.add(env);
       const target = `${project}/${env}`;
       current.set(target, [...(placements.get(env)?.nodes ?? [])]);
-      const desired: DesiredState = { environments: [], placements: [], parked: [], failures: [] };
-      const wanted = await resolveEnvironmentDeployment(ctx, project, found.value, desired);
+      const wanted = resolveEnvironmentDeployment(project, found.value);
       active.push({
         project,
         env,

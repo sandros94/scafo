@@ -11,20 +11,14 @@ import { ScafoError } from "../core/error.ts";
 import { planReconcile, type ReconcileAction } from "../core/placement/reconcile.ts";
 import { countingRegistry, storeOpsOf } from "../core/registry/counting.ts";
 import type { RuntimeDriver, RuntimeProcess } from "../core/types/runtime.ts";
-import { type ParkedEnvironment, type PlacementView, readDesired } from "./_desired.ts";
+import { type PlacementView, readDesired } from "./_desired.ts";
 import { createExecutor, failureOf, type ReconcileFailure } from "./_execute.ts";
 import { applyIngress } from "./_ingress.ts";
 import type { DaemonContext } from "./app.ts";
 import { DEFAULT_RUNTIME_CREDIT_MB } from "./_credit-controller.ts";
 
-export type { ParkedEnvironment, PlacementView } from "./_desired.ts";
+export type { PlacementView } from "./_desired.ts";
 export type { ReconcileFailure } from "./_execute.ts";
-
-/** One parked environment as a status reports it: the name is all that is read there. */
-export interface ParkedView {
-  project: string;
-  env: string;
-}
 
 /** Time between two passes of the loop when none is configured. */
 export const DEFAULT_RECONCILE_INTERVAL_MS: number = 5_000;
@@ -50,13 +44,6 @@ export interface ReconcileStatus {
    * and is therefore served here.
    */
   placements: PlacementView[];
-  /**
-   * Environments the last pass read as parked: nothing of their own runs here,
-   * and a request for one of their hosts wakes it. Named rather than reported
-   * whole, because a name is all a status needs — {@link Reconciler.parkedRecords}
-   * is what the wake surface resolves hosts against.
-   */
-  parked: ParkedView[];
 }
 
 /** The loop, and the handle to run it once or on a timer. */
@@ -64,9 +51,7 @@ export interface Reconciler {
   /** Runs one pass and resolves with the actions it planned. */
   runOnce(): Promise<ReconcileAction[]>;
   /**
-   * Asks for a pass NOW rather than at the next tick — what a wake does after it
-   * has stamped, so the environment it just asked for is started in
-   * milliseconds instead of at the end of the interval.
+   * Asks for a pass now rather than at the next tick.
    *
    * Single-flight, like every other way in: a kick that arrives while a pass is
    * running is remembered and honoured exactly once when that pass finishes, and
@@ -79,16 +64,6 @@ export interface Reconciler {
   shutdown(): Promise<void>;
   stop(): void;
   status(): ReconcileStatus;
-  /**
-   * The parked environments of the last pass, with the records the wake surface
-   * needs: an environment's own hosts, the custom domains its record mirrors,
-   * and the park policy it is woken under.
-   *
-   * Empty before the first pass, and empty after one that could not read the
-   * registry — this is what THIS node last read, never a cache of what it once
-   * knew.
-   */
-  parkedRecords(): ParkedEnvironment[];
 }
 
 export interface ReconcilerOptions {
@@ -162,13 +137,9 @@ export function createReconciler(
   let lastActions: ReconcileAction[] = [];
   let failures: ReconcileFailure[] = [];
   let lastPlacements: PlacementView[] = [];
-  let lastParked: ParkedEnvironment[] = [];
 
   /**
-   * One pass. `fromKick` says whether a wake asked for this one rather than the
-   * timer coming round to it, which is the whole difference between a wake's
-   * latency and the interval's — and it is true of the DEFERRED rerun below too,
-   * because that rerun is the kick being honoured late.
+   * One pass. `fromKick` says whether an immediate rerun requested this pass.
    */
   async function runPass(fromKick: boolean): Promise<ReconcileAction[]> {
     /* Passes must not overlap: two of them would plan against the same gap and
@@ -186,7 +157,6 @@ export function createReconciler(
     const pending: ReconcileFailure[] = [];
     let plan: ReconcileAction[] = [];
     let placements: PlacementView[] = [];
-    let parked: ParkedEnvironment[] = [];
     try {
       /* Filtered to this node: an environment placed on other nodes is not
          desired here, and what still runs for it is planned for a stop. */
@@ -196,7 +166,6 @@ export function createReconciler(
       });
       const desired = state.environments;
       placements = state.placements;
-      parked = state.parked;
       /* Gaps in what could be resolved, reported beside the actions rather than
          instead of them: the environments they concern are still planned for,
          minus whatever went missing. */
@@ -224,13 +193,10 @@ export function createReconciler(
 
       if (!abort.signal.aborted) {
         try {
-          /* Routing is published from what the pass ended with, not from what it
-             planned. The parked environments travel with it, because their
-             hosts are routed to this daemon to be woken rather than to a process. */
+          /* Routing is published from what the pass ended with, not from what it planned. */
           await applyIngress(daemon, {
             desired,
             processes: executor.currentProcesses(),
-            parked,
           });
         } catch (error) {
           /*
@@ -256,7 +222,6 @@ export function createReconciler(
       /* What THIS pass read, so a registry it could not read reports nothing
          rather than a decision that may since have moved. */
       lastPlacements = placements;
-      lastParked = parked;
       lastRunAt = new Date().toISOString();
       inFlight = false;
       if (activeAbort === abort) activeAbort = undefined;
@@ -310,10 +275,6 @@ export function createReconciler(
 
     kick,
 
-    parkedRecords(): ParkedEnvironment[] {
-      return lastParked.map((entry) => ({ ...entry }));
-    },
-
     start(): void {
       if (terminal || timer !== null) return;
 
@@ -341,7 +302,7 @@ export function createReconciler(
     shutdown(): Promise<void> {
       if (shutdown !== undefined) return shutdown;
       /* Synchronous closure matters: Sail awaits bucket and lease work before
-         this call, and neither a timer, a wake nor a credit release may start
+         this call, and neither a timer nor a credit release may start
          runtime work in that gap or after it. */
       terminal = true;
       kicked = false;
@@ -364,7 +325,6 @@ export function createReconciler(
         failures: [...failures],
         processes: executor.currentProcesses().map((process) => ({ ...process })),
         placements: lastPlacements.map((view) => ({ ...view, nodes: [...view.nodes] })),
-        parked: lastParked.map((entry) => ({ project: entry.project, env: entry.env.name })),
       };
     },
   };

@@ -85,8 +85,6 @@ const PROJECT = "app";
 const ENVIRONMENT = "production";
 /** Deployed, deleted through the coordinator, and reaped: the ephemeral one. */
 const PREVIEW = "preview";
-/** Long enough that only the explicit deletion ever removes it. */
-const PREVIEW_IDLE_TTL_S = 3600;
 /**
  * Scaled down to a single node, then carried through the coordinator's death.
  *
@@ -419,7 +417,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       await createEnvironment(registry, PROJECT, {
         name: PREVIEW,
         ephemeral: true,
-        idleTtlS: PREVIEW_IDLE_TTL_S,
       });
       /*
        * `--replicas all` because an ephemeral environment otherwise defaults to
@@ -835,18 +832,14 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expectCleanExit(retired);
       expect(retired.output).toContain("retired");
 
-      /* It leaves by the same door a reassignment uses: no process, no route —
-         and its host falls through each Caddy's catch-all to the daemon, which
-         answers a retired name with the one 404 every refusal wears. Safe to
-         poll: a retired environment refuses to wake and nothing is stamped. */
+      /* It leaves by the same door a reassignment uses: no process and no route.
+         With no matching Caddy route, the host receives Caddy's empty response. */
       for (const node of nodes) {
         await until(`${node.id} to stop serving ${SUNSET}`, DEADLINE_MS, async () => {
           const state = await stateOf(node);
           if (state.processes.some(runsSunset)) return null;
           const answer = await httpGet(node.httpPort, "/", { host: sunsetHost() });
-          return answer.status === 404 && answer.body.includes("urn:scafo:not-found")
-            ? answer
-            : null;
+          return answer.status === 200 && answer.body === "" ? answer : null;
         });
       }
       const stoppedMs = Date.now() - retiredAt;

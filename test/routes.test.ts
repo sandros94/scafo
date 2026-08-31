@@ -33,21 +33,16 @@ describe("environment routing", () => {
     expect(servingBackend(PROJECT, environment("production"), [running])).toEqual(backend(running));
   });
 
-  it("publishes parked hosts and the API separately", () => {
+  it("publishes the API independently of unrouted environments", () => {
     const env = environment("preview", ["preview.example.com"]);
     const desired = renderRoutes({
       platformDomains: ["apps.test"],
       environments: [{ project: PROJECT, env }],
       processes: [],
       claims: [],
-      wake: { port: 7331, parked: [{ project: PROJECT, env }] },
       api: { port: 7331 },
     });
-    expect(desired.wake).toEqual({
-      port: 7331,
-      hosts: ["preview.example.com", "shop--preview.apps.test"],
-      domains: ["apps.test"],
-    });
+    expect(desired.routes).toEqual([]);
     expect(desired.api).toEqual({ port: 7331, hosts: ["apps.test"], denied: API_DENIED_PREFIXES });
   });
 });

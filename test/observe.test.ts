@@ -31,13 +31,21 @@ describe("what an event is stamped with", () => {
     const clock = manualClock();
     const observe = createObservability({ enabled: true, now: clock.now });
 
-    observe.emit({ type: "wake.kicked", id: "aaaa" });
+    observe.emit({ type: "runtime.started", processId: "shop--one" });
     clock.tick(2_500);
-    observe.emit({ type: "wake.stamped", id: "aaaa" });
+    observe.emit({ type: "runtime.started", processId: "shop--two" });
 
     expect(observe.snapshot().events).toEqual([
-      { at: new Date(CLOCK_START_MS).toISOString(), type: "wake.kicked", id: "aaaa" },
-      { at: new Date(CLOCK_START_MS + 2_500).toISOString(), type: "wake.stamped", id: "aaaa" },
+      {
+        at: new Date(CLOCK_START_MS).toISOString(),
+        type: "runtime.started",
+        processId: "shop--one",
+      },
+      {
+        at: new Date(CLOCK_START_MS + 2_500).toISOString(),
+        type: "runtime.started",
+        processId: "shop--two",
+      },
     ]);
     /* The same clock a span is measured against, so a `durationMs` and the `at`
        beside it can never come from two different ones. */
@@ -48,22 +56,18 @@ describe("what an event is stamped with", () => {
     const observe = createObservability({ enabled: true, now: manualClock().now });
 
     observe.emit({
-      type: "wake.admitted",
-      id: "bbbb",
-      host: "shop--preview.apps.test",
+      type: "placement.pending",
       project: "shop",
       env: "preview",
-      inFlight: 2,
+      reason: "insufficient-capacity",
     });
 
     expect(observe.snapshot().events[0]).toEqual({
       at: new Date(CLOCK_START_MS).toISOString(),
-      type: "wake.admitted",
-      id: "bbbb",
-      host: "shop--preview.apps.test",
+      type: "placement.pending",
       project: "shop",
       env: "preview",
-      inFlight: 2,
+      reason: "insufficient-capacity",
     });
   });
 });
@@ -73,7 +77,7 @@ describe("the ring", () => {
     const observe = createObservability({ enabled: true, ringSize: 4, now: manualClock().now });
 
     for (let index = 0; index < 6; index++) {
-      observe.emit({ type: "wake.kicked", id: `id-${String(index)}` });
+      observe.emit({ type: "runtime.started", processId: `id-${String(index)}` });
     }
     const snapshot = observe.snapshot();
 
@@ -87,13 +91,13 @@ describe("the ring", () => {
   it("says nothing was dropped while it has not filled up", () => {
     const observe = createObservability({ enabled: true, ringSize: 4, now: manualClock().now });
 
-    observe.emit({ type: "wake.kicked", id: "one" });
-    observe.emit({ type: "wake.kicked", id: "two" });
+    observe.emit({ type: "runtime.started", processId: "one" });
+    observe.emit({ type: "runtime.started", processId: "two" });
 
     expect(observe.snapshot()).toEqual({
       events: [
-        { at: new Date(CLOCK_START_MS).toISOString(), type: "wake.kicked", id: "one" },
-        { at: new Date(CLOCK_START_MS).toISOString(), type: "wake.kicked", id: "two" },
+        { at: new Date(CLOCK_START_MS).toISOString(), type: "runtime.started", processId: "one" },
+        { at: new Date(CLOCK_START_MS).toISOString(), type: "runtime.started", processId: "two" },
       ],
       dropped: 0,
     });
@@ -101,14 +105,14 @@ describe("the ring", () => {
 
   it("does not consume what it hands out: two readers see the same events", () => {
     const observe = createObservability({ enabled: true, ringSize: 4, now: manualClock().now });
-    observe.emit({ type: "wake.kicked", id: "one" });
+    observe.emit({ type: "runtime.started", processId: "one" });
 
     const first = observe.snapshot();
     const second = observe.snapshot();
 
     expect(ids(second.events)).toEqual(ids(first.events));
     /* And a snapshot is a copy: pushing to one must not grow the ring. */
-    first.events.push({ at: "", type: "wake.kicked", id: "forged" });
+    first.events.push({ at: "", type: "runtime.started", processId: "forged" });
     expect(ids(observe.snapshot().events)).toEqual(["one"]);
   });
 
@@ -116,7 +120,7 @@ describe("the ring", () => {
     const observe = createObservability({ enabled: true, now: manualClock().now });
 
     for (let index = 0; index < OBSERVED_RING_SIZE + 3; index++) {
-      observe.emit({ type: "wake.kicked", id: String(index) });
+      observe.emit({ type: "runtime.started", processId: String(index) });
     }
 
     expect(observe.snapshot().events).toHaveLength(OBSERVED_RING_SIZE);
@@ -127,20 +131,20 @@ describe("the ring", () => {
 describe("draining, which is the flusher's reader", () => {
   it("takes what has been emitted since the last drain, and only that", () => {
     const observe = createObservability({ enabled: true, ringSize: 8, now: manualClock().now });
-    observe.emit({ type: "wake.kicked", id: "one" });
-    observe.emit({ type: "wake.kicked", id: "two" });
+    observe.emit({ type: "runtime.started", processId: "one" });
+    observe.emit({ type: "runtime.started", processId: "two" });
 
     expect(ids(observe.drain().events)).toEqual(["one", "two"]);
     /* Consumed: a second drain of the same events would write them twice. */
     expect(observe.drain().events).toEqual([]);
 
-    observe.emit({ type: "wake.kicked", id: "three" });
+    observe.emit({ type: "runtime.started", processId: "three" });
     expect(ids(observe.drain().events)).toEqual(["three"]);
   });
 
   it("leaves the window alone: a snapshot still shows what was drained", () => {
     const observe = createObservability({ enabled: true, ringSize: 8, now: manualClock().now });
-    observe.emit({ type: "wake.kicked", id: "one" });
+    observe.emit({ type: "runtime.started", processId: "one" });
 
     observe.drain();
 
@@ -152,7 +156,7 @@ describe("draining, which is the flusher's reader", () => {
   it("counts what fell out of the ring before it could be read, since the last drain", () => {
     const observe = createObservability({ enabled: true, ringSize: 4, now: manualClock().now });
     for (let index = 0; index < 6; index++) {
-      observe.emit({ type: "wake.kicked", id: `id-${String(index)}` });
+      observe.emit({ type: "runtime.started", processId: `id-${String(index)}` });
     }
 
     const first = observe.drain();
@@ -163,7 +167,7 @@ describe("draining, which is the flusher's reader", () => {
     /* Since the LAST DRAIN, never since the seam was made: the flusher records
        each flush's own loss, and a total would be counted again every time. */
     for (let index = 6; index < 11; index++) {
-      observe.emit({ type: "wake.kicked", id: `id-${String(index)}` });
+      observe.emit({ type: "runtime.started", processId: `id-${String(index)}` });
     }
     const second = observe.drain();
 
@@ -175,7 +179,7 @@ describe("draining, which is the flusher's reader", () => {
     const observe = createObservability({ enabled: true, ringSize: 4, now: manualClock().now });
 
     for (let round = 0; round < 5; round++) {
-      observe.emit({ type: "wake.kicked", id: `round-${String(round)}` });
+      observe.emit({ type: "runtime.started", processId: `round-${String(round)}` });
       expect(observe.drain().dropped).toBe(0);
     }
     /* And the ring itself has forgotten a few by now, which is a different
@@ -189,7 +193,7 @@ describe("a seam that is off", () => {
     const observe = createObservability({ enabled: false, now: manualClock().now });
 
     observe.emit({ type: "reconcile.pass.start", kicked: true });
-    observe.emit({ type: "wake.kicked", id: "one" });
+    observe.emit({ type: "runtime.started", processId: "one" });
 
     expect(observe.enabled).toBe(false);
     expect(observe.snapshot()).toEqual({ events: [], dropped: 0 });
@@ -211,7 +215,7 @@ describe("a seam that is off", () => {
 
 /* ------------------------------------------------------------------ helpers */
 
-/** The ids of the wake events a case emitted, in order. */
+/** The identities of the events a case emitted, in order. */
 function ids(events: ObservedEvent[]): string[] {
-  return events.map((event) => ("id" in event ? event.id : event.type));
+  return events.map((event) => ("processId" in event ? event.processId : event.type));
 }

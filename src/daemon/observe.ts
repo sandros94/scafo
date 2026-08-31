@@ -43,41 +43,8 @@ export const OBSERVED_RING_SIZE: number = 512;
  * are measured against {@link Observability.nowMs}.
  */
 export type ObservedEvent =
-  /* A held request let through this node's concurrent-wake cap, with what its
-     Host resolved to and how many wakes this node is holding including it. */
-  | {
-      at: string;
-      type: "wake.admitted";
-      id: string;
-      host: string;
-      project: string;
-      env: string;
-      inFlight: number;
-    }
-  /* Turned away AT the cap, having stamped nothing and started nothing. */
-  | { at: string; type: "wake.refused"; id: string; host: string }
-  /**
-   * What resolving this request's Host and its placement cost the bucket.
-   * Emitted once the request is admitted, because a refusal has nothing to
-   * attribute the cost to.
-   */
-  | { at: string; type: "wake.resolved"; id: string; storeOps?: number }
-  /* The stamp the reconcile loop starts things from is IN THE BUCKET — not
-     merely timestamped, which is a distinction a wake's latency is made of. */
-  | { at: string; type: "wake.stamped"; id: string }
-  | { at: string; type: "wake.kicked"; id: string }
-  /* The application answered, and this is what it answered with. A successful
-     wake leaves this trace and no other. */
-  | { at: string; type: "wake.served"; id: string; port: number; status: number }
-  /**
-   * A wake this node was holding that ended without an application answering it.
-   * `"deadline"` is the surface's own outcome; anything else is the description
-   * of what was raised, a hop that could not be made included.
-   */
-  | { at: string; type: "wake.failed"; id: string; reason: string }
-  /* A pass beginning. `kicked` tells a pass a wake asked for from one the timer
-     came round to, which is the difference between a wake's latency and the
-     interval's. */
+  /* A pass beginning. `kicked` distinguishes an explicitly requested pass from
+     one the timer started. */
   | { at: string; type: "reconcile.pass.start"; kicked: boolean }
   /** A coordinator newly could not admit an environment under its credit plan. */
   | {
@@ -130,7 +97,7 @@ export type ObservedEvent =
    * A project an admin has stopped, and who stopped it. THE OTHER AUDIT PAIR:
    * `actor` is the key the request was signed with, and the SUBJECT is the
    * project rather than another key, so it lands in the `project` column the
-   * wake and counter records already use.
+   * counter records already use.
    *
    * Emitted by the `/v1/projects` routes and by nothing else. A block written
    * straight to the bucket has no daemon in the picture and is covered by the

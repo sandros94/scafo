@@ -351,8 +351,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expect(JSON.parse(health.body)).toMatchObject({ ok: true, node: NODE_ID });
       observed.apexHealth = JSON.parse(health.body);
 
-      /* And it is the API rather than the wake surface: a path the API does not
-         have is the API's own miss, not "nothing is served at this host". */
+      /* A path the API does not have is the API's own miss. */
       const missing = await httpGet(caddyHttpPort, "/v1/nope", { host: PLATFORM_DOMAIN });
       expect(missing.status).toBe(404);
       expect(missing.body).not.toContain("urn:scafo:not-found");
@@ -439,7 +438,6 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
 
       const routes = await caddyRoutes();
       expect(routes.map((route) => route["@id"])).toContain("operator_authored");
-      expect(routes.map((route) => route["@id"])).toContain(`scafo_catchall_${PLATFORM_DOMAIN}`);
     },
     STEP_TIMEOUT_MS,
   );

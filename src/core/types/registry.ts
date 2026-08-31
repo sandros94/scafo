@@ -204,7 +204,6 @@ export interface ProjectRecord {
   previewDefaults?: {
     varset?: string;
     placement?: PlacementStrategy;
-    idleTtlS?: number;
   };
   /**
    * When the project came into being, stamped by the create that made it.
@@ -304,23 +303,6 @@ export interface DeploymentRevision {
 }
 
 /**
- * An environment's scale-to-zero decisions, each optional. Parked-ness itself
- * is never stored: it is derived from these and from the wake stamps, so there
- * is no state machine to desynchronize.
- */
-export interface ParkPolicy {
-  /**
-   * Seconds without a wake before an EPHEMERAL environment's processes stop,
-   * `0` to keep them warm. Only ephemeral environments park — a long-lived
-   * environment carries live traffic no clock can see, so until scafo can
-   * measure that traffic this field is refused for one.
-   */
-  afterS?: number;
-  /** Seconds a request held for a wake may wait before `503 Retry-After`. */
-  wakeDeadlineS?: number;
-}
-
-/**
  * A deployable environment of a project.
  * Key: `_scafo/projects/<project>/environments/<name>.json`.
  */
@@ -334,9 +316,7 @@ export interface EnvironmentRecord {
   varset?: string;
   domains: string[];
   placement: PlacementStrategy;
-  /** Ephemeral environments are reaped once idle for `idleTtlS`. */
   ephemeral: boolean;
-  idleTtlS?: number;
   /**
    * How many nodes serve this environment. Absent means the default its kind
    * implies — `"all"` when it is long-lived, `1` when it is ephemeral — which is
@@ -352,12 +332,6 @@ export interface EnvironmentRecord {
    * a selector means every MATCHING node.
    */
   nodeSelector?: NodeSelector;
-  /**
-   * How this environment scales to zero, where it differs from what its kind
-   * implies. Absent fields resolve to platform defaults — see
-   * `resolveParkPolicy` — so a record states only what an operator decided.
-   */
-  park?: ParkPolicy;
   /**
    * When the environment was retired: the first of the two steps that
    * decommission a long-lived environment.

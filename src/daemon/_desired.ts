@@ -4,14 +4,12 @@ import { ScafoError } from "../core/error.ts";
 import type { DesiredEnvironment } from "../core/placement/reconcile.ts";
 import { deploymentRevision } from "../core/registry/_deployment.ts";
 import { readJson } from "../core/registry/cas.ts";
-import { nowDate, type RegistryContext } from "../core/registry/context.ts";
+import type { RegistryContext } from "../core/registry/context.ts";
 import { listEnvironments } from "../core/registry/environments.ts";
 import { environmentKey } from "../core/registry/paths.ts";
-import { resolveParkPolicy } from "../core/registry/park.ts";
 import { listPlacements } from "../core/registry/placement.ts";
 import { isProjectBlocked, listProjects } from "../core/registry/projects.ts";
 import { getVarsetEnvelope, openVarset } from "../core/registry/varsets.ts";
-import { readEnvironmentWake } from "../core/registry/wake.ts";
 import {
   type ConcurrencyGate,
   createConcurrencyGate,
@@ -43,17 +41,6 @@ export interface PlacementView {
   selector?: NodeSelector;
 }
 
-/**
- * One environment a node reads as PARKED, with the whole record rather than its
- * name: the routing claims the environment's hosts for the node's own daemon, and
- * the wake surface resolves a request's Host back to it and reads the park
- * policy it is woken under. Neither can be done from a name.
- */
-export interface ParkedEnvironment {
-  project: string;
-  env: EnvironmentRecord;
-}
-
 /** Something one read could not resolve, recorded against the environment it concerns. */
 export interface DesiredFailure {
   /** `project/environment`. */
@@ -73,19 +60,6 @@ export interface DesiredState {
    * reconciles require placement and leave it pending. See {@link readDesired}.
    */
   placements: PlacementView[];
-  /**
-   * Environments this node reads as PARKED: ephemeral ones that have gone longer
-   * without a wake than their park policy allows.
-   *
-   * Reported rather than merely left out of {@link DesiredState.environments},
-   * because those two absences are the same absence to `/v1/state` and to an
-   * operator otherwise: an environment nothing runs for because it was never
-   * deployed looks exactly like one nothing runs for because it is waiting to be
-   * woken, and only one of them is answered by sending it a request.
-   *
-   * Carries the whole record rather than the name — see {@link ParkedEnvironment}.
-   */
-  parked: ParkedEnvironment[];
   /**
    * Environments that were read but could not be fully resolved, each naming
    * what was missing. The environment is still desired — see
@@ -109,13 +83,6 @@ export type PlacementReadMode = "required" | "legacy-fallback";
  * rendered from what this node actually runs, its hosts stop resolving with
  * them. Nothing in the route renderer knows what retirement is, and nothing in
  * it needs to.
- *
- * A PARKED environment leaves by that same door and comes back through it: an
- * ephemeral one that has gone without a wake for longer than its policy allows
- * is desired for none of its own builds, and a wake makes it desired again on
- * the next pass. It is named in {@link DesiredState.parked} while it is, because
- * it is otherwise indistinguishable from an environment nothing was ever
- * deployed to.
  *
  * MISSING PLACEMENT RECORD → LEGACY READS include an unconstrained environment;
  * production reads opt into `mode: "required"` and include none. The explicit
@@ -141,7 +108,7 @@ export type PlacementReadMode = "required" | "legacy-fallback";
  * EVERY READ THIS DOES IS BOUNDED BY ONE GATE, and the whole pass shares it. A
  * pass is a read per environment plus the reads that resolve it, and on a
  * hundred-millisecond store one after another that is seconds of latency in
- * front of every wake and every start. They are independent of each other, so
+ * front of every start. They are independent of each other, so
  * they overlap — but the bound is fleet-wide rather than per project or per
  * environment, because those nest and the product is what would reach the store.
  * What comes back does NOT depend on the order it came back in: results are
@@ -166,7 +133,6 @@ export async function readDesired(
   return {
     environments: perProject.flatMap((entry) => entry.environments),
     placements: perProject.flatMap((entry) => entry.placements),
-    parked: perProject.flatMap((entry) => entry.parked),
     failures: perProject.flatMap((entry) => entry.failures),
   };
 }
@@ -219,18 +185,13 @@ async function readProject(
    * is no second mechanism, and nothing downstream of here knows what a block
    * is.
    *
-   * NOT REPORTED AS PARKED EITHER. Parked promises that a request wakes it; a
-   * blocked project's hosts are refused rather than held open, so listing them
-   * there would route live traffic at a daemon that will answer 404 and stamp
-   * nothing.
-   *
    * It is read BEFORE the listings rather than beside them: a blocked project
    * costs one read and stops, which is what a fleet carrying a suspended tenant
    * should cost per pass. Absent reads as unblocked — a project deleted between
    * the listing and this read has no environments to find anyway.
    */
   if (await gate.run(() => isProjectBlocked(registry, project))) {
-    return { environments: [], placements: [], parked: [], failures: [] };
+    return { environments: [], placements: [], failures: [] };
   }
 
   /* One listing of each kind for the whole project, rather than two reads per
@@ -249,11 +210,10 @@ async function readProject(
     readEnvironment(registry, project, name, nodeId, placements.get(name), requirePlacement),
   );
 
-  const state: DesiredState = { environments: [], placements: [], parked: [], failures: [] };
+  const state: DesiredState = { environments: [], placements: [], failures: [] };
   for (const part of parts) {
     state.environments.push(...part.environments);
     state.placements.push(...part.placements);
-    state.parked.push(...part.parked);
     state.failures.push(...part.failures);
   }
   return state;
@@ -268,7 +228,7 @@ async function readEnvironment(
   placement: PlacementRecord | undefined,
   requirePlacement: boolean,
 ): Promise<DesiredState> {
-  const state: DesiredState = { environments: [], placements: [], parked: [], failures: [] };
+  const state: DesiredState = { environments: [], placements: [], failures: [] };
 
   /* Read once and used for every question below: whether the environment
      constrains where it runs, what its placement view should report, and what
@@ -292,7 +252,7 @@ async function readEnvironment(
   }
   if (!servedHere(placement, environment, nodeId, requirePlacement)) return state;
 
-  const wanted = await resolveEnvironmentDeployment(registry, project, environment, state);
+  const wanted = resolveEnvironmentDeployment(project, environment);
   if (wanted !== null) state.environments.push(wanted);
   return state;
 }
@@ -316,26 +276,16 @@ function servedHere(
 /**
  * Resolves whether an environment has a current celld deployment.
  *
- * PARKED-NESS IS DERIVED HERE AND STORED NOWHERE. An ephemeral environment that
- * has gone longer than its policy allows without a wake is parked: its runtime
- * is not desired, so the next pass stops it and its hosts stop
- * resolving. It is reported in {@link DesiredState.parked}
- * rather than merely dropped.
- *
  * The deployment notice is not treated that way and must not be: it says only
  * whether the environment has something to serve. A missing notice means there
  * is nothing to plan; a malformed one rejects the read rather than becoming a
  * runtime decision.
  *
- * One environment's reads run in sequence because parkedness decides whether
- * its deployment should be considered at all.
  */
-export async function resolveEnvironmentDeployment(
-  registry: RegistryContext,
+export function resolveEnvironmentDeployment(
   project: string,
   env: EnvironmentRecord,
-  state: DesiredState,
-): Promise<DesiredEnvironment | null> {
+): DesiredEnvironment | null {
   /*
    * On its way out: an environment an operator has retired is served nowhere,
    * from the next pass on. It still HAS a build — retirement is reversible, and
@@ -350,40 +300,11 @@ export async function resolveEnvironmentDeployment(
    */
   if (env.retiredAt !== undefined) return null;
   const revision = deploymentRevision(env);
-
-  const policy = resolveParkPolicy(env);
-  const parked = policy.afterS > 0 && (await isParked(registry, project, env, policy.afterS));
-  /* Reported only when there is something the clock is keeping stopped: an
-     environment without a deployment serves nothing either way, and
-     calling it parked would promise that a request wakes something. */
-  if (parked && revision !== null) state.parked.push({ project, env });
-
-  if (parked || revision === null) return null;
+  if (revision === null) return null;
 
   return {
     project,
     env,
     varsetId: env.varset,
   };
-}
-
-/**
- * Whether the environment has gone without a wake for longer than `afterS`.
- *
- * The base is its wake stamp, falling back to creation for one never stamped.
- * Deploying is not activity and cannot wake or extend an already parked
- * environment. A base that cannot be read keeps the environment awake: nothing
- * here should stop an application over a timestamp it could not parse.
- */
-async function isParked(
-  registry: RegistryContext,
-  project: string,
-  env: EnvironmentRecord,
-  afterS: number,
-): Promise<boolean> {
-  const woken = await readEnvironmentWake(registry, project, env.name);
-  const since = woken === null ? Date.parse(env.createdAt) : woken.getTime();
-  if (!Number.isFinite(since)) return false;
-
-  return nowDate(registry).getTime() - since >= afterS * 1000;
 }

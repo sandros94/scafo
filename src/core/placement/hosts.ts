@@ -4,10 +4,8 @@
  *
  * PURE AND REGISTRY-FREE, which is what makes it shareable. It tells the project
  * from the ref beside it and stops there: whether that ref is an environment or
- * a build is a question only the bucket answers, and the callers answer it
- * differently. The wake surface reads the registry (an environment of that name
- * before a build of it, `src/daemon/_wake-target.ts`); the ingress counters take
- * the label as written, because a log line is counted rather than served.
+ * a build is a question only the bucket answers. Ingress counters take the label
+ * as written, because a log line is counted rather than served.
  */
 
 import { parseHostLabel } from "../utils/slug.ts";

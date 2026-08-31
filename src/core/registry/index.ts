@@ -16,8 +16,6 @@ export * from "./operators.ts";
 export * from "./trust.ts";
 export * from "./domains.ts";
 export * from "./reaper.ts";
-export * from "./park.ts";
-export * from "./wake.ts";
 export * from "./tls.ts";
 export * from "./locks.ts";
 export * from "./tls-lock.ts";

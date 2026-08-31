@@ -237,7 +237,7 @@ describe("what a scoped operator is told about the refusal", () => {
 });
 
 describe("every JSON control route is bounded", () => {
-  it.each(["selector", "park", "operator", "labels"] as const)(
+  it.each(["selector", "operator", "labels"] as const)(
     "%s accepts the exact cap and rejects every over-cap or malformed body without mutating",
     async (name) => {
       const spec = await jsonRoute(name);
@@ -451,7 +451,7 @@ interface JsonRoute {
   snapshot(): Promise<string>;
 }
 
-async function jsonRoute(name: "selector" | "park" | "operator" | "labels"): Promise<JsonRoute> {
+async function jsonRoute(name: "selector" | "operator" | "labels"): Promise<JsonRoute> {
   const environment = (): Promise<string> =>
     getEnvironment(clock.ctx, MINE, ENVIRONMENT).then((record) => JSON.stringify(record));
   if (name === "selector") {
@@ -459,14 +459,6 @@ async function jsonRoute(name: "selector" | "park" | "operator" | "labels"): Pro
       path: pathIn(MINE, "/selector"),
       accepted: { selector: { tier: "fast" } },
       rejected: { selector: { tier: "slow" } },
-      snapshot: environment,
-    };
-  }
-  if (name === "park") {
-    return {
-      path: pathIn(MINE, "/park"),
-      accepted: { policy: null },
-      rejected: { policy: { afterS: 1 } },
       snapshot: environment,
     };
   }
@@ -529,7 +521,6 @@ function environmentCalls(): Array<[string, string, Call]> {
     ["retire", "/retire", { method: "POST" }],
     ["unretire", "/unretire", { method: "POST" }],
     ["selector", "/selector", { method: "POST", body: { selector: { tier: "fast" } } }],
-    ["park", "/park", { method: "POST", body: { policy: null } }],
     /* The deletion is lease-gated and this app coordinates nothing, so what an
        allowed caller gets here is the coordinator's absence — which is exactly
        the point: it is not a 403, and it was decided AFTER the scope check. */

@@ -713,7 +713,6 @@ describe("what happens to an accepted deploy", () => {
     await createEnvironment(clock.ctx, PROJECT, {
       name: "preview",
       ephemeral: true,
-      idleTtlS: 900,
     });
 
     const id = (await responseId(
@@ -724,7 +723,6 @@ describe("what happens to an accepted deploy", () => {
     /* And it is still the environment it was: the deploy created nothing. */
     await expect(getEnvironment(clock.ctx, PROJECT, "preview")).resolves.toMatchObject({
       ephemeral: true,
-      idleTtlS: 900,
     });
   });
 
@@ -975,7 +973,6 @@ function fakeReconciler(processes: () => RuntimeProcess[] = () => running): Reco
   return {
     runOnce: () => Promise.resolve([]),
     kick: () => {},
-    parkedRecords: () => [],
     start: () => {},
     shutdown: () => Promise.resolve(),
     stop: () => {},
@@ -986,7 +983,6 @@ function fakeReconciler(processes: () => RuntimeProcess[] = () => running): Reco
       failures: [],
       processes: processes(),
       placements: [],
-      parked: [],
     }),
   };
 }

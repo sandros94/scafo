@@ -10,7 +10,6 @@ export type ScafoErrorCode =
   | "capability-missing"
   | "placement-unavailable"
   | "project-blocked"
-  | "wake-unavailable"
   | "capacity-unavailable"
   | "draining"
   | "deploy-overloaded"
@@ -52,10 +51,6 @@ const DEFAULT_STATUS: Record<ScafoErrorCode, number> = {
      forbidden: nothing is wrong with the caller or with its key, and the same
      request works unchanged the moment the block is lifted. */
   "project-blocked": 409,
-  /* A host that IS wakeable, refused for now: over the node's wake cap, or past
-     the deadline the request was held for. Always answered with a `Retry-After`,
-     because the very next try may well succeed. */
-  "wake-unavailable": 503,
   "capacity-unavailable": 503,
   "draining": 503,
   "deploy-overloaded": 429,

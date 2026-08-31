@@ -104,14 +104,14 @@ describe("labels", () => {
     await createProject(clock.ctx, {
       slug: PROJECT,
       placement: "dense",
-      previewDefaults: { idleTtlS: 30 },
+      previewDefaults: { placement: "dense" },
     });
 
     await setProjectLabels(clock.ctx, PROJECT, { tenant: "acme" });
 
     await expect(getProject(clock.ctx, PROJECT)).resolves.toMatchObject({
       placement: "dense",
-      previewDefaults: { idleTtlS: 30 },
+      previewDefaults: { placement: "dense" },
     });
   });
 });
@@ -146,7 +146,7 @@ describe("blocking a project", () => {
     await createProject(clock.ctx, {
       slug: PROJECT,
       placement: "dense",
-      previewDefaults: { idleTtlS: 30 },
+      previewDefaults: { placement: "dense" },
     });
     await setProjectLabels(clock.ctx, PROJECT, { tenant: "acme" });
     const before = await getProject(clock.ctx, PROJECT);
