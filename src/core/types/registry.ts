@@ -28,15 +28,6 @@ export type ReplicaCount = number | "all";
  */
 export type NodeSelector = Record<string, string>;
 
-/**
- * Non-fatal advisory returned alongside a successful operation. Warnings never
- * abort a call; `code` is the stable contract, `detail` is human-facing.
- */
-export interface ScafoWarning {
-  code: string;
-  detail: string;
-}
-
 /** Registry-wide settings written at bootstrap. Key: `_scafo/meta.json`. */
 export interface RegistryMeta {
   v: 1;
@@ -287,10 +278,6 @@ export interface BuildRecord {
   v: 1;
   id: string;
   celldVersionId?: string;
-  /** Whether the build reads its configuration at runtime rather than at build time. */
-  runtimeConfigurable: boolean;
-  /** Varset the artifact was built against; drives the runtime-configurable warning. */
-  builtWithVarset?: string;
   source?: BuildSource;
   /** Present only when a verified workload token uploaded this build. */
   oidc?: OidcActor;
@@ -303,8 +290,6 @@ export interface BuildRecord {
 export interface BuildInput {
   id: string;
   celldVersionId?: string;
-  runtimeConfigurable: boolean;
-  builtWithVarset?: string;
   source?: BuildSource;
   /** Auth-owned workload identity; deploy intake, not request metadata, sets this. */
   oidc?: OidcActor;

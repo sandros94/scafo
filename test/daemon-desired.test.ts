@@ -54,7 +54,7 @@ beforeEach(async () => {
 
   for (const project of [PROJECT, OTHER_PROJECT]) {
     await createProject(registry, { slug: project });
-    await createBuild(registry, project, { id: BUILD, runtimeConfigurable: true });
+    await createBuild(registry, project, { id: BUILD });
   }
   await deployed(PROJECT, "prod");
 
@@ -557,7 +557,7 @@ async function watchedInstallation(): Promise<{
   const observing = new ObservingStore(new MemoryCasStore());
   const { ctx } = ctxWith(observing);
   await createProject(ctx, { slug: PROJECT });
-  await createBuild(ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
+  await createBuild(ctx, PROJECT, { id: BUILD });
 
   const taken = await acquireLease(ctx, SELF);
   if (taken === null) throw new Error("the fixture could not take the lease");

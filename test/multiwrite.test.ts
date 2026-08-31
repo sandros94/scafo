@@ -68,7 +68,7 @@ const FLOWS: Flow[] = [
       await createEnvironment(ctx, PROJECT, { name: "prod" });
     },
     run: async ({ ctx }) => {
-      await createBuild(ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
+      await createBuild(ctx, PROJECT, { id: BUILD });
       await recordDeployment(ctx, PROJECT, "prod", BUILD);
     },
     settled: async ({ ctx }) => {

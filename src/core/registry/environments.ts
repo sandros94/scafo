@@ -8,7 +8,6 @@ import type {
   NodeSelector,
   PlacementStrategy,
   ReplicaCount,
-  ScafoWarning,
   VarsetEnvelope,
 } from "../types/registry.ts";
 import { deepEqual, isCasConflict, namesFromKeys } from "./_shared.ts";
@@ -34,12 +33,6 @@ export interface CreateEnvironmentInput {
    * unconstrained, on whichever live nodes the coordinator picks.
    */
   nodeSelector?: NodeSelector;
-}
-
-/** An environment after a change, with any advisories the change raised. */
-export interface EnvironmentUpdate {
-  environment: EnvironmentRecord;
-  warnings: ScafoWarning[];
 }
 
 /**
@@ -113,7 +106,7 @@ export async function setEnvironmentVarset(
   project: string,
   env: string,
   varsetId: string,
-): Promise<EnvironmentUpdate> {
+): Promise<EnvironmentRecord> {
   await requireJson<VarsetEnvelope>(ctx, varsetKey(project, varsetId));
 
   const updated = await updateJson<EnvironmentRecord>(
@@ -122,7 +115,7 @@ export async function setEnvironmentVarset(
     (current) => ({ ...current, varset: varsetId }),
   );
 
-  return { environment: updated.value, warnings: [] };
+  return updated.value;
 }
 
 /* Set at creation and never rewritten, so they identify the record. Everything

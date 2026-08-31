@@ -118,7 +118,7 @@ beforeEach(async () => {
   for (const project of [MINE, THEIRS]) {
     await createProject(clock.ctx, { slug: project });
     await createEnvironment(clock.ctx, project, { name: ENVIRONMENT });
-    await createBuild(clock.ctx, project, { id: BUILD, runtimeConfigurable: true });
+    await createBuild(clock.ctx, project, { id: BUILD });
     await recordDeployment(clock.ctx, project, ENVIRONMENT, BUILD);
   }
 
@@ -575,7 +575,7 @@ async function upload(id: string, keys: Keypair, project: string): Promise<Respo
     method: "POST",
     headers: {
       authorization: `Bearer ${await signNodeToken(keys.privateKey, id)}`,
-      [DEPLOY_METADATA_HEADER]: encodeDeployMetadata({ runtimeConfigurable: false }),
+      [DEPLOY_METADATA_HEADER]: encodeDeployMetadata({}),
     },
     body: new Uint8Array([1, 2, 3]),
   });
@@ -639,12 +639,9 @@ function bothProjectsReconciled(): Reconciler {
       processId: `${project}--${ENVIRONMENT}`,
       project,
       env: ENVIRONMENT,
-      attemptedRevision: 1,
-      appliedRevision: 1,
-      deployment: { version: BUILD, prefix: `deployments/main/${BUILD}`, generation: 1 },
+      configuredVarset: null,
       port: 42_001,
       internalPort: 42_002,
-      ready: true,
     })),
     placements: [MINE, THEIRS].map((project) => ({
       project,
@@ -725,7 +722,6 @@ function stubDeploys(): StubDeploys {
       id: `000000000000000${String(next)}`,
       project,
       state: "accepted",
-      warnings: [],
     };
     byId.set(status.id, status);
     return status;
@@ -771,7 +767,6 @@ function daemonConfig(): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
-      probePath: "/",
       bindHost: "127.0.0.1",
       durability: "bucket",
       cellIdleEvictS: 900,

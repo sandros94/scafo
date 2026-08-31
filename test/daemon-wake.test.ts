@@ -1021,18 +1021,15 @@ function fakeReconciler(): FakeReconciler {
   return fake;
 }
 
-/** A process that has passed its gate, which is the only kind a wake is handed to. */
-function ready(env: string, build: string, port: number): RuntimeProcess {
+/** A supervised process a wake may be handed to. */
+function ready(env: string, _build: string, port: number): RuntimeProcess {
   return {
     processId: `${PROJECT}--${env}`,
     project: PROJECT,
     env,
-    attemptedRevision: 1,
-    appliedRevision: 1,
-    deployment: { version: build, prefix: `deployments/main/${build}`, generation: 1 },
+    configuredVarset: null,
     port,
     internalPort: port + 1,
-    ready: true,
   };
 }
 
@@ -1048,11 +1045,10 @@ async function seed(): Promise<void> {
   for (const id of [BUILD, SUPERSEDED, THIRD]) {
     await createBuild(clock.ctx, PROJECT, {
       id,
-      runtimeConfigurable: true,
     });
   }
   /* Recorded before builds said which fleet holds their code: not wakeable. */
-  await createBuild(clock.ctx, PROJECT, { id: ORPHAN_BUILD, runtimeConfigurable: true });
+  await createBuild(clock.ctx, PROJECT, { id: ORPHAN_BUILD });
 
   await recordDeployment(clock.ctx, PROJECT, PREVIEW, SUPERSEDED);
   await recordDeployment(clock.ctx, PROJECT, PREVIEW, BUILD);
@@ -1081,7 +1077,6 @@ function daemonConfig(bindHost = "127.0.0.1", apiPublic = true): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
-      probePath: "/",
       bindHost,
       durability: "bucket",
       cellIdleEvictS: 900,

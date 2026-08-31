@@ -163,7 +163,7 @@ export function createWakeService(daemon: DaemonContext): WakeService {
 
   /* Where a woken process is dialled: WHAT IT BINDS, which is loopback on a
      single node and this node's tunnel address on a fleet. The same value the
-     readiness gate probes and the ingress routes to — dialling loopback here
+     ingress routes to — dialling loopback here
      while the listeners are elsewhere does the whole of a wake and then fails
      the request it was for. */
   const upstreamHost = runtimeDialHost(daemon.config.runtime);
@@ -204,7 +204,7 @@ export function createWakeService(daemon: DaemonContext): WakeService {
   /**
    * Holds the request until something is ready to take it, or until the
    * environment's own deadline runs out. The loop is polled rather than
-   * subscribed to because readiness is a fact about a process the loop already
+   * subscribed to because running state is a fact about a process the loop already
    * re-establishes on every pass, and there is nothing here to keep in sync.
    */
   async function awaitServing(target: WakeTarget): Promise<number | undefined> {

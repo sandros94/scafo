@@ -4,12 +4,7 @@ import { describeError, ScafoError } from "../core/error.ts";
 import { formatProcessId, parseProcessId } from "../core/placement/ids.ts";
 import type { DesiredEnvironment, ReconcileAction } from "../core/placement/reconcile.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
-import type {
-  ProbeOptions,
-  RuntimeDriver,
-  RuntimeProcess,
-  RuntimeSpecInput,
-} from "../core/types/runtime.ts";
+import type { RuntimeDriver, RuntimeProcess, RuntimeSpecInput } from "../core/types/runtime.ts";
 import { openEnvironmentVars } from "./_desired.ts";
 import type { DaemonContext } from "./app.ts";
 import { advertisedAddress } from "./config.ts";
@@ -29,7 +24,6 @@ export interface ExecutorDeps {
   daemon: DaemonContext;
   registry: RegistryContext;
   driver: RuntimeDriver;
-  probe: ProbeOptions;
   baseEnv: Record<string, string>;
   known: Map<string, RuntimeProcess>;
 }
@@ -40,13 +34,12 @@ export interface Executor {
     desired: DesiredEnvironment[],
     pending: ReconcileFailure[],
     signal?: AbortSignal,
-    beforeAdopt?: (processId: string) => Promise<void>,
   ): Promise<void>;
   currentProcesses(): RuntimeProcess[];
 }
 
 export function createExecutor(deps: ExecutorDeps): Executor {
-  const { daemon, registry, driver, probe, baseEnv, known } = deps;
+  const { daemon, registry, driver, baseEnv, known } = deps;
   const observe = daemon.observability;
   if (daemon.credits === undefined) {
     throw new ScafoError("invalid-input", "Missing node credit controller");
@@ -66,7 +59,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
   ): Promise<void> {
     signal?.throwIfAborted();
     const entry = wanted.get(placement(action.project, action.env));
-    if (entry === undefined || entry.env.deployment?.revision !== action.revision) return;
+    if (entry === undefined || entry.env.deployment === null) return;
 
     const processId = formatProcessId({ project: action.project, env: action.env });
     const creditMb = daemon.config.runtime.creditMb ?? DEFAULT_RUNTIME_CREDIT_MB;
@@ -81,25 +74,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     }
     transitions.push({ hold: transition, processId });
 
-    const input: RuntimeSpecInput = {
-      project: entry.project,
-      env: entry.env,
-      vars: await openEnvironmentVars(registry, entry, daemon.varsetKey),
-      ports: action.ports,
-      node: {
-        endpoint: daemon.config.bucket.endpoint,
-        region: daemon.config.bucket.region,
-        bucket: daemon.config.bucket.bucket,
-        keyPrefix: daemon.config.bucket.prefix,
-        accessKey: daemon.config.bucket.accessKey,
-        secretKey: daemon.config.bucket.secretKey,
-        advertiseHost: advertisedAddress(daemon.config.node).host,
-        bindHost: daemon.config.runtime.bindHost,
-      },
-      capacity: daemon.capacity,
-      maxRssMb: creditMb,
-      baseEnv,
-    };
+    const input = await runtimeInput(entry, action.ports);
     const spec = driver.processSpec(input);
     if (spec.id !== processId) {
       throw new ScafoError("invalid-input", "Runtime process id does not match credit owner");
@@ -108,11 +83,9 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       processId,
       project: entry.project,
       env: entry.env.name,
-      attemptedRevision: 0,
-      appliedRevision: 0,
+      configuredVarset: entry.varsetId ?? null,
       port: action.ports.public,
       internalPort: action.ports.internal,
-      ready: false,
     };
 
     let processStarted = false;
@@ -141,26 +114,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       processStarted = true;
       signal?.throwIfAborted();
       known.set(processId, started);
-      observe?.emit({ type: "runtime.started", processId, revision: action.revision });
-
-      if (await gate(started)) {
-        signal?.throwIfAborted();
-        const deployment = await driver.currentDeployment(
-          started,
-          signal === undefined ? undefined : { signal },
-        );
-        signal?.throwIfAborted();
-        known.set(processId, {
-          ...started,
-          attemptedRevision: action.revision,
-          appliedRevision: action.revision,
-          deployment,
-          ready: true,
-        });
-        return;
-      }
-      pending.push(noted(processId, "the process did not pass its readiness gate"));
-      await stopStarted();
+      observe?.emit({ type: "runtime.started", processId });
     } catch (error) {
       if (processStarted) await stopStarted();
       if (signal?.aborted !== true) throw error;
@@ -169,161 +123,117 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     }
   }
 
-  async function runAdopt(
-    action: Extract<ReconcileAction, { type: "adopt" }>,
-    pending: ReconcileFailure[],
-    signal?: AbortSignal,
-    beforeAdopt?: (processId: string) => Promise<void>,
-  ): Promise<void> {
-    signal?.throwIfAborted();
-    const process = known.get(action.processId);
-    if (process === undefined) return;
-    if (process.internalPort === UNKNOWN_PORT) {
-      throw new ScafoError("capability-missing", "Runtime listener is unknown", {
-        detail: `the internal listener of "${action.processId}" is not available to this daemon`,
-      });
-    }
-    const creditMb = daemon.config.runtime.creditMb ?? DEFAULT_RUNTIME_CREDIT_MB;
-    const hold = credits.tryReserveTransition({
-      owner: {
-        namespace: "deployment-adoption",
-        id: `${action.processId}@${String(action.revision)}`,
-      },
-      mb: creditMb,
-    });
-    if (hold === undefined) {
-      throw new ScafoError("capacity-unavailable", "Adoption credit is unavailable", {
-        detail:
-          `this node cannot admit ${String(creditMb)}MiB to adopt deployment revision ` +
-          `${String(action.revision)} for "${action.processId}" yet`,
-      });
-    }
+  async function runStop(action: Extract<ReconcileAction, { type: "stop" }>): Promise<void> {
     try {
-      await beforeAdopt?.(action.processId);
-      signal?.throwIfAborted();
-      const adoption = await driver.adoptCurrent(
-        process,
-        signal === undefined ? undefined : { signal },
-      );
-      signal?.throwIfAborted();
-      if (adoption.outcome === "rejected") {
-        known.set(action.processId, { ...process, attemptedRevision: action.revision });
-        throw new ScafoError("capability-missing", "Runtime rejected its deployment", {
-          status: 502,
-          detail: `celld rejected version "${adoption.version}": ${adoption.error}`,
-        });
-      }
-      const adopted: RuntimeProcess = {
-        ...process,
-        attemptedRevision: action.revision,
-        appliedRevision: action.revision,
-        deployment: adoption.deployment,
-        ready: false,
-      };
-      known.set(action.processId, adopted);
-      observe?.emit({
-        type: "runtime.adopted",
-        processId: action.processId,
-        revision: action.revision,
-      });
-      if (await gate(adopted)) {
-        signal?.throwIfAborted();
-        known.set(action.processId, { ...adopted, ready: true });
-      } else {
-        signal?.throwIfAborted();
-        pending.push(
-          noted(action.processId, "the adopted deployment did not pass its readiness gate"),
-        );
-      }
-    } finally {
-      hold.release();
+      await daemon.supervisor.stop(action.processId, { graceMs: driver.stopGraceMs });
+      quarantined.delete(action.processId);
+      known.delete(action.processId);
+    } catch (error) {
+      quarantined.add(action.processId);
+      throw error;
     }
   }
 
-  async function runGate(
-    action: Extract<ReconcileAction, { type: "await-ready" }>,
+  async function runRestart(
+    action: Extract<ReconcileAction, { type: "restart" }>,
+    wanted: Map<string, DesiredEnvironment>,
     pending: ReconcileFailure[],
     signal?: AbortSignal,
   ): Promise<void> {
     signal?.throwIfAborted();
+    const entry = wanted.get(placement(action.project, action.env));
     const process = known.get(action.processId);
-    if (process === undefined) return;
-    if (quarantined.has(action.processId)) {
-      try {
-        await daemon.supervisor.stop(action.processId, { graceMs: driver.stopGraceMs });
-        quarantined.delete(action.processId);
-        known.delete(action.processId);
-      } catch (error) {
-        known.set(action.processId, { ...process, ready: false });
-        pending.push(failureOf(error, { action: "stop", subject: action.processId }));
-      }
-      return;
+    if (entry === undefined || process === undefined || entry.env.deployment === null) return;
+
+    /* Decrypt and materialize the replacement before touching the process that
+       still serves the environment. A bad varset therefore cannot turn a
+       configuration error into downtime. */
+    const input = await runtimeInput(entry, action.ports);
+    const spec = driver.processSpec(input);
+    if (spec.id !== action.processId) {
+      throw new ScafoError("invalid-input", "Runtime process id does not match restart target");
     }
-    if (process.port === UNKNOWN_PORT) {
-      pending.push(
-        noted(
-          action.processId,
-          "the process was not started by this daemon, so its listeners are unknown",
-        ),
-      );
-      return;
-    }
-    if (await gate(process)) {
-      signal?.throwIfAborted();
-      known.set(action.processId, { ...process, ready: true });
-      return;
-    }
+    const replacement: RuntimeProcess = {
+      processId: action.processId,
+      project: entry.project,
+      env: entry.env.name,
+      configuredVarset: entry.varsetId ?? null,
+      port: action.ports.public,
+      internalPort: action.ports.internal,
+    };
+
+    await runStop({ type: "stop", processId: action.processId, reason: "runtime restart" });
     signal?.throwIfAborted();
-    pending.push(noted(action.processId, "the process did not pass its readiness gate"));
+    let processStarted = false;
+    let cleanup: Promise<void> | undefined;
+    const stopReplacement = (): Promise<void> => {
+      if (cleanup !== undefined) return cleanup;
+      if (!processStarted) return Promise.resolve();
+      known.set(action.processId, replacement);
+      cleanup = (async (): Promise<void> => {
+        try {
+          await daemon.supervisor.stop(action.processId, { graceMs: driver.stopGraceMs });
+          quarantined.delete(action.processId);
+          known.delete(action.processId);
+        } catch (error) {
+          quarantined.add(action.processId);
+          pending.push(failureOf(error, { action: "stop", subject: action.processId }));
+        }
+      })();
+      return cleanup;
+    };
+    const cancel = (): void => void stopReplacement();
+    signal?.addEventListener("abort", cancel, { once: true });
+    try {
+      await daemon.supervisor.start(spec);
+      processStarted = true;
+      signal?.throwIfAborted();
+      known.set(action.processId, replacement);
+      observe?.emit({ type: "runtime.started", processId: action.processId });
+    } catch (error) {
+      if (processStarted) await stopReplacement();
+      if (signal?.aborted !== true) throw error;
+    } finally {
+      signal?.removeEventListener("abort", cancel);
+    }
   }
 
-  async function gate(process: RuntimeProcess): Promise<boolean> {
-    if (observe === undefined) return driver.probeReady(process, probe);
-    let attempts = 0;
-    const startedMs = observe.nowMs();
-    const passed = await driver.probeReady(process, {
-      ...probe,
-      onAttempt: (): void => {
-        attempts++;
+  async function runtimeInput(
+    entry: DesiredEnvironment,
+    ports: { public: number; internal: number },
+  ): Promise<RuntimeSpecInput> {
+    return {
+      project: entry.project,
+      env: entry.env,
+      vars: await openEnvironmentVars(registry, entry, daemon.varsetKey),
+      ports,
+      node: {
+        endpoint: daemon.config.bucket.endpoint,
+        region: daemon.config.bucket.region,
+        bucket: daemon.config.bucket.bucket,
+        keyPrefix: daemon.config.bucket.prefix,
+        accessKey: daemon.config.bucket.accessKey,
+        secretKey: daemon.config.bucket.secretKey,
+        advertiseHost: advertisedAddress(daemon.config.node).host,
+        bindHost: daemon.config.runtime.bindHost,
       },
-    });
-    observe.emit(
-      passed
-        ? {
-            type: "gate.passed",
-            processId: process.processId,
-            attempts,
-            durationMs: observe.nowMs() - startedMs,
-          }
-        : { type: "gate.failed", processId: process.processId, attempts },
-    );
-    return passed;
+      capacity: daemon.capacity,
+      maxRssMb: daemon.config.runtime.creditMb ?? DEFAULT_RUNTIME_CREDIT_MB,
+      baseEnv,
+    };
   }
 
   return {
-    async execute(plan, desired, pending, signal, beforeAdopt): Promise<void> {
+    async execute(plan, desired, pending, signal): Promise<void> {
       const wanted = new Map(
         desired.map((entry) => [placement(entry.project, entry.env.name), entry]),
       );
       for (const action of plan) {
         if (signal?.aborted === true) break;
         try {
-          switch (action.type) {
-            case "start":
-              await runStart(action, wanted, pending, signal);
-              break;
-            case "adopt":
-              await runAdopt(action, pending, signal, beforeAdopt);
-              break;
-            case "await-ready":
-              await runGate(action, pending, signal);
-              break;
-            case "stop":
-              await daemon.supervisor.stop(action.processId, { graceMs: driver.stopGraceMs });
-              quarantined.delete(action.processId);
-              known.delete(action.processId);
-              break;
-          }
+          if (action.type === "start") await runStart(action, wanted, pending, signal);
+          else if (action.type === "restart") await runRestart(action, wanted, pending, signal);
+          else await runStop(action);
         } catch (error) {
           pending.push(failureOf(error, { action: action.type, subject: subjectOf(action) }));
         }
@@ -357,9 +267,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
         const bookkept = known.get(status.id);
         if (bookkept !== undefined) {
           processes.push(
-            quarantined.has(status.id)
-              ? { ...bookkept, ready: false, teardownPending: true }
-              : bookkept,
+            quarantined.has(status.id) ? { ...bookkept, teardownPending: true } : bookkept,
           );
           continue;
         }
@@ -369,11 +277,8 @@ export function createExecutor(deps: ExecutorDeps): Executor {
           processId: status.id,
           project: identity.project,
           env: identity.env,
-          attemptedRevision: 0,
-          appliedRevision: 0,
           port: UNKNOWN_PORT,
           internalPort: UNKNOWN_PORT,
-          ready: false,
         };
         known.set(status.id, adopted);
         processes.push(adopted);
@@ -381,10 +286,6 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       return processes;
     },
   };
-}
-
-function noted(processId: string, detail: string): ReconcileFailure {
-  return { at: new Date().toISOString(), action: "await-ready", subject: processId, detail };
 }
 
 export function failureOf(

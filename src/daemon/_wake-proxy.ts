@@ -61,7 +61,7 @@ const HOP_BY_HOP_RESPONSE: ReadonlySet<string> = new Set([
  * `upstreamHost` is WHERE THE PROCESS BINDS and is required for that reason: it
  * is loopback on a single node and the node's tunnel address on a fleet, where
  * `127.0.0.1` answers nothing at all. This is one of the three dialers of a
- * process this node started — the readiness gate and the ingress are the others
+ * process this node started — the ingress is the other
  * — and all three take the same value from `runtimeDialHost`.
  */
 export function proxyToProcess(

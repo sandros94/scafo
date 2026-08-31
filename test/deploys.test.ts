@@ -23,6 +23,7 @@ import {
   DEPLOY_METADATA_HEADER,
   DEPLOY_METADATA_MAX_BYTES,
   encodeDeployMetadata,
+  type DeployMetadata,
 } from "../src/daemon/_intake.ts";
 import type { Reconciler } from "../src/daemon/reconcile.ts";
 import { OIDC_AUDIENCE, signNodeToken } from "../src/core/auth/index.ts";
@@ -33,8 +34,6 @@ import {
   createProject,
   getBuild,
   getEnvironment,
-  placementKey,
-  readEnvironmentWake,
   registerNode,
   setTrustPolicy,
   unblockProject,
@@ -54,10 +53,6 @@ import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock } from "./_helpers.ts";
 
 const OPERATOR = "op-1234abcd";
-/** A second node of the same installation, and where its daemon answers. */
-const NODE_B = "node-b1b1b1b1";
-const PEER_HOST = "node-b.test";
-const PEER_PORT = 7401;
 const PROJECT = "shop";
 const RIVAL = "rival";
 const ENVIRONMENT = "production";
@@ -135,10 +130,7 @@ beforeEach(async () => {
     reconciler: fakeReconciler(),
     credits: createCreditController({ allocatableMb: 10_000, surgeMb: 512 }),
   };
-  daemon.deploys = createDeployService(daemon, fakeRunner(), {
-    routedTimeoutMs: 300,
-    pollMs: 5,
-  });
+  daemon.deploys = createDeployService(daemon, fakeRunner());
   daemon.artifactStager = createFileArtifactStager();
   app = createNodeApp(daemon);
 
@@ -189,7 +181,7 @@ describe("who may deploy", () => {
     const response = await streamedUpload(
       await workloadToken({ sub: "repo:evil/app" }),
       PROJECT,
-      { runtimeConfigurable: false },
+      {},
       unreadBody(() => reads++),
     );
 
@@ -204,7 +196,7 @@ describe("who may deploy", () => {
 
     expect(response.status).toBe(202);
     expect(response.headers.get("location")).toBe(`/v1/deploys/${status.id}`);
-    expect(status).toMatchObject({ project: PROJECT, state: "accepted", warnings: [] });
+    expect(status).toMatchObject({ project: PROJECT, state: "accepted" });
   });
 
   it("answers 202 without awaiting builder completion", async () => {
@@ -241,7 +233,7 @@ describe("who may deploy", () => {
     const response = await streamedUpload(
       await operatorToken(),
       PROJECT,
-      { runtimeConfigurable: false },
+      {},
       unreadBody(() => reads++),
     );
 
@@ -275,12 +267,7 @@ describe("who may deploy", () => {
       pull: () => new Promise<void>(() => {}),
     });
 
-    const response = await streamedUpload(
-      await operatorToken(),
-      PROJECT,
-      { runtimeConfigurable: false },
-      body,
-    );
+    const response = await streamedUpload(await operatorToken(), PROJECT, {}, body);
 
     expect(response.status).toBe(408);
     expect(response.headers.get("location")).toBeNull();
@@ -305,7 +292,6 @@ describe("who may deploy", () => {
         taskTimeoutMs: 300_000,
       },
     });
-    running = [readyProcess(VERSION_ID)];
     const retained = (await responseId(await upload(await operatorToken()))) as string;
     await settled(retained);
     runs = [];
@@ -601,7 +587,7 @@ describe("what an upload must carry", () => {
     expect(response.status).toBe(202);
   });
 
-  it.each(["", "%%%", "e30", "eyJiIjoyLCJhIjoxfQ"])(
+  it.each(["", "%%%", "eyJiIjoyLCJhIjoxfQ"])(
     "refuses absent, malformed, or non-canonical metadata before reading the body: %s",
     async (header) => {
       let reads = 0;
@@ -622,7 +608,7 @@ describe("what an upload must carry", () => {
     const response = await streamedUpload(
       await operatorToken(),
       PROJECT,
-      { project: PROJECT, runtimeConfigurable: false },
+      { project: PROJECT },
       unreadBody(() => reads++),
     );
 
@@ -664,24 +650,13 @@ describe("what an upload must carry", () => {
       method: "POST",
       headers: {
         authorization: `Bearer ${await operatorToken()}`,
-        [DEPLOY_METADATA_HEADER]: encodeDeployMetadata({ runtimeConfigurable: false }),
+        [DEPLOY_METADATA_HEADER]: encodeDeployMetadata({}),
       },
     });
 
     const problem = await problemOf(response);
     expect(problem.status).toBe(400);
     expect(problem.detail).toContain("artifact body");
-  });
-
-  it("refuses meta that does not say whether the build reads its config at runtime", async () => {
-    const { runtimeConfigurable: _dropped, ...rest } = meta();
-
-    const response = await upload(await operatorToken(), rest);
-
-    await expect(problemOf(response)).resolves.toMatchObject({
-      status: 400,
-      detail: expect.stringContaining("runtimeConfigurable"),
-    });
   });
 
   it("refuses names the registry could not address", async () => {
@@ -707,10 +682,9 @@ describe("what an upload must carry", () => {
 
 describe("what happens to an accepted deploy", () => {
   it("publishes the artifact, records the build and makes it current", async () => {
-    running = [readyProcess(VERSION_ID)];
     const id = (await responseId(await upload(await operatorToken()))) as string;
 
-    await expect(settled(id)).resolves.toMatchObject({ state: "routed", build: VERSION_ID });
+    await expect(settled(id)).resolves.toMatchObject({ state: "deployed", build: VERSION_ID });
     expect(runs).toHaveLength(1);
     expect(runs[0]).toMatchObject({
       project: PROJECT,
@@ -723,7 +697,7 @@ describe("what happens to an accepted deploy", () => {
     expect(receivedArtifacts[0]).toEqual(artifactBytes);
 
     const build = await getBuild(clock.ctx, PROJECT, VERSION_ID);
-    expect(build).toMatchObject({ celldVersionId: VERSION_ID, runtimeConfigurable: false });
+    expect(build).toMatchObject({ celldVersionId: VERSION_ID });
 
     const environment = await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
     expect(environment.deployment?.revision).toBe(1);
@@ -860,67 +834,6 @@ describe("what happens to an accepted deploy", () => {
     });
   });
 
-  it("reaches routed once the reconcile loop reports the build serving traffic", async () => {
-    running = [readyProcess(VERSION_ID)];
-
-    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
-
-    await expect(settled(id)).resolves.toMatchObject({ state: "routed", build: VERSION_ID });
-    const environment = await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
-    expect(environment.deployment?.revision).toBe(1);
-  });
-
-  it("does not call a superseding celld version the deployment it published", async () => {
-    running = [
-      {
-        ...readyProcess("bbbbbbbb"),
-        attemptedRevision: 2,
-        appliedRevision: 2,
-      },
-    ];
-
-    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
-
-    await expect(settled(id)).resolves.toMatchObject({ state: "deployed", build: VERSION_ID });
-  });
-
-  it("does not acknowledge an exact celld version before its marker was applied", async () => {
-    running = [
-      {
-        ...readyProcess(VERSION_ID),
-        attemptedRevision: 0,
-        appliedRevision: 0,
-      },
-    ];
-
-    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
-
-    await expect(settled(id)).resolves.toMatchObject({ state: "deployed", build: VERSION_ID });
-  });
-
-  it("stops at deployed with a warning when nothing becomes ready in time", async () => {
-    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
-
-    const status = await settled(id);
-    /* Never an error: the build exists and celld published it, so the loop
-       goes on trying long after the deploy stopped watching. */
-    expect(status.state).toBe("deployed");
-    expect(status.warnings.map((warning) => warning.code)).toEqual(["deploy-not-routed"]);
-  });
-
-  it("carries deploy-time build warnings through to the status", async () => {
-    running = [readyProcess(VERSION_ID)];
-    await createEnvironment(clock.ctx, PROJECT, { name: ENVIRONMENT, varset: "a1b2c3d4" });
-
-    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
-
-    const status = await settled(id);
-    expect(status.state).toBe("routed");
-    expect(status.warnings.map((warning) => warning.code)).toEqual([
-      "build-not-runtime-configurable",
-    ]);
-  });
-
   it("reports a publish that threw as failed, and says why", async () => {
     publish = () => Promise.reject(new Error("celld exited with code 1"));
 
@@ -968,7 +881,6 @@ describe("what happens to an accepted deploy", () => {
       project: PROJECT,
       environment: ENVIRONMENT,
       script: PROJECT,
-      runtimeConfigurable: false,
     });
     const status = admission?.start(
       {
@@ -981,111 +893,6 @@ describe("what happens to an accepted deploy", () => {
 
     await settled(status?.id as string);
     expect(dispose).toHaveBeenCalledOnce();
-  });
-});
-
-describe("watching a build the coordinator placed somewhere else", () => {
-  /*
-   * A deploy is accepted by whichever node the caller reached, and WHICH nodes
-   * serve the environment is decided afterwards, by the coordinator. So the node
-   * holding the deploy open is routinely not the node that starts the build —
-   * and asking only its own processes made the answer depend on which door the
-   * deploy went through, which is exactly what a client cannot know.
-   */
-
-  it("reaches routed through a node that runs nothing for the build itself", async () => {
-    const peer = await standUpPeer();
-    peer.processes.push(readyProcess(VERSION_ID));
-    await placeOn(NODE_B);
-
-    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
-
-    /* This node's own reconcile loop reports nothing at all, and the deploy is
-       routed all the same, because the node the placement named does. */
-    expect(running).toEqual([]);
-    await expect(settled(id)).resolves.toMatchObject({ state: "routed", build: VERSION_ID });
-  });
-
-  it("names the node it was watching when the build never came up there", async () => {
-    await standUpPeer();
-    await placeOn(NODE_B);
-
-    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
-
-    const status = await settled(id);
-    expect(status.state).toBe("deployed");
-    /* The one case where "nothing was ready" is not about the node answering. */
-    expect(status.warnings[0].detail).toContain(NODE_B);
-  });
-
-  it("asks nobody while the placement names this node", async () => {
-    const peer = await standUpPeer();
-    running = [readyProcess(VERSION_ID)];
-    await placeOn(OPERATOR);
-
-    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
-
-    await expect(settled(id)).resolves.toMatchObject({ state: "routed" });
-    /* The local processes are the whole answer, so the hop is never made. */
-    expect(peer.asked).toEqual([]);
-  });
-
-  it("keeps looking rather than failing the deploy when the peer cannot be reached", async () => {
-    await standUpPeer();
-    await placeOn(NODE_B);
-    daemon.fetchFn = () => Promise.reject(new Error("connect ECONNREFUSED"));
-
-    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
-
-    const status = await settled(id);
-    /* The build exists and celld published it; an unreachable peer says
-       nothing about either, and a deploy is never failed over one. */
-    expect(status.state).toBe("deployed");
-    expect(status.warnings.map((warning) => warning.code)).toEqual(["deploy-not-routed"]);
-  });
-
-  it("asks nobody about a node the placement names that is no longer live", async () => {
-    const peer = await standUpPeer({ heartbeatAgoMs: 10 * 60_000 });
-    peer.processes.push(readyProcess(VERSION_ID));
-    await placeOn(NODE_B);
-
-    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
-
-    /* A decision outlives the node it names; a node that stopped beating is
-       counted out here exactly as it is everywhere else. */
-    await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
-    expect(peer.asked).toEqual([]);
-  });
-});
-
-describe("deploying a parked environment", () => {
-  it("does not stamp activity once the new build is serving traffic", async () => {
-    running = [readyProcess(VERSION_ID)];
-    await expect(readEnvironmentWake(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toBeNull();
-
-    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
-
-    await expect(settled(id)).resolves.toMatchObject({ state: "routed" });
-    await expect(readEnvironmentWake(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toBeNull();
-  });
-
-  it("does not stamp activity when it becomes current", async () => {
-    /* The build exists and is startable, which is the whole of what this deploy
-       asked for; the environment is no less freshly deployed for it. */
-    const id = (await responseId(await upload(await operatorToken()))) as string;
-
-    await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
-    await expect(readEnvironmentWake(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toBeNull();
-  });
-
-  it("does not stamp activity when it gives up waiting for routing", async () => {
-    /* Missing the deadline is a warning and never a failure: celld published
-       the build and the loop keeps trying. Deployment itself is not activity. */
-    const id = (await responseId(await upload(await operatorToken(), meta()))) as string;
-
-    const status = await settled(id);
-    expect(status.warnings.map((warning) => warning.code)).toEqual(["deploy-not-routed"]);
-    await expect(readEnvironmentWake(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toBeNull();
   });
 });
 
@@ -1144,7 +951,6 @@ function daemonConfig(): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
-      probePath: "/",
       bindHost: "127.0.0.1",
       durability: "bucket",
       cellIdleEvictS: 900,
@@ -1185,73 +991,6 @@ function fakeReconciler(processes: () => RuntimeProcess[] = () => running): Reco
   };
 }
 
-/* ---- a second node of the same installation ---- */
-
-/** A second node, its own daemon, and what this one asked it. */
-interface Peer {
-  /** Processes it reports as running; push a ready one to make it serve. */
-  processes: RuntimeProcess[];
-  /** Paths this node's daemon has called on it, in order. */
-  asked: string[];
-}
-
-/**
- * Registers a second node, stands its daemon up in this process, and points this
- * node's peer hop at it.
- *
- * Live by default, because that is what the placement's answer is only useful
- * for; `heartbeatAgoMs` is how one is made stale.
- */
-async function standUpPeer(opts: { heartbeatAgoMs?: number } = {}): Promise<Peer> {
-  const keys = await generateJWK("EdDSA", { kid: NODE_B });
-  await registerNode(clock.ctx, {
-    v: 1,
-    id: NODE_B,
-    publicKey: { kty: "OKP", crv: "Ed25519", x: keys.publicKey.x },
-    addresses: { internal: PEER_HOST, apiPort: PEER_PORT },
-    heartbeatAt: new Date(clock.nowMs() - (opts.heartbeatAgoMs ?? 0)).toISOString(),
-  });
-
-  const processes: RuntimeProcess[] = [];
-  const asked: string[] = [];
-  const peer = createNodeApp({
-    config: daemonConfig(),
-    nodeId: NODE_B,
-    registry: clock.ctx,
-    supervisor: fakeSupervisor(),
-    version: "0.0.0-test",
-    reconciler: fakeReconciler(() => processes),
-  });
-
-  /* Node tokens are verified against the registry, so the hop is authenticated
-     for real here rather than waved through. */
-  daemon.signingKey = operatorKeys.privateKey;
-  daemon.fetchFn = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const href = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
-    const url = new URL(href);
-    if (url.host !== `${PEER_HOST}:${String(PEER_PORT)}`) {
-      return Promise.reject(new Error(`nothing answers at ${href}`));
-    }
-    asked.push(url.pathname);
-    return Promise.resolve(peer.request(url.pathname, init));
-  }) as typeof fetch;
-
-  return { processes, asked };
-}
-
-/** Records the coordinator's decision for this environment, as it would stand. */
-async function placeOn(...nodes: string[]): Promise<void> {
-  await clock.ctx.store.put(
-    placementKey(PROJECT, ENVIRONMENT),
-    JSON.stringify({
-      v: 1,
-      nodes,
-      decidedAt: new Date(clock.nowMs()).toISOString(),
-      fence: 1,
-    }),
-  );
-}
-
 function fakeRunner(): DeployRunner {
   return {
     async run(input) {
@@ -1264,22 +1003,8 @@ function fakeRunner(): DeployRunner {
   };
 }
 
-function readyProcess(build: string): RuntimeProcess {
-  return {
-    processId: `${PROJECT}--${ENVIRONMENT}`,
-    project: PROJECT,
-    env: ENVIRONMENT,
-    attemptedRevision: 1,
-    appliedRevision: 1,
-    deployment: { version: build, prefix: `deployments/main/${build}`, generation: 1 },
-    port: 42_000,
-    internalPort: 42_001,
-    ready: true,
-  };
-}
-
 function meta(): Record<string, unknown> {
-  return { project: PROJECT, environment: ENVIRONMENT, runtimeConfigurable: false };
+  return { project: PROJECT, environment: ENVIRONMENT };
 }
 
 /* ---- driving the app ---- */
@@ -1295,7 +1020,7 @@ async function upload(
     headers: {
       ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
       "content-type": "application/octet-stream",
-      [DEPLOY_METADATA_HEADER]: encodeDeployMetadata(metadata as { runtimeConfigurable: boolean }),
+      [DEPLOY_METADATA_HEADER]: encodeDeployMetadata(metadata as DeployMetadata),
     },
     body: artifact.open(),
     duplex: "half",
@@ -1309,9 +1034,7 @@ async function streamedUpload(
   body: ReadableStream<Uint8Array>,
 ): Promise<Response> {
   const encoded =
-    typeof metadata === "string"
-      ? metadata
-      : encodeDeployMetadata(metadata as { runtimeConfigurable: boolean });
+    typeof metadata === "string" ? metadata : encodeDeployMetadata(metadata as DeployMetadata);
   return await app.request(`/v1/projects/${project}/deploys`, {
     method: "POST",
     headers: {

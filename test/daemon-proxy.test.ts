@@ -79,7 +79,7 @@ beforeEach(async () => {
     ephemeral: true,
     idleTtlS: 900,
   });
-  await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
+  await createBuild(clock.ctx, PROJECT, { id: BUILD });
   await recordDeployment(clock.ctx, PROJECT, ENVIRONMENT, BUILD);
 });
 
@@ -386,7 +386,6 @@ function daemonConfig(): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
-      probePath: "/",
       bindHost: "127.0.0.1",
       durability: "bucket",
       cellIdleEvictS: 900,

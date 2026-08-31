@@ -15,7 +15,7 @@ import {
   sealVarset,
   type VarsetDescription,
 } from "../core/registry/varsets.ts";
-import type { PlainVarset, ScafoWarning } from "../core/types/registry.ts";
+import type { PlainVarset } from "../core/types/registry.ts";
 
 /** What a variable name may look like: the shell's own rule, so a process can read it. */
 const VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -38,7 +38,6 @@ export interface SetVarsetOptions {
 export interface SetVarsetResult {
   /** Id the sealed envelope is stored under, and what the environment now points at. */
   id: string;
-  warnings: ScafoWarning[];
 }
 
 /** Seals the variables, stores them and points the environment at them. */
@@ -49,8 +48,8 @@ export async function setVarset(
   const sealed = await sealVarset(opts.plain, opts.key);
   await putVarset(registry, opts.project, sealed);
 
-  const updated = await setEnvironmentVarset(registry, opts.project, opts.env, sealed.id);
-  return { id: sealed.id, warnings: updated.warnings };
+  await setEnvironmentVarset(registry, opts.project, opts.env, sealed.id);
+  return { id: sealed.id };
 }
 
 export interface ShowVarsetOptions {

@@ -552,7 +552,6 @@ describe("whose traffic a counted host actually was", () => {
     await createBuild(registry, "shop", {
       id: BUILD,
       celldVersionId: BUILD,
-      runtimeConfigurable: false,
     });
     await createProject(registry, { slug: "untouched" });
 
@@ -657,16 +656,12 @@ describe("what the traces come to", () => {
     const records: ObserveRecord[] = [
       ...wakeTimeline("8f3a", CLOCK_START_MS - 10 * MINUTE_MS),
       event("node-a", CLOCK_START_MS - 9 * MINUTE_MS, {
-        type: "gate.passed",
+        type: "runtime.started",
         processId: "shop--production",
-        attempts: 2,
-        durationMs: 700,
       }),
       event("node-a", CLOCK_START_MS - 8 * MINUTE_MS, {
-        type: "gate.passed",
+        type: "runtime.started",
         processId: "blog--production",
-        attempts: 1,
-        durationMs: 100,
       }),
       event("node-a", CLOCK_START_MS - 7 * MINUTE_MS, {
         type: "reconcile.pass.start",
@@ -677,7 +672,7 @@ describe("what the traces come to", () => {
     const selection = selectTraces(records, { project: "shop" });
 
     /* The five wake events — only the first of which names the project — plus
-       the runtime gate, which names it through the process id. The reconcile
+       the runtime start, which names it through the process id. The reconcile
        pass belongs to the node rather than to any project. */
     expect(selection.events).toHaveLength(6);
     expect(selection.events.every((record) => record.type !== "reconcile.pass.start")).toBe(true);

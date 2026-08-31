@@ -183,7 +183,7 @@ export function createTraefikDriver(opts?: TraefikDriverOptions): TraefikDriver 
    * Empty until the first reconcile pass, and deliberately not "nothing to say".
    * A node that has just started is running none of its processes yet — the
    * supervisor's children went with the daemon — so the honest answer to "what
-   * does this node serve" is "nothing", and routing that follows readiness must
+   * does this node serve" is "nothing", and routing that follows supervision must
    * say so. Serving the previous configuration instead would point Traefik at
    * ports nothing listens on, which is a 502 per request where this is a 404.
    */

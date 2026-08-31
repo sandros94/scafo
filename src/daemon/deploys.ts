@@ -25,10 +25,7 @@ import type {
   NodeSelector,
   OidcActor,
   ReplicaCount,
-  ScafoWarning,
 } from "../core/types/registry.ts";
-import { startBudget } from "../core/utils/budget.ts";
-import { createRoutedWatch } from "./_routed.ts";
 import type { DaemonContext } from "./app.ts";
 import {
   createDeployScheduler,
@@ -46,12 +43,6 @@ import {
   type DeploySchedulerOptions,
 } from "./_deploy-scheduler.ts";
 
-/** How long a deploy waits to be observed serving traffic. */
-export const DEFAULT_ROUTED_TIMEOUT_MS: number = 120_000;
-
-/** Time between two looks at what the reconcile loop reports. */
-export const DEFAULT_POLL_MS: number = 500;
-
 /**
  * Deploys remembered at once. The map is soft state with no upper bound of its
  * own, so the oldest are forgotten to keep a long-lived daemon from growing.
@@ -59,19 +50,18 @@ export const DEFAULT_POLL_MS: number = 500;
 export const DEFAULT_HISTORY: number = 256;
 
 /**
- * How far a deploy has got. Exactly three of these are final — `deployed`,
- * `routed` and `failed` — so a client polls until it reaches one of them and
+ * How far a deploy has got. Exactly two of these are final — `deployed` and
+ * `failed` — so a client polls until it reaches one of them and
  * never has to guess whether a state it sees is still moving.
  *
  * - `accepted` — the project and environment exist and the artifact is in hand.
  * - `uploading` — work is under way: the artifact is being published, and when
- *   brought into service afterwards.
- * - `deployed` — the build is current, but no assigned node was seen serving it.
- * - `routed` — a process serving that build has passed its readiness gate.
+ *   its immutable history and environment notice are persisted afterwards.
+ * - `deployed` — celld published the deployment and Scafo persisted its metadata.
  * - `failed` — the deploy did not complete. Its detail states when celld already
  *   moved current before Scafo could record the matching registry marker.
  */
-export type DeployState = "accepted" | "uploading" | "deployed" | "routed" | "failed";
+export type DeployState = "accepted" | "uploading" | "deployed" | "failed";
 
 /** What a caller polling a deploy is told. */
 export interface DeployStatus {
@@ -82,7 +72,6 @@ export interface DeployStatus {
   state: DeployState;
   /** Why it failed, when it did. */
   detail?: string;
-  warnings: ScafoWarning[];
 }
 
 /** Everything a deploy request carries besides the artifact itself. */
@@ -93,8 +82,6 @@ export interface DeployMeta {
   script: string;
   /** Id to record the build as; defaults to the version the runtime assigned. */
   buildId?: string;
-  runtimeConfigurable: boolean;
-  builtWithVarset?: string;
   /**
    * How many nodes should serve the environment. Absent says nothing about
    * placement, and an environment that already exists keeps what it has.
@@ -112,10 +99,6 @@ export interface DeployMeta {
 }
 
 export interface DeployServiceOptions {
-  /** Defaults to {@link DEFAULT_ROUTED_TIMEOUT_MS}. */
-  routedTimeoutMs?: number;
-  /** Defaults to {@link DEFAULT_POLL_MS}. */
-  pollMs?: number;
   /** Defaults to {@link DEFAULT_HISTORY}. */
   history?: number;
   scheduler?: Omit<DeploySchedulerOptions, "credits" | "creditMb"> &
@@ -133,7 +116,7 @@ export interface DeployService {
   admit(meta: DeployMeta): Promise<DeployAdmission>;
   /** The deploy's status, or null when this daemon has never heard of it. */
   get(id: string): DeployStatus | null;
-  /** Closes admission and joins every receive, task, watch, and cleanup. */
+  /** Closes admission and joins every receive, task, and cleanup. */
   stop(reason: unknown): Promise<void>;
 }
 
@@ -157,8 +140,6 @@ export function createDeployService(
   runner: DeployRunner,
   opts?: DeployServiceOptions,
 ): DeployService {
-  const routedTimeoutMs = opts?.routedTimeoutMs ?? DEFAULT_ROUTED_TIMEOUT_MS;
-  const pollMs = opts?.pollMs ?? DEFAULT_POLL_MS;
   const history = Math.max(1, opts?.history ?? DEFAULT_HISTORY);
   const deploy = daemon.config.deploy;
   const schedulerOptions = opts?.scheduler;
@@ -183,7 +164,6 @@ export function createDeployService(
     taskTimeoutMs: deploy?.taskTimeoutMs ?? DEFAULT_TASK_TIMEOUT_MS,
     ...schedulerOptions,
   });
-  const stopping = new AbortController();
   const continuations = new Set<Promise<void>>();
 
   const statuses = new Map<string, DeployStatus>();
@@ -197,83 +177,12 @@ export function createDeployService(
     return next;
   }
 
-  function warn(id: string, warning: ScafoWarning): void {
-    const current = statuses.get(id);
-    if (current !== undefined) update(id, { warnings: [...current.warnings, warning] });
-  }
-
-  /**
-   * Waits for the new build to be reported serving traffic.
-   *
-   * WATCHED WHERE IT WAS PLACED, NOT WHERE IT WAS UPLOADED. A deploy is accepted
-   * by whichever node the caller reached, and which nodes serve the environment
-   * is the coordinator's decision, taken afterwards — so this asks THIS node's
-   * processes first and, when the placement names other nodes, asks those
-   * (`_routed.ts`). Without that, a deploy sent to any node but the one placement
-   * happened to choose spent its whole budget watching a node that was never
-   * going to start anything.
-   *
-   * Running out of time is a warning and never a failure: the build exists,
-   * celld published it and the deployment notice was recorded, so the loop will
-   * keep trying long after this deploy stopped watching.
-   */
-  async function awaitRouted(
-    id: string,
-    meta: DeployMeta,
-    target: { build: string; celldVersionId: string; revision: number },
-    signal: AbortSignal,
-  ): Promise<void> {
-    const giveUp = async (detail: string): Promise<void> => {
-      update(id, { state: "deployed" });
-      warn(id, { code: "deploy-not-routed", detail });
-    };
-
-    if (daemon.reconciler === undefined) {
-      await giveUp(
-        `build "${target.build}" was deployed and made current, but this node runs no ` +
-          `reconcile loop, so nothing here will start it`,
-      );
-      return;
-    }
-
-    const watch = createRoutedWatch(daemon, {
-      project: meta.project,
-      env: meta.environment,
-      revision: target.revision,
-      version: target.celldVersionId,
-    });
-
-    /* A duration rather than a moment in time, so it is measured monotonically
-       (`utils/budget.ts`): a wall clock stepping forward mid-wait would cut this
-       short and warn that nothing was serving the build while the loop was still
-       bringing it up. */
-    const remaining = startBudget(routedTimeoutMs);
-    for (;;) {
-      throwIfStopped(signal);
-      if (await watch.routed()) {
-        update(id, { state: "routed" });
-        return;
-      }
-      if (remaining() <= 0) {
-        await giveUp(
-          `build "${target.build}" was deployed and made current, but no process serving it ` +
-            `had passed its readiness gate after ${String(routedTimeoutMs)}ms` +
-            /* Named, because a deploy that was watching another node entirely is
-               the one case where "nothing was ready" is not about this node. */
-            `${watchedOn(watch.asked())}`,
-        );
-        return;
-      }
-      await delay(pollMs, signal);
-    }
-  }
-
   async function publish(
     id: string,
     meta: DeployMeta,
     artifact: StagedArtifact,
     signal: AbortSignal,
-  ): Promise<{ build: BuildRecord; celldVersionId: string; revision: number }> {
+  ): Promise<BuildRecord> {
     update(id, { state: "uploading" });
     const bucket = daemon.config.bucket;
     let celldVersionId: string | undefined;
@@ -301,23 +210,15 @@ export function createDeployService(
       const build = await createBuild(daemon.registry, meta.project, {
         id: meta.buildId ?? published.celldVersionId,
         celldVersionId: published.celldVersionId,
-        runtimeConfigurable: meta.runtimeConfigurable,
-        ...(meta.builtWithVarset === undefined ? {} : { builtWithVarset: meta.builtWithVarset }),
         ...(meta.source === undefined ? {} : { source: meta.source }),
         ...(meta.oidc === undefined ? {} : { oidc: meta.oidc }),
       });
       update(id, { build: build.id });
       throwIfStopped(signal);
-      const current = await recordDeployment(
-        daemon.registry,
-        meta.project,
-        meta.environment,
-        build.id,
-        { signal },
-      );
-      for (const warning of current.warnings) warn(id, warning);
+      await recordDeployment(daemon.registry, meta.project, meta.environment, build.id, { signal });
       throwIfStopped(signal);
-      return { build, celldVersionId: published.celldVersionId, revision: current.revision };
+      update(id, { state: "deployed" });
+      return build;
     } catch (error) {
       if (celldVersionId === undefined) throw error;
       throw new Error(
@@ -325,34 +226,6 @@ export function createDeployService(
           `recording its deployment revision: ${boundedDetail(error)}`,
         { cause: error },
       );
-    }
-  }
-
-  async function finish(
-    id: string,
-    meta: DeployMeta,
-    published: { build: BuildRecord; celldVersionId: string; revision: number },
-  ): Promise<void> {
-    try {
-      /* Starting, gating and routing the new build is the reconcile loop's job;
-         this only watches for it to happen, and settles the state either way. */
-      await awaitRouted(
-        id,
-        meta,
-        {
-          build: published.build.id,
-          celldVersionId: published.celldVersionId,
-          revision: published.revision,
-        },
-        stopping.signal,
-      );
-    } catch (error) {
-      update(id, {
-        state: "failed",
-        detail:
-          `celld published and Scafo recorded build "${published.build.id}", but stopped ` +
-          `before its routing watch finished: ${boundedDetail(error)}`,
-      });
     }
   }
 
@@ -396,7 +269,6 @@ export function createDeployService(
             id,
             project: meta.project,
             state: "accepted",
-            warnings: [],
           };
           /* Enqueue owns the handoff. It must succeed before an id becomes
              observable; a refused one leaves no ghost status or history row. */
@@ -407,7 +279,7 @@ export function createDeployService(
           forget(statuses, history);
           const answer = snapshot(accepted);
           const continuation = scheduled.completion.then(
-            (build) => finish(id, meta, build),
+            () => undefined,
             (error) => {
               update(id, { state: "failed", detail: boundedDetail(error) });
             },
@@ -425,7 +297,6 @@ export function createDeployService(
     },
 
     async stop(reason): Promise<void> {
-      stopping.abort(reason);
       await scheduler.stop(reason);
       await Promise.allSettled(continuations);
     },
@@ -478,16 +349,6 @@ async function ensureEnvironment(
   }
 }
 
-/**
- * Where the watch had got to, for a warning to say so. Empty on the ordinary
- * path — this node's own processes were the answer — and then the warning says
- * nothing extra at all.
- */
-function watchedOn(nodes: readonly string[]): string {
-  if (nodes.length === 0) return "";
-  return `, on the node${nodes.length === 1 ? "" : "s"} its placement names (${nodes.join(", ")})`;
-}
-
 /** Drops the oldest deploys once more than `keep` are remembered. */
 function forget(statuses: Map<string, DeployStatus>, keep: number): void {
   for (const id of statuses.keys()) {
@@ -497,7 +358,7 @@ function forget(statuses: Map<string, DeployStatus>, keep: number): void {
 }
 
 function snapshot(status: DeployStatus): DeployStatus {
-  return { ...status, warnings: status.warnings.map((warning) => ({ ...warning })) };
+  return { ...status };
 }
 
 /** Joins the installation's key prefix to a fleet prefix. */
@@ -530,24 +391,4 @@ function boundedDetail(error: unknown): string {
 
 function throwIfStopped(signal: AbortSignal): void {
   if (signal.aborted) throw signal.reason;
-}
-
-function delay(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) {
-      reject(signal.reason);
-      return;
-    }
-    const timer = setTimeout(done, ms);
-    const cancel = (): void => {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", cancel);
-      reject(signal.reason);
-    };
-    function done(): void {
-      signal.removeEventListener("abort", cancel);
-      resolve();
-    }
-    signal.addEventListener("abort", cancel, { once: true });
-  });
 }

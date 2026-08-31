@@ -1009,23 +1009,26 @@ describe("the variables an operator hands every runtime process", () => {
     }
   });
 
-  it("refuses a reserved name written in the config file just the same", async () => {
-    const error = await rejectsWith(
-      () =>
-        loadDaemonConfig({
-          configPath: CONFIG_PATH,
-          readFile: fileAt(
-            CONFIG_PATH,
-            JSON.stringify({ runtime: { celldEnv: { CELLD_MAX_RSS_MB: "256" } } }),
-          ),
-          env: REQUIRED_ENV,
-        }),
-      "invalid-input",
-    );
+  it.each(["CELLD_MAX_RSS_MB", "CELLD_VARS_FILE"])(
+    "refuses reserved %s written in the config file",
+    async (name) => {
+      const error = await rejectsWith(
+        () =>
+          loadDaemonConfig({
+            configPath: CONFIG_PATH,
+            readFile: fileAt(
+              CONFIG_PATH,
+              JSON.stringify({ runtime: { celldEnv: { [name]: "unsafe" } } }),
+            ),
+            env: REQUIRED_ENV,
+          }),
+        "invalid-input",
+      );
 
-    expect(error.detail).toContain("CELLD_MAX_RSS_MB");
-    expect(error.detail).toContain("runtime.celldEnv");
-  });
+      expect(error.detail).toContain(name);
+      expect(error.detail).toContain("runtime.celldEnv");
+    },
+  );
 
   it.each(["CELLD_OTEL", "=1", "9LIVES=1", "CELLD-OTEL=1", "CELLD OTEL=1", "A=1,A=2", " , "])(
     "refuses %p, naming the setting",

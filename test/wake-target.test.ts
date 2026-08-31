@@ -26,7 +26,7 @@ beforeEach(async () => {
   clock = ctxWith(new MemoryCasStore());
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, { name: PREVIEW, ephemeral: true });
-  await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
+  await createBuild(clock.ctx, PROJECT, { id: BUILD });
   await recordDeployment(clock.ctx, PROJECT, PREVIEW, BUILD);
 });
 

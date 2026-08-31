@@ -21,7 +21,7 @@ describe("the CLI deploy upload", () => {
       nodeUrl: "https://node.test",
       token: "token",
       project: "shop",
-      metadata: { runtimeConfigurable: false, environment: "production" },
+      metadata: { environment: "production" },
       artifact: {
         byteLength: 3,
         open: () => new Blob([new Uint8Array([1, 2, 3])]).stream(),

@@ -140,7 +140,6 @@ export const sailArgs: ArgsDef = {
   "queue-timeout-ms": { type: "string", description: "Queued deploy deadline in milliseconds" },
   "task-timeout-ms": { type: "string", description: "Active deploy deadline in milliseconds" },
   "output-bytes": { type: "string", description: "Subprocess output tail retained in memory" },
-  "probe-path": { type: "string", description: "Path the application readiness probe requests" },
   "observability": {
     type: "boolean",
     description:
@@ -298,7 +297,7 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   }
 
   /* What every dialer of a process this node starts uses — the ingress here, the
-     readiness gate below, and the wake surface's own hop, which reads it off the
+     ingress below, and the wake surface's own hop, which reads it off the
      same configuration. */
   const upstreamHost = runtimeDialHost(config.runtime);
 
@@ -383,7 +382,6 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
     binPath: config.runtime.binPath,
     durability: config.runtime.durability,
     cellIdleEvictS: config.runtime.cellIdleEvictS,
-    probeHost: upstreamHost,
     ...(config.runtime.celldEnv === undefined ? {} : { operatorEnv: config.runtime.celldEnv }),
   });
   const reconciler = createReconciler(daemon, driver, {

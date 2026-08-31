@@ -28,7 +28,7 @@ beforeEach(async () => {
   clock = ctxWith(new MemoryCasStore());
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, { name: ENV });
-  await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
+  await createBuild(clock.ctx, PROJECT, { id: BUILD });
 });
 
 describe("environment records", () => {
@@ -79,26 +79,11 @@ describe("deployment revision", () => {
       revision: 1,
       deployedAt: new Date(clock.nowMs()).toISOString(),
     });
-    expect(update.warnings).toEqual([]);
-  });
-
-  it("warns when a frozen build cannot use the environment varset", async () => {
-    const frozen = "bbbbbbbb";
-    await createEnvironment(clock.ctx, PROJECT, { name: "warned", varset: "cccccccc" });
-    await createBuild(clock.ctx, PROJECT, {
-      id: frozen,
-      runtimeConfigurable: false,
-      builtWithVarset: "dddddddd",
-    });
-    const update = await recordDeployment(clock.ctx, PROJECT, "warned", frozen);
-    expect(update.warnings.map((warning) => warning.code)).toEqual([
-      "build-not-runtime-configurable",
-    ]);
   });
 
   it("commutes concurrent records into consecutive revisions", async () => {
     const successor = "bbbbbbbb";
-    await createBuild(clock.ctx, PROJECT, { id: successor, runtimeConfigurable: true });
+    await createBuild(clock.ctx, PROJECT, { id: successor });
     const inner = clock.ctx.store;
     let collide = true;
     clock.ctx.store = {
@@ -166,11 +151,10 @@ describe("setEnvironmentVarset", () => {
     const key = await importVarsetKey(crypto.getRandomValues(new Uint8Array(32)));
     const sealed = await sealVarset({ TOKEN: { value: "t", secret: true } }, key);
     await putVarset(clock.ctx, PROJECT, sealed);
-    await createBuild(clock.ctx, PROJECT, { id: frozen, runtimeConfigurable: false });
+    await createBuild(clock.ctx, PROJECT, { id: frozen });
     await recordDeployment(clock.ctx, PROJECT, ENV, frozen);
 
     const update = await setEnvironmentVarset(clock.ctx, PROJECT, ENV, sealed.id);
-    expect(update.environment.varset).toBe(sealed.id);
-    expect(update.warnings).toEqual([]);
+    expect(update.varset).toBe(sealed.id);
   });
 });

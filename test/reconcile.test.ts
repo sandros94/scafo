@@ -22,7 +22,6 @@ describe("an environment with nothing running", () => {
         type: "start",
         project: "shop",
         env: "prod",
-        revision: 1,
         ports: { public: PORT_START, internal: PORT_START + 1 },
       },
     ]);
@@ -33,71 +32,67 @@ describe("an environment with nothing running", () => {
   });
 });
 
-describe("a deployment revision", () => {
-  it("adopts a newer revision in place", () => {
-    const running = runtimeProcess("shop", "prod", 1, true);
+describe("runtime-owned deployment lifecycle", () => {
+  it("does nothing when only the deployment revision changes", () => {
     expect(
       planReconcile({
         desired: [desired("shop", "prod", 2)],
-        actual: [running],
-        ports: countingPorts(),
-      }),
-    ).toEqual([{ type: "adopt", processId: running.processId, revision: 2 }]);
-  });
-
-  it("gates an unready process already at the current revision", () => {
-    const running = runtimeProcess("shop", "prod", 2, false);
-    expect(
-      planReconcile({
-        desired: [desired("shop", "prod", 2)],
-        actual: [running],
-        ports: countingPorts(),
-      }),
-    ).toEqual([{ type: "await-ready", processId: running.processId }]);
-  });
-
-  it("retries a pending teardown before adopting a newer revision", () => {
-    const running = { ...runtimeProcess("shop", "prod", 1, false), teardownPending: true as const };
-    expect(
-      planReconcile({
-        desired: [desired("shop", "prod", 2)],
-        actual: [running],
-        ports: countingPorts(),
-      }),
-    ).toEqual([
-      {
-        type: "stop",
-        processId: running.processId,
-        reason: "runtime teardown is pending",
-      },
-    ]);
-  });
-
-  it("adopts a newer revision even when the preceding generation is unready", () => {
-    const running = runtimeProcess("shop", "prod", 1, false);
-    expect(
-      planReconcile({
-        desired: [desired("shop", "prod", 2)],
-        actual: [running],
-        ports: countingPorts(),
-      }),
-    ).toEqual([{ type: "adopt", processId: running.processId, revision: 2 }]);
-  });
-
-  it("does nothing when the environment process is current and ready", () => {
-    expect(
-      planReconcile({
-        desired: [desired("shop", "prod", 2)],
-        actual: [runtimeProcess("shop", "prod", 2, true)],
+        actual: [runtimeProcess("shop", "prod", null)],
         ports: countingPorts(),
       }),
     ).toEqual([]);
+  });
+
+  it("restarts with the same ports when the varset changes", () => {
+    const running = runtimeProcess("shop", "prod", "old");
+    const wanted = desired("shop", "prod", 2);
+    wanted.varsetId = "new";
+    expect(planReconcile({ desired: [wanted], actual: [running], ports: countingPorts() })).toEqual(
+      [
+        {
+          type: "restart",
+          processId: running.processId,
+          project: "shop",
+          env: "prod",
+          ports: { public: RUNNING_PORT, internal: RUNNING_PORT + 1 },
+        },
+      ],
+    );
+  });
+
+  it("conservatively restarts a recovered process whose configuration is unknown", () => {
+    const running = runtimeProcess("shop", "prod");
+    expect(
+      planReconcile({
+        desired: [desired("shop", "prod", 2)],
+        actual: [running],
+        ports: countingPorts(),
+      }),
+    ).toEqual([expect.objectContaining({ type: "restart", processId: running.processId })]);
+  });
+
+  it("retries a pending teardown before a configuration restart", () => {
+    const running = {
+      ...runtimeProcess("shop", "prod", "old"),
+      teardownPending: true as const,
+    };
+    const wanted = desired("shop", "prod", 2);
+    wanted.varsetId = "new";
+    expect(planReconcile({ desired: [wanted], actual: [running], ports: countingPorts() })).toEqual(
+      [
+        {
+          type: "stop",
+          processId: running.processId,
+          reason: "runtime teardown is pending",
+        },
+      ],
+    );
   });
 });
 
 describe("placement removal", () => {
   it("stops an environment no longer assigned to this node", () => {
-    const running = runtimeProcess("shop", "prod", 1, true);
+    const running = runtimeProcess("shop", "prod", null);
     expect(planReconcile({ desired: [], actual: [running], ports: countingPorts() })).toEqual([
       {
         type: "stop",
@@ -107,8 +102,8 @@ describe("placement removal", () => {
     ]);
   });
 
-  it("plans starts before stops across environments", () => {
-    const removed = runtimeProcess("archive", "old", 1, true);
+  it("plans starts before unrelated stops", () => {
+    const removed = runtimeProcess("archive", "old", null);
     const plan = planReconcile({
       desired: [desired("shop", "prod", 1)],
       actual: [removed],
@@ -118,8 +113,8 @@ describe("placement removal", () => {
   });
 
   it("orders environments and leftover stops independently of input order", () => {
-    const z = runtimeProcess("zulu", "prod", 1, true);
-    const a = runtimeProcess("alpha", "prod", 1, true);
+    const z = runtimeProcess("zulu", "prod", null);
+    const a = runtimeProcess("alpha", "prod", null);
     const plan = planReconcile({
       desired: [desired("zulu", "new", 1), desired("alpha", "new", 1)],
       actual: [z, a],
@@ -163,21 +158,14 @@ function desired(project: string, env: string, revision: number): DesiredEnviron
   };
 }
 
-function runtimeProcess(
-  project: string,
-  env: string,
-  revision: number,
-  ready: boolean,
-): RuntimeProcess {
+function runtimeProcess(project: string, env: string, varset?: string | null): RuntimeProcess {
   return {
     processId: formatProcessId({ project, env }),
     project,
     env,
-    attemptedRevision: revision,
-    appliedRevision: revision,
+    ...(varset === undefined ? {} : { configuredVarset: varset }),
     port: RUNNING_PORT,
     internalPort: RUNNING_PORT + 1,
-    ready,
   };
 }
 

@@ -17,33 +17,15 @@ export interface RuntimeProcess {
   processId: string;
   project: string;
   env: string;
-  /** Latest Scafo deployment revision for which adoption reached a conclusive outcome. */
-  attemptedRevision: number;
-  /** Latest Scafo deployment revision whose exact celld state was confirmed. */
-  appliedRevision: number;
-  /** Celld's confirmed current deployment; absent until its state was read successfully. */
-  deployment?: RuntimeDeployment;
+  /** Varset supplied when this process started; absent for an adopted process. */
+  configuredVarset?: string | null;
   /** A failed supervisor stop must be retried before any other lifecycle action. */
   teardownPending?: true;
   /** Loopback port serving public traffic. */
   port: number;
   /** Loopback port reserved for node-to-node traffic. */
   internalPort: number;
-  /** True once the process has passed its readiness gate. */
-  ready: boolean;
 }
-
-/** Deployment identity reported by celld's internal `/state`. */
-export interface RuntimeDeployment {
-  version: string;
-  prefix: string;
-  generation: number;
-}
-
-/** Conclusive result of asking a runtime to adopt the pointer it sees. */
-export type RuntimeAdoption =
-  | { outcome: "confirmed"; deployment: RuntimeDeployment }
-  | { outcome: "rejected"; version: string; prefix: string; error: string };
 
 /** The bucket a runtime process reads its fleet from, and how peers reach this node. */
 export interface RuntimeNodeInput {
@@ -58,8 +40,8 @@ export interface RuntimeNodeInput {
   advertiseHost: string;
   /**
    * Address the process binds its listeners to. Defaults to loopback, which is
-   * all a single node needs: its ingress and its readiness probe are on the same
-   * host, and nothing else may reach a runtime process directly.
+   * all a single node needs: its ingress is on the same host, and nothing else
+   * may reach a runtime process directly.
    *
    * A multi-node fleet is the case that needs more. Peers dial each other at
    * {@link RuntimeNodeInput.advertiseHost} and the internal port to reach the
@@ -80,9 +62,9 @@ export interface RuntimeSpecInput {
   vars: PlainVarset | null;
   ports: { public: number; internal: number };
   node: RuntimeNodeInput;
-  /** Node capacity the process is bounded by; omitted leaves the runtime's own defaults. */
+  /** Transitional node capacity bounds; removed with Scafo credit admission. */
   capacity?: CapacityPlan;
-  /** RSS pressure limit reserved for this one runtime process. */
+  /** RSS credit reserved for this process while Scafo owns admission. */
   maxRssMb?: number;
   /**
    * Environment the process starts from, before the driver adds its own settings.
@@ -97,33 +79,7 @@ export interface RuntimeSpecInput {
   extraEnv?: Record<string, string>;
 }
 
-/** How hard a readiness gate tries, and what it accepts. */
-export interface ProbeOptions {
-  /** Path the application-level probe requests. Defaults to `/`. */
-  path?: string;
-  /** Status the application-level probe must stay below. Defaults to 500. */
-  expectBelow?: number;
-  /** Times the gate is tried before it fails. */
-  attempts?: number;
-  /** Wait between attempts, in milliseconds. */
-  delayMs?: number;
-  /** Injected `fetch`; defaults to the global one. */
-  fetchFn?: typeof fetch;
-  /**
-   * Called once as each attempt begins, for a caller counting how hard a gate
-   * had to try.
-   *
-   * How LONG a gate took is the caller's own measurement, but how MANY attempts
-   * it cost is only knowable from inside — a gate that passed first time and one
-   * that passed on the twelfth answer the same `true`, and the difference is
-   * what says a build is slow to come up rather than merely up. A driver that
-   * does not report attempts simply never calls this, and a caller counting them
-   * reads zero.
-   */
-  onAttempt?: () => void;
-}
-
-/** Runs one environment's build on a node, and says when it is ready to serve. */
+/** Runs one environment's Celld process on a node. */
 export interface RuntimeDriver {
   /**
    * Grace a caller must give one of this driver's processes between `SIGTERM`
@@ -133,13 +89,4 @@ export interface RuntimeDriver {
   readonly stopGraceMs: number;
   /** Materializes the spec that runs one environment on this node. */
   processSpec(input: RuntimeSpecInput): ProcessSpec;
-  /** Asks a running process to adopt celld's current deployment in place. */
-  adoptCurrent(process: RuntimeProcess, opts?: { signal?: AbortSignal }): Promise<RuntimeAdoption>;
-  /** Reads the exact deployment a process currently serves. */
-  currentDeployment(
-    process: RuntimeProcess,
-    opts?: { signal?: AbortSignal },
-  ): Promise<RuntimeDeployment>;
-  /** Whether a running process passes its readiness gate. */
-  probeReady(process: RuntimeProcess, opts?: ProbeOptions): Promise<boolean>;
 }

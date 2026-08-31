@@ -1,14 +1,13 @@
 /* Internal monotonic notice that celld moved an environment's current deployment. */
 
-import type { EnvironmentUpdate } from "./environments.ts";
-import { varsetWarnings } from "./_varset-warning.ts";
 import type { BuildRecord, EnvironmentRecord } from "../types/registry.ts";
 import { requireJson, updateJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
 import { buildKey, environmentKey } from "./paths.ts";
 import { ScafoError } from "../error.ts";
 
-export interface DeploymentUpdate extends EnvironmentUpdate {
+export interface DeploymentUpdate {
+  environment: EnvironmentRecord;
   revision: number;
 }
 
@@ -26,7 +25,7 @@ export async function recordDeployment(
   buildId: string,
   opts?: { signal?: AbortSignal },
 ): Promise<DeploymentUpdate> {
-  const build = await requireJson<BuildRecord>(ctx, buildKey(project, buildId));
+  await requireJson<BuildRecord>(ctx, buildKey(project, buildId));
   const updated = await updateJson<EnvironmentRecord>(
     ctx,
     environmentKey(project, env),
@@ -53,7 +52,6 @@ export async function recordDeployment(
   return {
     environment: updated.value,
     revision,
-    warnings: varsetWarnings(updated.value, build.value),
   };
 }
 

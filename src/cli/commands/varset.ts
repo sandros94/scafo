@@ -106,9 +106,6 @@ async function runSet(flags: Record<string, unknown>): Promise<void> {
     `scafo: sealed ${String(count)} variable${count === 1 ? "" : "s"} as varset "${result.id}" ` +
       `for "${target.project}/${target.env}"`,
   );
-  for (const warning of result.warnings) {
-    console.warn(`scafo: warning: ${warning.code}: ${warning.detail}`);
-  }
 }
 
 async function runShow(flags: Record<string, unknown>): Promise<void> {

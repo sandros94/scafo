@@ -8,7 +8,6 @@ export type ScafoErrorCode =
   | "trust-mismatch"
   | "cas-conflict"
   | "capability-missing"
-  | "build-not-runtime-configurable"
   | "placement-unavailable"
   | "project-blocked"
   | "wake-unavailable"
@@ -48,7 +47,6 @@ const DEFAULT_STATUS: Record<ScafoErrorCode, number> = {
   "trust-mismatch": 403,
   "cas-conflict": 409,
   "capability-missing": 409,
-  "build-not-runtime-configurable": 409,
   "placement-unavailable": 409,
   /* An admin of the fleet has stopped the project. A CONFLICT rather than a
      forbidden: nothing is wrong with the caller or with its key, and the same

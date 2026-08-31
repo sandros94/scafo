@@ -56,7 +56,7 @@ export interface RenderRoutesInput {
    * Every deployed environment the node serves.
    */
   environments: Array<{ project: string; env: EnvironmentRecord }>;
-  /** Processes running on this node right now; only ready ones are routable. */
+  /** Processes the supervisor reports running on this node right now. */
   processes: RuntimeProcess[];
   claims: RouteClaim[];
   /**
@@ -80,35 +80,32 @@ export interface RenderRoutesInput {
 }
 
 /**
- * Renders the routing for the processes this node has ready.
+ * Renders the routing for the processes this node has running.
  *
  * Three kinds of host are emitted, in descending precedence when two of them
  * would answer on the same name:
  *
- * 1. `<project>--<env>.<domain>` for each environment that has something ready
+ * 1. `<project>--<env>.<domain>` for each environment that has a process running
  *    to serve it, plus `<project>.<domain>` when that environment is
  *    {@link APEX_ENVIRONMENT}.
- * 2. Each claimed custom domain whose environment has something ready.
+ * 2. Each claimed custom domain whose environment has a process running.
  * 3. The hosts of every PARKED environment — its label under each domain, its
  *    apex when it is {@link APEX_ENVIRONMENT}, and every custom domain its
  *    record claims — which no process answers on and which therefore go to the
  *    node's own daemon instead, to be woken by the request that asked for them.
  *    These are reported in `wake` rather than in `routes`, because they name a
  *    daemon rather than a backend, and a host that already has a route above is
- *    never among them: mid-transition, the ready process wins.
+ *    never among them: mid-transition, the running process wins.
  * 4. The BARE APEX of every platform domain, when this node publishes the
  *    fleet's API there — reported in `api`, on the same precedence rule: an apex
  *    that an application or wake route already answers on is left out. A `*.<domain>`
  *    matcher covers exactly one label, so an apex is never a catch-all's
  *    business and needs an explicit route of its own.
  *
- * A process that has not passed its readiness gate is never routed: sending it
- * traffic is exactly what the gate exists to prevent.
- *
- * An environment's hosts resolve only to its ready environment-owned process.
+ * An environment's hosts resolve only to its running environment-owned process.
  */
 export function renderRoutes(input: RenderRoutesInput): IngressDesired {
-  const ready = readyProcesses(input.processes);
+  const running = runningProcesses(input.processes);
 
   const routes = new Map<string, IngressBackend>();
   /* Precedence is "first writer wins", so the kinds are emitted in order and a
@@ -127,7 +124,7 @@ export function renderRoutes(input: RenderRoutesInput): IngressDesired {
      host when it has one, and every custom domain claimed for it. */
   const served = new Map<string, IngressBackend>();
   for (const { project, env } of environments) {
-    const backend = currentBackend(project, env, ready);
+    const backend = currentBackend(project, env, running);
     if (backend !== undefined) served.set(placement(project, env.name), backend);
   }
 
@@ -164,7 +161,7 @@ export function renderRoutes(input: RenderRoutesInput): IngressDesired {
 /**
  * What an environment's own hosts answer with — the very computation
  * {@link renderRoutes} gives its label, its apex and its custom domains, and an
- * empty list when nothing ready serves it.
+ * empty list when no supervised process serves it.
  *
  * EXPORTED SO THAT WHAT ANSWERS AN ENVIRONMENT IS DECIDED IN ONE PLACE. The
  * daemon's wake surface answers every host the ingress has no explicit route for,
@@ -179,7 +176,7 @@ export function servingBackend(
   env: EnvironmentRecord,
   processes: RuntimeProcess[],
 ): IngressBackend | undefined {
-  return currentBackend(project, env, readyProcesses(processes));
+  return currentBackend(project, env, runningProcesses(processes));
 }
 
 /**
@@ -189,9 +186,9 @@ export function servingBackend(
  * A host `routes` already answers on is left out rather than listed in both. The
  * two overlap for a whole pass whenever an environment is waking — the record
  * still reads parked to a node that has not re-read it, while the process it
- * started is already ready — and the ready process is the better answer of the
- * two, since routing it to the daemon would hold a request for something that is
- * already up.
+ * started is already running — and the running process is the better answer of
+ * the two, since routing it to the daemon would hold a request for something
+ * that is already up.
  */
 function wakeRouting(
   wake: { port: number; parked: Array<{ project: string; env: EnvironmentRecord }> },
@@ -241,17 +238,21 @@ function apiRouting(
 }
 
 /**
- * {@link servingBackend} over processes that are already ready and already sorted,
+ * {@link servingBackend} over processes that are already running and already sorted,
  * which is what a whole render shares between its environments.
  */
 function currentBackend(
   project: string,
   env: EnvironmentRecord,
-  ready: RuntimeProcess[],
+  running: RuntimeProcess[],
 ): IngressBackend | undefined {
   if (env.deployment === null) return undefined;
-  const process = ready.find(
-    (candidate) => candidate.project === project && candidate.env === env.name,
+  const process = running.find(
+    (candidate) =>
+      candidate.project === project &&
+      candidate.env === env.name &&
+      candidate.teardownPending !== true &&
+      candidate.port > 0,
   );
   return process === undefined ? undefined : backendOf(process);
 }
@@ -275,14 +276,12 @@ function hostUnder(domain: string, project: string, ref?: string): string | null
 }
 
 /**
- * The processes anything here may name, in one order: sorted so that two ready
- * processes serving the same build — which a retried start can leave behind —
+ * The processes anything here may name, in one order: sorted so that two running
+ * processes serving the same environment — which a retried start can leave behind —
  * always resolve to the same one.
  */
-function readyProcesses(processes: RuntimeProcess[]): RuntimeProcess[] {
-  return processes
-    .filter((process) => process.ready)
-    .sort((a, b) => compare(a.processId, b.processId));
+function runningProcesses(processes: RuntimeProcess[]): RuntimeProcess[] {
+  return [...processes].sort((a, b) => compare(a.processId, b.processId));
 }
 
 function backendOf(process: RuntimeProcess): IngressBackend {

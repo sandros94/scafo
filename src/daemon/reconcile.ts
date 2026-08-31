@@ -10,7 +10,7 @@ import { createPortAllocator } from "../core/placement/ports.ts";
 import { ScafoError } from "../core/error.ts";
 import { planReconcile, type ReconcileAction } from "../core/placement/reconcile.ts";
 import { countingRegistry, storeOpsOf } from "../core/registry/counting.ts";
-import type { ProbeOptions, RuntimeDriver, RuntimeProcess } from "../core/types/runtime.ts";
+import type { RuntimeDriver, RuntimeProcess } from "../core/types/runtime.ts";
 import { type ParkedEnvironment, type PlacementView, readDesired } from "./_desired.ts";
 import { createExecutor, failureOf, type ReconcileFailure } from "./_execute.ts";
 import { applyIngress } from "./_ingress.ts";
@@ -94,8 +94,6 @@ export interface Reconciler {
 export interface ReconcilerOptions {
   /** Time between passes. Defaults to {@link DEFAULT_RECONCILE_INTERVAL_MS}. */
   intervalMs?: number;
-  /** Readiness gate settings; the configured probe path is used unless overridden. */
-  probe?: ProbeOptions;
   /**
    * Environment every runtime process starts from.
    *
@@ -146,7 +144,6 @@ export function createReconciler(
     daemon,
     registry,
     driver,
-    probe: { path: daemon.config.runtime.probePath, ...opts?.probe },
     baseEnv: opts?.baseEnv ?? runtimeBaseEnv(globalThis.process?.env ?? {}),
     known,
   });
@@ -223,35 +220,18 @@ export function createReconciler(
         }),
       });
 
-      await executor.execute(
-        plan,
-        desired,
-        pending,
-        abort.signal,
-        daemon.ingress === undefined
-          ? undefined
-          : async (processId): Promise<void> => {
-              /* Reserved transition credit is already held when this runs.
-                 Withdraw the route before celld swaps generations; the final
-                 convergence below restores a rejected reload or publishes a
-                 newly gated one. */
-              await applyIngress(daemon, {
-                desired,
-                processes: executor
-                  .currentProcesses()
-                  .filter((process) => process.processId !== processId),
-                parked,
-              });
-            },
-      );
+      await executor.execute(plan, desired, pending, abort.signal);
 
       if (!abort.signal.aborted) {
         try {
           /* Routing is published from what the pass ended with, not from what it
-           planned: only a process that came out of it ready may take traffic.
-           The parked environments travel with it, because their hosts are routed
-           to this daemon to be woken rather than to a process. */
-          await applyIngress(daemon, { desired, processes: [...known.values()], parked });
+             planned. The parked environments travel with it, because their
+             hosts are routed to this daemon to be woken rather than to a process. */
+          await applyIngress(daemon, {
+            desired,
+            processes: executor.currentProcesses(),
+            parked,
+          });
         } catch (error) {
           /*
            * An ingress that cannot be reached is recorded and nothing more. The
@@ -382,7 +362,7 @@ export function createReconciler(
         running: inFlight,
         lastActions: [...lastActions],
         failures: [...failures],
-        processes: [...known.values()].map((process) => ({ ...process })),
+        processes: executor.currentProcesses().map((process) => ({ ...process })),
         placements: lastPlacements.map((view) => ({ ...view, nodes: [...view.nodes] })),
         parked: lastParked.map((entry) => ({ project: entry.project, env: entry.env.name })),
       };

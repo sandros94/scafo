@@ -11,9 +11,9 @@ import type { RuntimeProcess } from "../src/core/types/runtime.ts";
 const PROJECT = "shop";
 
 describe("environment routing", () => {
-  it("routes every host to the ready environment process", () => {
+  it("routes every host to the running environment process", () => {
     const env = environment(APEX_ENVIRONMENT, ["shop.example.com"]);
-    const running = process(true, 8100);
+    const running = process(8100);
     expect(
       renderRoutes({
         platformDomains: ["apps.test"],
@@ -28,16 +28,9 @@ describe("environment routing", () => {
     ]);
   });
 
-  it("keeps a ready old generation routed while newer adoption is pending or rejected", () => {
-    const env = environment("production");
-    const old = { ...process(true, 8100), attemptedRevision: 2, appliedRevision: 1 };
-    expect(servingBackend(PROJECT, env, [old])).toEqual(backend(old));
-  });
-
-  it("does not route an unready process", () => {
-    expect(
-      servingBackend(PROJECT, environment("production"), [process(false, 8100)]),
-    ).toBeUndefined();
+  it("routes independently of celld deployment revisions", () => {
+    const running = process(8100);
+    expect(servingBackend(PROJECT, environment("production"), [running])).toEqual(backend(running));
   });
 
   it("publishes parked hosts and the API separately", () => {
@@ -72,17 +65,14 @@ function environment(name: string, domains: string[] = []): EnvironmentRecord {
   };
 }
 
-function process(ready: boolean, port: number): RuntimeProcess {
+function process(port: number): RuntimeProcess {
   return {
     processId: `${PROJECT}--production`,
     project: PROJECT,
     env: "production",
-    attemptedRevision: 2,
-    appliedRevision: 2,
-    deployment: { version: "version", prefix: "deployments/main/version", generation: 2 },
+    configuredVarset: null,
     port,
     internalPort: port + 1,
-    ready,
   };
 }
 

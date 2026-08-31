@@ -382,18 +382,15 @@ function environment(name: string, domains: string[]): EnvironmentRecord {
   };
 }
 
-/** A ready process, which is the only kind the routing ever names. */
-function process_(project: string, env: string, build: string, port: number): RuntimeProcess {
+/** A supervised process, which is the only kind the routing ever names. */
+function process_(project: string, env: string, _build: string, port: number): RuntimeProcess {
   return {
     processId: `${project}--${env}`,
     project,
     env,
-    attemptedRevision: 1,
-    appliedRevision: 1,
-    deployment: { version: build, prefix: `deployments/main/${build}`, generation: 1 },
+    configuredVarset: null,
     port,
     internalPort: port + 1,
-    ready: true,
   };
 }
 

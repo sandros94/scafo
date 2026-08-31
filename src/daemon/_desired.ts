@@ -177,10 +177,9 @@ export async function readDesired(
  * Throws rather than answering null when the environment has one this node
  * cannot open — no key at all, the wrong key, or an envelope that will not
  * decrypt. A process started without the variables its environment is
- * configured with is a silent misconfiguration: it would come up, pass its
- * readiness gate and serve requests against whatever defaults its code falls
- * back to. The caller records the failure against that one environment and
- * leaves whatever already serves it running.
+ * configured with is a silent misconfiguration: it would serve requests against
+ * whatever defaults its code falls back to. The caller records the failure
+ * against that one environment and leaves whatever already serves it running.
  */
 export async function openEnvironmentVars(
   registry: RegistryContext,

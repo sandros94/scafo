@@ -270,19 +270,6 @@ describe("the round trip an environment's variables make", () => {
     });
   });
 
-  it("does not infer runtime configurability from historical builds", async () => {
-    const world = await seededRegistry({ runtimeConfigurable: false });
-
-    const result = await setVarset(world.registry, {
-      project: PROJECT,
-      env: ENVIRONMENT,
-      plain: toPlainVarset({ A: "1" }),
-      key: world.key,
-    });
-
-    expect(result.warnings).toEqual([]);
-  });
-
   it("refuses the wrong key rather than reporting an environment with no variables", async () => {
     const world = await seededRegistry();
     await setVarset(world.registry, {
@@ -364,13 +351,12 @@ interface World {
 }
 
 /** A registry holding one project, one deployed environment and its build history. */
-async function seededRegistry(opts?: { runtimeConfigurable?: boolean }): Promise<World> {
+async function seededRegistry(): Promise<World> {
   const { ctx } = ctxWith(new MemoryCasStore());
   await createProject(ctx, { slug: PROJECT });
   await createEnvironment(ctx, PROJECT, { name: ENVIRONMENT });
   await createBuild(ctx, PROJECT, {
     id: BUILD,
-    runtimeConfigurable: opts?.runtimeConfigurable ?? true,
     celldVersionId: `version-${BUILD}`,
   });
   await recordDeployment(ctx, PROJECT, ENVIRONMENT, BUILD);

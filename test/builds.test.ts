@@ -11,8 +11,6 @@ import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
 const PROJECT = "app";
 const BUILD: BuildInput = {
   id: "0123abcd",
-  runtimeConfigurable: true,
-  builtWithVarset: "aaaaaaaa",
   source: {
     provider: "github",
     repo: "sandros94/scafo",
@@ -23,9 +21,7 @@ const BUILD: BuildInput = {
 
 /** Every field two records of one build may NOT disagree about. */
 const DIFFERENT_IN: Array<{ field: string; patch: Partial<BuildInput> }> = [
-  { field: "runtimeConfigurable", patch: { runtimeConfigurable: false } },
   { field: "celldVersionId", patch: { celldVersionId: "version-1" } },
-  { field: "builtWithVarset", patch: { builtWithVarset: "bbbbbbbb" } },
   {
     field: "source",
     patch: {
@@ -54,8 +50,6 @@ describe("createBuild", () => {
     expect(record).toMatchObject({
       v: 1,
       id: BUILD.id,
-      runtimeConfigurable: true,
-      builtWithVarset: "aaaaaaaa",
     });
     expect(Date.parse(record.createdAt)).toBe(clock.nowMs());
     await expect(getBuild(clock.ctx, PROJECT, BUILD.id)).resolves.toEqual(record);
@@ -86,21 +80,6 @@ describe("createBuild", () => {
 
     expect(error.status).toBe(409);
     expect(await store.get(buildKey(PROJECT, BUILD.id))).toEqual(before);
-  });
-
-  it("refuses to rewrite a build whose contents differ", async () => {
-    const { store, clock } = await seeded();
-    await createBuild(clock.ctx, PROJECT, BUILD);
-    const before = await store.get(buildKey(PROJECT, BUILD.id));
-
-    const error = await rejectsWith(
-      () => createBuild(clock.ctx, PROJECT, { ...BUILD, runtimeConfigurable: false }),
-      "immutable",
-    );
-    expect(error.status).toBe(409);
-
-    const after = await store.get(buildKey(PROJECT, BUILD.id));
-    expect(after).toEqual(before);
   });
 
   it("rejects an id that is not a content digest", async () => {

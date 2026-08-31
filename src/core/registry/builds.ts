@@ -20,11 +20,9 @@ export async function createBuild(
   const record: BuildRecord = {
     v: 1,
     id: input.id,
-    runtimeConfigurable: input.runtimeConfigurable,
     createdAt: nowIso(ctx),
   };
   if (input.celldVersionId !== undefined) record.celldVersionId = input.celldVersionId;
-  if (input.builtWithVarset !== undefined) record.builtWithVarset = input.builtWithVarset;
   if (input.source !== undefined) record.source = input.source;
   if (input.oidc !== undefined) record.oidc = input.oidc;
 

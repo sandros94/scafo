@@ -224,13 +224,12 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
         await createProject(ctx, { slug: project, placement: "dense" });
         await expect(listProjects(ctx)).resolves.toContain(project);
 
-        const build = await createBuild(ctx, project, { id: buildId, runtimeConfigurable: true });
+        const build = await createBuild(ctx, project, { id: buildId });
         expect(build.id).toBe(buildId);
 
         await createEnvironment(ctx, project, { name: "prod" });
         const flipped = await recordDeployment(ctx, project, "prod", buildId);
         expect(flipped.environment.deployment).toMatchObject({ revision: 1 });
-        expect(flipped.warnings).toEqual([]);
 
         const key = await importVarsetKey(crypto.getRandomValues(new Uint8Array(32)));
         const sealed = await sealVarset({ TOKEN: { value: "s3cr3t", secret: true } }, key);
@@ -240,7 +239,7 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
         ).resolves.toEqual({ TOKEN: { value: "s3cr3t", secret: true } });
 
         const configured = await setEnvironmentVarset(ctx, project, "prod", sealed.id);
-        expect(configured.environment.varset).toBe(sealed.id);
+        expect(configured.varset).toBe(sealed.id);
 
         await claimDomain(ctx, host, project, "prod");
         await expect(checkDomain(ctx, host)).resolves.toMatchObject({

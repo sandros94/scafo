@@ -21,7 +21,7 @@ import { readTextFile, reportFailure } from "../_utils.ts";
 export const DEFAULT_POLL_MS: number = 1000;
 
 /** States a deploy stops moving in. */
-const SETTLED: string[] = ["routed", "deployed", "failed"];
+const SETTLED: string[] = ["deployed", "failed"];
 
 const deployArgs: ArgsDef = {
   "dir": { type: "positional", description: "Directory holding the built project" },
@@ -33,10 +33,6 @@ const deployArgs: ArgsDef = {
   "project": { type: "string", description: "Project slug to deploy into", required: true },
   "env": { type: "string", description: "Environment to deploy into (production)" },
   "script": { type: "string", description: "Name the runtime files the app under" },
-  "runtime-configurable": {
-    type: "boolean",
-    description: "The build reads its configuration at runtime, not at build time",
-  },
   "replicas": {
     type: "string",
     description: "How many nodes serve this environment: a whole number, or all",
@@ -106,7 +102,6 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
   const meta = {
     environment,
     script: text(flags.script) ?? project,
-    runtimeConfigurable: flags["runtime-configurable"] === true,
     /* Only when they were asked for: a deploy that names no replica count and no
        selector must leave whatever the environment already carries exactly as it
        is. Neither flag can lift a constraint — that is `scafo env selector`. */
@@ -173,8 +168,6 @@ async function watch(url: string, authorize: Authorize, from: DeployStatus): Pro
     last = status;
     if (!SETTLED.includes(status.state)) continue;
 
-    for (const warning of status.warnings)
-      console.warn(`scafo: ${warning.code}: ${warning.detail}`);
     if (status.state === "failed") {
       throw new ScafoError("invalid-input", "Deploy failed", { detail: status.detail });
     }

@@ -76,10 +76,8 @@ describe("what a flush carries", () => {
     observe.emit({ type: "wake.kicked", id: "aaaa" });
     clock.tick(10);
     observe.emit({
-      type: "gate.passed",
-      processId: "shop--prod--b1b1b1b1",
-      attempts: 3,
-      durationMs: 900,
+      type: "runtime.started",
+      processId: "shop--prod",
     });
 
     expect(await flusherWith().flush()).toBe(true);
@@ -98,10 +96,8 @@ describe("what a flush carries", () => {
         record: "event",
         node: NODE,
         at: new Date(CLOCK_START_MS + 10).toISOString(),
-        type: "gate.passed",
-        processId: "shop--prod--b1b1b1b1",
-        attempts: 3,
-        durationMs: 900,
+        type: "runtime.started",
+        processId: "shop--prod",
       },
     ]);
   });

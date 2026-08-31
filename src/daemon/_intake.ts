@@ -37,8 +37,7 @@ export const DEPLOY_METADATA_HEADER: string = "x-scafo-deploy";
 export const DEPLOY_METADATA_MAX_BYTES: number = 8_192;
 
 /** Metadata accepted beside the project path; the server fills its defaults. */
-export type DeployMetadata = Partial<Omit<DeployMeta, "project" | "oidc" | "runtimeConfigurable">> &
-  Pick<DeployMeta, "runtimeConfigurable">;
+export type DeployMetadata = Partial<Omit<DeployMeta, "project" | "oidc">>;
 
 /** What `POST /v1/environments/:project/:env/selector` is asked to set. */
 export interface SelectorRequest {
@@ -239,16 +238,10 @@ function parseMeta(parsed: unknown, project: string): DeployMeta {
   const script = text(body, "script") ?? project;
   assertSlug(script);
 
-  const runtimeConfigurable = flag(body, "runtimeConfigurable");
-  if (runtimeConfigurable === undefined) {
-    throw invalid(`"runtimeConfigurable" must be stated, as true or as false`);
-  }
-
   const meta: DeployMeta = {
     project,
     environment,
     script,
-    runtimeConfigurable,
   };
 
   /* Absent means "say nothing about placement", which is not the same as saying
@@ -270,11 +263,6 @@ function parseMeta(parsed: unknown, project: string): DeployMeta {
   if (buildId !== undefined) {
     assertId(buildId);
     meta.buildId = buildId;
-  }
-  const builtWithVarset = text(body, "builtWithVarset");
-  if (builtWithVarset !== undefined) {
-    assertId(builtWithVarset);
-    meta.builtWithVarset = builtWithVarset;
   }
   const source = readSource(body.source);
   if (source !== undefined) meta.source = source;
@@ -317,13 +305,6 @@ function text(body: Record<string, unknown>, name: string, required?: true): str
     throw invalid(`"${name}" must be given`);
   }
   if (typeof value !== "string") throw invalid(`"${name}" must be a string`);
-  return value;
-}
-
-function flag(body: Record<string, unknown>, name: string): boolean | undefined {
-  const value = body[name];
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "boolean") throw invalid(`"${name}" must be true or false`);
   return value;
 }
 

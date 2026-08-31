@@ -588,16 +588,14 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   );
 
   it(
-    "reports a deploy routed through the node that was never going to run it",
+    "completes a deploy through a node that was never going to run it",
     async () => {
       /*
        * THE ASYMMETRY THIS IS FOR. Intake is independent of placement — any node
        * accepts an upload — but placement is the coordinator's decision, taken
-       * after the deploy has landed. So the node holding the deploy open is
-       * routinely not the node that starts the build, and a deploy that watched
-       * only its OWN processes reported `deploy-not-routed` after the full
-       * two-minute budget while the build had been serving on the other node for
-       * seconds. Same build, same fleet: 2s one way, 124s the other.
+       * after the deploy has landed. Deployment completion therefore means celld
+       * published the build and Scafo recorded it; it does not wait for the intake
+       * node to serve placement that belongs elsewhere.
        *
        * The selector is what makes the placement certain rather than a hash's
        * decision: only node-b carries the label, so node-a can never be the one
@@ -616,16 +614,11 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         ),
         {},
       );
-      const routedMs = Date.now() - startedAt;
+      const deployedMs = Date.now() - startedAt;
       expectCleanExit(result);
 
-      /* The deploy settles at `routed` rather than at `deployed` with a warning:
-         the node it was sent to went and asked the node the placement named. */
-      expect(result.output, daemonLogTail()).toContain("routed");
-      expect(result.output).not.toContain("deploy-not-routed");
-      /* Comfortably inside the 120s budget, which is what "watched the wrong
-         node until it gave up" would have spent. */
-      expect(routedMs).toBeLessThan(90_000);
+      expect(result.output, daemonLogTail()).toContain("deployed");
+      expect(deployedMs).toBeLessThan(90_000);
 
       /* And the claim rests on the placement really being elsewhere. */
       await until(`${AWAITED} to be placed on ${labelled.id} alone`, DEADLINE_MS, async () => {
@@ -638,7 +631,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         environment: AWAITED,
         deployedThrough: plain.id,
         placedOn: labelled.id,
-        routedMs,
+        deployedMs,
         output: result.output.trim().slice(-300),
       };
     },

@@ -82,7 +82,7 @@ beforeEach(async () => {
     idleTtlS: 900,
   });
   for (const id of [B1, B4]) {
-    await createBuild(clock.ctx, PROJECT, { id, runtimeConfigurable: true });
+    await createBuild(clock.ctx, PROJECT, { id });
   }
 
   await recordDeployment(clock.ctx, PROJECT, "prod", B1);

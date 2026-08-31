@@ -40,7 +40,7 @@ export interface CapacityPlan {
    * nothing is booted on behalf of a request that was already turned away.
    *
    * A wake IS a process boot — unpacking nothing, but starting a runtime,
-   * loading a build and waiting on a readiness gate — and boots are CPU-bound
+   * loading a build — and boots are CPU-bound
    * bursts rather than steady load, so the ceiling is taken from threads and not
    * from memory. Half of them, so a node waking a batch keeps enough of itself
    * to answer for what it is already serving.

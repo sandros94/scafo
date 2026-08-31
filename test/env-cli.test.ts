@@ -76,7 +76,7 @@ beforeEach(async () => {
   });
   await createProject(clock.ctx, { slug: PROJECT });
   for (const id of [BUILD, OTHER_BUILD]) {
-    await createBuild(clock.ctx, PROJECT, { id, runtimeConfigurable: true });
+    await createBuild(clock.ctx, PROJECT, { id });
   }
   await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
   await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true });
@@ -579,7 +579,6 @@ function daemonConfig(): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
-      probePath: "/",
       bindHost: "127.0.0.1",
       durability: "bucket",
       cellIdleEvictS: 900,

@@ -67,7 +67,7 @@ beforeEach(async () => {
   for (const slug of [PROJECT, NEIGHBOUR]) {
     await createProject(registry, { slug });
     await createEnvironment(registry, slug, { name: ENVIRONMENT });
-    await createBuild(registry, slug, { id: BUILD, runtimeConfigurable: true });
+    await createBuild(registry, slug, { id: BUILD });
     await recordDeployment(registry, slug, ENVIRONMENT, BUILD);
   }
   await claimDomain(registry, CUSTOM_DOMAIN, PROJECT, ENVIRONMENT);
@@ -229,7 +229,6 @@ function daemonConfig(): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
-      probePath: "/",
       bindHost: "127.0.0.1",
       durability: "bucket",
       cellIdleEvictS: 900,

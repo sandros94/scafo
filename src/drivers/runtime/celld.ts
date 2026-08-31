@@ -1,20 +1,14 @@
 /*
- * Runtime driver for celld: one environment-owned process, in-place deployment
- * adoption, and the gate that says when it may take traffic.
+ * Runtime driver for celld: one environment-owned process and its start-time
+ * configuration. Celld owns deployment adoption and application readiness.
  */
 
 import { ScafoError } from "../../core/error.ts";
-import { assertPositiveSafeInteger } from "../../core/utils/number.ts";
 import { formatProcessId } from "../../core/placement/ids.ts";
 import { fleetPrefix } from "../../core/registry/paths.ts";
-import type {
-  ProbeOptions,
-  RuntimeDriver,
-  RuntimeProcess,
-  RuntimeSpecInput,
-} from "../../core/types/runtime.ts";
+import { assertPositiveSafeInteger } from "../../core/utils/number.ts";
+import type { RuntimeDriver, RuntimeSpecInput } from "../../core/types/runtime.ts";
 import type { ProcessSpec } from "../../core/types/supervisor.ts";
-import { createCelldInternalClient } from "./_celld-internal.ts";
 
 /** Command run when the caller does not name one. */
 export const DEFAULT_CELLD_BIN: string = "celld";
@@ -31,16 +25,6 @@ export const DEFAULT_BIND_HOST: string = "127.0.0.1";
 
 /** Time a stopped runtime process is given between `SIGTERM` and `SIGKILL`. */
 export const DEFAULT_STOP_GRACE_MS: number = 30_000;
-
-/** Path the runtime answers its own health on; every other path belongs to the application. */
-export const HEALTH_PATH: string = "/__celld/health";
-
-/** Times the readiness gate is tried, and the wait between attempts. */
-const DEFAULT_PROBE_ATTEMPTS = 60;
-const DEFAULT_PROBE_DELAY_MS = 250;
-
-/** Status the application-level probe must stay below when none is configured. */
-const DEFAULT_EXPECT_BELOW = 500;
 
 /** How far the drain is kept below the stop grace, and the shortest drain worth having. */
 const DRAIN_HEADROOM_MS = 5_000;
@@ -93,12 +77,14 @@ export const RESERVED_ENV: string[] = [
   "CELLD_INTERNAL_ADDR",
   "CELLD_ADVERTISE",
   "CELLD_SHUTDOWN_DRAIN_MS",
-  /* Derived from the capacity plan and the ingress topology: a caller silently
-     winning over them would undo the node's own resource and trust decisions.
-     Tuning them belongs in typed configuration, not a raw variable. */
+  /* Kept aligned with Scafo's transitional admission accounting until that
+     accounting is removed as one unit. */
   "CELLD_MAX_RSS_MB",
   "CELLD_MAX_RESIDENT_CELLS",
+  /* Derived from the ingress topology: a caller silently winning over it would
+     undo the node's trust decision. */
   "CELLD_TRUST_FORWARDED_HEADERS",
+  "CELLD_VARS_FILE",
   /* The durability posture, the replication destination, the node's session
      identity and its control plane decide when a write is called durable and
      who may restart the process — the node's decisions, never a deploy's. */
@@ -135,15 +121,6 @@ export interface CelldDriverOptions {
    */
   cellIdleEvictS?: number;
   /**
-   * Address the readiness gate dials, which is the address the processes bind.
-   * Loopback by default; a node whose processes bind a tunnel address must
-   * hand it in, or the gate probes an address nothing answers on and no
-   * process is ever called ready.
-   */
-  probeHost?: string;
-  /** Fetch implementation for the colocated internal operator API. */
-  internalFetch?: typeof fetch;
-  /**
    * Variables the operator hands EVERY process this driver spawns, on top of
    * the environment it is given and under everything the driver writes itself.
    * The runtime's own switches are what this is for — `CELLD_OTEL` and the
@@ -168,7 +145,6 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
   const binPath = opts.binPath ?? DEFAULT_CELLD_BIN;
   const graceMs = opts.graceMs ?? DEFAULT_STOP_GRACE_MS;
   const durability = opts.durability ?? "bucket";
-  const probeHost = opts.probeHost ?? "127.0.0.1";
   const cellIdleEvictS = opts.cellIdleEvictS ?? 0;
 
   if (!Number.isInteger(graceMs) || graceMs < MIN_DRAIN_MS + DRAIN_HEADROOM_MS) {
@@ -217,88 +193,7 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
         }),
       };
     },
-
-    async adoptCurrent(process, callOpts) {
-      const client = internalClient(process, probeHost, opts.internalFetch);
-      const result = await client.reload(callOpts);
-      if (result.outcome === "failed") {
-        return {
-          outcome: "rejected",
-          version: result.version,
-          prefix: result.prefix,
-          error: result.error,
-        };
-      }
-      if (result.outcome === "unavailable") {
-        throw new ScafoError("capability-missing", "Runtime did not adopt its deployment", {
-          status: 502,
-          detail: `celld reload ${result.outcome}: ${result.error}`,
-        });
-      }
-      const deployment = await confirmedDeployment(client, callOpts);
-      if (
-        deployment.version !== result.version ||
-        deployment.generation !== result.generation ||
-        (result.prefix !== undefined && deployment.prefix !== result.prefix)
-      ) {
-        throw new ScafoError("capability-missing", "Runtime deployment confirmation disagreed", {
-          status: 502,
-          detail: "celld /reload and /state reported different deployments",
-        });
-      }
-      return { outcome: "confirmed", deployment };
-    },
-
-    async currentDeployment(process, callOpts) {
-      return confirmedDeployment(internalClient(process, probeHost, opts.internalFetch), callOpts);
-    },
-
-    async probeReady(process: RuntimeProcess, probe?: ProbeOptions): Promise<boolean> {
-      const fetchFn = probe?.fetchFn ?? globalThis.fetch;
-      const attempts = Math.max(1, probe?.attempts ?? DEFAULT_PROBE_ATTEMPTS);
-      const delayMs = probe?.delayMs ?? DEFAULT_PROBE_DELAY_MS;
-      const expectBelow = probe?.expectBelow ?? DEFAULT_EXPECT_BELOW;
-      const path = probe?.path ?? "/";
-      const origin = `http://${probeHost}:${String(process.port)}`;
-
-      for (let attempt = 0; attempt < attempts; attempt++) {
-        if (attempt > 0) await delay(delayMs);
-        probe?.onAttempt?.();
-
-        /*
-         * Both signals are required. The runtime answers its health endpoint
-         * from the process itself, so a process whose application fails every
-         * single request still reports 200 there; and a process on its way out
-         * answers the health endpoint while refusing everything else. Neither
-         * check alone distinguishes "serving" from "running".
-         */
-        if ((await statusOf(fetchFn, `${origin}${HEALTH_PATH}`)) !== 200) continue;
-
-        const app = await statusOf(fetchFn, `${origin}${path.startsWith("/") ? path : `/${path}`}`);
-        if (app !== null && app < expectBelow) return true;
-      }
-      return false;
-    },
   };
-}
-
-function internalClient(process: RuntimeProcess, host: string, fetchFn?: typeof fetch) {
-  const endpoint = `http://${host}:${String(process.internalPort)}`;
-  return createCelldInternalClient(endpoint, fetchFn === undefined ? undefined : { fetchFn });
-}
-
-async function confirmedDeployment(
-  client: ReturnType<typeof createCelldInternalClient>,
-  callOpts?: { signal?: AbortSignal },
-) {
-  const state = await client.state(callOpts);
-  if ("error" in state) {
-    throw new ScafoError("capability-missing", "Runtime has no active deployment", {
-      status: 502,
-      detail: "celld /state reported actor_stopped",
-    });
-  }
-  return state.deployment;
 }
 
 /** What the driver's own options put into every process it spawns. */
@@ -314,8 +209,8 @@ function processEnv(input: RuntimeSpecInput, settings: EnvSettings): Record<stri
   /*
    * Precedence, weakest first: the environment the daemon was started from, then
    * the variables the operator handed this node, then everything this driver
-   * derives — credentials, drain, forwarded-header trust, durability, capacity
-   * caps — then the environment's own varset, and idle eviction last of all.
+   * derives — credentials, drain, forwarded-header trust and durability — then
+   * the environment's own varset, and idle eviction last of all.
    * The driver's half is written AFTER the operator's on purpose: those values
    * come from the node's configuration and from the ports these processes
    * actually bound, so a variable that disagreed with them could only describe a
@@ -348,8 +243,6 @@ function processEnv(input: RuntimeSpecInput, settings: EnvSettings): Record<stri
     env.CELLD_MAX_RSS_MB = String(input.maxRssMb);
   }
   if (capacity !== undefined) {
-    /* Zero means "unbounded" to the runtime, so a degenerate budget is left
-       to the runtime's own default rather than written as no limit at all. */
     if (input.maxRssMb === undefined && capacity.maxRssMbPerProcess >= 1) {
       env.CELLD_MAX_RSS_MB = String(capacity.maxRssMbPerProcess);
     }
@@ -357,6 +250,10 @@ function processEnv(input: RuntimeSpecInput, settings: EnvSettings): Record<stri
       env.CELLD_MAX_RESIDENT_CELLS = String(capacity.maxResidentCells);
     }
   }
+
+  /* A node configures each environment through its own CELLD_VAR_* entries.
+     An inherited shared file would merge unrelated configuration into it. */
+  delete env.CELLD_VARS_FILE;
 
   /* The name after the prefix becomes the binding name verbatim, so a variable
      reaches the application under exactly the name the varset gave it. */
@@ -400,20 +297,4 @@ function checkedExtraEnv(extraEnv?: Record<string, string>): Record<string, stri
 function joinPrefix(keyPrefix: string | undefined, fleet: string): string {
   const trimmed = keyPrefix?.replaceAll(/^\/+|\/+$/g, "") ?? "";
   return trimmed === "" ? fleet : `${trimmed}/${fleet}`;
-}
-
-/** Status of one probe request; null when the request itself did not complete. */
-async function statusOf(fetchFn: typeof fetch, url: string): Promise<number | null> {
-  try {
-    const response = await fetchFn(url, { redirect: "manual" });
-    /* Nothing reads the body, and an unread one holds the connection open. */
-    await response.body?.cancel();
-    return response.status;
-  } catch {
-    return null;
-  }
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

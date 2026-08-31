@@ -48,7 +48,7 @@ beforeEach(async () => {
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
   await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true, idleTtlS: 900 });
-  await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
+  await createBuild(clock.ctx, PROJECT, { id: BUILD });
   await recordDeployment(clock.ctx, PROJECT, "preview", BUILD);
 
   for (const key of [...FLEET_KEYS, ...SURVIVORS]) await store.put(key, "{}");

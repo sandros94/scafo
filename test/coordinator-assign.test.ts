@@ -58,7 +58,7 @@ beforeEach(async () => {
   };
 
   await createProject(clock.ctx, { slug: PROJECT });
-  await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
+  await createBuild(clock.ctx, PROJECT, { id: BUILD });
   for (const id of [NODE_A, NODE_B]) await register(id);
 });
 
@@ -541,7 +541,7 @@ describe("credit-profile refusals", () => {
 
 describe("credit demand follows resolved process multiplicity", () => {
   beforeEach(async () => {
-    await createBuild(clock.ctx, PROJECT, { id: BUILD_TWO, runtimeConfigurable: true });
+    await createBuild(clock.ctx, PROJECT, { id: BUILD_TWO });
     await register(NODE_A, undefined, { allocatableMb: 70, runtimeMb: 20, deployMb: 1 });
     clock.tick(NODE_LIVENESS_WINDOW_MS);
     await heartbeatNode(clock.ctx, NODE_A);
@@ -573,7 +573,7 @@ describe("one fleet-wide credit plan", () => {
     await environmentNamed("prod");
     await setReplicas(clock.ctx, PROJECT, "prod", 1);
     await createProject(clock.ctx, { slug: other });
-    await createBuild(clock.ctx, other, { id: BUILD, runtimeConfigurable: true });
+    await createBuild(clock.ctx, other, { id: BUILD });
     await createEnvironment(clock.ctx, other, { name: "prod" });
     await recordDeployment(clock.ctx, other, "prod", BUILD);
     await setReplicas(clock.ctx, other, "prod", 1);
@@ -606,7 +606,7 @@ describe("one fleet-wide credit plan", () => {
     const beta = "beta";
     for (const project of [alpha, beta]) {
       await createProject(clock.ctx, { slug: project });
-      await createBuild(clock.ctx, project, { id: BUILD, runtimeConfigurable: true });
+      await createBuild(clock.ctx, project, { id: BUILD });
       await createEnvironment(clock.ctx, project, { name: "prod" });
       await recordDeployment(clock.ctx, project, "prod", BUILD);
       await setReplicas(clock.ctx, project, "prod", 1);
@@ -932,7 +932,6 @@ function daemonConfig(nodeId: string): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
-      probePath: "/",
       bindHost: "127.0.0.1",
       durability: "bucket",
       cellIdleEvictS: 900,

@@ -588,7 +588,7 @@ describe("GET /v1/ingress/ask", () => {
      * nothing behind it refuses.
      */
     await deployable();
-    await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
+    await createBuild(clock.ctx, PROJECT, { id: BUILD });
     await recordDeployment(clock.ctx, PROJECT, ENVIRONMENT, BUILD);
     const real = await app.request(`/v1/ingress/ask?domain=${PROJECT}--${ENVIRONMENT}.apps.test`);
     expect(real.status).toBe(200);
@@ -843,7 +843,6 @@ function daemonConfig(): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
-      probePath: "/",
       bindHost: "127.0.0.1",
       durability: "bucket",
       cellIdleEvictS: 900,

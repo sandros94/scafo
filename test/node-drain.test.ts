@@ -47,7 +47,7 @@ beforeEach(async () => {
   logged = [];
 
   await createProject(clock.ctx, { slug: PROJECT });
-  await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
+  await createBuild(clock.ctx, PROJECT, { id: BUILD });
   for (const id of [NODE_A, NODE_B]) await register(id);
 
   const acquired = await acquireLease(clock.ctx, NODE_A);

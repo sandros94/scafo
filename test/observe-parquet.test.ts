@@ -129,10 +129,7 @@ const EVERY_EVENT: ObserveEventRecord[] = [
     listOps: 3,
     durationMs: 412,
   }),
-  event({ type: "runtime.started", processId: "shop--prod", revision: 1 }),
-  event({ type: "runtime.adopted", processId: "shop--prod", revision: 2 }),
-  event({ type: "gate.passed", processId: "shop--prod", attempts: 3, durationMs: 900 }),
-  event({ type: "gate.failed", processId: "shop--prod", attempts: 5 }),
+  event({ type: "runtime.started", processId: "shop--prod" }),
   event({
     type: "operator.trusted",
     actor: "op-aaaa1111",
@@ -197,7 +194,6 @@ describe("the wide schema a flush declares", () => {
       host: "string?",
       project: "string?",
       env: "string?",
-      revision: "i64?",
       inFlight: "i64?",
       storeOps: "i64?",
       listOps: "i64?",
@@ -209,7 +205,6 @@ describe("the wide schema a flush declares", () => {
       failures: "i64?",
       durationMs: "i64?",
       processId: "string?",
-      attempts: "i64?",
       actor: "string?",
       subject: "string?",
       role: "string?",
@@ -356,9 +351,6 @@ describe("what one record becomes", () => {
         "placement.pending",
         "reconcile.pass.end",
         "runtime.started",
-        "runtime.adopted",
-        "gate.passed",
-        "gate.failed",
         "operator.trusted",
         "operator.revoked",
       ]),
@@ -400,12 +392,12 @@ describe("the file a flush encodes to", () => {
     const records: ObserveRecord[] = [flush(), ...EVERY_EVENT, counters()];
     const { bytes } = PARQUET_CODEC.encode(records);
 
-    /* A footer for 47 columns is the floor whatever the rows say, and 20 rows of
+    /* A footer for 45 columns is the floor whatever the rows say, and 17 rows of
        mostly-null columns cannot reach 64 KiB. Loose on purpose: this is a sanity
        bound on the encoder, not a golden size to be updated on every change. */
     expect(bytes.length).toBeGreaterThan(1000);
     expect(bytes.length).toBeLessThan(65_536);
-    expect(records).toHaveLength(20);
+    expect(records).toHaveLength(17);
   });
 
   it("compresses every data page, and says in the file which codec it used", () => {
@@ -596,13 +588,13 @@ describe.skipIf(DUCKDB === undefined)("what DuckDB makes of a flush", () => {
        query names them quoted — the column is the record's own field name and
        stays that, because a schema that renamed fields to please one reader would
        stop matching the records it encodes. */
-    expect(query(file, "SELECT count(*) FROM read_parquet('$FILE')")).toBe("20");
+    expect(query(file, "SELECT count(*) FROM read_parquet('$FILE')")).toBe("17");
     expect(
       query(
         file,
         `SELECT "record", count(*) FROM read_parquet('$FILE') GROUP BY "record" ORDER BY "record"`,
       ),
-    ).toBe(["counters,1", "event,18", "flush,1"].join("\n"));
+    ).toBe(["counters,1", "event,15", "flush,1"].join("\n"));
 
     /* A counter snapshot reads as the numbers it was written from, timestamp
        included — which is what makes these files answerable without scafo. */
@@ -627,17 +619,13 @@ describe.skipIf(DUCKDB === undefined)("what DuckDB makes of a flush", () => {
         `SELECT count(*) FROM read_parquet('$FILE') WHERE "record" = 'event' ` +
           `AND "requests" IS NULL`,
       ),
-    ).toBe("18");
+    ).toBe("15");
     expect(
       query(file, `SELECT "status" FROM read_parquet('$FILE') WHERE "type" = 'wake.served'`),
     ).toBe("200");
     expect(
-      query(
-        file,
-        `SELECT count(*) FROM read_parquet('$FILE') ` +
-          `WHERE "type" IN ('runtime.started', 'runtime.adopted') AND "revision" IS NOT NULL`,
-      ),
-    ).toBe("2");
+      query(file, `SELECT count(*) FROM read_parquet('$FILE') WHERE "type" = 'runtime.started'`),
+    ).toBe("1");
 
     /* And the file says who wrote it, and how the pages are packed — which is the
        only claim about the compression that comes from a reader rather than from

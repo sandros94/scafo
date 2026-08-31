@@ -57,7 +57,7 @@ beforeEach(async () => {
 
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, { name: ENV });
-  await createBuild(clock.ctx, PROJECT, { id: BUILD, runtimeConfigurable: true });
+  await createBuild(clock.ctx, PROJECT, { id: BUILD });
   await recordDeployment(clock.ctx, PROJECT, ENV, BUILD);
 
   const acquired = await acquireLease(clock.ctx, NODE_A);

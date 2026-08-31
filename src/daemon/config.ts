@@ -315,8 +315,6 @@ export interface RuntimeConfig {
   binPath: string;
   /** First port of the range runtime processes are given pairs from. */
   portRangeStart: number;
-  /** Path the application-level half of the readiness gate requests. */
-  probePath: string;
   /**
    * Address runtime processes bind their listeners to. Loopback by default,
    * which is everything a single node needs.
@@ -401,9 +399,6 @@ export const DEFAULT_LISTEN: string = "127.0.0.1:7400";
 
 /** Command that runs an environment when none is configured. */
 export const DEFAULT_RUNTIME_BIN: string = "celld";
-
-/** Path probed for application readiness when none is configured. */
-export const DEFAULT_PROBE_PATH: string = "/";
 
 /** Address runtime processes bind to when none is configured: loopback only. */
 export const DEFAULT_BIND_HOST: string = "127.0.0.1";
@@ -538,7 +533,6 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
     runtime: {
       binPath: resolve("celldBin", sources) ?? DEFAULT_RUNTIME_BIN,
       portRangeStart: resolvePort("portRangeStart", sources, DEFAULT_PORT_RANGE_START),
-      probePath: resolve("probePath", sources) ?? DEFAULT_PROBE_PATH,
       bindHost: resolveBindHost(sources) ?? tunnelHost ?? DEFAULT_BIND_HOST,
       durability: resolveDurability(sources) ?? DEFAULT_DURABILITY,
       cellIdleEvictS: resolveCellIdleEvict(sources),
@@ -587,12 +581,11 @@ export function advertisedAddress(node: DaemonConfig["node"]): HostPort {
  * — a process bound to a tunnel address alone answers nothing on `127.0.0.1`,
  * however local the caller is.
  *
- * THREE DIALERS ASK THIS QUESTION AND ALL THREE MUST GET THE SAME ANSWER: the
- * readiness gate (`probeHost` on the runtime driver), the ingress the routes are
- * rendered for (`upstreamHost` on both ingress drivers), and the wake surface's
- * hop down to the process it has just brought up. A node whose processes bind a
- * wildcard cannot tell them apart, which is why this is one function rather than
- * three expressions.
+ * BOTH DIALERS ASK THIS QUESTION AND MUST GET THE SAME ANSWER: the ingress the
+ * routes are rendered for (`upstreamHost` on both ingress drivers), and the wake
+ * surface's hop down to the process it has just brought up. A node whose
+ * processes bind a wildcard cannot tell them apart, which is why this is one
+ * function rather than two expressions.
  */
 export function runtimeDialHost(runtime: DaemonConfig["runtime"]): string {
   return WILDCARD_BIND_HOSTS.includes(runtime.bindHost) ? DEFAULT_BIND_HOST : runtime.bindHost;
@@ -681,7 +674,6 @@ const ORIGINS = {
     env: ["SCAFO_PORT_RANGE_START"],
     file: "runtime.portRangeStart",
   },
-  probePath: { flag: "probe-path", env: ["SCAFO_PROBE_PATH"], file: "runtime.probePath" },
   bindHost: { flag: "bind-host", env: ["SCAFO_BIND_HOST"], file: "runtime.bindHost" },
   durability: { flag: "durability", env: ["SCAFO_DURABILITY"], file: "runtime.durability" },
   cellIdleEvictS: {

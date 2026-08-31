@@ -100,17 +100,7 @@ export type ObservedEvent =
       listOps: number;
       durationMs: number;
     }
-  | { at: string; type: "runtime.started"; processId: string; revision: number }
-  | { at: string; type: "runtime.adopted"; processId: string; revision: number }
-  | {
-      at: string;
-      type: "gate.passed";
-      processId: string;
-      /** Probe attempts the driver reported; `0` from a driver that reports none. */
-      attempts: number;
-      durationMs: number;
-    }
-  | { at: string; type: "gate.failed"; processId: string; attempts: number }
+  | { at: string; type: "runtime.started"; processId: string }
   /**
    * A key the fleet now trusts, and who said so. THE AUDIT PAIR: `actor` is the
    * key the request was signed with, `subject` the key it was about, and `role`

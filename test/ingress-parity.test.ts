@@ -783,17 +783,14 @@ function environment(
   };
 }
 
-/** Ready by construction: an unready process is not routed and has no parity to prove. */
-function process(project: string, env: string, build: string, port: number): RuntimeProcess {
+/** Supervised by construction: stopped processes have no ingress parity to prove. */
+function process(project: string, env: string, _build: string, port: number): RuntimeProcess {
   return {
     processId: `${project}--${env}`,
     project,
     env,
-    attemptedRevision: 1,
-    appliedRevision: 1,
-    deployment: { version: build, prefix: `deployments/main/${build}`, generation: 1 },
+    configuredVarset: null,
     port,
     internalPort: port + 1,
-    ready: true,
   };
 }

@@ -25,14 +25,18 @@ export type ReconcileAction =
       type: "start";
       project: string;
       env: string;
-      revision: number;
       ports: { public: number; internal: number };
     }
-  | { type: "adopt"; processId: string; revision: number }
-  | { type: "await-ready"; processId: string }
+  | {
+      type: "restart";
+      processId: string;
+      project: string;
+      env: string;
+      ports: { public: number; internal: number };
+    }
   | { type: "stop"; processId: string; reason: string };
 
-/** Plans starts and in-place adoption before unrelated placement stops. */
+/** Plans starts and configuration restarts before unrelated placement stops. */
 export function planReconcile(input: ReconcileInput): ReconcileAction[] {
   const moves: ReconcileAction[] = [];
   const stops: ReconcileAction[] = [];
@@ -48,25 +52,31 @@ export function planReconcile(input: ReconcileInput): ReconcileAction[] {
   for (const wanted of desired) {
     const project = wanted.project;
     const env = wanted.env.name;
-    const revision = wanted.env.deployment?.revision;
-    if (revision === undefined) continue;
+    if (wanted.env.deployment === null) continue;
 
     const key = placementKey(project, env);
     const process = running.get(key);
     running.delete(key);
 
     if (process === undefined) {
-      moves.push({ type: "start", project, env, revision, ports: input.ports.nextPorts() });
+      moves.push({ type: "start", project, env, ports: input.ports.nextPorts() });
     } else if (process.teardownPending === true) {
       moves.push({
         type: "stop",
         processId: process.processId,
         reason: "runtime teardown is pending",
       });
-    } else if (process.attemptedRevision !== revision) {
-      moves.push({ type: "adopt", processId: process.processId, revision });
-    } else if (!process.ready) {
-      moves.push({ type: "await-ready", processId: process.processId });
+    } else if (process.configuredVarset !== (wanted.varsetId ?? null)) {
+      moves.push({
+        type: "restart",
+        processId: process.processId,
+        project,
+        env,
+        ports:
+          process.port > 0 && process.internalPort > 0
+            ? { public: process.port, internal: process.internalPort }
+            : input.ports.nextPorts(),
+      });
     }
   }
 

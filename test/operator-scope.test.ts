@@ -93,7 +93,7 @@ beforeEach(async () => {
     await createEnvironment(clock.ctx, project, { name: ENVIRONMENT });
     await createEnvironment(clock.ctx, project, { name: PREVIEW, ephemeral: true });
     for (const id of [BUILD, OTHER_BUILD]) {
-      await createBuild(clock.ctx, project, { id, runtimeConfigurable: true });
+      await createBuild(clock.ctx, project, { id });
     }
     await recordDeployment(clock.ctx, project, ENVIRONMENT, BUILD);
   }
@@ -129,7 +129,7 @@ describe("an operator scoped to one project cannot touch another", () => {
       method: "POST",
       headers: {
         authorization: `Bearer ${await signNodeToken(tenant.privateKey, TENANT_ID)}`,
-        [DEPLOY_METADATA_HEADER]: encodeDeployMetadata({ runtimeConfigurable: false }),
+        [DEPLOY_METADATA_HEADER]: encodeDeployMetadata({}),
       },
       body: unreadBody(() => reads++),
       duplex: "half",
@@ -560,7 +560,7 @@ async function upload(id: string, keys: Keypair, project: string): Promise<Respo
     method: "POST",
     headers: {
       authorization: `Bearer ${await signNodeToken(keys.privateKey, id)}`,
-      [DEPLOY_METADATA_HEADER]: encodeDeployMetadata({ runtimeConfigurable: false }),
+      [DEPLOY_METADATA_HEADER]: encodeDeployMetadata({}),
     },
     body: new Uint8Array([1, 2, 3]),
   });
@@ -622,7 +622,6 @@ function stubDeploys(): StubDeploys {
       id: `000000000000000${String(next)}`,
       project,
       state: "accepted",
-      warnings: [],
     };
     byId.set(status.id, status);
     return status;
@@ -668,7 +667,6 @@ function daemonConfig(): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
-      probePath: "/",
       bindHost: "127.0.0.1",
       durability: "bucket",
       cellIdleEvictS: 900,
