@@ -6,8 +6,7 @@
   "compatibility_date": "2025-01-01",
 
   /* THE ONE LINE THE STEP SHEET ASKS YOU TO EDIT. Deploying again with "v2"
-     here is a second build of the same project, and watching the alias move
-     onto it is what a flip looks like from outside. */
+     lets you watch celld adopt the new current deployment. */
   "vars": { "APP_VERSION": "v1" },
 
   /* SQLite-backed classes are the only kind this runtime migrates. */

@@ -61,7 +61,7 @@ export interface DaemonContext {
   nodeId: string;
   registry: RegistryContext;
   supervisor: Supervisor;
-  /** Build of the daemon, reported by `GET /v1/health`. */
+  /** Build of the daemon, reported by `GET /.well-known/scafo/health`. */
   version: string;
   /**
    * Private half of this node's identity, when it holds one: what signs the node
@@ -117,7 +117,7 @@ export interface DaemonContext {
   storage?: StorageService;
 }
 
-/** Body of `GET /v1/health`. */
+/** Body of `GET /.well-known/scafo/health`. */
 export interface DaemonHealth {
   ok: boolean;
   version: string;
@@ -224,7 +224,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
    * load balancer polling this route still sends it traffic until the process is
    * gone; reporting the state would let one drain connections first.
    */
-  app.get("/v1/health", (): DaemonHealth => ({
+  app.get("/.well-known/scafo/health", (): DaemonHealth => ({
     ok: true,
     version: daemon.version,
     node: daemon.nodeId,

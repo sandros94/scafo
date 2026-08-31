@@ -10,8 +10,6 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_JSON_BYTES,
   DEFAULT_BIND_HOST,
-  DEFAULT_CELL_IDLE_EVICT_S,
-  DEFAULT_DURABILITY,
   DEFAULT_CONFIG_PATHS,
   DEFAULT_LISTEN,
   DEFAULT_REGION,
@@ -558,76 +556,6 @@ describe("the address runtime processes bind", () => {
   });
 });
 
-describe("when a write counts as durable", () => {
-  it("acknowledges against the bucket until the operator trades that away", async () => {
-    const config = await loadDaemonConfig({ env: REQUIRED_ENV });
-
-    /* The safe half: with every write in the bucket before it is acknowledged,
-       losing every node at once still loses nothing. */
-    expect(config.runtime.durability).toBe(DEFAULT_DURABILITY);
-    expect(config.runtime.durability).toBe("bucket");
-  });
-
-  it("takes either mode, from any source, flags first", async () => {
-    const fromEnv = await loadDaemonConfig({
-      env: { ...REQUIRED_ENV, SCAFO_DURABILITY: "fleet" },
-    });
-    const flagWins = await loadDaemonConfig({
-      flags: { durability: "bucket" },
-      env: { ...REQUIRED_ENV, SCAFO_DURABILITY: "fleet" },
-    });
-
-    expect(fromEnv.runtime.durability).toBe("fleet");
-    expect(flagWins.runtime.durability).toBe("bucket");
-  });
-
-  it("refuses a mode the runtime does not have", async () => {
-    const error = await rejectsWith(
-      () => loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_DURABILITY: "quorum" } }),
-      "invalid-input",
-    );
-
-    expect(error.detail).toContain("runtime.durability");
-    expect(error.detail).toContain('"bucket"');
-    expect(error.detail).toContain('"fleet"');
-  });
-});
-
-describe("how long a cell may sit idle", () => {
-  it("evicts on the platform default until the operator says otherwise", async () => {
-    const config = await loadDaemonConfig({ env: REQUIRED_ENV });
-
-    expect(config.runtime.cellIdleEvictS).toBe(DEFAULT_CELL_IDLE_EVICT_S);
-    expect(config.runtime.cellIdleEvictS).toBe(900);
-  });
-
-  it("takes a configured age, and zero for never", async () => {
-    const cases: [string, number][] = [
-      ["300", 300],
-      ["0", 0],
-    ];
-
-    for (const [given, expected] of cases) {
-      const config = await loadDaemonConfig({
-        env: { ...REQUIRED_ENV, SCAFO_CELL_IDLE_EVICT: given },
-      });
-
-      expect(config.runtime.cellIdleEvictS, given).toBe(expected);
-    }
-  });
-
-  it("refuses an age that is not a whole number of seconds", async () => {
-    for (const bad of ["-5", "soon", "1.5"]) {
-      const error = await rejectsWith(
-        () => loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_CELL_IDLE_EVICT: bad } }),
-        "invalid-input",
-      );
-
-      expect(error.detail, bad).toContain("runtime.cellIdleEvictS");
-    }
-  });
-});
-
 describe("deploy resource limits", () => {
   it("ships finite safeguards for artifact bytes and archive entries", async () => {
     const config = await loadDaemonConfig({ env: REQUIRED_ENV });
@@ -908,7 +836,7 @@ describe("the variables an operator hands every runtime process", () => {
   });
 
   it("REFUSES a name the runtime driver writes itself, naming the variable", async () => {
-    for (const name of ["CELLD_DURABILITY", "AWS_REGION", "CELLD_ADDR", "CELLD_IDLE_EVICT_S"]) {
+    for (const name of ["AWS_REGION", "CELLD_ADDR"]) {
       const error = await rejectsWith(
         () => loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_CELLD_ENV: `${name}=1` } }),
         "invalid-input",
@@ -919,9 +847,23 @@ describe("the variables an operator hands every runtime process", () => {
          the configuration they got wrong. */
       expect(error.detail, name).toContain(name);
       expect(error.detail, name).toContain("runtime.celldEnv");
-      expect(error.detail, name).toContain("runtime.durability");
-      expect(error.detail, name).toContain("runtime.cellIdleEvictS");
     }
+  });
+
+  it("passes upstream Celld policy through without Scafo defaults", async () => {
+    const config = await loadDaemonConfig({
+      env: {
+        ...REQUIRED_ENV,
+        SCAFO_CELLD_ENV:
+          "CELLD_DURABILITY=bucket,CELLD_IDLE_EVICT_S=900,CELLD_SHUTDOWN_TOTAL_MS=60000",
+      },
+    });
+
+    expect(config.runtime.celldEnv).toEqual({
+      CELLD_DURABILITY: "bucket",
+      CELLD_IDLE_EVICT_S: "900",
+      CELLD_SHUTDOWN_TOTAL_MS: "60000",
+    });
   });
 
   it.each(["CELLD_VARS_FILE"])("refuses reserved %s written in the config file", async (name) => {

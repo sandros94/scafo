@@ -165,7 +165,7 @@ describe("archive resource limits", () => {
 describe("what is not an artifact", () => {
   it("cancels a pending magic read promptly and releases its reader", async () => {
     const controller = new AbortController();
-    const reason = new ScafoError("lease-lost", "Pointer lock was lost");
+    const reason = new ScafoError("lease-lost", "Publish authority was lost");
     let cancelled: unknown;
     const stream = new ReadableStream<Uint8Array>({
       pull: () => new Promise<void>(() => {}),

@@ -2,10 +2,10 @@
  * The playground application. Two routes, and each one exists to make something
  * about scafo visible from a `curl`.
  *
- * `/` answers with the build's own version and with the URL it saw. The version
- * is what makes a flip observable — deploy a second build with a different one
- * and the answer changes the moment the alias moves. The URL is the host header
- * the ingress forwarded, which is every routing decision scafo made, echoed back.
+ * `/` answers with the deployment's own version and with the URL it saw. Deploy
+ * again with a different version and the answer changes when celld adopts it.
+ * The URL is the host header the ingress forwarded, which is every routing
+ * decision scafo made, echoed back.
  *
  * `/count` answers from a durable object instead. One name means one cell, and
  * one cell has exactly one owner however many nodes serve the environment: the

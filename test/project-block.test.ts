@@ -2,7 +2,7 @@
  * WHAT A BLOCKED PROJECT STOPS DOING.
  *
  * Blocking is a FULL STOP and its whole value is that it needs no bookkeeping to
- * undo: the environment records, the builds, the aliases, the domains and the
+ * undo: the environment records, the builds, the deployments, the domains and the
  * placement decisions are all left exactly as they stand, and one flag on the
  * project record takes the project out of service. Unblocking is one call and
  * everything comes back on the next pass.
@@ -179,8 +179,6 @@ function daemonConfig(): DaemonConfig {
       binPath: "celld",
       portRangeStart: 42_000,
       bindHost: "127.0.0.1",
-      durability: "bucket",
-      cellIdleEvictS: 900,
     },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },

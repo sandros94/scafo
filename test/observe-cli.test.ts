@@ -784,7 +784,6 @@ describe("what the traces come to", () => {
     /* The default hides events a node really did record, so the command has to
        carry the way back to them. */
     expect(traces.args).toHaveProperty("all");
-    expect(traces.args).not.toHaveProperty("wake");
   });
 
   it("renders every field an event carried, whatever the event is", () => {

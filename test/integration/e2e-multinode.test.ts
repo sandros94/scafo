@@ -113,9 +113,8 @@ const FAST_LABEL = "tier=fast";
 /**
  * Deployed THROUGH the node that cannot run it, under the same selector.
  *
- * The point is the deploy's own watch rather than the placement: a deploy is
- * held open until a process serving the build is ready, and the node
- * holding it open is not the node that starts it.
+ * The point is deploy intake rather than placement: celld publishes the build
+ * through one node even though another node is the only one allowed to run it.
  */
 const AWAITED = "awaited";
 
@@ -158,9 +157,8 @@ const REASSIGN_STEP_TIMEOUT_MS = 300_000;
  * before it stops anything, so the coordinator counts it out on its next
  * assignment tick (a third of the 15s lease TTL) rather than after the 90s
  * liveness window. What is left is the shutdown itself, that tick, the
- * survivor's next reconcile pass (5s) and a process start with its readiness
- * gate. Generous for all of that, and still comfortably inside the window a
- * crash cannot beat.
+ * survivor's next reconcile pass (5s) and a process start. Generous for all of
+ * that, and still comfortably inside the window a crash cannot beat.
  */
 const GRACEFUL_DRAIN_BUDGET_MS = 60_000;
 
@@ -267,10 +265,10 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
     async () => {
       for (const node of nodes) {
         const health = await until(
-          `${node.id} to answer /v1/health`,
+          `${node.id} to answer /.well-known/scafo/health`,
           BOOT_DEADLINE_MS,
           async () => {
-            const answer = await httpGet(node.apiPort, "/v1/health", {});
+            const answer = await httpGet(node.apiPort, "/.well-known/scafo/health", {});
             return answer.status === 200 ? answer : null;
           },
         );
@@ -318,7 +316,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       observed.deployV1Output = result.output;
 
       expectCleanExit(result);
-      expect(result.output, daemonLogTail()).toContain("routed");
+      expect(result.output, daemonLogTail()).toContain("deployed");
       buildV1 = buildIdOf(result.output);
       observed.buildV1 = buildV1;
 
@@ -463,8 +461,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         await until(`${node.id} to stop running ${PREVIEW}`, DEADLINE_MS, async () => {
           const state = await stateOf(node);
           const running = state.processes.filter(
-            (process) =>
-              process.state === "running" && process.id.startsWith(`${PROJECT}--${PREVIEW}--`),
+            (process) => process.state === "running" && process.id === `${PROJECT}--${PREVIEW}`,
           );
           return running.length === 0 ? state : null;
         });
@@ -726,7 +723,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         "docker",
         /* Ample grace, so a slow shutdown is never SIGKILLed halfway through the
            drain write this test is about. */
-        ["stop", "-t", "30", leaving.daemon.getId()],
+        ["stop", "-t", "50", leaving.daemon.getId()],
         REPO_ROOT,
         { PATH: env.PATH ?? "" },
       );
@@ -792,7 +789,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         async () => {
           const node = await readJson<NodeRecord>(registry, nodeKey(leaving.id));
           if (node === null || node.value.drainingAt !== undefined) return null;
-          const answer = await httpGet(leaving.apiPort, "/v1/health", {});
+          const answer = await httpGet(leaving.apiPort, "/.well-known/scafo/health", {});
           return answer.status === 200 ? node.value : null;
         },
       );
@@ -1122,21 +1119,21 @@ function targetedHost(): string {
 
 /** Whether a process on a node is one serving {@link TARGETED}. */
 function runsTargeted(process: ProcessStatus): boolean {
-  return process.state === "running" && process.id.startsWith(`${PROJECT}--${TARGETED}--`);
+  return process.state === "running" && process.id === `${PROJECT}--${TARGETED}`;
 }
 
 function runsAwaited(process: ProcessStatus): boolean {
-  return process.state === "running" && process.id.startsWith(`${PROJECT}--${AWAITED}--`);
+  return process.state === "running" && process.id === `${PROJECT}--${AWAITED}`;
 }
 
 /** Whether a process on a node is one serving {@link SOLO}. */
 function runsSolo(process: ProcessStatus): boolean {
-  return process.state === "running" && process.id.startsWith(`${PROJECT}--${SOLO}--`);
+  return process.state === "running" && process.id === `${PROJECT}--${SOLO}`;
 }
 
 /** Whether a process on a node is one serving {@link SUNSET}. */
 function runsSunset(process: ProcessStatus): boolean {
-  return process.state === "running" && process.id.startsWith(`${PROJECT}--${SUNSET}--`);
+  return process.state === "running" && process.id === `${PROJECT}--${SUNSET}`;
 }
 
 /** One `scafo env <action>` run from the host against `node`'s node API. */
@@ -1212,7 +1209,6 @@ function deployArgs(
     PROJECT,
     "--env",
     environment,
-    "--runtime-configurable",
     "--key",
     keyPath,
     ...extra,

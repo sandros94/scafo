@@ -254,8 +254,6 @@ function config(): DaemonConfig {
       binPath: "celld",
       portRangeStart: 42_000,
       bindHost: "127.0.0.1",
-      durability: "bucket",
-      cellIdleEvictS: 0,
     },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },

@@ -1,5 +1,5 @@
 /*
- * Deploy runner for celld 0.2.x: unpacks an uploaded artifact and publishes it
+ * Deploy runner for celld 0.4.0: unpacks an uploaded artifact and publishes it
  * into an environment's fleet as a new version.
  *
  * Publishing is a task, not a service — it starts, does one thing and exits — so
@@ -31,11 +31,14 @@ export const DEFAULT_CELLD_BIN: string = "celld";
 /** Config files an artifact may carry, in the order they are looked for. */
 const CONFIG_NAMES: string[] = ["wrangler.jsonc", "wrangler.json"];
 
-/** The line the runtime reports a published version on. */
-const VERSION_RE = /Current Version ID:\s*([\da-f]{8,64})/i;
+/** The version shape celld uses in deployment object keys. */
+const VERSION_RE = /^[\da-f]{8,64}$/i;
 
 /** Variable the runtime is told which esbuild executable to build with. */
 const ESBUILD_ENV = "CELLD_ESBUILD";
+
+/** Independent bound for celld's one machine-output deployment record. */
+const DEPLOY_RECORD_BYTES = 4096;
 
 export interface CelldDeployRunnerOptions {
   /** Executable that publishes a version; resolved against `PATH` unless it is a path. */
@@ -91,6 +94,7 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
           binPath,
           [
             "deploy",
+            "--json",
             "--config",
             config,
             "--bucket",
@@ -129,10 +133,9 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
  * Points the artifact's config at the name scafo recorded for it, and returns
  * the path to it.
  *
- * The runtime files a version under the name its config carries, and the fleet's
- * pointer is then addressed by that name for the lifetime of the environment. An
- * artifact that named itself something else would deploy into a second fleet
- * directory the daemon never activates, so the recorded name wins.
+ * The runtime files a version under the name its config carries. An artifact
+ * that named itself something else would deploy into a second fleet directory
+ * the daemon never serves, so the recorded name wins.
  */
 async function prepareConfig(dir: string, script: string): Promise<string> {
   for (const name of CONFIG_NAMES) {
@@ -182,18 +185,14 @@ function run(
     });
 
     const output = new ByteTail(opts.outputBytes);
-    let stdoutCarry = "";
-    let version: string | undefined;
+    const stdout = new ByteTail(DEPLOY_RECORD_BYTES);
     let spawned = false;
     let cancelled = false;
     let spawnFailure: ScafoError | undefined;
     let cleanup: Promise<void> | undefined;
     child.stdout.on("data", (chunk: Buffer) => {
       output.push(chunk);
-      if (version !== undefined) return;
-      const text = stdoutCarry + new TextDecoder().decode(chunk);
-      version = VERSION_RE.exec(text)?.[1];
-      stdoutCarry = text.slice(-128);
+      stdout.push(chunk);
     });
     child.stderr.on("data", (chunk: Buffer) => output.push(chunk));
 
@@ -205,8 +204,8 @@ function run(
 
     const cancel = (): void => {
       cancelled = true;
-      /* A stale builder is an integrity risk, not a graceful shutdown: it may
-         move the deployment pointer at any point before it exits. */
+      /* A stale builder is an integrity risk, not a graceful shutdown: celld
+         may publish the deployment at any point before it exits. */
       beginCleanup();
     };
     opts.signal.addEventListener("abort", cancel, { once: true });
@@ -236,6 +235,7 @@ function run(
       opts.signal.removeEventListener("abort", cancel);
       beginCleanup();
       if (cleanup !== undefined) await cleanup;
+      const version = deployVersion(stdout.bytes());
       if (cancelled) {
         const failure = aborted(opts.signal);
         reject(version === undefined ? failure : afterPublished(version, failure));
@@ -254,7 +254,7 @@ function run(
       const partial =
         version === undefined
           ? ""
-          : `celld reported version "${version.toLowerCase()}", so it may already have moved current; `;
+          : `celld reported version "${version.toLowerCase()}", so it may already have published; `;
       const prefix = `${partial}"${command} ${args[0] ?? ""}" ${ended}: `;
       const tailBytes = Math.max(1, 4096 - new TextEncoder().encode(prefix).byteLength);
       reject(
@@ -267,15 +267,37 @@ function run(
   });
 }
 
-/** Preserves an abort's contract while making its possible pointer effect explicit. */
+/** Preserves an abort's contract while making a possible completed publish explicit. */
 function afterPublished(version: string, failure: ScafoError): ScafoError {
   return new ScafoError(failure.code, failure.message, {
     status: failure.status,
     detail:
-      `celld reported version "${version.toLowerCase()}", so it may already have moved current ` +
-      `before publication was stopped`,
+      `celld reported version "${version.toLowerCase()}", so it may already have published ` +
+      `before the command was stopped`,
     cause: failure,
   });
+}
+
+/** Reads the one machine-output record emitted by `celld deploy --json`. */
+function deployVersion(bytes: Uint8Array): string | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(decodeUtf8Tail(bytes, bytes.byteLength).trim());
+  } catch {
+    return undefined;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.worker !== "string" ||
+    typeof record.location !== "string" ||
+    record.dry_run !== false ||
+    typeof record.version !== "string" ||
+    !VERSION_RE.test(record.version)
+  ) {
+    return undefined;
+  }
+  return record.version;
 }
 
 function aborted(signal: AbortSignal): ScafoError {

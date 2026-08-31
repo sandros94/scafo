@@ -48,9 +48,9 @@ services:
 
     # NOT DOCKER'S DEFAULT TEN. On SIGTERM the node marks itself draining,
     # releases the coordinator lease, stops reconciling, and only then stops the
-    # processes serving traffic — each draining in-flight requests for 25s. Ten
-    # seconds cuts that off mid-drain.
-    stop_grace_period: 35s
+    # processes serving traffic. Celld 0.4 reserves up to 40s for that shutdown;
+    # ten seconds cuts it off mid-drain.
+    stop_grace_period: 50s
 
     ports:
       # Caddy shares this container's network namespace, so ITS port is
@@ -88,7 +88,7 @@ services:
         - CMD
         - node
         - -e
-        - "fetch('http://127.0.0.1:7400/v1/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+        - "fetch('http://127.0.0.1:7400/.well-known/scafo/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
       interval: 5s
       timeout: 5s
       retries: 30

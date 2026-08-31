@@ -100,7 +100,7 @@ const NODE_ID = "node-e2e-image";
  * example and the Kubernetes manifest all carry. A node given less than this
  * has its celld processes killed mid-drain.
  */
-const STOP_GRACE_S = 35;
+const STOP_GRACE_S = 50;
 
 let store: StartedStore;
 let caddy: StartedTestContainer;
@@ -203,6 +203,7 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
       const pinned = await node.exec(["sh", "-c", "echo $ESBUILD_BINARY_PATH"]);
 
       expect(celld.exitCode, celld.output).toBe(0);
+      expect(celld.output).toContain("0.4.0");
       expect(esbuild.exitCode, esbuild.output).toBe(0);
       expect(pinned.output.trim()).not.toBe("");
 
@@ -219,10 +220,14 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
   it(
     "declares and reaches a healthy fixed-loopback image healthcheck",
     async () => {
-      const health = await until("the node to answer /v1/health", BOOT_DEADLINE_MS, async () => {
-        const answer = await httpGet(apiPort, "/v1/health", {});
-        return answer.status === 200 ? answer : null;
-      });
+      const health = await until(
+        "the node to answer /.well-known/scafo/health",
+        BOOT_DEADLINE_MS,
+        async () => {
+          const answer = await httpGet(apiPort, "/.well-known/scafo/health", {});
+          return answer.status === 200 ? answer : null;
+        },
+      );
       expect(JSON.parse(health.body)).toMatchObject({ ok: true, node: NODE_ID });
 
       const inspected = await docker([
@@ -244,7 +249,7 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
           "CMD",
           "node",
           "-e",
-          'fetch("http://127.0.0.1:7400/v1/health").then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))',
+          'fetch("http://127.0.0.1:7400/.well-known/scafo/health").then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))',
         ],
         Interval: 5_000_000_000,
         Timeout: 3_000_000_000,
@@ -295,7 +300,6 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
           PROJECT,
           "--env",
           ENVIRONMENT,
-          "--runtime-configurable",
           "--key",
           keyPath,
         ],
@@ -304,7 +308,7 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
       observed.deployMs = Date.now() - started;
 
       expectCleanExit(deploy);
-      expect(deploy.output, nodeLogTail()).toContain("routed");
+      expect(deploy.output, nodeLogTail()).toContain("deployed");
       build = buildIdOf(deploy.output);
       expect(await listBuilds(registry, PROJECT)).toContain(build);
 
@@ -317,7 +321,11 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
         return served.status === 200 && served.body.includes(`"v1"`) ? served : null;
       });
 
-      observed.served = { host, build, body: answer.body };
+      const runtimeHealth = await httpGet(caddyHttpPort, "/.well-known/celld/health", { host });
+      expect(runtimeHealth.status).toBe(200);
+      expect(JSON.parse(runtimeHealth.body)).toEqual({ ok: true });
+
+      observed.served = { host, build, body: answer.body, celldHealth: runtimeHealth.status };
     },
     STEP_TIMEOUT_MS,
   );
@@ -326,12 +334,12 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
     "stops cleanly within the grace the image documents",
     async () => {
       /*
-       * `docker stop -t 35`, the way an operator's init system does it, rather
+       * `docker stop -t 50`, the way an operator's init system does it, rather
        * than through the test framework — the number is the point. On SIGTERM
        * the node marks itself draining, releases the coordinator lease, stops
        * reconciling, closes its listener and only then stops its celld
-       * processes, which drain for 25s and are killed at 30. A container given
-       * docker's default 10s is killed in the middle of that, and exits 137.
+       * processes. Celld 0.4 reserves up to 40s for that shutdown, so the
+       * container leaves headroom beyond the runtime's own deadline.
        */
       const started = Date.now();
       const stopped = await docker(["stop", "-t", String(STOP_GRACE_S), node.getId()]);

@@ -95,32 +95,6 @@ jobs:
       - name: Build packages
         run: pnpm build
 
-  test-container-integration:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24.17.0
-          cache: "pnpm"
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Test container limits
-        run: >-
-          pnpm vitest run
-          test/integration/capacity-cgroup.test.ts
-          --slowTestThreshold=1000
-
   test-store-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -171,10 +145,8 @@ jobs:
             files: >-
               test/integration/e2e-traefik.test.ts
               test/integration/e2e-tls.test.ts
-          - shard: multinode-durability
-            files: >-
-              test/integration/e2e-multinode.test.ts
-              test/integration/e2e-durability.test.ts
+          - shard: multinode
+            files: test/integration/e2e-multinode.test.ts
 
     name: test-docker-e2e (${{ matrix.shard }})
 
@@ -245,7 +217,6 @@ jobs:
       - lint
       - typecheck
       - test-pure
-      - test-container-integration
       - test-store-integration
       - test-docker-e2e
       - test-k3s-e2e

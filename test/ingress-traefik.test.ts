@@ -181,8 +181,8 @@ describe("saying that nothing is routed", () => {
   });
 
   it("is what a driver that has not reconciled yet holds", () => {
-    /* Routing follows readiness: a node that has just started runs none of its
-       processes, so the honest answer is that it serves nothing. */
+    /* A node that has not reconciled has published no runtime processes, so the
+       honest answer is that it serves nothing. */
     expect(createTraefikDriver().snapshot()).toEqual({});
   });
 
@@ -316,8 +316,6 @@ function daemonConfig(): DaemonConfig {
       binPath: "celld",
       portRangeStart: 42_000,
       bindHost: "127.0.0.1",
-      durability: "bucket",
-      cellIdleEvictS: 900,
     },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },

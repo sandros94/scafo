@@ -17,10 +17,8 @@
 # multi-architecture index, so amd64 and arm64 both resolve from it.
 #
 # Moving to a new celld is an explicit edit of both lines, and belongs with the
-# rules the driver encodes (src/drivers/runtime/celld.ts) — above all that idle
-# eviction stays off until enabling it becomes a deliberate policy, and that
-# durability stays pinned to the bucket, not to 0.3.0's write-behind default.
-FROM ghcr.io/denoland/celld:0.3.0@sha256:f47d97c2980aa98aef1d9c42205a313442f48acb606c5987dbb9b32983a23aaf AS celld
+# process contract the driver encodes (src/drivers/runtime/celld.ts).
+FROM ghcr.io/denoland/celld:0.4.0@sha256:f73157548ed8e54a4b50e9cecfcb0fb8e209fb4d35cf78b7c45815ce78a7929f AS celld
 
 # ---------------------------------------------------------------------------
 # Build: the repository's own toolchain, which does not survive into the image.
@@ -106,20 +104,23 @@ EXPOSE 7400
 # Docker can ask the daemon without adding a second binary to the image: Node
 # already carries fetch, and the fixed loopback/default port is the image's own
 # contract. Deployments that change the listener carry their probes explicitly.
-HEALTHCHECK --interval=5s --timeout=3s --start-period=30s --retries=3 CMD ["node", "-e", "fetch(\"http://127.0.0.1:7400/v1/health\").then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+HEALTHCHECK --interval=5s --timeout=3s --start-period=30s --retries=3 CMD ["node", "-e", "fetch(\"http://127.0.0.1:7400/.well-known/scafo/health\").then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
 
-# STOP GRACE MUST BE AT LEAST 35 SECONDS. This is not a tuning preference.
+# STOP GRACE MUST BE AT LEAST 50 SECONDS. This is not a tuning preference.
 #
 # On SIGTERM the daemon marks itself draining, releases the coordinator lease,
 # stops reconciling, closes its listener, and only then stops the celld
-# processes it supervises — each of which is given 30s between SIGTERM and
-# SIGKILL and drains its in-flight requests for the first 25s of it. A container
-# killed before that has run leaves requests dropped mid-flight and a node the
-# fleet has to time out instead of being told about.
+# processes it supervises. celld 0.4 bounds its own shutdown at 40s; each child
+# gets another 5s before SIGKILL, and the container gives the daemon 5s around
+# that sequence. A container killed before it has run leaves requests dropped
+# mid-flight and a node the fleet has to time out instead of being told about.
 #
-#   compose:    stop_grace_period: 35s
-#   kubernetes: terminationGracePeriodSeconds: 35
-#   docker run: docker stop -t 35 <container>
+#   compose:    stop_grace_period: 50s
+#   kubernetes: terminationGracePeriodSeconds: 50
+#   docker run: docker stop -t 50 <container>
+#
+# If runtime.celldEnv raises CELLD_SHUTDOWN_TOTAL_MS above its 40000 default,
+# raise the enclosing grace to at least that value plus 10 seconds as well.
 #
 # Docker's own default is 10s, which is not enough. See examples/.
 STOPSIGNAL SIGTERM

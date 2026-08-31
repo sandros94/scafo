@@ -1,42 +1,33 @@
 # The single-node playground
 
-One bucket, one scafo node, one ingress, thrown away when you are done — the
-whole product loop: register a remote, deploy, reach it by name, deploy a second
-build, watch the alias move. Type the steps one at a time; each says what you
-should see. First: [`../README.md`](../README.md) for what this needs.
+One bucket, one Scafo node, one ingress, thrown away when you are done. This
+walkthrough registers a remote, deploys an application, reaches it by name, then
+replaces its current deployment. Start with [`../README.md`](../README.md).
 
 ## 0. Ports
 
-| Port   | What                                      | Bound to        |
-| ------ | ----------------------------------------- | --------------- |
-| `80`   | the ingress — where applications answer   | every interface |
-| `7400` | the node API — where deploys are accepted | `127.0.0.1`     |
-| `8333` | the bucket — where the registry lives     | `127.0.0.1`     |
+| Port   | What                    | Bound to        |
+| ------ | ----------------------- | --------------- |
+| `80`   | Application ingress     | every interface |
+| `7400` | Scafo node/API listener | `127.0.0.1`     |
+| `8333` | Bucket                  | `127.0.0.1`     |
 
-Port 80 is usually the taken one, and `docker compose up` fails on it naming the
-port and not the service. Move any of the three in `.env`.
+Port 80 is usually the taken one. Move any port in `.env` when needed.
 
-## 1. Bring the stack up
+## 1. Start the stack
 
 ```sh
 cp .env.example .env
 docker compose up -d
 docker compose logs node
-curl -s http://127.0.0.1:7400/v1/health
+curl -s http://127.0.0.1:7400/.well-known/scafo/health
 ```
 
-**You should see** `seaweedfs` started, `bucket` **exited**, `node` **healthy**,
-`caddy` started, then `listening on http://0.0.0.0:7400 as node "node-eb2d16b1"`,
-`coordinator lease taken at fence 1`, and finally
-`{"ok":true,"version":"0.0.0","node":"node-eb2d16b1"}`.
+The `bucket` container exits successfully after creating the bucket. The node
+then reports its id and the coordinator lease. The health document describes
+the Scafo daemon only; it does not say that an application is deployed.
 
-An exited `bucket` is success. Compose waits twice on purpose: a node proves the
-bucket honours conditional writes before it boots, and Caddy fills its
-certificate cache from the node's storage API when it starts. `/v1/health`
-answers without a key and reports on the **daemon** — not on whether an
-application is serving.
-
-## 2. Point your shell at this playground
+## 2. Point your shell at it
 
 ```sh
 export SCAFO_HOME="$PWD/.scafo"
@@ -44,14 +35,15 @@ set -a; . ./.env; set +a
 alias scafo='node ../../dist/cli/index.mjs'
 ```
 
-**You should see** nothing. `SCAFO_HOME` extends the disposability promise to your
-operator state: keys and remote registrations land in `.scafo/` here rather than in
-your real `~/.scafo`, and `rm -rf .scafo` is the whole undo. Sourcing `.env` gives
-the CLI the bucket credentials two steps below need.
+`SCAFO_HOME` keeps the playground's keys and remotes out of your real
+`~/.scafo`. To use the CLI from the image instead:
 
-> **No node toolchain?** Use `alias scafo='docker compose run --rm cli'` instead,
-> and register the remote at `http://node:7400` in step 3 — the CLI is then a
-> container on this stack's network. Every other command here is unchanged.
+```sh
+alias scafo='docker compose run --rm cli'
+```
+
+Use `http://node:7400` instead of `http://127.0.0.1:7400` in the next step when
+using that container alias.
 
 ## 3. Register the remote
 
@@ -60,49 +52,45 @@ scafo remote add playground --endpoint http://127.0.0.1:7400 --register
 scafo remote list
 ```
 
-**You should see** a key minted into `.scafo/keys/playground.json`, then
-`registered "op-cf99eff4" as admin-tier; tokens it signs are now accepted by every
-node`, then the one remote listed back. A remote entry holds what every other command would
-otherwise be told — **where** the installation is and **who** is speaking — and a
-single registered remote resolves automatically: nothing below passes `--key` or
-`--node`.
+This mints an admin-tier operator key under `.scafo/` and registers its public
+half in the shared registry. Later commands resolve the only remote
+automatically.
 
 ## 4. Deploy the application
 
-`app/` is a thirty-line worker: `/` answers with its version and the URL it saw,
-`/count` from a durable object.
+`app/` contains a small Worker with `/` and a durable `/count` endpoint.
 
 ```sh
-scafo deploy ./app --project shop --env production --flip
+scafo deploy ./app --project shop --env production
 ```
 
-**You should see** `packing`, `accepted`, `uploading`, `routed`, and `build
-69981639ba366c2a`. `routed` is the word to wait for. The **build** id is derived
-from the content, so that one is yours too until you edit `app/` — and the same
-bytes deployed again drop `uploading` entirely.
+The command progresses through `accepted`, `uploading`, and `deployed`, then
+prints the immutable build id recorded by Scafo. Celld publishes that deployment
+as the environment's current one; no activation flag is needed.
 
-## 5. Reach it, three ways
+## 5. Reach Scafo and Celld
 
-Nothing resolves `*.scafo.test`, so send the `Host` header — that header is every
-routing decision scafo makes.
+Nothing resolves `*.scafo.test`, so these requests supply `Host` explicitly:
 
 ```sh
-curl -H 'Host: shop.scafo.test'                   http://127.0.0.1/
-curl -H 'Host: shop--production.scafo.test'       http://127.0.0.1/
-curl -H 'Host: shop--69981639ba366c2a.scafo.test' http://127.0.0.1/
-curl -H 'Host: shop.scafo.test' http://127.0.0.1/count
-curl -H 'Host: shop.scafo.test' http://127.0.0.1/count
+curl -H 'Host: shop.scafo.test' \
+  http://127.0.0.1/
+curl -H 'Host: shop--production.scafo.test' \
+  http://127.0.0.1/
+curl -H 'Host: shop.scafo.test' \
+  http://127.0.0.1/count
+curl -H 'Host: shop.scafo.test' \
+  http://127.0.0.1/count
+curl -H 'Host: shop.scafo.test' \
+  http://127.0.0.1/.well-known/celld/health
 ```
 
-**You should see** `{"version":"v1","url":"http://…/"}` three times, each echoing
-its own host, then `{"n":1,…}` and `{"n":2,…}`. `<project>--<env>` is the
-environment, `<project>` alone is production's short name, and
-`<project>--<build>` is _that build specifically_, which stays addressable after
-the environment moves on — step 8 leans on it. The counter is here so the same
-two calls in the [multi-node playground](../multi-node/README.md), where they
-land on _different machines_ and still climb, have something to compare against.
+The first two names reach the same environment: `production` also owns the
+short project host. The counter increases across requests. The last response is
+Celld's application health endpoint; it is distinct from
+`/.well-known/scafo/health` on the node/API listener.
 
-## 6. What the node wrote into Caddy, and what it left alone
+## 6. Inspect the ingress boundary
 
 ```sh
 docker compose exec caddy wget -qO- \
@@ -110,114 +98,67 @@ docker compose exec caddy wget -qO- \
 curl -H 'Host: operator.test' http://127.0.0.1/
 ```
 
-**You should see** seven routes and then `written by hand`:
+Caddy contains routes for the environment host, the production short host, and
+the platform API apex. The `operator_authored` route from
+[`caddy.json`](caddy.json) remains untouched. There is no wildcard fallback for
+an undeployed host.
 
-```
-"@id":"operator_authored"
-"@id":"scafo_shop--69981639ba366c2a.scafo.test"
-"@id":"scafo_shop--production.scafo.test"
-"@id":"scafo_shop.scafo.test"
-"@id":"scafo_apideny_scafo.test"
-"@id":"scafo_api_scafo.test"
-"@id":"scafo_catchall_scafo.test"
-```
-
-Three names for the build, the apex's denial rule written _before_ the apex's own
-route so it wins, and a catch-all that answers for a host whose process is not
-running — and wakes it. The node owns only the `scafo_` ones; `operator_authored`
-is hand-written in [`caddy.json`](caddy.json) and survives every reconcile.
-
-## 7. The apex, and what it refuses
+## 7. Use the platform apex safely
 
 ```sh
-curl -s -H 'Host: scafo.test' http://127.0.0.1/v1/health
+curl -s -H 'Host: scafo.test' \
+  http://127.0.0.1/.well-known/scafo/health
 curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: scafo.test' \
   'http://127.0.0.1/v1/storage/list?prefix='
 curl -s -H "Authorization: Bearer $SCAFO_STORAGE_TOKEN" \
   'http://127.0.0.1:7400/v1/storage/list?prefix='
 ```
 
-**You should see** the health document, `404`, then `["last_clean.json"]`.
-`*.scafo.test` is one label and never the apex, so the node routes the bare apex
-to its own daemon — but `/v1/storage` (private keys) and `/v1/ingress/traefik` (the
-routing map) are excluded by **Caddy**, and the daemon behind it is never asked.
-That one key is Caddy's certificate bookkeeping, written through the node into
-the bucket against the `.env` token: the ingress holds no bucket credential.
+The first request reaches the node API through the platform apex. The second is
+blocked by Caddy: `/v1/storage` and `/v1/ingress/traefik` are never published
+through that apex. The same storage route remains available on the node's local
+listener with its dedicated token.
 
-## 8. Deploy a second build and watch the flip
+## 8. Replace the current deployment
 
-Change one line in [`app/wrangler.jsonc`](app/wrangler.jsonc) to
-`"vars": { "APP_VERSION": "v2" },`, then deploy and watch the old build's route go
-— **in this order**, and the last paragraph is why:
+Change `APP_VERSION` in [`app/wrangler.jsonc`](app/wrangler.jsonc) from `v1` to
+`v2`, then run:
 
 ```sh
-scafo deploy ./app --project shop --env production --flip
+scafo deploy ./app --project shop --env production
 curl -H 'Host: shop.scafo.test' http://127.0.0.1/
-docker compose exec caddy wget -qO- \
-  http://127.0.0.1:2019/config/apps/http/servers/scafo/routes | grep -c 69981639ba366c2a
-```
-
-**You should see** a **different** build id (`3f3c070446280951` if you changed
-only that character), then `{"version":"v2",…}`, then `1` — and `0` from that last
-command about six seconds later. Ask for the superseded build anyway:
-
-```sh
-curl -s -o /dev/null -w '%{http_code} in %{time_total}s\n' \
-  -H 'Host: shop--69981639ba366c2a.scafo.test' http://127.0.0.1/
-curl -s -H 'Host: shop--69981639ba366c2a.scafo.test' http://127.0.0.1/
 curl -H 'Host: shop.scafo.test' http://127.0.0.1/count
 ```
 
-**You should see** `200 in 0.5s`, `{"version":"v1",…}`, `{"n":3,…}`. **A
-superseded build is not gone; it is parked**, and its own name is the door — that
-half second is its process starting, which step 9 finds again as latency, and the
-count carried across the deploy: new code, same cell, same state.
+The deploy prints a different build id and the host begins serving `v2`. The
+durable counter continues because the environment's Celld fleet did not change.
 
-**And now it is awake, so it stays.** Asking for a parked build stamps it as
-wanted, so its route comes back — run that `grep -c` a few seconds later and it is
-`1` again. That is why the withdrawal had to be watched first: scafo will not take
-away a build you are using.
+Celld 0.4.0 exposes one current application deployment per fleet. Previous
+artifacts may remain in the bucket, but Scafo does not provide an old-build host
+or historical deployment selector. Track the upstream lifecycle discussion in
+[Celld issue #181](https://github.com/denoland/celld/issues/181).
 
-## 9. What the node counted
+## 9. Read observations
 
 ```sh
 scafo metrics --since 30m
 scafo traces --since 30m --project shop
 ```
 
-**You should see** a row per project and environment, then every rollout ending in
-`wake.admitted` and `wake.served` — counters flush every 60 seconds, so wait a
-minute if you were quick:
-
-```
-PROJECT      ENV                   REQUESTS    BYTES  2XX  3XX  4XX  5XX     P50     P95
-(unmatched)  (unmatched)                  3     68 B    2    0    1    0  <=10ms  <=10ms
-shop         (build 69981639ba36)         2    132 B    2    0    0    0  <=50ms    <=1s
-shop         production                  47  2.27 kB   47    0    0    0  <=10ms  <=10ms
-```
-
-The `(unmatched)` row is everything belonging to no project — `operator.test` and
-the apex. **The `(build …)` row is the build host**: asking for `shop--<build>` is
-not traffic to `production` and is not billed as such, and its `P95` of `<=1s` is
-step 8's wake showing up as latency. `--project shop` is doing real work: without
-it the last 200 events are almost all the reconcile loop, one pass every 5
-seconds. A request that actually wakes something carries an `x-scafo-wake` header,
-and `scafo traces --wake <id>` expands that one into its five events.
+Metrics come from the ingress access log and flush every 60 seconds. Traces show
+non-periodic node events by default; `--all` also includes reconcile passes.
 
 ## 10. Tear it down
 
 ```sh
 docker compose down -v
-docker compose ps -a                        # nothing
-docker volume ls | grep scafo-single-node   # nothing
+docker compose ps -a
+docker volume ls | grep scafo-single-node
 rm -rf .env .scafo
 ```
 
-**You should see** it take about three seconds — worth knowing because
-`stop_grace_period` is **35**, a ceiling and not a wait. With nothing in flight
-the drain is over in moments; under real traffic it is not, and Docker's default
-of 10 seconds would cut it off mid-drain. The images stay.
+The 50-second stop grace is a ceiling, not a fixed wait. With no requests in
+flight the stack normally stops much sooner.
 
-Next: [the multi-node playground](../multi-node/README.md) — one cell owned across
-two machines, a node killed mid-service. Or the production-shaped
-[`../../examples/`](../../examples/).
+Next: [the multi-node playground](../multi-node/README.md), or the
+production-shaped [`../../examples/`](../../examples/).

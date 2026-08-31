@@ -23,11 +23,15 @@ buckets and host or VM security boundaries.
 - Most node APIs authenticate signed node and operator requests. Operator roles
   and project scopes restrict the operations a key may perform; OIDC deploy
   policy binds a workload deployer to its configured project.
-- `GET /v1/health` and `GET /v1/ingress/ask` for on-demand TLS are intentionally
-  public. `GET /v1/ingress/traefik` is intentionally unauthenticated and
+- `GET /.well-known/scafo/health` on the node/API listener and
+  `GET /v1/ingress/ask` for on-demand TLS are intentionally public.
+  `GET /v1/ingress/traefik` is intentionally unauthenticated and
   publishes the complete host-to-loopback routing map, so only colocated or
   private Traefik may reach it. `/v1/storage` uses a separate storage bearer
   token and must never be exposed through ingress.
+- `GET /.well-known/celld/health` belongs to Celld and answers on deployed
+  application hosts. It says that application runtime is healthy; it is not the
+  Scafo node/API health check.
 - The registry lives in a bucket and uses conditional writes to prevent lost
   updates. Coordinator leases and fences guard stale placement decisions and
   other explicitly lease-gated coordinator duties.
@@ -67,7 +71,9 @@ buckets and host or VM security boundaries.
   hosts must use the installer's systemd unit or an equivalent cgroup-owning
   supervisor: it must TERM the daemon first, hard-kill remaining members of its
   one non-delegated cgroup, including builders, on daemon exit or timeout, and
-  allow the node's 35-second drain window.
+  allow at least 50 seconds for the coordinated shutdown. If Celld's
+  `CELLD_SHUTDOWN_TOTAL_MS` is raised, the enclosing grace must be at least 10
+  seconds larger than that value.
 - The image relies on its direct Node entrypoint as container process 1 in a
   private PID namespace; do not use a host PID namespace or a persistent wrapper.
   The Kubernetes manifest makes the same boundary explicit with `hostPID: false`
@@ -87,6 +93,9 @@ buckets and host or VM security boundaries.
   storage-token, and deployment credentials as administrative secrets.
 - Use external host, VM, or container resource controls for CPU, memory,
   process, filesystem, network, and cleanup limits.
+- Configure upstream runtime policy through `runtime.celldEnv`, `--celld-env`,
+  or `SCAFO_CELLD_ENV`; Scafo supplies no durability, idle-eviction, or memory
+  policy defaults.
 - Use separate installations, buckets, and host or VM boundaries for different
   trust domains.
 - Pin and review the Scafo build you deploy, and use a current supported Celld
@@ -98,13 +107,23 @@ buckets and host or VM security boundaries.
 
 ## Celld boundary
 
-Celld is an alpha and supports one application deployment per fleet. Security
-fixes apply only to Celld's latest release; older alpha releases receive none.
-Its
-[limitations](https://github.com/denoland/celld/blob/main/docs/limitations.md)
-define that boundary. Scafo composes projects and environments above Celld, but
-does not provide stronger isolation for hostile code. Review this boundary and
-the upstream notes before every upgrade.
+Scafo requires Celld 0.4.0 and gives each environment its own Celld fleet. Celld
+owns deployment adoption, application health, cells, and resource policy inside
+that fleet; Scafo does not replace those controls.
+
+Celld currently exposes one current application deployment per fleet. A later
+deploy replaces what its environment serves. Earlier artifacts may remain in
+the bucket, but Scafo deliberately adds no old-build routing or historical
+deployment selector over them. Track the upstream lifecycle work in
+[Celld issue #181](https://github.com/denoland/celld/issues/181).
+
+Celld is alpha software. Security fixes apply only to its latest release; older
+alpha releases receive none. Its
+[security guidance](https://github.com/denoland/celld/blob/main/docs/security.md)
+and [limitations](https://github.com/denoland/celld/blob/main/docs/limitations.md)
+define the runtime boundary. Scafo composes projects and environments above
+Celld, but does not provide stronger isolation for hostile code. Review those
+upstream documents before every upgrade.
 
 Scafo does not add a raw TCP bridge or transparent tunnel to work around missing
 Celld APIs. Upstream secure internal APIs or typed outbound HTTP/WS mediation

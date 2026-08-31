@@ -85,9 +85,9 @@ export interface DeployRunner {
   /**
    * Resolves with the version the artifact was published as. Throws when the
    * artifact is not a readable archive, or when publishing itself failed. A
-   * runtime may already have moved current before it reports failure, so a
-   * runner that detected a version must preserve that partial outcome in its
-   * error for the caller to report honestly.
+   * runtime may already have published before it reports failure, so a runner
+   * that detected a version must preserve that partial outcome in its error for
+   * the caller to report honestly.
    */
   run(input: DeployRunInput, opts: DeployRunOptions): Promise<DeployRunResult>;
 }

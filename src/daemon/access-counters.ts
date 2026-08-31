@@ -134,9 +134,8 @@ export interface IngressCountersOptions {
  *    environment.
  * 2. THE PLATFORM HOST GRAMMAR, for everything else under a platform domain —
  *    `<project>.<domain>` as the apex environment, `<project>--<ref>.<domain>`
- *    as that ref. This is what a request for a PARKED or STARTING environment
- *    looks like: nothing routes it yet, and it is still that environment's
- *    traffic.
+ *    as that ref. This attributes a platform host even when it currently has no
+ *    route.
  *
  * Anything else — a domain this installation never minted, an address, a
  * scanner's invention — is {@link UNATTRIBUTED}, counted in full in its own

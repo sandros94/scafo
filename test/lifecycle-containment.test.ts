@@ -27,7 +27,7 @@ describe("lifecycle containment artifacts", () => {
       KillMode: "mixed",
       KillSignal: "SIGTERM",
       SendSIGKILL: "yes",
-      TimeoutStopSec: "40s",
+      TimeoutStopSec: "50s",
       Delegate: "no",
     });
   });
@@ -41,7 +41,7 @@ describe("lifecycle containment artifacts", () => {
       shareProcessNamespace: false,
       terminationGracePeriodSeconds: expect.any(Number),
     });
-    expect(pod?.terminationGracePeriodSeconds).toBeGreaterThanOrEqual(35);
+    expect(pod?.terminationGracePeriodSeconds).toBeGreaterThanOrEqual(50);
   });
 
   it("uses the daemon health endpoint for startup, readiness and liveness", async () => {
@@ -51,14 +51,14 @@ describe("lifecycle containment artifacts", () => {
     );
 
     expect(node?.startupProbe).toMatchObject({
-      httpGet: { path: "/v1/health", port: "api" },
+      httpGet: { path: "/.well-known/scafo/health", port: "api" },
     });
     expect(node?.readinessProbe).toMatchObject({
-      httpGet: { path: "/v1/health", port: "api" },
+      httpGet: { path: "/.well-known/scafo/health", port: "api" },
       periodSeconds: 5,
     });
     expect(node?.livenessProbe).toMatchObject({
-      httpGet: { path: "/v1/health", port: "api" },
+      httpGet: { path: "/.well-known/scafo/health", port: "api" },
       periodSeconds: 20,
       failureThreshold: 3,
     });

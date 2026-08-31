@@ -159,16 +159,14 @@ spec:
       # containment is what removes runtime descendants and builders after node death.
       hostPID: false
       shareProcessNamespace: false
-      # THIRTY-FIVE SECONDS, AND NOT KUBERNETES' DEFAULT THIRTY.
+      # FIFTY SECONDS, AND NOT KUBERNETES' DEFAULT THIRTY.
       #
       # On SIGTERM a node writes that it is draining so the coordinator stops
       # giving it work, releases the coordinator lease, stops reconciling,
       # closes its listener, and only then stops the celld processes serving
-      # traffic — each of which drains its in-flight requests for 25s and is
-      # given 30s before it is killed. Anything shorter cuts the drain off in
-      # the middle: requests are dropped mid-flight, and the fleet has to time
-      # the node out over the liveness window instead of being told it left.
-      terminationGracePeriodSeconds: 35
+      # traffic. Celld 0.4 reserves up to 40s for that shutdown; the remaining
+      # margin lets Scafo finish its own ordered shutdown around it.
+      terminationGracePeriodSeconds: 50
       securityContext:
         # The uid the image's `scafo` user runs as. The state volume below is
         # handed to this group so the node can write its identity into it.
@@ -245,18 +243,18 @@ spec:
           # Answered before the node is doing anything else useful, and cheap.
           startupProbe:
             httpGet:
-              path: /v1/health
+              path: /.well-known/scafo/health
               port: api
             periodSeconds: 5
             failureThreshold: 24
           readinessProbe:
             httpGet:
-              path: /v1/health
+              path: /.well-known/scafo/health
               port: api
             periodSeconds: 5
           livenessProbe:
             httpGet:
-              path: /v1/health
+              path: /.well-known/scafo/health
               port: api
             periodSeconds: 20
             failureThreshold: 3

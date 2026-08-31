@@ -172,7 +172,7 @@ describe("converging a server that already has routes", () => {
     expect(routes).toHaveLength(2);
   });
 
-  it("deletes a legacy wake catch-all while preserving operator routes", async () => {
+  it("deletes a stale managed catch-all while preserving operator routes", async () => {
     const staleId = `${ROUTE_ID_PREFIX}catchall_apps.test`;
     routes.push(
       {

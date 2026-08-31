@@ -920,11 +920,11 @@ describe("polling a deploy", () => {
   });
 });
 
-describe("removed deployment-selection routes", () => {
+describe("retired deployment-selection endpoints", () => {
   it.each([
-    ["alias", aliasPath()],
+    ["alias", `/v1/projects/${PROJECT}/environments/${ENVIRONMENT}/alias`],
     ["split", `/v1/environments/${PROJECT}/${ENVIRONMENT}/split`],
-  ])("answers %s changes with an ordinary 404", async (_name, path) => {
+  ])("keeps the removed %s mutation unavailable", async (_name, path) => {
     const response = await post(path, await operatorToken(), { build: VERSION_ID });
     expect(response.status).toBe(404);
   });
@@ -948,8 +948,6 @@ function daemonConfig(): DaemonConfig {
       binPath: "celld",
       portRangeStart: 42_000,
       bindHost: "127.0.0.1",
-      durability: "bucket",
-      cellIdleEvictS: 900,
     },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },
@@ -1068,10 +1066,6 @@ async function post(
     },
     body: JSON.stringify(body),
   });
-}
-
-function aliasPath(project: string = PROJECT): string {
-  return `/v1/projects/${project}/environments/${ENVIRONMENT}/alias`;
 }
 
 async function get(path: string, token: string | undefined): Promise<Response> {

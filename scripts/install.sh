@@ -134,9 +134,9 @@ set -eu
 # the same files after their SHA-512 matched that list, so verifying either one
 # verifies the same bytes.
 
-CELLD_VERSION='0.3.0'
-CELLD_SHA256_amd64='cbfcfa5f6d7551b5316f6f4c9d7751c741a9ba2a2305dde8d5cb4d1b37fb34a6'
-CELLD_SHA256_arm64='88a35070144408f902036076b7f88df38548ce4dda073fff27a6dd1f6d2bae28'
+CELLD_VERSION='0.4.0'
+CELLD_SHA256_amd64='0488628597154725db2f61f85434fb381e1b2535d1e9f097c6d20727cd337973'
+CELLD_SHA256_arm64='d95ec7108d2c280144599727ac66106c0123d09c573f5724d3b4d3bc33f7603e'
 
 # Upstream Caddy, which is what SCAFO_INSTALL_CADDY=plain installs. The DEFAULT
 # ingress is scafo-caddy, which carries no version here at all: it comes from a
@@ -181,9 +181,9 @@ STORAGE_ENDPOINT='http://127.0.0.1:7400'
 # The stop grace is part of the product, not a tuning preference: on SIGTERM the
 # daemon marks itself draining, releases the coordinator lease, stops
 # reconciling, closes its listener and only THEN stops the runtime processes,
-# each of which drains its in-flight requests for 25s and is killed at 30s.
-# Anything under 35 cuts that off mid-drain.
-STOP_TIMEOUT='40'
+# each of which has a 40s complete shutdown bound and is killed at 45s. The
+# daemon gets the remaining 5s around that sequence.
+STOP_TIMEOUT='50'
 
 DEFAULT_INSTALL_BASE_LATEST='https://github.com/sandros94/scafo/releases/latest/download'
 DEFAULT_INSTALL_BASE_TAGGED='https://github.com/sandros94/scafo/releases/download'
@@ -603,8 +603,8 @@ SCAFO_S3_REGION=us-east-1
 # Optional: keeps this installation inside one prefix of a shared bucket.
 #SCAFO_S3_PREFIX=
 
-# The names applications are served under: <project>.<domain>,
-# <project>--<env>.<domain>, <project>--<build>.<domain>. Comma-separated.
+# The names applications are served under: <project>.<domain> and
+# <project>--<env>.<domain>. Comma-separated.
 SCAFO_PLATFORM_DOMAINS=
 
 # The node API. Loopback needs no further statement about the network; widening
@@ -620,6 +620,12 @@ SCAFO_CADDY_ADMIN=http://127.0.0.1:2019
 
 # What this machine IS, for environments that ask for a class of node.
 #SCAFO_NODE_LABELS=tier=fast,region=eu-west-1
+
+# Upstream Celld policy for every runtime process, comma-separated. Scafo adds
+# no durability, idle-eviction or memory defaults. If SHUTDOWN_TOTAL_MS is
+# raised above 40000, also raise TimeoutStopSec in scafo-node.service to at
+# least that value plus 10 seconds.
+#SCAFO_CELLD_ENV=CELLD_MAX_RSS_MB=512,CELLD_MAX_RESIDENT_CELLS=64
 
 # Observing this node: the first switch makes it record its own events, and the
 # second — which is REFUSED without the first — counts what Caddy actually
@@ -1004,7 +1010,7 @@ explain_manual_setup() {
     say 'the same user as the node, or a group you give it yourself.'
     say ''
   fi
-  say 'Whatever supervises them must give the node AT LEAST 35 SECONDS between'
+  say 'Whatever supervises them must give the node AT LEAST 50 SECONDS between'
   say 'SIGTERM and SIGKILL, and must signal the daemon alone rather than every'
   say 'process beside it: it drains its runtimes itself, in an order that matters.'
 }
@@ -1049,14 +1055,14 @@ next_steps() {
     printf '   looks for it. Back it up: nothing can reissue it.\n\n'
     printf '4. Deploy something:\n\n'
     printf '     scafo deploy ./my-app --node http://127.0.0.1:7400 \\\n'
-    printf '       --project shop --env production --flip\n\n'
+    printf '       --project shop --env production\n\n'
   else
     printf '1. Run the node and the ingress as described above.\n'
     printf '2. Mint an operator key with the same bucket settings exported:\n\n'
     printf '     scafo operator keygen --register\n\n'
     printf '3. Deploy something:\n\n'
     printf '     scafo deploy ./my-app --node http://127.0.0.1:7400 \\\n'
-    printf '       --project shop --env production --flip\n\n'
+    printf '       --project shop --env production\n\n'
   fi
 
   printf 'WHERE THINGS ARE\n\n'

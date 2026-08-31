@@ -84,9 +84,9 @@ beforeEach(async () => {
   });
 });
 
-describe("GET /v1/health", () => {
+describe("GET /.well-known/scafo/health", () => {
   it("answers without a token, naming the build and the node", async () => {
-    const response = await app.request("/v1/health");
+    const response = await app.request("/.well-known/scafo/health");
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
@@ -433,9 +433,9 @@ describe("GET /v1/ingress/ask", () => {
     /* An environment that EXISTS but never had a deployment is the same refusal as
        one that never existed: nothing serves it, and a
        name that answers nothing has no business holding a certificate. */
-    await createEnvironment(clock.ctx, PROJECT, { name: "unflipped" });
-    const unflipped = await app.request(`/v1/ingress/ask?domain=${PROJECT}--unflipped.apps.test`);
-    expect(unflipped.status).toBe(404);
+    await createEnvironment(clock.ctx, PROJECT, { name: "undeployed" });
+    const undeployed = await app.request(`/v1/ingress/ask?domain=${PROJECT}--undeployed.apps.test`);
+    expect(undeployed.status).toBe(404);
 
     const junk = await app.request(`/v1/ingress/ask?domain=${PROJECT}--nothing.apps.test`);
     expect(junk.status).toBe(404);
@@ -536,7 +536,9 @@ describe("GET /v1/ingress/ask", () => {
 
 describe("the fleet's API at the platform apex", () => {
   it("dispatches the bare apex to the API routes rather than to the host surface", async () => {
-    const health = await app.request("/v1/health", { headers: { host: PLATFORM_DOMAIN } });
+    const health = await app.request("/.well-known/scafo/health", {
+      headers: { host: PLATFORM_DOMAIN },
+    });
 
     expect(health.status).toBe(200);
     await expect(health.json()).resolves.toEqual({ ok: true, version: VERSION, node: NODE_ID });
@@ -562,7 +564,7 @@ describe("the fleet's API at the platform apex", () => {
 
 describe("routes that do not exist", () => {
   it("answers as a problem document, without pretending it is an auth failure", async () => {
-    for (const path of ["/v1/nope", "/", "/v1/state/extra"]) {
+    for (const path of ["/v1/nope", "/", "/v1/state/extra", "/v1/health"]) {
       const response = await app.request(path);
       const problem = (await response.json()) as ProblemDetails;
 
@@ -575,7 +577,7 @@ describe("routes that do not exist", () => {
   });
 
   it("answers a known path asked with the wrong method the same way", async () => {
-    const response = await app.request("/v1/health", { method: "POST" });
+    const response = await app.request("/.well-known/scafo/health", { method: "POST" });
 
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toMatchObject({ type: "about:blank", status: 404 });
@@ -667,8 +669,6 @@ function daemonConfig(): DaemonConfig {
       binPath: "celld",
       portRangeStart: 42_000,
       bindHost: "127.0.0.1",
-      durability: "bucket",
-      cellIdleEvictS: 900,
     },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },

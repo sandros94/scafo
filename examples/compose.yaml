@@ -10,13 +10,12 @@
 #          SCAFO_S3_ACCESS_KEY=scafo SCAFO_S3_SECRET_KEY=scafo-secret
 #   node dist/cli/index.mjs keygen --register
 #   node dist/cli/index.mjs deploy ./my-app --node http://127.0.0.1:7400 \
-#     --project shop --env production --flip
+#     --project shop --env production
 #   curl -H 'Host: shop.scafo.test' http://127.0.0.1
 #
-# The application answers at `<project>--<env>.scafo.test`, at `shop.scafo.test`
-# for the `production` environment, and at `<project>--<build>.scafo.test` for
-# every build that is running. Nothing resolves those names on your machine —
-# send the `Host` header, or add them to /etc/hosts.
+# The application answers at `<project>--<env>.scafo.test`, and at
+# `shop.scafo.test` for the `production` environment. Nothing resolves those
+# names on your machine — send the `Host` header, or add them to /etc/hosts.
 #
 # Scaling this to several hosts is a matter of running this same node service on
 # each of them against the SAME bucket and prefix, on a network they can all
@@ -82,15 +81,13 @@ services:
     depends_on:
       bucket:
         condition: service_completed_successfully
-    # THIRTY-FIVE SECONDS, AND NOT DOCKER'S DEFAULT TEN.
+    # FIFTY SECONDS, AND NOT DOCKER'S DEFAULT TEN.
     #
     # On SIGTERM the node marks itself as draining so the fleet stops giving it
     # work, releases the coordinator lease, stops reconciling, and only then
-    # stops the celld processes serving traffic — each of which drains its
-    # in-flight requests for 25s and is given 30s before it is killed. Ten
-    # seconds cuts that off in the middle: requests are dropped mid-flight and
-    # the fleet has to time the node out rather than being told it left.
-    stop_grace_period: 35s
+    # stops the celld processes serving traffic. Celld 0.4 reserves up to 40s
+    # for its own shutdown sequence; ten seconds cuts that off in the middle.
+    stop_grace_period: 50s
     ports:
       # Caddy shares this container's network namespace, so ITS ports are
       # published here — a container that joins another's namespace has no

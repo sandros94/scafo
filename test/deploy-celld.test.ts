@@ -1,7 +1,7 @@
 /*
- * The celld deploy task is a real child process here. A lost pointer lock must
- * end that child and wait for its exit before the runner returns: otherwise the
- * stale builder can move the fleet pointer after a successor has won.
+ * The celld deploy task is a real child process here. Lost authority must end
+ * that child and wait for its exit before the runner returns: otherwise the
+ * stale builder can publish after a successor has won.
  */
 
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -82,21 +82,21 @@ it("cancels mid-expansion and removes the partial extraction directory", async (
   const running = runner.run(input(slow), { signal: controller.signal });
 
   await expect.poll(() => reads).toBeGreaterThan(3);
-  controller.abort(new ScafoError("lease-lost", "Pointer lock was lost"));
+  controller.abort(new ScafoError("lease-lost", "Publish authority was lost"));
 
   await expect(running).rejects.toMatchObject({ code: "lease-lost" });
   expect(await readdir(staging)).toEqual([]);
   await rm(root, { recursive: true, force: true });
 });
 
-it("kills and awaits the builder before a lost pointer lock can return", async () => {
+it("kills and awaits the builder before lost publish authority can return", async () => {
   const root = await mkdtemp(join(tmpdir(), "scafo-deploy-cancel-"));
   const source = join(root, "source");
   const staging = join(root, "staging");
   const bin = join(root, "celld-test");
   const pidFile = join(root, "child.pid");
   const descendantFile = join(root, "descendant.pid");
-  const pointer = join(root, "pointer-moved");
+  const staleEffect = join(root, "stale-effect");
   let pid: number | undefined;
   let descendantPid: number | undefined;
 
@@ -105,7 +105,7 @@ it("kills and awaits the builder before a lost pointer lock can return", async (
       'import { writeFileSync } from "node:fs";',
       "writeFileSync(process.env.SCAFO_TEST_DESCENDANT_PID, String(process.pid));",
       "setTimeout(() => {",
-      '  writeFileSync(process.env.SCAFO_TEST_POINTER, "stale");',
+      '  writeFileSync(process.env.SCAFO_TEST_STALE_EFFECT, "stale");',
       "}, 250);",
       "setInterval(() => {}, 1000);",
     ].join("\n");
@@ -131,7 +131,7 @@ it("kills and awaits the builder before a lost pointer lock can return", async (
       baseEnv: {
         SCAFO_TEST_PID: pidFile,
         SCAFO_TEST_DESCENDANT_PID: descendantFile,
-        SCAFO_TEST_POINTER: pointer,
+        SCAFO_TEST_STALE_EFFECT: staleEffect,
       },
     });
     const controller = new AbortController();
@@ -140,14 +140,14 @@ it("kills and awaits the builder before a lost pointer lock can return", async (
     pid = await pidFrom(pidFile);
     descendantPid = await pidFrom(descendantFile);
 
-    controller.abort(new ScafoError("lease-lost", "Pointer lock was lost"));
+    controller.abort(new ScafoError("lease-lost", "Publish authority was lost"));
 
     await expect(running).rejects.toMatchObject({ code: "lease-lost" });
     expect(() => process.kill(pid as number, 0)).toThrow(/kill ESRCH/);
     expect(() => process.kill(descendantPid as number, 0)).toThrow(/kill ESRCH/);
     expect(await readdir(staging)).toEqual([]);
     await new Promise((resolve) => setTimeout(resolve, 300));
-    await expect(readFile(pointer, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(staleEffect, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   } finally {
     if (pid !== undefined) {
       try {
@@ -173,7 +173,7 @@ it("tears down an inherited-pipe descendant when the builder leader exits", asyn
   const staging = join(root, "staging");
   const bin = join(root, "celld-test");
   const descendantFile = join(root, "descendant.pid");
-  const pointer = join(root, "pointer-moved");
+  const staleEffect = join(root, "stale-effect");
   let descendantPid: number | undefined;
   let running: Promise<DeployRunResult> | undefined;
 
@@ -182,7 +182,7 @@ it("tears down an inherited-pipe descendant when the builder leader exits", asyn
       'import { writeFileSync } from "node:fs";',
       "writeFileSync(process.env.SCAFO_TEST_DESCENDANT_PID, String(process.pid));",
       "setTimeout(() => {",
-      '  writeFileSync(process.env.SCAFO_TEST_POINTER, "stale");',
+      '  writeFileSync(process.env.SCAFO_TEST_STALE_EFFECT, "stale");',
       "}, 250);",
       "setInterval(() => {}, 1000);",
     ].join("\n");
@@ -194,7 +194,7 @@ it("tears down an inherited-pipe descendant when the builder leader exits", asyn
         'import { writeFileSync, writeSync } from "node:fs";',
         `const descendant = spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(descendant)}], { stdio: "inherit", env: process.env });`,
         "writeFileSync(process.env.SCAFO_TEST_DESCENDANT_PID, String(descendant.pid));",
-        'writeSync(1, "Current Version ID: 1111aaaa\\n");',
+        'writeSync(1, JSON.stringify({ worker: "shop", version: "1111aaaa", location: "s3://bucket/deploy/shop/1111aaaa", dry_run: false }) + "\\n");',
         "setTimeout(() => process.exit(0), 20);",
       ].join("\n"),
     );
@@ -208,7 +208,7 @@ it("tears down an inherited-pipe descendant when the builder leader exits", asyn
       stagingDir: staging,
       baseEnv: {
         SCAFO_TEST_DESCENDANT_PID: descendantFile,
-        SCAFO_TEST_POINTER: pointer,
+        SCAFO_TEST_STALE_EFFECT: staleEffect,
       },
     });
     running = runner.run(input(await packDirectory(source)), {
@@ -226,7 +226,7 @@ it("tears down an inherited-pipe descendant when the builder leader exits", asyn
     expect(outcome).toEqual({ state: "settled", result: { celldVersionId: "1111aaaa" } });
     expect(() => process.kill(descendantPid as number, 0)).toThrow(/kill ESRCH/);
     await new Promise((resolve) => setTimeout(resolve, 300));
-    await expect(readFile(pointer, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(staleEffect, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   } finally {
     if (descendantPid !== undefined) {
       try {
@@ -240,7 +240,7 @@ it("tears down an inherited-pipe descendant when the builder leader exits", asyn
   }
 });
 
-it("finds a split version marker before unlimited later stdout and stderr", async () => {
+it("reads celld 0.4 JSON output split across writes", async () => {
   const root = await mkdtemp(join(tmpdir(), "scafo-deploy-output-"));
   const source = join(root, "source");
   const staging = join(root, "staging");
@@ -251,10 +251,9 @@ it("finds a split version marker before unlimited later stdout and stderr", asyn
       [
         `#!${process.execPath}`,
         'import { writeSync } from "node:fs";',
-        'writeSync(1, "prefix-€-Current Ver");',
-        'writeSync(1, "sion ID: abcdef12\\n");',
-        'writeSync(1, "x".repeat(200_000));',
-        'writeSync(2, "y".repeat(200_000));',
+        'if (!process.argv.includes("--json")) process.exit(2);',
+        'writeSync(1, "{\\\"worker\\\":\\\"shop\\\",\\\"ver");',
+        'writeSync(1, "sion\\\":\\\"abcdef12\\\",\\\"location\\\":\\\"s3://bucket/deploy/shop/abcdef12\\\",\\\"dry_run\\\":false}\\n");',
       ].join("\n"),
     );
     await chmod(bin, 0o755);
@@ -266,7 +265,8 @@ it("finds a split version marker before unlimited later stdout and stderr", asyn
       binPath: bin,
       stagingDir: staging,
       baseEnv: {},
-      outputBytes: 1024,
+      /* Diagnostic retention must not truncate the machine-output record. */
+      outputBytes: 1,
     }).run(input(artifact), { signal: new AbortController().signal });
 
     expect(result).toEqual({ celldVersionId: "abcdef12" });
@@ -275,8 +275,8 @@ it("finds a split version marker before unlimited later stdout and stderr", asyn
   }
 });
 
-it("reports a detected version when Celld fails after it may have moved current", async () => {
-  const root = await mkdtemp(join(tmpdir(), "scafo-deploy-partial-"));
+it("refuses the pre-0.4 human deploy output", async () => {
+  const root = await mkdtemp(join(tmpdir(), "scafo-deploy-old-output-"));
   const source = join(root, "source");
   const staging = join(root, "staging");
   const bin = join(root, "celld-test");
@@ -287,6 +287,33 @@ it("reports a detected version when Celld fails after it may have moved current"
         `#!${process.execPath}`,
         'import { writeSync } from "node:fs";',
         'writeSync(1, "Current Version ID: abcdef12\\n");',
+      ].join("\n"),
+    );
+    await chmod(bin, 0o755);
+    await Promise.all([mkdir(source), mkdir(staging)]);
+    await writeFile(join(source, "wrangler.jsonc"), '{ "name": "shop" }');
+
+    const runner = createCelldDeployRunner({ binPath: bin, stagingDir: staging, baseEnv: {} });
+    await expect(
+      runner.run(input(await packDirectory(source)), { signal: new AbortController().signal }),
+    ).rejects.toMatchObject({ code: "store-nonconforming" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("reports a detected version when celld fails after it may have published", async () => {
+  const root = await mkdtemp(join(tmpdir(), "scafo-deploy-partial-"));
+  const source = join(root, "source");
+  const staging = join(root, "staging");
+  const bin = join(root, "celld-test");
+  try {
+    await writeFile(
+      bin,
+      [
+        `#!${process.execPath}`,
+        'import { writeSync } from "node:fs";',
+        'writeSync(1, JSON.stringify({ worker: "shop", version: "abcdef12", location: "s3://bucket/deploy/shop/abcdef12", dry_run: false }) + "\\n");',
         'writeSync(2, "late failure\\n");',
         "process.exit(1);",
       ].join("\n"),
@@ -302,9 +329,7 @@ it("reports a detected version when Celld fails after it may have moved current"
 
     expect(error).toMatchObject({ code: "invalid-input" });
     expect((error as Error & { detail?: string }).detail).toContain("abcdef12");
-    expect((error as Error & { detail?: string }).detail).toContain(
-      "may already have moved current",
-    );
+    expect((error as Error & { detail?: string }).detail).toContain("may already have published");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -322,7 +347,7 @@ it("reports a detected version when publication is aborted after Celld named it"
       [
         `#!${process.execPath}`,
         'import { writeFileSync, writeSync } from "node:fs";',
-        'writeSync(1, "Current Version ID: abcdef12\\n");',
+        'writeSync(1, JSON.stringify({ worker: "shop", version: "abcdef12", location: "s3://bucket/deploy/shop/abcdef12", dry_run: false }) + "\\n");',
         'writeFileSync(process.env.SCAFO_TEST_READY, "ready");',
         "setInterval(() => {}, 1000);",
       ].join("\n"),
@@ -338,14 +363,12 @@ it("reports a detected version when publication is aborted after Celld named it"
     });
     const running = runner.run(input(await packDirectory(source)), { signal: controller.signal });
     await vi.waitFor(() => readFile(ready, "utf8"));
-    controller.abort(new ScafoError("lease-lost", "Pointer lock was lost"));
+    controller.abort(new ScafoError("lease-lost", "Publish authority was lost"));
 
     const error = await running.catch((failure: unknown) => failure);
     expect(error).toMatchObject({ code: "lease-lost" });
     expect((error as Error & { detail?: string }).detail).toContain("abcdef12");
-    expect((error as Error & { detail?: string }).detail).toContain(
-      "may already have moved current",
-    );
+    expect((error as Error & { detail?: string }).detail).toContain("may already have published");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

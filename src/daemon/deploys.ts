@@ -57,8 +57,8 @@ export const DEFAULT_HISTORY: number = 256;
  * - `uploading` — work is under way: the artifact is being published, and when
  *   its immutable history and environment notice are persisted afterwards.
  * - `deployed` — celld published the deployment and Scafo persisted its metadata.
- * - `failed` — the deploy did not complete. Its detail states when celld already
- *   moved current before Scafo could record the matching registry marker.
+ * - `failed` — the deploy did not complete. Its detail states when celld may
+ *   already have published before Scafo could record matching metadata.
  */
 export type DeployState = "accepted" | "uploading" | "deployed" | "failed";
 

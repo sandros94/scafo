@@ -268,7 +268,7 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
     if (controlNode === null) throw new Error("the control pod has not registered its node record");
     const controlNodeId = controlNode.id;
     await until("the pinned test API NodePort", DEADLINE_MS, async () => {
-      const answer = await httpGet(apiPort, "/v1/health", {});
+      const answer = await httpGet(apiPort, "/.well-known/scafo/health", {});
       if (answer.status !== 200) return null;
       const health = JSON.parse(answer.body) as { node?: string };
       return health.node === controlNodeId ? answer : null;
@@ -287,7 +287,7 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
       expect(pods).toHaveLength(2);
       for (const pod of pods) {
         expect(pod.status?.containerStatuses?.every((status) => status.ready)).toBe(true);
-        const health = await podGet(pod, 7400, "/v1/health");
+        const health = await podGet(pod, 7400, "/.well-known/scafo/health");
         expect(health.exitCode, health.output).toBe(0);
       }
       const deploy = await runK3sCli(
@@ -300,7 +300,6 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
           PROJECT,
           "--env",
           "production",
-          "--runtime-configurable",
           "--replicas",
           "all",
           "--key",
@@ -309,6 +308,7 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
         {},
       );
       expect(deploy.code, deploy.output).toBe(0);
+      expect(deploy.output).toContain("deployed");
       expect(buildIdOf(deploy.output)).toMatch(/^[\da-f]+$/);
       await serves(`${PROJECT}.${PLATFORM_DOMAIN}`, "v1");
 
@@ -374,7 +374,6 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
           PROJECT,
           "--env",
           "single",
-          "--runtime-configurable",
           "--replicas",
           "1",
           "--key",
@@ -383,6 +382,7 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
         {},
       );
       expect(single.code, single.output).toBe(0);
+      expect(single.output).toContain("deployed");
 
       const placement = await until("a one-node placement", DEADLINE_MS, async () => {
         const record = await readJson<PlacementRecord>(registry, placementKey(PROJECT, "single"));
@@ -396,10 +396,10 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
       );
       const owner = states.find(({ state }) => state.node?.id === placement.nodes[0]);
       const nonOwner = states.find(({ state }) => state.node?.id !== placement.nodes[0]);
-      expect(owner?.state.processes.some((process) => process.id.includes("--single--"))).toBe(
+      expect(owner?.state.processes.some((process) => process.id === `${PROJECT}--single`)).toBe(
         true,
       );
-      expect(nonOwner?.state.processes.some((process) => process.id.includes("--single--"))).toBe(
+      expect(nonOwner?.state.processes.some((process) => process.id === `${PROJECT}--single`)).toBe(
         false,
       );
       const forwarded = await until(
@@ -584,7 +584,7 @@ function runK3sCli(args: string[], extraEnv: Record<string, string>): Promise<Co
 }
 
 function runsProduction(process: ProcessStatus): boolean {
-  return process.state === "running" && process.id.startsWith(`${PROJECT}--production--`);
+  return process.state === "running" && process.id === `${PROJECT}--production`;
 }
 
 async function crictlId(args: string[], description: string): Promise<string> {

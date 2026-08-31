@@ -3,6 +3,40 @@ import { createCelldDriver, RESERVED_ENV } from "../src/drivers/runtime/celld.ts
 import type { RuntimeSpecInput } from "../src/core/types/runtime.ts";
 
 describe("celld process specs", () => {
+  it("leaves celld shutdown policy upstream-owned and waits beyond its default", () => {
+    const driver = createCelldDriver({});
+    const spec = driver.processSpec(specInput());
+
+    expect(driver.stopGraceMs).toBe(45_000);
+    expect(spec.env).not.toHaveProperty("CELLD_SHUTDOWN_TOTAL_MS");
+    expect(spec.env).not.toHaveProperty("CELLD_SHUTDOWN_DRAIN_MS");
+  });
+
+  it("derives supervisor grace from the operator's celld shutdown bound", () => {
+    const operatorEnv = {
+      CELLD_SHUTDOWN_TOTAL_MS: "60000",
+      CELLD_SHUTDOWN_DRAIN_MS: "25000",
+    };
+    const driver = createCelldDriver({ operatorEnv });
+    operatorEnv.CELLD_SHUTDOWN_TOTAL_MS = "120000";
+    const spec = driver.processSpec(specInput());
+
+    expect(driver.stopGraceMs).toBe(65_000);
+    expect(spec.env).toMatchObject({
+      CELLD_SHUTDOWN_TOTAL_MS: "60000",
+      CELLD_SHUTDOWN_DRAIN_MS: "25000",
+    });
+  });
+
+  it.each(["", "0", "-1", "1.5", "unbounded", "2147478648"])(
+    "refuses untimable CELLD_SHUTDOWN_TOTAL_MS=%j",
+    (value) => {
+      expect(() => createCelldDriver({ operatorEnv: { CELLD_SHUTDOWN_TOTAL_MS: value } })).toThrow(
+        expect.objectContaining({ code: "invalid-input" }),
+      );
+    },
+  );
+
   it("owns one stable process per environment and injects its varset", () => {
     const spec = createCelldDriver({ binPath: "/opt/celld" }).processSpec(specInput());
     expect(spec.id).toBe("shop--production");
@@ -17,11 +51,18 @@ describe("celld process specs", () => {
     expect(spec.env).not.toHaveProperty("CELLD_MAX_RESIDENT_CELLS");
   });
 
-  it("passes operator-owned celld resource policy through unchanged", () => {
+  it("passes operator-owned celld policy through unchanged", () => {
     const spec = createCelldDriver({
-      operatorEnv: { CELLD_MAX_RSS_MB: "384", CELLD_MAX_RESIDENT_CELLS: "12" },
+      operatorEnv: {
+        CELLD_DURABILITY: "bucket",
+        CELLD_IDLE_EVICT_S: "900",
+        CELLD_MAX_RSS_MB: "384",
+        CELLD_MAX_RESIDENT_CELLS: "12",
+      },
     }).processSpec(specInput());
     expect(spec.env).toMatchObject({
+      CELLD_DURABILITY: "bucket",
+      CELLD_IDLE_EVICT_S: "900",
       CELLD_MAX_RSS_MB: "384",
       CELLD_MAX_RESIDENT_CELLS: "12",
     });
@@ -42,6 +83,8 @@ describe("celld process specs", () => {
       ).toThrow(expect.objectContaining({ code: "invalid-input" }));
     }
     expect(RESERVED_ENV).toContain("CELLD_VARS_FILE");
+    expect(RESERVED_ENV).toContain("CELLD_DURABILITY");
+    expect(RESERVED_ENV).toContain("CELLD_IDLE_EVICT_S");
     expect(RESERVED_ENV).not.toContain("CELLD_MAX_RSS_MB");
     expect(RESERVED_ENV).not.toContain("CELLD_MAX_RESIDENT_CELLS");
   });

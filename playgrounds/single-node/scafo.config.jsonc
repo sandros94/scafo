@@ -33,9 +33,8 @@
   },
 
   /* Apex domains this installation serves subdomains under. Applications answer
-     at <project>--<env>.scafo.test, at <project>.scafo.test for the production
-     environment, and at <project>--<build>.scafo.test for every running build.
-     Nothing on your machine resolves those names: send a Host header. */
+     at <project>--<env>.scafo.test and at <project>.scafo.test for the production
+     environment. Nothing on your machine resolves those names: send a Host header. */
   "platformDomains": ["scafo.test"],
 
   /*

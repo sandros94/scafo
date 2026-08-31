@@ -26,8 +26,8 @@ const DOMAINS = ["apps.test", "preview.test"];
 
 describe("what a host is counted as", () => {
   it("reads an environment's label and its project's apex off the host grammar alone", () => {
-    /* Nothing has to be routed for this: a request for a PARKED environment is
-       exactly this case, and it is still that environment's traffic. */
+    /* Nothing has to be routed for this: host grammar alone is enough to
+       attribute an environment's traffic. */
     const counters = counting();
     counters.ingest(line({ host: "shop--preview.apps.test" }));
     counters.ingest(line({ host: "shop.apps.test" }));
@@ -53,7 +53,7 @@ describe("what a host is counted as", () => {
     expect(counters.snapshot().unattributed).toBe(0);
   });
 
-  it("keeps a PARKED environment's custom domain attributable, because the claim outlives the route", () => {
+  it("keeps an inactive environment's custom domain attributable, because the claim outlives the route", () => {
     /* Nothing is ready, so the routing carries no route for it at all; the claim
        is what an environment's record says regardless. */
     const counters = counting();

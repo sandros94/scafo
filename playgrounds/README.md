@@ -8,7 +8,7 @@ honours the conditional writes scafo's registry is built on. No cloud account, n
 credentials, no DNS.
 
 - [`single-node/`](single-node/README.md) — **start here.** Register a remote,
-  deploy, reach it by name, flip a build, wake a parked one, read what it counted.
+  deploy, reach it by name, replace its deployment, read what the node counted.
 - [`multi-node/`](multi-node/README.md) — what only happens at two: the
   coordinator lease, one cell owned across machines, a node killed mid-service.
 
@@ -79,11 +79,11 @@ that pull needs `docker login ghcr.io` with a `read:packages` token; otherwise
 a Kubernetes Deployment, the rules that must not be got wrong — meant to be copied
 and kept. These are meant to be deleted, so the bucket is in the stack, the app is
 in `app/`, the credentials are fake, every port is overridable. What they do not
-differ on is anything that would teach you something untrue: the stop grace is 35s
+differ on is anything that would teach you something untrue: the stop grace is 50s
 in both, the ingress shares the node's namespace in both, one bucket and prefix is
 one fleet in both.
 
 Neither does TLS: nothing resolves `*.scafo.test` and no CA would issue for it, so
 both serve plain HTTP, as [`../examples/caddy.json`](../examples/caddy.json) and
-the end-to-end suites do. Custom domains, varsets, CI deploys, canaries and
-traffic splits are all real, all covered by those suites, and none of them here.
+the end-to-end suites do. Custom domains, varsets and CI deploys are implemented
+elsewhere and deliberately left out of these first walkthroughs.

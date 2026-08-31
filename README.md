@@ -35,15 +35,27 @@ export SCAFO_S3_ENDPOINT=http://127.0.0.1:8333 SCAFO_S3_BUCKET=scafo \
 
 node dist/cli/index.mjs operator keygen --register
 node dist/cli/index.mjs deploy ./my-app --node http://127.0.0.1:7400 \
-  --project shop --env production --flip
+  --project shop --env production
 
 curl -H 'Host: shop.scafo.test' http://127.0.0.1
 ```
 
 The application is reachable at `<project>--<env>.scafo.test`, at
-`shop.scafo.test` for the `production` environment, and at
-`<project>--<build>.scafo.test` for every build that is running. Nothing resolves
-those names for you — send the `Host` header, or add them to `/etc/hosts`.
+`shop.scafo.test` for the `production` environment, and at any custom domains
+claimed for that environment. Nothing resolves those names for you — send the
+`Host` header, or add them to `/etc/hosts`.
+
+The node/API listener reports Scafo itself at
+`/.well-known/scafo/health`. A deployed application's host reports its Celld
+runtime at `/.well-known/celld/health`; these are deliberately separate
+surfaces.
+
+Scafo follows Celld 0.4.0's current-deployment model: a new deploy becomes the
+environment's current deployment. Previous artifacts may remain in the bucket,
+but Scafo does not expose old-build hosts or a historical deployment selector. Follow
+[Celld issue #181](https://github.com/denoland/celld/issues/181) for the upstream
+lifecycle discussion. See [SECURITY.md](./SECURITY.md) for the trust boundary and
+links to Celld's current security and limitation notes.
 
 ## Running it for real
 
@@ -120,9 +132,11 @@ those names for you — send the `Host` header, or add them to `/etc/hosts`.
   in a private PID namespace: do not use host PID mode or a persistent wrapper,
   because container lifecycle containment removes remaining descendants, including
   in-flight builders, after an abrupt daemon death. **Give it a stop grace of at
-  least 35 seconds**
-  (`stop_grace_period: 35s`, `terminationGracePeriodSeconds: 35`): a node drains
-  its in-flight requests on the way out, and a shorter grace kills it mid-drain.
+  least 50 seconds**
+  (`stop_grace_period: 50s`, `terminationGracePeriodSeconds: 50`): Celld 0.4's
+  default shutdown may take 40 seconds, and the node needs time to coordinate it.
+  If `runtime.celldEnv.CELLD_SHUTDOWN_TOTAL_MS` raises that upstream bound,
+  raise the enclosing grace to at least the configured value plus 10 seconds.
 - **One host:** [`examples/compose.yaml`](./examples/compose.yaml), the stack the
   quickstart runs. Every operational rule it depends on is a comment in it.
 - **Kubernetes:** [`examples/kubernetes/`](./examples/kubernetes/) — the same node

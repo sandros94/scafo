@@ -20,7 +20,7 @@ import { assertLabels, parseLabels } from "../core/utils/labels.ts";
    drift: what an operator may not hand a runtime process is decided by what the
    driver derives for itself, and a copy here would go stale the first time that
    list grew. */
-import { IDLE_EVICT_ENV, RESERVED_ENV, TELEMETRY_ENV } from "../drivers/runtime/celld.ts";
+import { OPERATOR_RESERVED_ENV, TELEMETRY_ENV } from "../drivers/runtime/celld.ts";
 import { DEFAULT_JSON_BYTES } from "./_json.ts";
 import {
   DEFAULT_ACTIVE_TASKS,
@@ -311,25 +311,6 @@ export interface RuntimeConfig {
    */
   bindHost: string;
   /**
-   * When the runtime calls a write durable. `"bucket"` acknowledges a write
-   * once it is in the bucket, so losing every node at once loses nothing.
-   * `"fleet"` acknowledges at follower fsync and uploads behind — much faster
-   * writes and far fewer storage operations on a fleet of two or more nodes,
-   * paid for by needing at least one holder of the log to survive; on a single
-   * node the two behave identically. A per-installation trade, so it is
-   * configuration here rather than a default anywhere else.
-   */
-  durability: DurabilityMode;
-  /**
-   * Seconds a cell may sit idle before the runtime evicts it from memory,
-   * `0` to never evict. Eviction is transparent to the application — the
-   * cell's state is in the bucket and the next request restores it — so this
-   * is a RAM-density dial, paid for with a sub-second restore on the first
-   * request after a quiet spell. The runtime's own default is "never", a
-   * default set when eviction was still unsafe; here it is on.
-   */
-  cellIdleEvictS: number;
-  /**
    * Variables handed to every runtime process this node spawns, on top of the
    * ones the settings above are turned into. The escape hatch for what has no
    * typed setting of its own — the runtime's own telemetry switches above all
@@ -345,19 +326,6 @@ export interface RuntimeConfig {
    */
   celldEnv?: Record<string, string>;
 }
-
-/**
- * Names no `runtime.celldEnv` may carry, taken from the driver that writes them.
- *
- * Idle eviction is listed apart from the rest only because it is the driver's
- * for a different reason — it is a node policy with a setting of its own — and
- * the refusal below points at that setting by name.
- */
-const DRIVER_ENV: string[] = [IDLE_EVICT_ENV, ...RESERVED_ENV];
-
-/** The two answers to "when is a write durable", in the order a refusal lists them. */
-export type DurabilityMode = "bucket" | "fleet";
-const DURABILITY_MODES: DurabilityMode[] = ["bucket", "fleet"];
 
 export interface LoadConfigOptions {
   /** Config file to read; defaults to {@link DEFAULT_CONFIG_PATHS}, first readable wins. */
@@ -387,12 +355,6 @@ export const DEFAULT_BIND_HOST: string = "127.0.0.1";
 
 /** Bind addresses that answer on every address of the host, loopback included. */
 const WILDCARD_BIND_HOSTS: string[] = ["0.0.0.0", "::"];
-
-/** Durability when none is configured: a write acknowledged is a write in the bucket. */
-export const DEFAULT_DURABILITY: DurabilityMode = "bucket";
-
-/** Idle-cell eviction age when none is configured: fifteen minutes. */
-export const DEFAULT_CELL_IDLE_EVICT_S: number = 900;
 
 /** UDP port a WireGuard interface listens on when none is configured. */
 export const DEFAULT_WIREGUARD_PORT: number = 51_820;
@@ -508,8 +470,6 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
       binPath: resolve("celldBin", sources) ?? DEFAULT_RUNTIME_BIN,
       portRangeStart: resolvePort("portRangeStart", sources, DEFAULT_PORT_RANGE_START),
       bindHost: resolveBindHost(sources) ?? tunnelHost ?? DEFAULT_BIND_HOST,
-      durability: resolveDurability(sources) ?? DEFAULT_DURABILITY,
-      cellIdleEvictS: resolveCellIdleEvict(sources),
       ...(celldEnv === undefined ? {} : { celldEnv }),
     },
     deploy: resolveDeploy(sources),
@@ -645,12 +605,6 @@ const ORIGINS = {
     file: "runtime.portRangeStart",
   },
   bindHost: { flag: "bind-host", env: ["SCAFO_BIND_HOST"], file: "runtime.bindHost" },
-  durability: { flag: "durability", env: ["SCAFO_DURABILITY"], file: "runtime.durability" },
-  cellIdleEvictS: {
-    flag: "cell-idle-evict",
-    env: ["SCAFO_CELL_IDLE_EVICT"],
-    file: "runtime.cellIdleEvictS",
-  },
   artifactBytes: {
     flag: "artifact-bytes",
     env: ["SCAFO_ARTIFACT_BYTES"],
@@ -973,39 +927,6 @@ function resolveBindHost(sources: Sources): string | undefined {
   return value;
 }
 
-/** The idle-cell eviction age in seconds, `0` for never, defaulted when unnamed. */
-function resolveCellIdleEvict(sources: Sources): number {
-  const origin: Origin = ORIGINS.cellIdleEvictS;
-  const raw = flagOrEnv(origin, sources) ?? fileValue(sources.file, origin.file);
-  if (raw === undefined || raw === null || raw === "") return DEFAULT_CELL_IDLE_EVICT_S;
-
-  const value = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN;
-  if (!Number.isInteger(value) || value < 0) {
-    throw new ScafoError("invalid-input", "Invalid configuration value", {
-      detail:
-        `"${origin.file}" must be a whole number of seconds, ` +
-        `with 0 meaning cells are never evicted for being idle, got ${JSON.stringify(raw)}`,
-    });
-  }
-  return value;
-}
-
-/** The configured durability mode, or undefined when the operator named none. */
-function resolveDurability(sources: Sources): DurabilityMode | undefined {
-  const value = resolve("durability", sources);
-  if (value === undefined) return undefined;
-
-  if (!(DURABILITY_MODES as string[]).includes(value)) {
-    throw new ScafoError("invalid-input", "Invalid configuration value", {
-      detail:
-        `"${ORIGINS.durability.file}" must be one of ` +
-        `${DURABILITY_MODES.map((mode) => JSON.stringify(mode)).join(", ")}, ` +
-        `got ${JSON.stringify(value)}`,
-    });
-  }
-  return value as DurabilityMode;
-}
-
 /**
  * What this node says it is, or undefined when the operator said nothing.
  *
@@ -1060,15 +981,13 @@ function resolveCelldEnv(sources: Sources): Record<string, string> | undefined {
   }
 
   for (const name of Object.keys(vars)) {
-    if (!DRIVER_ENV.includes(name)) continue;
+    if (!OPERATOR_RESERVED_ENV.includes(name)) continue;
 
     throw new ScafoError("invalid-input", "Reserved environment variable", {
       detail:
         `"${origin.file}" sets "${name}", which the runtime driver writes itself from this ` +
         `node's configuration and from the listeners its processes bind — a value set here ` +
-        `is overwritten and never reaches the application. Drop it, or state it through the ` +
-        `setting that owns it, such as "${ORIGINS.durability.file}" or ` +
-        `"${ORIGINS.cellIdleEvictS.file}"`,
+        `would be overwritten. Drop it from the Celld policy`,
     });
   }
   return Object.keys(vars).length === 0 ? undefined : vars;

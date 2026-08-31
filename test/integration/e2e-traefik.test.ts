@@ -214,10 +214,14 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   it(
     "answers its health endpoint and has bootstrapped the registry in the bucket",
     async () => {
-      const health = await wait("the daemon to answer /v1/health", BOOT_DEADLINE_MS, async () => {
-        const answer = await httpGet(apiPort, "/v1/health", {});
-        return answer.status === 200 ? answer : null;
-      });
+      const health = await wait(
+        "the daemon to answer /.well-known/scafo/health",
+        BOOT_DEADLINE_MS,
+        async () => {
+          const answer = await httpGet(apiPort, "/.well-known/scafo/health", {});
+          return answer.status === 200 ? answer : null;
+        },
+      );
       expect(JSON.parse(health.body)).toMatchObject({ ok: true, node: NODE_ID });
 
       const meta = await readMeta(registry);
@@ -253,24 +257,18 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   );
 
   it(
-    "answers 404 from the daemon for a host nothing owns — the same answer Caddy gives now",
+    "answers Traefik's native 404 for a host nothing owns",
     async () => {
-      /*
-       * The divergence this test used to document is retired: an unmatched
-       * platform host no longer stops at the ingress — the catch-all hands it
-       * to the daemon, and the daemon answers the same problem document behind
-       * either driver. What is asserted here is therefore Traefik POLLING the
-       * catch-all at all, waited out because the provider poll runs on its own
-       * clock.
-       */
       const answer = await wait(
-        "the catch-all to hand unknowns to the daemon",
+        "an unknown host to fall through Traefik",
         DEADLINE_MS,
         async () => {
           const got = await httpGet(httpPort, "/", { host: "unrouted.scafo.test" });
-          return got.status === 404 && got.body.includes("urn:scafo:not-found") ? got : null;
+          return got.status === 404 && got.body.includes("404 page not found") ? got : null;
         },
       );
+      expect(answer).toMatchObject({ status: 404 });
+      expect(answer.body).toContain("404 page not found");
       observed.routelessHost = { status: answer.status, body: answer.body };
     },
     STEP_TIMEOUT_MS,
@@ -301,7 +299,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   );
 
   it(
-    "deploys the first build, makes it current and reports it routed",
+    "deploys the first build and reports it deployed",
     async () => {
       const started = Date.now();
       const result = await runCli(deployArgs(await staged("v1")), {});
@@ -309,13 +307,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       observed.deployV1Output = result.output;
 
       expectCleanExit(result);
-      /*
-       * "routed" here means what it means everywhere: a process serving the
-       * build passed its readiness gate and the node published the routing. It
-       * does NOT mean Traefik has read it yet — that is the next assertion, and
-       * keeping them apart is the whole difference this suite exists to show.
-       */
-      expect(result.output, daemonLogTail()).toContain("routed");
+      expect(result.output, daemonLogTail()).toContain("deployed");
 
       buildV1 = buildIdOf(result.output);
       expect(await listBuilds(registry, PROJECT)).toContain(buildV1);
@@ -374,7 +366,9 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
         `${PLATFORM_DOMAIN} to answer the daemon's health`,
         DEADLINE_MS,
         async () => {
-          const answer = await httpGet(httpPort, "/v1/health", { host: PLATFORM_DOMAIN });
+          const answer = await httpGet(httpPort, "/.well-known/scafo/health", {
+            host: PLATFORM_DOMAIN,
+          });
           return answer.status === 200 ? answer : null;
         },
       );
@@ -409,13 +403,13 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
     async () => {
       const result = await runCli(deployArgs(await staged("v2")), {});
       expectCleanExit(result);
-      expect(result.output, daemonLogTail()).toContain("routed");
+      expect(result.output, daemonLogTail()).toContain("deployed");
       buildV2 = buildIdOf(result.output);
       expect(buildV2).not.toBe(buildV1);
       observed.buildV2 = buildV2;
       observed.deployV2Output = result.output;
 
-      /* The process is ready before Traefik necessarily polls the new route. */
+      /* The deployment settles before Traefik necessarily polls the new route. */
       const publishedAt = Date.now();
       await wait(`the router for ${envHost()} to be published`, DEADLINE_MS, async () => {
         const routers = (await snapshotNow()).http?.routers ?? {};
@@ -448,7 +442,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       );
 
       const running = state.processes.filter((process) => process.state === "running");
-      expect(running[0].id).toBe(`${PROJECT}--${ENVIRONMENT}--${buildV2}`);
+      expect(running[0].id).toBe(`${PROJECT}--${ENVIRONMENT}`);
       /*
        * No ingress failure in the pass, which is a stronger statement here than
        * it looks: an `apply` that reaches nothing cannot fail on a network, so a
@@ -555,7 +549,6 @@ function deployArgs(dir: string): string[] {
     PROJECT,
     "--env",
     ENVIRONMENT,
-    "--runtime-configurable",
     "--key",
     keyPath,
   ];

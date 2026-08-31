@@ -246,10 +246,14 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   it(
     "answers its health endpoint and has bootstrapped the registry in the bucket",
     async () => {
-      const health = await until("the daemon to answer /v1/health", BOOT_DEADLINE_MS, async () => {
-        const answer = await httpGet(apiPort, "/v1/health", {});
-        return answer.status === 200 ? answer : null;
-      });
+      const health = await until(
+        "the daemon to answer /.well-known/scafo/health",
+        BOOT_DEADLINE_MS,
+        async () => {
+          const answer = await httpGet(apiPort, "/.well-known/scafo/health", {});
+          return answer.status === 200 ? answer : null;
+        },
+      );
       expect(JSON.parse(health.body)).toMatchObject({ ok: true, node: NODE_ID });
 
       const meta = await readMeta(registry);
@@ -288,7 +292,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   );
 
   it(
-    "deploys the first build, makes it current and reports it routed",
+    "deploys the first build and reports it deployed",
     async () => {
       const started = Date.now();
       const result = await runCli(deployArgs(await stageApp("v1")), {});
@@ -296,7 +300,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       observed.deployV1Output = result.output;
 
       expectCleanExit(result);
-      expect(result.output, daemonLogTail()).toContain("routed");
+      expect(result.output, daemonLogTail()).toContain("deployed");
 
       buildV1 = buildIdOf(result.output);
       expect(await listBuilds(registry, PROJECT)).toContain(buildV1);
@@ -312,7 +316,19 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         const answer = await untilServes(host, "v1");
         expect(JSON.parse(answer.body).url, `the url ${host} saw`).toContain(host);
       }
+      const runtimeHealth = await until(
+        `${envHost()} to answer celld health`,
+        DEADLINE_MS,
+        async () => {
+          const answer = await httpGet(caddyHttpPort, "/.well-known/celld/health", {
+            host: envHost(),
+          });
+          return answer.status === 200 && answer.body === '{"ok":true}' ? answer : null;
+        },
+      );
+      expect(JSON.parse(runtimeHealth.body)).toEqual({ ok: true });
       observed.v1Hosts = [envHost(), apexHost()];
+      observed.celldHealth = runtimeHealth.status;
     },
     STEP_TIMEOUT_MS,
   );
@@ -344,7 +360,9 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         `${PLATFORM_DOMAIN} to answer the daemon's health through Caddy`,
         DEADLINE_MS,
         async () => {
-          const answer = await httpGet(caddyHttpPort, "/v1/health", { host: PLATFORM_DOMAIN });
+          const answer = await httpGet(caddyHttpPort, "/.well-known/scafo/health", {
+            host: PLATFORM_DOMAIN,
+          });
           return answer.status === 200 ? answer : null;
         },
       );
@@ -420,7 +438,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   );
 
   it(
-    "makes a second deployment current and withdraws the superseded process",
+    "deploys a second build for the existing environment",
     async () => {
       const started = Date.now();
       const result = await runCli(deployArgs(await stageApp("v2")), {});
@@ -428,7 +446,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       observed.deployV2Output = result.output;
 
       expectCleanExit(result);
-      expect(result.output, daemonLogTail()).toContain("routed");
+      expect(result.output, daemonLogTail()).toContain("deployed");
       buildV2 = buildIdOf(result.output);
       expect(buildV2).not.toBe(buildV1);
       observed.buildV2 = buildV2;
@@ -461,7 +479,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       );
 
       const running = state.processes.filter((process) => process.state === "running");
-      expect(running[0].id).toBe(`${PROJECT}--${ENVIRONMENT}--${buildV2}`);
+      expect(running[0].id).toBe(`${PROJECT}--${ENVIRONMENT}`);
       expect(state.node?.id).toBe(NODE_ID);
       expect(state.reconcile?.failures ?? []).toEqual([]);
       observed.finalProcesses = state.processes;
@@ -537,10 +555,9 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       observed.workloadDeployOutput = result.output;
 
       expectCleanExit(result);
-      /* Accepted (202), then carried the whole way: build, deployment notice and a process
-         through its readiness gate. Every poll re-presented the same token,
-         which a workload token — unlike a node token — survives. */
-      expect(result.output, daemonLogTail()).toContain("routed");
+      /* Accepted (202), built and published by celld. Every poll re-presented
+         the same token, which a workload token — unlike a node token — survives. */
+      expect(result.output, daemonLogTail()).toContain("deployed");
 
       buildCi = buildIdOf(result.output);
       expect(await listBuilds(registry, PROJECT)).toContain(buildCi);
@@ -556,7 +573,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
 
       /* And production is untouched: a token scoped to one project deploying a
          new environment of it must not disturb what was already running. */
-      await untilServes(apexHost(), "v1");
+      await untilServes(apexHost(), "v2");
     },
     STEP_TIMEOUT_MS,
   );
@@ -622,7 +639,6 @@ function deployArgs(dir: string, environment: string = ENVIRONMENT): string[] {
     PROJECT,
     "--env",
     environment,
-    "--runtime-configurable",
     ...(environment === ENVIRONMENT ? ["--key", keyPath] : []),
   ];
 }

@@ -91,19 +91,11 @@ export const sailArgs: ArgsDef = {
   "celld-env": {
     type: "string",
     description:
-      "Extra variables for every runtime process, NAME=value,NAME2=value2 (CELLD_OTEL=1); " +
+      "Upstream Celld variables for every runtime process, NAME=value,NAME2=value2; " +
       "a value cannot contain a comma here — write those as runtime.celldEnv in the config file",
   },
   "port-range-start": { type: "string", description: "First port runtime processes use" },
   "bind-host": { type: "string", description: "Address runtime processes bind their listeners to" },
-  "durability": {
-    type: "string",
-    description: 'When a write is durable: "bucket" (default) or "fleet" (ack at follower fsync)',
-  },
-  "cell-idle-evict": {
-    type: "string",
-    description: "Seconds a cell may sit idle before eviction frees its memory (0 = never)",
-  },
   "artifact-bytes": {
     type: "string",
     description: "Maximum compressed and expanded bytes per deploy artifact",
@@ -352,8 +344,6 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
 
   const driver = createCelldDriver({
     binPath: config.runtime.binPath,
-    durability: config.runtime.durability,
-    cellIdleEvictS: config.runtime.cellIdleEvictS,
     ...(config.runtime.celldEnv === undefined ? {} : { operatorEnv: config.runtime.celldEnv }),
   });
   const reconciler = createReconciler(daemon, driver, {

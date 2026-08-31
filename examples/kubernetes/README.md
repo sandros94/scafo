@@ -39,14 +39,15 @@ Watch it come up:
 ```sh
 kubectl rollout status deploy/scafo-node
 kubectl port-forward svc/scafo-nodes 7400:7400
-curl -s localhost:7400/v1/health
+curl -s localhost:7400/.well-known/scafo/health
 # {"ok":true,"version":"...","node":"node-368f8285"}
 ```
 
-`/v1/health` and `/v1/ingress/traefik` are the two routes that answer without a
-key — the first is what the probes ask, the second is what the sidecar polls.
-Everything else on the node API, `/v1/state` included, wants an operator token and
-answers `401` without one.
+`/.well-known/scafo/health`, `/v1/ingress/ask`, and
+`/v1/ingress/traefik` answer without an operator key. The first is what the
+probes ask, the second authorizes on-demand TLS, and the third is what the
+sidecar polls. Authenticated node APIs such as `/v1/state` answer `401` without
+a valid token.
 
 ## How traffic gets in
 
@@ -57,9 +58,8 @@ Traefik sidecar. Point a wildcard DNS record at whatever address it gets:
 *.apps.example.com  ->  <EXTERNAL-IP of scafo-ingress>
 ```
 
-An application is then reachable at `<project>--<env>.apps.example.com`, at
-`<project>.apps.example.com` for its `production` environment, and at
-`<project>--<build>.apps.example.com` for every build that is running.
+An application is then reachable at `<project>--<env>.apps.example.com` and at
+`<project>.apps.example.com` for its `production` environment.
 
 Nothing about that path is scafo-specific on the cluster's side, and it does not
 have to be a LoadBalancer: an Ingress or a Gateway pointed at the same pods works
@@ -134,15 +134,12 @@ If ingress-nginx specifically is what you need, either disable the addon or
 install the controller under a class name of its own
 (`--set controller.ingressClassResource.name=…`) and point your rules at that.
 
-### The sidecar is Traefik v3, and v2 fails quietly
+### The sidecar is Traefik v3
 
-What the node publishes is a v3 dynamic configuration. A v2 Traefik accepts the
-document, reports every router as enabled, and serves the ones that match a
-single host correctly — but `HostRegexp` means something else in v2, so the
-platform domain's catch-all matches nothing and a host waiting to be woken gets
-the ingress's own `404` instead of reaching the node. Nothing logs a problem.
-Check the tag, especially against a cluster whose bundled controller is older
-than the sidecar you are copying this from.
+The manifest and generated dynamic configuration target Traefik v3. Keep the
+sidecar on that major; a cluster's separate edge controller may use another
+implementation because it only forwards the original Host header to the
+sidecars.
 
 ### TLS
 
@@ -179,22 +176,18 @@ itself and queries `/v1/ingress/ask`; an Ingress controller in front of the pods
 never asks anything, so every custom domain is provisioned ahead of its traffic.
 
 **One address in front of every node has a consequence for `--replicas`.** A node
-routes to the processes IT runs and to nothing else — routing follows readiness,
-not intent. An environment served by every node (the default for long-lived
-environments) answers from whichever pod the load balancer picks. An environment
-narrowed to fewer, with `scafo deploy --replicas 1` or a `--node-selector`,
-answers `404` from the pods that do not serve it. Narrow an environment's
-replicas only when what reaches it knows which nodes hold it.
+routes only to the environment processes it runs. An environment served by every
+node (the default for long-lived environments) answers from whichever pod the
+load balancer picks. An environment narrowed to fewer nodes, with
+`scafo deploy --replicas 1` or a `--node-selector`, returns the ingress's native
+unmatched response from pods that do not serve it. Narrow replicas only when the
+layer in front knows which nodes hold the environment.
 
-The probes will not cover for you here, and it is worth knowing why before you
-read a graph. `/v1/health` reports on the DAEMON, and the daemon keeps answering
-`200` while the node restarts the runtime processes underneath it — a rollout, a
-crashed process coming back, one that fenced itself. There is no per-pod
-serving-readiness signal today, so a Service in front of every pod goes on
-sending traffic to a pod mid-churn, and a request can meet a runtime process that
-is restarting and come back `502`. It is brief and it is not the pod being
-unhealthy; it is the one gap between "this node is up" and "this node is serving
-what you asked for".
+The Kubernetes probes cover the Scafo node/API listener through
+`/.well-known/scafo/health`; they do not aggregate every application in the pod.
+Celld owns application health and exposes `/.well-known/celld/health` through
+each deployed application's host. Use that endpoint when checking a particular
+application.
 
 ## Deploying to it
 
@@ -206,13 +199,12 @@ the coordinator may do is forwarded to whichever node holds the lease.
 
 ## Three rules that must not be violated
 
-**The stop grace stays at 35 seconds or more.** On SIGTERM a node writes that it
+**The stop grace stays at 50 seconds or more.** On SIGTERM a node writes that it
 is draining, releases the coordinator lease, stops reconciling, closes its
-listener, and only then stops the celld processes serving traffic — each drains
-its in-flight requests for 25s and is given 30s before it is killed. Kubernetes'
-default of 30 cuts that off in the middle: requests are dropped mid-flight, and
-the fleet has to time the node out over the liveness window instead of being told
-it left. `terminationGracePeriodSeconds: 35` is the minimum, not a suggestion.
+listener, and only then stops the Celld processes serving traffic. Celld 0.4's
+default shutdown may take 40 seconds; Kubernetes' default 30 seconds can cut
+that off in the middle. `terminationGracePeriodSeconds: 50` leaves the node
+enough room to coordinate that shutdown.
 
 **The node stays process 1 in a private PID namespace.** `hostPID: false` and
 `shareProcessNamespace: false` are deliberate: the container lifecycle then
