@@ -7,7 +7,6 @@
  */
 
 import { type JSONCParseError, parseJSONC } from "confbox";
-import { DEFAULT_DAEMON_OVERHEAD_MB, DEFAULT_MEMORY_FRACTION } from "../core/capacity/compute.ts";
 import { ScafoError } from "../core/error.ts";
 import { assertPositiveSafeInteger } from "../core/utils/number.ts";
 import { DEFAULT_ARCHIVE_ENTRIES, DEFAULT_ARTIFACT_BYTES } from "../core/types/deploy.ts";
@@ -22,11 +21,9 @@ import { assertLabels, parseLabels } from "../core/utils/labels.ts";
    driver derives for itself, and a copy here would go stale the first time that
    list grew. */
 import { IDLE_EVICT_ENV, RESERVED_ENV, TELEMETRY_ENV } from "../drivers/runtime/celld.ts";
-import { DEFAULT_RUNTIME_CREDIT_MB } from "./_credit-controller.ts";
 import { DEFAULT_JSON_BYTES } from "./_json.ts";
 import {
   DEFAULT_ACTIVE_TASKS,
-  DEFAULT_DEPLOY_CREDIT_MB,
   DEFAULT_OUTPUT_BYTES,
   DEFAULT_PROJECT_ACTIVE_TASKS,
   DEFAULT_PROJECT_QUEUED_TASKS,
@@ -83,8 +80,6 @@ export interface DaemonConfig {
   };
   /** Apex domains the platform serves wildcard subdomains under. */
   platformDomains: string[];
-  /** How this node derives the allocatable memory-credit pool it owns. */
-  capacity?: CapacityConfig;
   /** How this node runs and gates the processes that serve its environments. */
   runtime: RuntimeConfig;
   /** Resource bounds applied independently while receiving and expanding deploys. */
@@ -124,8 +119,6 @@ export interface DaemonConfig {
 }
 
 export interface DeployConfig {
-  /** Whole MiB one active deploy reserves until artifact cleanup succeeds. */
-  creditMb?: number;
   /** Maximum received compressed bytes and, independently, expanded bytes. */
   artifactBytes: number;
   /** Maximum entries in one tar archive. */
@@ -140,14 +133,6 @@ export interface DeployConfig {
   queueTimeoutMs: number;
   taskTimeoutMs: number;
   outputBytes: number;
-}
-
-/** Tunables of the node-wide memory-credit pool. */
-export interface CapacityConfig {
-  /** Share of probed memory allocatable to runtime and deploy credit. */
-  memoryFraction: number;
-  /** Whole MiB held back for the daemon before allocating credit. */
-  daemonOverheadMb: number;
 }
 
 /**
@@ -344,8 +329,6 @@ export interface RuntimeConfig {
    * default set when eviction was still unsafe; here it is on.
    */
   cellIdleEvictS: number;
-  /** Whole MiB one serving runtime reserves once runtime wiring lands. */
-  creditMb?: number;
   /**
    * Variables handed to every runtime process this node spawns, on top of the
    * ones the settings above are turned into. The escape hatch for what has no
@@ -521,21 +504,12 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
       ...(labels === undefined ? {} : { labels }),
     },
     platformDomains: resolvePlatformDomains(sources),
-    capacity: {
-      memoryFraction: resolveFraction("memoryFraction", sources, DEFAULT_MEMORY_FRACTION),
-      daemonOverheadMb: resolvePositiveSafeInteger(
-        "daemonOverheadMb",
-        sources,
-        DEFAULT_DAEMON_OVERHEAD_MB,
-      ),
-    },
     runtime: {
       binPath: resolve("celldBin", sources) ?? DEFAULT_RUNTIME_BIN,
       portRangeStart: resolvePort("portRangeStart", sources, DEFAULT_PORT_RANGE_START),
       bindHost: resolveBindHost(sources) ?? tunnelHost ?? DEFAULT_BIND_HOST,
       durability: resolveDurability(sources) ?? DEFAULT_DURABILITY,
       cellIdleEvictS: resolveCellIdleEvict(sources),
-      creditMb: resolvePositiveSafeInteger("runtimeCreditMb", sources, DEFAULT_RUNTIME_CREDIT_MB),
       ...(celldEnv === undefined ? {} : { celldEnv }),
     },
     deploy: resolveDeploy(sources),
@@ -677,21 +651,6 @@ const ORIGINS = {
     env: ["SCAFO_CELL_IDLE_EVICT"],
     file: "runtime.cellIdleEvictS",
   },
-  memoryFraction: {
-    flag: "memory-fraction",
-    env: ["SCAFO_MEMORY_FRACTION"],
-    file: "capacity.memoryFraction",
-  },
-  daemonOverheadMb: {
-    flag: "daemon-overhead-mb",
-    env: ["SCAFO_DAEMON_OVERHEAD_MB"],
-    file: "capacity.daemonOverheadMb",
-  },
-  runtimeCreditMb: {
-    flag: "runtime-credit-mb",
-    env: ["SCAFO_RUNTIME_CREDIT_MB"],
-    file: "runtime.creditMb",
-  },
   artifactBytes: {
     flag: "artifact-bytes",
     env: ["SCAFO_ARTIFACT_BYTES"],
@@ -703,11 +662,6 @@ const ORIGINS = {
     file: "deploy.archiveEntries",
   },
   activeTasks: { flag: "active-tasks", env: ["SCAFO_ACTIVE_TASKS"], file: "deploy.activeTasks" },
-  deployCreditMb: {
-    flag: "deploy-credit-mb",
-    env: ["SCAFO_DEPLOY_CREDIT_MB"],
-    file: "deploy.creditMb",
-  },
   projectActiveTasks: {
     flag: "project-active-tasks",
     env: ["SCAFO_PROJECT_ACTIVE_TASKS"],
@@ -854,19 +808,6 @@ function resolvePositiveSafeInteger(setting: Setting, sources: Sources, fallback
   return value;
 }
 
-function resolveFraction(setting: Setting, sources: Sources, fallback: number): number {
-  const origin: Origin = ORIGINS[setting];
-  const raw = flagOrEnv(origin, sources) ?? fileValue(sources.file, origin.file);
-  if (raw === undefined || raw === "") return fallback;
-  const value = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN;
-  if (!Number.isFinite(value) || value <= 0 || value > 1) {
-    throw new ScafoError("invalid-input", "Invalid configuration value", {
-      detail: `"${origin.file}" must be greater than 0 and at most 1, got ${JSON.stringify(raw)}`,
-    });
-  }
-  return value;
-}
-
 function resolveNonNegativeSafeInteger(
   setting: Setting,
   sources: Sources,
@@ -886,7 +827,6 @@ function resolveNonNegativeSafeInteger(
 
 function resolveDeploy(sources: Sources): DeployConfig {
   const deploy: DeployConfig = {
-    creditMb: resolvePositiveSafeInteger("deployCreditMb", sources, DEFAULT_DEPLOY_CREDIT_MB),
     artifactBytes: resolvePositiveSafeInteger("artifactBytes", sources, DEFAULT_ARTIFACT_BYTES),
     archiveEntries: resolvePositiveSafeInteger("archiveEntries", sources, DEFAULT_ARCHIVE_ENTRIES),
     activeTasks: resolvePositiveSafeInteger("activeTasks", sources, DEFAULT_ACTIVE_TASKS),

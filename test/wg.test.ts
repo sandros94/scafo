@@ -12,19 +12,9 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type ArgsDef, type CommandDef, parseArgs } from "citty";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { creditArgs } from "../src/cli/_credit-args.ts";
 import { type DaemonConfig, loadDaemonConfig } from "../src/daemon/config.ts";
-import { sailArgs } from "../src/cli/commands/sail.ts";
-import { wg } from "../src/cli/commands/wg.ts";
-import {
-  loadWireguardRecord,
-  probeNodeCredits,
-  publishWireguard,
-  registerThisNode,
-} from "../src/cli/_bootstrap.ts";
-import type { HostReader } from "../src/core/capacity/reader.ts";
+import { loadWireguardRecord, publishWireguard, registerThisNode } from "../src/cli/_bootstrap.ts";
 import type { NodeState } from "../src/cli/_node-state.ts";
 import { collectWireguardPeers, renderWireguardConf } from "../src/cli/_wg-conf.ts";
 import {
@@ -397,66 +387,6 @@ describe("the addresses a tunnelled node uses", () => {
 });
 
 describe("what a node publishes about its place on the tunnel", () => {
-  it("shares the sail credit flags and parses their normal space form", () => {
-    const init = (wg.subCommands as Record<string, CommandDef>).init;
-    const args = init.args as ArgsDef;
-    for (const name of Object.keys(creditArgs)) {
-      expect(args[name]).toBe(creditArgs[name]);
-      expect(sailArgs[name]).toBe(creditArgs[name]);
-    }
-
-    expect(
-      parseArgs(
-        [
-          "--memory-fraction",
-          "0.5",
-          "--daemon-overhead-mb",
-          "256",
-          "--runtime-credit-mb",
-          "512",
-          "--deploy-credit-mb",
-          "768",
-        ],
-        args,
-      ),
-    ).toMatchObject({
-      "memory-fraction": "0.5",
-      "daemon-overhead-mb": "256",
-      "runtime-credit-mb": "512",
-      "deploy-credit-mb": "768",
-    });
-  });
-
-  it("derives and retains the one profile both boot paths advertise", async () => {
-    const config = await loadDaemonConfig({
-      env: {
-        ...REQUIRED_ENV,
-        SCAFO_MEMORY_FRACTION: "0.5",
-        SCAFO_DAEMON_OVERHEAD_MB: "256",
-        SCAFO_RUNTIME_CREDIT_MB: "512",
-        SCAFO_DEPLOY_CREDIT_MB: "768",
-      },
-    });
-    const reader: HostReader = {
-      capacityInputs: () =>
-        Promise.resolve({
-          cgroup: { memoryMax: null, cpuMax: null },
-          host: { cores: 4, memBytes: 8 * 1024 * 1024 * 1024 },
-        }),
-    };
-    const profile = await probeNodeCredits(config, reader);
-    const { ctx } = ctxWith(new MemoryCasStore());
-    const registered = await registerThisNode(ctx, {
-      config,
-      state: nodeState(NODE_A),
-      capacity: profile.capacity,
-      credits: profile.credits,
-    });
-
-    expect(profile.credits).toEqual({ allocatableMb: 3840, runtimeMb: 512, deployMb: 768 });
-    expect(registered.credits).toEqual(profile.credits);
-  });
-
   it("writes the wireguard field into its own record, alongside everything else", async () => {
     const { ctx } = ctxWith(new MemoryCasStore());
     const config = await tunnelConfig({ SCAFO_LISTEN: "0.0.0.0:7400" });
@@ -496,7 +426,7 @@ describe("what a node publishes about its place on the tunnel", () => {
      * `scafo wg init` is run from an operator's shell, not from the daemon's
      * environment, so the configuration it resolves may not be the one the node
      * is running on. Rewriting the record from it would move the node's
-     * advertised address and capacity along with its tunnel details, and nothing
+     * advertised address along with its tunnel details, and nothing
      * would report it until a peer failed to reach it.
      */
     const { ctx } = ctxWith(new MemoryCasStore());
@@ -506,19 +436,6 @@ describe("what a node publishes about its place on the tunnel", () => {
     const before = await registerThisNode(ctx, {
       config: running,
       state: nodeState(NODE_A),
-      capacity: {
-        cores: 4,
-        memMb: 8192,
-        cgroup: true,
-        threads: 4,
-        isolates: 8,
-        rssBudgetMb: 6144,
-        maxRssMbPerProcess: 768,
-        maxResidentCells: 8,
-        maxConcurrentWakes: 2,
-        probedAt: "2026-01-01T00:00:00.000Z",
-      },
-      credits: { allocatableMb: 4096, runtimeMb: 512, deployMb: 1024 },
     });
 
     /* A different shell entirely: no advertise, so the defaults would apply. */
@@ -534,8 +451,6 @@ describe("what a node publishes about its place on the tunnel", () => {
     });
 
     expect(after.addresses).toEqual(before.addresses);
-    expect(after.capacity).toEqual(before.capacity);
-    expect(after.credits).toEqual(before.credits);
     expect(after.wireguard?.publicKey).toBe(STORED_PUBLIC);
   });
 
@@ -553,19 +468,6 @@ describe("what a node publishes about its place on the tunnel", () => {
     const sailOptions = {
       config: running,
       state: nodeState(NODE_A),
-      capacity: {
-        cores: 4,
-        memMb: 8192,
-        cgroup: true,
-        threads: 4,
-        isolates: 8,
-        rssBudgetMb: 6144,
-        maxRssMbPerProcess: 768,
-        maxResidentCells: 8,
-        maxConcurrentWakes: 2,
-        probedAt: "2026-01-01T00:00:00.000Z",
-      },
-      credits: { allocatableMb: 4096, runtimeMb: 512, deployMb: 1024 },
     } satisfies Parameters<typeof registerThisNode>[1];
     let sailed: NodeRecord | null = null;
     store.onBeforePut = async (key): Promise<void> => {
@@ -595,7 +497,6 @@ describe("what a node publishes about its place on the tunnel", () => {
     });
     expect(after.addresses).toEqual({ internal: "10.0.0.4", apiPort: 9000 });
     expect(after.labels).toEqual({ tier: "fast", region: "eu-west-1" });
-    expect(after.credits).toEqual(sailOptions.credits);
   });
 
   it("registers a node outright when it has no record yet", async () => {

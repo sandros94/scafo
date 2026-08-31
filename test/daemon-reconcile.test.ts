@@ -9,7 +9,6 @@ import { importVarsetKey, putVarset, sealVarset } from "../src/core/registry/var
 import type { RuntimeDriver, RuntimeSpecInput } from "../src/core/types/runtime.ts";
 import type { IngressDesired } from "../src/core/types/ingress.ts";
 import type { ProcessSpec, ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
-import { createCreditController } from "../src/daemon/_credit-controller.ts";
 import type { DaemonContext } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { createReconciler } from "../src/daemon/reconcile.ts";
@@ -157,7 +156,6 @@ async function seededWorld() {
     registry: registry.ctx,
     supervisor,
     version: "test",
-    credits: createCreditController({ allocatableMb: 4096, surgeMb: 512 }),
     ingress: {
       async apply(desired: IngressDesired) {
         events.push(`ingress:${String(desired.routes.length)}`);
@@ -258,7 +256,6 @@ function config(): DaemonConfig {
       bindHost: "127.0.0.1",
       durability: "bucket",
       cellIdleEvictS: 0,
-      creditMb: 512,
     },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },

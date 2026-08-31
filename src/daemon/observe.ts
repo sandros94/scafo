@@ -30,7 +30,6 @@
  */
 
 import type { OperatorRole } from "../core/types/registry.ts";
-import type { CreditPlacementFailureReason } from "../core/placement/credits.ts";
 
 /** Events the ring holds before the oldest are dropped to make room. */
 export const OBSERVED_RING_SIZE: number = 512;
@@ -46,13 +45,13 @@ export type ObservedEvent =
   /* A pass beginning. `kicked` distinguishes an explicitly requested pass from
      one the timer started. */
   | { at: string; type: "reconcile.pass.start"; kicked: boolean }
-  /** A coordinator newly could not admit an environment under its credit plan. */
+  /** A coordinator newly could not place an environment on an eligible live node. */
   | {
       at: string;
       type: "placement.pending";
       project: string;
       env: string;
-      reason: CreditPlacementFailureReason;
+      reason: "placement-unavailable";
     }
   | {
       at: string;

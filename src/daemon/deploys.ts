@@ -30,7 +30,6 @@ import type { DaemonContext } from "./app.ts";
 import {
   createDeployScheduler,
   DEFAULT_ACTIVE_TASKS,
-  DEFAULT_DEPLOY_CREDIT_MB,
   DEFAULT_PROJECT_ACTIVE_TASKS,
   DEFAULT_PROJECT_QUEUED_TASKS,
   DEFAULT_PROJECT_STAGED_BYTES,
@@ -101,8 +100,7 @@ export interface DeployMeta {
 export interface DeployServiceOptions {
   /** Defaults to {@link DEFAULT_HISTORY}. */
   history?: number;
-  scheduler?: Omit<DeploySchedulerOptions, "credits" | "creditMb"> &
-    Partial<Pick<DeploySchedulerOptions, "credits" | "creditMb">>;
+  scheduler?: DeploySchedulerOptions;
 }
 
 export interface DeployService {
@@ -143,15 +141,7 @@ export function createDeployService(
   const history = Math.max(1, opts?.history ?? DEFAULT_HISTORY);
   const deploy = daemon.config.deploy;
   const schedulerOptions = opts?.scheduler;
-  const credits = schedulerOptions?.credits ?? daemon.credits;
-  if (credits === undefined) {
-    throw new ScafoError("invalid-input", "Missing deploy credit controller", {
-      detail: "deploy admission requires the node-wide credit controller",
-    });
-  }
   const scheduler = createDeployScheduler({
-    credits,
-    creditMb: schedulerOptions?.creditMb ?? deploy?.creditMb ?? DEFAULT_DEPLOY_CREDIT_MB,
     artifactBytes: deploy?.artifactBytes ?? DEFAULT_ARTIFACT_BYTES,
     activeTasks: deploy?.activeTasks ?? DEFAULT_ACTIVE_TASKS,
     projectActiveTasks: deploy?.projectActiveTasks ?? DEFAULT_PROJECT_ACTIVE_TASKS,

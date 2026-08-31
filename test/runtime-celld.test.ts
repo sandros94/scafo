@@ -17,24 +17,10 @@ describe("celld process specs", () => {
     expect(spec.env).not.toHaveProperty("CELLD_MAX_RESIDENT_CELLS");
   });
 
-  it("keeps celld bounds aligned with transitional Scafo admission", () => {
-    const spec = createCelldDriver({}).processSpec(
-      specInput({
-        maxRssMb: 384,
-        capacity: {
-          cores: 2,
-          memMb: 4096,
-          cgroup: true,
-          threads: 2,
-          isolates: 2,
-          rssBudgetMb: 3276,
-          maxRssMbPerProcess: 512,
-          maxResidentCells: 12,
-          maxConcurrentWakes: 2,
-          probedAt: "2026-01-01T00:00:00.000Z",
-        },
-      }),
-    );
+  it("passes operator-owned celld resource policy through unchanged", () => {
+    const spec = createCelldDriver({
+      operatorEnv: { CELLD_MAX_RSS_MB: "384", CELLD_MAX_RESIDENT_CELLS: "12" },
+    }).processSpec(specInput());
     expect(spec.env).toMatchObject({
       CELLD_MAX_RSS_MB: "384",
       CELLD_MAX_RESIDENT_CELLS: "12",
@@ -56,6 +42,8 @@ describe("celld process specs", () => {
       ).toThrow(expect.objectContaining({ code: "invalid-input" }));
     }
     expect(RESERVED_ENV).toContain("CELLD_VARS_FILE");
+    expect(RESERVED_ENV).not.toContain("CELLD_MAX_RSS_MB");
+    expect(RESERVED_ENV).not.toContain("CELLD_MAX_RESIDENT_CELLS");
   });
 });
 

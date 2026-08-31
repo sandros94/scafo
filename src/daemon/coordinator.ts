@@ -176,8 +176,7 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
     if (observe === undefined) return;
     const next = new Map<string, string>();
     for (const failure of assignment.unplaced) {
-      if (failure.pending === undefined) continue;
-      const fingerprint = JSON.stringify(failure.pending);
+      const fingerprint = JSON.stringify({ reason: failure.reason, detail: failure.detail });
       next.set(failure.target, fingerprint);
       if (rememberedPending.get(failure.target) === fingerprint) continue;
       const [project, env] = failure.target.split("/");
@@ -186,7 +185,7 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
         type: "placement.pending",
         project,
         env,
-        reason: failure.pending.reason,
+        reason: failure.reason,
       });
     }
     /* A resolution must forget the old state: recurrence is another real event. */

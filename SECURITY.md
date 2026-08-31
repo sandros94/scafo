@@ -55,10 +55,10 @@ buckets and host or VM security boundaries.
   [security guidance](https://github.com/denoland/celld/blob/main/docs/security.md).
 - Deploy admission bounds compressed and expanded artifact bytes, archive
   entries, retained builder output, node and project concurrency and queue
-  depth, node and project staged bytes, receive, queue, and task deadlines, and
-  node-wide deploy-memory credits. These configurable application-level limits
-  are not OS isolation; apply external host or container limits for CPU, memory,
-  processes, filesystem use, and networking.
+  depth, node and project staged bytes, and receive, queue, and task deadlines.
+  These configurable application-level limits are not OS isolation and do not
+  admit work against available memory; apply external host or container limits
+  for CPU, memory, processes, filesystem use, and networking.
 - On `SIGINT` or `SIGTERM`, `scafo sail` closes deploy admission, cancels staged,
   queued, and active deploy work, joins builder process-group cleanup, then
   drains supervised runtimes. Manual `scafo sail` remains development-only for

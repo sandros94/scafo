@@ -5,10 +5,8 @@ import {
   type DeployScheduler,
   type DeploySchedulerOptions,
 } from "../src/daemon/_deploy-scheduler.ts";
-import { createCreditController, type CreditController } from "../src/daemon/_credit-controller.ts";
 
-const baseLimits: Omit<DeploySchedulerOptions, "credits"> = {
-  creditMb: 1,
+const baseLimits: DeploySchedulerOptions = {
   artifactBytes: 100,
   activeTasks: 2,
   projectActiveTasks: 1,
@@ -20,14 +18,9 @@ const baseLimits: Omit<DeploySchedulerOptions, "credits"> = {
   queueTimeoutMs: 600_000,
   taskTimeoutMs: 300_000,
 };
-const defaultCreditAccount = createCreditController({
-  allocatableMb: 100_000,
-  surgeMb: 1,
-}).account;
 
 function limits(overrides: Partial<DeploySchedulerOptions> = {}): DeploySchedulerOptions {
   return {
-    credits: createCreditController({ allocatableMb: 100_000, surgeMb: 1 }),
     ...baseLimits,
     ...overrides,
   };
@@ -36,15 +29,6 @@ function limits(overrides: Partial<DeploySchedulerOptions> = {}): DeploySchedule
 afterEach(() => vi.useRealTimers());
 
 describe("deploy scheduler accounting", () => {
-  it("requires a shared controller and a positive active-deploy credit", () => {
-    expect(() => createDeployScheduler(limits({ credits: undefined as never }))).toThrow(
-      expect.objectContaining({ code: "invalid-input" }),
-    );
-    expect(() => createDeployScheduler(limits({ creditMb: 0 }))).toThrow(
-      expect.objectContaining({ code: "invalid-input" }),
-    );
-  });
-
   it("reserves global and project count and bytes atomically", () => {
     const scheduler = createDeployScheduler(limits({ queuedTasks: 2 }));
     scheduler.reserve("one");
@@ -54,7 +38,6 @@ describe("deploy scheduler accounting", () => {
       expect.objectContaining({ code: "deploy-overloaded", status: 429 }),
     );
     expect(scheduler.usage()).toEqual({
-      credit: defaultCreditAccount,
       activeTasks: 0,
       queuedTasks: 2,
       stagedBytes: 200,
@@ -159,63 +142,6 @@ describe("deploy scheduler accounting", () => {
 });
 
 describe("deploy scheduler ordering", () => {
-  it("holds deploy credit through cleanup and dispatches the blocked head on release", async () => {
-    const credits = createCreditController({ allocatableMb: 49, surgeMb: 10 });
-    const scheduler = createDeployScheduler(
-      limits({
-        credits,
-        creditMb: 20,
-      }),
-    );
-    const firstGate = deferred<void>();
-    const cleanup = deferred<void>();
-    const first = scheduler
-      .reserve("one")
-      .enqueue(staged(1, cleanup.promise), async () => firstGate.promise);
-    const second = scheduler.reserve("two").enqueue(staged(1), async () => "second");
-
-    await settle();
-    expect(scheduler.usage()).toMatchObject({ activeTasks: 1, queuedTasks: 1 });
-    expect(credits.account).toMatchObject({ deployMb: 20 });
-
-    firstGate.resolve();
-    await settle();
-    expect(credits.account).toMatchObject({ deployMb: 20 });
-    cleanup.resolve();
-    await first.completion;
-    await expect(second.completion).resolves.toBe("second");
-    expect(credits.account).toMatchObject({ deployMb: 0 });
-  });
-
-  it("retries a credit-starved head synchronously when transition credit releases", async () => {
-    const credits = createCreditController({ allocatableMb: 49, surgeMb: 10 });
-    const transition = credits.tryReserveTransition({
-      owner: { namespace: "process", id: "transition" },
-      mb: 30,
-    });
-    const scheduler = createDeployScheduler(limits({ credits, creditMb: 20 }));
-    const task = scheduler.reserve("one").enqueue(staged(1), async () => "started");
-
-    await settle();
-    expect(scheduler.usage()).toMatchObject({ activeTasks: 0, queuedTasks: 1 });
-    transition?.release();
-
-    await expect(task.completion).resolves.toBe("started");
-  });
-
-  it("retries a credit-starved head synchronously when a runtime snapshot shrinks", async () => {
-    const credits = createCreditController({ allocatableMb: 49, surgeMb: 10 });
-    credits.replaceRuntime([{ owner: { namespace: "process", id: "old" }, mb: 20 }]);
-    const scheduler = createDeployScheduler(limits({ credits, creditMb: 20 }));
-    const task = scheduler.reserve("one").enqueue(staged(1), async () => "started");
-
-    await settle();
-    expect(scheduler.usage()).toMatchObject({ activeTasks: 0, queuedTasks: 1 });
-    credits.replaceRuntime([]);
-
-    await expect(task.completion).resolves.toBe("started");
-  });
-
   it("is per-project FIFO and round-robin across ready projects", async () => {
     const scheduler = createDeployScheduler(limits({ activeTasks: 1 }));
     const gate = deferred<void>();
@@ -294,30 +220,6 @@ describe("deploy scheduler deadlines and cleanup", () => {
     await running.completion;
   });
 
-  it("expires credit-starved queued work without polling and releases staged accounting", async () => {
-    vi.useFakeTimers();
-    const credits = createCreditController({ allocatableMb: 49, surgeMb: 10 });
-    const transition = credits.tryReserveTransition({
-      owner: { namespace: "process", id: "transition" },
-      mb: 30,
-    });
-    const scheduler = createDeployScheduler(
-      limits({
-        credits,
-        creditMb: 20,
-        queueTimeoutMs: 100,
-      }),
-    );
-    const artifact = staged(1);
-    const task = scheduler.reserve("one").enqueue(artifact, async () => "must not run");
-
-    await vi.advanceTimersByTimeAsync(100);
-    await expect(task.completion).rejects.toMatchObject({ code: "deploy-timeout" });
-    expect(artifact.disposals).toBe(1);
-    expect(scheduler.usage()).toMatchObject({ activeTasks: 0, queuedTasks: 0, stagedBytes: 0 });
-    transition?.release();
-  });
-
   it("makes stop join disposal already started by queue expiry", async () => {
     vi.useFakeTimers();
     const scheduler = createDeployScheduler(
@@ -388,9 +290,8 @@ describe("deploy scheduler deadlines and cleanup", () => {
     expect(scheduler.usage()).toMatchObject({ activeTasks: 1, stagedBytes: 11 });
   });
 
-  it("keeps failed-cleanup deploy credit charged until stop retries disposal", async () => {
-    const credits = createCreditController({ allocatableMb: 49, surgeMb: 10 });
-    const scheduler = createDeployScheduler(limits({ credits, creditMb: 20 }));
+  it("keeps failed-cleanup accounting until stop retries disposal", async () => {
+    const scheduler = createDeployScheduler(limits());
     let disposals = 0;
     const artifact = staged(1);
     artifact.dispose = async (): Promise<void> => {
@@ -401,51 +302,10 @@ describe("deploy scheduler deadlines and cleanup", () => {
 
     const task = scheduler.reserve("one").enqueue(artifact, async () => {});
     await expect(task.completion).rejects.toThrow("disk busy");
-    expect(credits.account).toMatchObject({ deployMb: 20 });
-
-    await scheduler.stop(new Error("node stopping"));
-    expect(credits.account).toMatchObject({ deployMb: 0 });
-  });
-
-  it("keeps accounting intact when credit release fails so stop can retry it", async () => {
-    const underlying = createCreditController({ allocatableMb: 49, surgeMb: 10 });
-    let releases = 0;
-    const credits: CreditController = {
-      get account() {
-        return underlying.account;
-      },
-      subscribe: (listener) => underlying.subscribe(listener),
-      replaceRuntime: (reservations) => underlying.replaceRuntime(reservations),
-      settleTransitions: (holds, reservations) => underlying.settleTransitions(holds, reservations),
-      tryReserveTransition: (request) => underlying.tryReserveTransition(request),
-      tryReserveDeploy(request) {
-        const hold = underlying.tryReserveDeploy(request);
-        if (hold === undefined) return undefined;
-        return {
-          release(): void {
-            releases += 1;
-            if (releases === 1) throw new Error("credit release busy");
-            hold.release();
-          },
-        };
-      },
-    };
-    const scheduler = createDeployScheduler(limits({ credits, creditMb: 20 }));
-    const task = scheduler.reserve("one").enqueue(staged(1), async () => {});
-
-    await expect(task.completion).rejects.toThrow("credit release busy");
     expect(scheduler.usage()).toMatchObject({ activeTasks: 1, stagedBytes: 1 });
-    expect(credits.account).toMatchObject({ deployMb: 20 });
 
     await scheduler.stop(new Error("node stopping"));
-    expect(scheduler.usage()).toEqual({
-      credit: credits.account,
-      activeTasks: 0,
-      queuedTasks: 0,
-      stagedBytes: 0,
-      projects: {},
-    });
-    expect(credits.account).toMatchObject({ deployMb: 0 });
+    expect(scheduler.usage()).toEqual(emptyUsage());
   });
 
   it("stop closes admission, aborts receiving/active, disposes queued, and awaits cleanup", async () => {
@@ -478,103 +338,6 @@ describe("deploy scheduler deadlines and cleanup", () => {
     await expect(active.completion).rejects.toThrow("node stopping");
     await expect(queued.completion).rejects.toThrow("node stopping");
     expect(scheduler.usage()).toEqual(emptyUsage());
-  });
-
-  it("unsubscribes on stop so a later credit release cannot dispatch queued work", async () => {
-    const credits = createCreditController({ allocatableMb: 49, surgeMb: 10 });
-    const transition = credits.tryReserveTransition({
-      owner: { namespace: "process", id: "transition" },
-      mb: 30,
-    });
-    const scheduler = createDeployScheduler(limits({ credits, creditMb: 20 }));
-    const artifact = staged(1);
-    const task = scheduler.reserve("one").enqueue(artifact, async () => "must not run");
-
-    await settle();
-    await scheduler.stop(new Error("node stopping"));
-    transition?.release();
-
-    await expect(task.completion).rejects.toThrow("node stopping");
-    expect(artifact.disposals).toBe(1);
-    expect(scheduler.usage()).toMatchObject({ activeTasks: 0, queuedTasks: 0 });
-  });
-
-  it("does not activate a queued job when a credit observer stops the scheduler", async () => {
-    const credits = createCreditController({ allocatableMb: 49, surgeMb: 10 });
-    const scheduler = createDeployScheduler(limits({ credits, creditMb: 20 }));
-    let ran = false;
-    let stopping: Promise<void> | undefined;
-    credits.subscribe(() => {
-      if (credits.account.deployMb > 0 && stopping === undefined) {
-        stopping = scheduler.stop(new Error("observer stopped node"));
-      }
-    });
-
-    const task = scheduler.reserve("one").enqueue(staged(1), async () => {
-      ran = true;
-    });
-
-    await stopping;
-    await expect(task.completion).rejects.toThrow("observer stopped node");
-    expect(ran).toBe(false);
-    expect(credits.account).toMatchObject({ deployMb: 0 });
-    expect(scheduler.usage()).toEqual({
-      credit: credits.account,
-      activeTasks: 0,
-      queuedTasks: 0,
-      stagedBytes: 0,
-      projects: {},
-    });
-  });
-
-  it("retries credit release when an observer stops admission during reservation", async () => {
-    const underlying = createCreditController({ allocatableMb: 49, surgeMb: 10 });
-    let releases = 0;
-    const credits: CreditController = {
-      get account() {
-        return underlying.account;
-      },
-      subscribe: (listener) => underlying.subscribe(listener),
-      replaceRuntime: (reservations) => underlying.replaceRuntime(reservations),
-      settleTransitions: (holds, reservations) => underlying.settleTransitions(holds, reservations),
-      tryReserveTransition: (request) => underlying.tryReserveTransition(request),
-      tryReserveDeploy(request) {
-        const hold = underlying.tryReserveDeploy(request);
-        if (hold === undefined) return undefined;
-        return {
-          release(): void {
-            releases += 1;
-            if (releases === 1) throw new Error("credit release busy");
-            hold.release();
-          },
-        };
-      },
-    };
-    const scheduler = createDeployScheduler(limits({ credits, creditMb: 20 }));
-    let ran = false;
-    let stopping: Promise<void> | undefined;
-    credits.subscribe(() => {
-      if (credits.account.deployMb > 0 && stopping === undefined) {
-        stopping = scheduler.stop(new Error("observer stopped node"));
-      }
-    });
-
-    const task = scheduler.reserve("one").enqueue(staged(1), async () => {
-      ran = true;
-    });
-
-    await stopping;
-    await expect(task.completion).rejects.toThrow("credit release busy");
-    expect(ran).toBe(false);
-    expect(releases).toBe(2);
-    expect(credits.account).toMatchObject({ deployMb: 0 });
-    expect(scheduler.usage()).toEqual({
-      credit: credits.account,
-      activeTasks: 0,
-      queuedTasks: 0,
-      stagedBytes: 0,
-      projects: {},
-    });
   });
 });
 
@@ -609,7 +372,6 @@ function enqueue(
 
 function emptyUsage(): ReturnType<DeployScheduler["usage"]> {
   return {
-    credit: defaultCreditAccount,
     activeTasks: 0,
     queuedTasks: 0,
     stagedBytes: 0,

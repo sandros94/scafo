@@ -59,7 +59,7 @@ describe("what an event is stamped with", () => {
       type: "placement.pending",
       project: "shop",
       env: "preview",
-      reason: "insufficient-capacity",
+      reason: "placement-unavailable",
     });
 
     expect(observe.snapshot().events[0]).toEqual({
@@ -67,7 +67,7 @@ describe("what an event is stamped with", () => {
       type: "placement.pending",
       project: "shop",
       env: "preview",
-      reason: "insufficient-capacity",
+      reason: "placement-unavailable",
     });
   });
 });

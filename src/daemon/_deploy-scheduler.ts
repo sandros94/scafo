@@ -1,10 +1,7 @@
 import { ScafoError } from "../core/error.ts";
-import type { CreditAccount } from "../core/capacity/credits.ts";
 import type { StagedArtifact } from "../core/types/deploy.ts";
-import type { CreditController, CreditHold, CreditOwner } from "./_credit-controller.ts";
 
 export const DEFAULT_ACTIVE_TASKS: number = 1;
-export const DEFAULT_DEPLOY_CREDIT_MB: number = 1024;
 export const DEFAULT_PROJECT_ACTIVE_TASKS: number = 1;
 export const DEFAULT_QUEUED_TASKS: number = 4;
 export const DEFAULT_PROJECT_QUEUED_TASKS: number = 2;
@@ -16,10 +13,6 @@ export const DEFAULT_TASK_TIMEOUT_MS: number = 300_000;
 export const DEFAULT_OUTPUT_BYTES: number = 65_536;
 
 export interface DeploySchedulerOptions {
-  /** The node-wide controller active deploy work must reserve against. */
-  credits: CreditController;
-  /** Whole MiB one active deploy reserves until its staged artifact is gone. */
-  creditMb: number;
   artifactBytes: number;
   activeTasks: number;
   projectActiveTasks: number;
@@ -40,7 +33,7 @@ export interface DeployReservation {
   readonly project: string;
   signal: AbortSignal;
   cancel(reason?: unknown): void;
-  /** Disposes a completed artifact rejected before enqueue, then releases capacity. */
+  /** Disposes a completed artifact rejected before enqueue, then releases its slot and bytes. */
   discard(artifact: StagedArtifact, reason?: unknown): Promise<void>;
   enqueue<T>(
     artifact: StagedArtifact,
@@ -49,8 +42,6 @@ export interface DeployReservation {
 }
 
 export interface DeploySchedulerUsage {
-  /** The shared node account, for typed observability without message parsing. */
-  credit: Readonly<CreditAccount>;
   activeTasks: number;
   queuedTasks: number;
   stagedBytes: number;
@@ -70,8 +61,6 @@ export interface DeployScheduler {
 }
 
 interface Job {
-  creditOwner: CreditOwner;
-  credit?: CreditHold;
   project: string;
   artifact: StagedArtifact;
   byteLength: number;
@@ -117,9 +106,6 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
   let stopPromise: Promise<void> | undefined;
   let dispatching = false;
   let dispatchRequested = false;
-  const unsubscribe = options.credits.subscribe(() => dispatch());
-  const schedulerId = nextSchedulerId++;
-  let nextJobId = 0;
 
   const stateOf = (project: string): ProjectState => {
     let state = projects.get(project);
@@ -153,11 +139,6 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
     if (state === undefined || state.activeTasks <= 0 || state.stagedBytes < job.byteLength) {
       throw new Error("deploy scheduler active accounting underflow");
     }
-    /* Release the external reservation before mutating local accounting. If the
-       controller refuses, stop can retry the intact active job without lying
-       about either resource. */
-    job.credit?.release();
-    job.credit = undefined;
     activeTasks -= 1;
     stagedBytes -= job.byteLength;
     state.activeTasks -= 1;
@@ -167,10 +148,6 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
   };
 
   const releaseQueuedJob = (job: Job): void => {
-    /* A synchronous stop may claim a queued job while dispatch is acquiring its
-       hold. The job owns that hold through cleanup, just like active work. */
-    job.credit?.release();
-    job.credit = undefined;
     releaseQueued(job.project, job.byteLength);
   };
 
@@ -292,24 +269,6 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
           const job = state.queue[0];
           if (job === undefined || job.phase !== "queued") continue;
 
-          const credit = options.credits.tryReserveDeploy({
-            owner: job.creditOwner,
-            mb: options.creditMb,
-          });
-          if (credit === undefined) {
-            state.ready = true;
-            ready.unshift(project);
-            break;
-          }
-          job.credit = credit;
-
-          /* Reservation notifies synchronously. A listener may close the
-             scheduler and hand this queued job to stop cleanup before the hold
-             returns, so activation must prove it still owns the same head. */
-          if (closed || state.queue[0] !== job || job.phase !== "queued") {
-            continue;
-          }
-
           state.queue.shift();
           queuedTasks -= 1;
           state.queuedTasks -= 1;
@@ -426,10 +385,6 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
           const settled = Promise.withResolvers<unknown>();
           settled.promise.catch(() => {});
           const job: Job = {
-            creditOwner: {
-              namespace: "deploy",
-              id: `${String(schedulerId)}:${String(nextJobId++)}`,
-            },
             project,
             artifact,
             byteLength: artifact.byteLength,
@@ -467,7 +422,6 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
         });
       }
       return {
-        credit: options.credits.account,
         activeTasks,
         queuedTasks,
         stagedBytes,
@@ -478,7 +432,6 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
     stop(reason): Promise<void> {
       if (stopPromise !== undefined) return stopPromise;
       closed = true;
-      unsubscribe();
       stopPromise = (async (): Promise<void> => {
         if (queueTimer !== undefined) clearTimeout(queueTimer);
         const receivingCleanup: Promise<void>[] = [];
@@ -530,18 +483,7 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
 }
 
 function validateOptions(options: DeploySchedulerOptions): void {
-  if (
-    typeof options.credits !== "object" ||
-    options.credits === null ||
-    typeof options.credits.subscribe !== "function" ||
-    typeof options.credits.tryReserveDeploy !== "function"
-  ) {
-    throw new ScafoError("invalid-input", "Invalid deploy credit controller", {
-      detail: "deploy scheduling requires a shared credit controller",
-    });
-  }
   for (const name of [
-    "creditMb",
     "artifactBytes",
     "activeTasks",
     "projectActiveTasks",
@@ -581,8 +523,6 @@ function validateOptions(options: DeploySchedulerOptions): void {
     });
   }
 }
-
-let nextSchedulerId = 1;
 
 function assertByteLength(value: number, maximum: number): void {
   if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {

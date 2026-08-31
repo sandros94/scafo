@@ -89,21 +89,6 @@ describe("isNodeLive", () => {
     expect(isNodeLive(record, at(5000), { windowMs: 10_000 })).toBe(true);
   });
 
-  it("falls back to the capacity probe on a record from a node that beats none", () => {
-    /* A rolling upgrade: the node is running an older build that never wrote a
-       heartbeat, and reading the fleet as empty would be the worse answer. */
-    const record = node(NODE_A, { probedAt: iso(0) });
-
-    expect(isNodeLive(record, at(1000))).toBe(true);
-    expect(isNodeLive(record, at(NODE_LIVENESS_WINDOW_MS))).toBe(false);
-  });
-
-  it("prefers the heartbeat over the probe when the record carries both", () => {
-    const record = node(NODE_A, { heartbeatAt: iso(NODE_LIVENESS_WINDOW_MS), probedAt: iso(0) });
-
-    expect(isNodeLive(record, at(NODE_LIVENESS_WINDOW_MS + 1000))).toBe(true);
-  });
-
   it("refuses a record that says nothing about when the node was last seen", () => {
     /* Guessing "recently" would hand environments to a node that may be years
        gone; the record carries no evidence either way. */
@@ -114,7 +99,7 @@ describe("isNodeLive", () => {
 
 describe("heartbeatNode", () => {
   it("touches the heartbeat and nothing else in the record", async () => {
-    const registered = await registerNode(clock.ctx, node(NODE_A, { probedAt: iso(0) }));
+    const registered = await registerNode(clock.ctx, node(NODE_A, {}));
     clock.tick(NODE_HEARTBEAT_INTERVAL_MS);
 
     const at = await heartbeatNode(clock.ctx, NODE_A);
@@ -466,15 +451,12 @@ describe("createEnvironment", () => {
 });
 
 /** A node record with whatever evidence of life the case is about. */
-function node(id: string, opts: { heartbeatAt?: string; probedAt?: string }): NodeRecord {
+function node(id: string, opts: { heartbeatAt?: string }): NodeRecord {
   return {
     v: 1,
     id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: "key" },
     addresses: { internal: "10.0.0.1", apiPort: 7400 },
-    ...(opts.probedAt === undefined
-      ? {}
-      : { capacity: { cores: 4, memMb: 8192, cgroup: false, probedAt: opts.probedAt } }),
     ...(opts.heartbeatAt === undefined ? {} : { heartbeatAt: opts.heartbeatAt }),
   };
 }

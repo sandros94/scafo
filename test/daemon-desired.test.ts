@@ -55,7 +55,7 @@ beforeEach(async () => {
 });
 
 describe("an environment nobody has placed", () => {
-  it("is not served by a credit-capable daemon until placement is explicit", async () => {
+  it("is not served by a current daemon until placement is explicit", async () => {
     const state = await readDesired(registry, { nodeId: SELF, mode: "required" });
 
     expect(state.environments).toEqual([]);

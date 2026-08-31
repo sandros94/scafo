@@ -7,7 +7,6 @@
  */
 
 import { createPortAllocator } from "../core/placement/ports.ts";
-import { ScafoError } from "../core/error.ts";
 import { planReconcile, type ReconcileAction } from "../core/placement/reconcile.ts";
 import { countingRegistry, storeOpsOf } from "../core/registry/counting.ts";
 import type { RuntimeDriver, RuntimeProcess } from "../core/types/runtime.ts";
@@ -15,7 +14,6 @@ import { type PlacementView, readDesired } from "./_desired.ts";
 import { createExecutor, failureOf, type ReconcileFailure } from "./_execute.ts";
 import { applyIngress } from "./_ingress.ts";
 import type { DaemonContext } from "./app.ts";
-import { DEFAULT_RUNTIME_CREDIT_MB } from "./_credit-controller.ts";
 
 export type { PlacementView } from "./_desired.ts";
 export type { ReconcileFailure } from "./_execute.ts";
@@ -91,12 +89,6 @@ export function createReconciler(
   driver: RuntimeDriver,
   opts?: ReconcilerOptions,
 ): Reconciler {
-  if (daemon.credits === undefined) {
-    throw new ScafoError("invalid-input", "Missing node credit controller", {
-      detail: "reconciliation requires the node-wide credit controller",
-    });
-  }
-  const credits = daemon.credits;
   const intervalMs = opts?.intervalMs ?? DEFAULT_RECONCILE_INTERVAL_MS;
 
   const observe = daemon.observability;
@@ -124,8 +116,6 @@ export function createReconciler(
   });
 
   let timer: ReturnType<typeof setInterval> | null = null;
-  let unsubscribeCredits: (() => void) | undefined;
-  let runtimeAvailableMb = credits.account.runtimeAvailableMb;
   let inFlight = false;
   let terminal = false;
   let activePass: Promise<ReconcileAction[]> | undefined;
@@ -174,12 +164,6 @@ export function createReconciler(
       }
 
       const actual = executor.currentProcesses();
-      credits.replaceRuntime(
-        actual.map((process) => ({
-          owner: { namespace: "process", id: process.processId },
-          mb: daemon.config.runtime.creditMb ?? DEFAULT_RUNTIME_CREDIT_MB,
-        })),
-      );
       plan = planReconcile({
         desired,
         actual,
@@ -278,13 +262,6 @@ export function createReconciler(
     start(): void {
       if (terminal || timer !== null) return;
 
-      runtimeAvailableMb = credits.account.runtimeAvailableMb;
-      unsubscribeCredits = credits.subscribe((): void => {
-        const next = credits.account.runtimeAvailableMb;
-        const increased = next > runtimeAvailableMb;
-        runtimeAvailableMb = next;
-        if (increased) kick();
-      });
       timer = setInterval(() => void startPass(false), intervalMs);
       /* The loop must never be the reason the process stays alive. */
       const handle = timer as { unref?: () => void };
@@ -295,23 +272,18 @@ export function createReconciler(
       if (timer === null) return;
       clearInterval(timer);
       timer = null;
-      unsubscribeCredits?.();
-      unsubscribeCredits = undefined;
     },
 
     shutdown(): Promise<void> {
       if (shutdown !== undefined) return shutdown;
       /* Synchronous closure matters: Sail awaits bucket and lease work before
-         this call, and neither a timer nor a credit release may start
-         runtime work in that gap or after it. */
+         this call, and no timer may start runtime work in that gap or after it. */
       terminal = true;
       kicked = false;
       if (timer !== null) {
         clearInterval(timer);
         timer = null;
       }
-      unsubscribeCredits?.();
-      unsubscribeCredits = undefined;
       activeAbort?.abort(new Error("Reconciler is shutting down"));
       shutdown = (activePass ?? Promise.resolve()).then(() => {});
       return shutdown;

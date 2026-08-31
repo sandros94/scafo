@@ -5,7 +5,6 @@
  * together.
  */
 
-import type { CapacityPlan } from "../capacity/compute.ts";
 import type { EnvironmentRecord, PlainVarset } from "./registry.ts";
 import type { ProcessSpec } from "./supervisor.ts";
 
@@ -62,10 +61,6 @@ export interface RuntimeSpecInput {
   vars: PlainVarset | null;
   ports: { public: number; internal: number };
   node: RuntimeNodeInput;
-  /** Transitional node capacity bounds; removed with Scafo credit admission. */
-  capacity?: CapacityPlan;
-  /** RSS credit reserved for this process while Scafo owns admission. */
-  maxRssMb?: number;
   /**
    * Environment the process starts from, before the driver adds its own settings.
    *

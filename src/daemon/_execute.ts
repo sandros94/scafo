@@ -8,7 +8,6 @@ import type { RuntimeDriver, RuntimeProcess, RuntimeSpecInput } from "../core/ty
 import { openEnvironmentVars } from "./_desired.ts";
 import type { DaemonContext } from "./app.ts";
 import { advertisedAddress } from "./config.ts";
-import { DEFAULT_RUNTIME_CREDIT_MB } from "./_credit-controller.ts";
 
 const UNKNOWN_PORT = 0;
 
@@ -41,15 +40,7 @@ export interface Executor {
 export function createExecutor(deps: ExecutorDeps): Executor {
   const { daemon, registry, driver, baseEnv, known } = deps;
   const observe = daemon.observability;
-  if (daemon.credits === undefined) {
-    throw new ScafoError("invalid-input", "Missing node credit controller");
-  }
-  const credits = daemon.credits;
   const quarantined = new Set<string>();
-  const transitions: {
-    hold: import("./_credit-controller.ts").CreditHold;
-    processId: string;
-  }[] = [];
 
   async function runStart(
     action: Extract<ReconcileAction, { type: "start" }>,
@@ -62,22 +53,10 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     if (entry === undefined || entry.env.deployment === null) return;
 
     const processId = formatProcessId({ project: action.project, env: action.env });
-    const creditMb = daemon.config.runtime.creditMb ?? DEFAULT_RUNTIME_CREDIT_MB;
-    const transition = credits.tryReserveTransition({
-      owner: { namespace: "process", id: processId },
-      mb: creditMb,
-    });
-    if (transition === undefined) {
-      throw new ScafoError("capacity-unavailable", "Runtime credit is unavailable", {
-        detail: `this node cannot admit ${String(creditMb)}MiB for "${processId}" yet`,
-      });
-    }
-    transitions.push({ hold: transition, processId });
-
     const input = await runtimeInput(entry, action.ports);
     const spec = driver.processSpec(input);
     if (spec.id !== processId) {
-      throw new ScafoError("invalid-input", "Runtime process id does not match credit owner");
+      throw new ScafoError("invalid-input", "Runtime process id does not match environment");
     }
     const started: RuntimeProcess = {
       processId,
@@ -217,8 +196,6 @@ export function createExecutor(deps: ExecutorDeps): Executor {
         advertiseHost: advertisedAddress(daemon.config.node).host,
         bindHost: daemon.config.runtime.bindHost,
       },
-      capacity: daemon.capacity,
-      maxRssMb: daemon.config.runtime.creditMb ?? DEFAULT_RUNTIME_CREDIT_MB,
       baseEnv,
     };
   }
@@ -238,22 +215,6 @@ export function createExecutor(deps: ExecutorDeps): Executor {
           pending.push(failureOf(error, { action: action.type, subject: subjectOf(action) }));
         }
       }
-
-      const actual = this.currentProcesses();
-      const running = new Set(actual.map((process) => process.processId));
-      const live = transitions.filter((entry) => running.has(entry.processId));
-      const snapshot = actual.map((process) => ({
-        owner: { namespace: "process", id: process.processId },
-        mb: daemon.config.runtime.creditMb ?? DEFAULT_RUNTIME_CREDIT_MB,
-      }));
-      if (live.length > 0) {
-        credits.settleTransitions(
-          live.map((entry) => entry.hold),
-          snapshot,
-        );
-      } else credits.replaceRuntime(snapshot);
-      for (const entry of transitions) if (!running.has(entry.processId)) entry.hold.release();
-      transitions.length = 0;
     },
 
     currentProcesses(): RuntimeProcess[] {
@@ -296,9 +257,6 @@ export function failureOf(
     at: new Date().toISOString(),
     ...about,
     detail: describeError(error),
-    ...(error instanceof ScafoError && error.code === "capacity-unavailable"
-      ? { code: error.code }
-      : {}),
   };
 }
 

@@ -261,20 +261,16 @@ spec:
             periodSeconds: 20
             failureThreshold: 3
           resources:
-            # THE MEMORY LIMIT IS PLANNED FROM. THE CORES ARE NOT, UNLESS SAID.
+            # THESE ARE KUBERNETES LIMITS, NOT SCAFO PLACEMENT INPUTS.
             #
-            # The node plans its capacity — how many cells it will hold and what
-            # RSS budget it gives them — by reading its own cgroup. A memory
-            # limit is what writes `memory.max`, so the 2Gi below really is the
-            # number the memory side of that plan is done from, and a pod with
-            # none plans against the whole machine's memory.
+            # Scafo does not derive placement or deploy admission from this
+            # cgroup. Kubernetes enforces the pod's CPU and memory boundary;
+            # celld-specific resource policy, when needed, belongs in
+            # SCAFO_CELLD_ENV (or runtime.celldEnv in the config file).
             #
-            # The CPU side is not capped here at all, and A REQUEST IS A SHARE
-            # RATHER THAN A CEILING: it writes no `cpu.max`, so every pod reads
-            # the host's core count and plans against all of it — on a 2-vCPU
-            # machine, two pods each plan for 2 cores. Add `limits.cpu` if the
-            # plan should match the slice the pod actually gets; the cost is
-            # being throttled at it, which is why this file does not assume it.
+            # A CPU REQUEST IS A SHARE RATHER THAN A CEILING. Add `limits.cpu`
+            # if the process must be throttled at a fixed CPU allocation; this
+            # example leaves it burstable and caps memory at 2Gi.
             #
             # SIZE THIS AGAINST THE BUCKET'S LATENCY, NOT ONLY THE WORKLOAD. A
             # small node running several runtime processes against a store with

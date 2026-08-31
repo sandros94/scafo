@@ -10,7 +10,6 @@ export type ScafoErrorCode =
   | "capability-missing"
   | "placement-unavailable"
   | "project-blocked"
-  | "capacity-unavailable"
   | "draining"
   | "deploy-overloaded"
   | "deploy-timeout"
@@ -51,7 +50,6 @@ const DEFAULT_STATUS: Record<ScafoErrorCode, number> = {
      forbidden: nothing is wrong with the caller or with its key, and the same
      request works unchanged the moment the block is lifted. */
   "project-blocked": 409,
-  "capacity-unavailable": 503,
   "draining": 503,
   "deploy-overloaded": 429,
   "deploy-timeout": 408,

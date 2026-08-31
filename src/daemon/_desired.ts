@@ -92,8 +92,7 @@ export type PlacementReadMode = "required" | "legacy-fallback";
  * Legacy fallback is solely a rolling-upgrade contract: an old daemon does not
  * understand that a missing record is pending, so it retains the behaviour it
  * shipped with. New daemons state `mode: "required"` and wait for the
- * coordinator's explicit decision; that is what makes capacity-pending work
- * start nowhere without turning absence into a distributed reservation.
+ * coordinator's explicit decision.
  *
  * The LEGACY EXCEPTION is what a selector means. A selector is an explicit constraint —
  * the operator has said which nodes may run this — and the fallback exists to

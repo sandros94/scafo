@@ -44,8 +44,6 @@ const IMAGE_TAG = "scafo-e2e-k3s";
 const NAMESPACE = "scafo-e2e";
 const PLATFORM_DOMAIN = "scafo.k3s.test";
 const PROJECT = "app";
-/* A controlled 384MiB deploy fits beside one 512MiB runtime and its 512MiB surge. */
-const TEST_DEPLOY_CREDIT_MB = "384";
 const BUCKET: BucketSettings = {
   bucket: "scafo-k3s-e2e",
   prefix: "e2e",
@@ -283,13 +281,8 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
   }, TEARDOWN_TIMEOUT_MS);
 
   it(
-    "probes, deploys, proves placement, drains, and restarts through one control-plane lifecycle",
+    "deploys, proves placement, drains, and restarts through one control-plane lifecycle",
     async () => {
-      const config = await core.readNamespacedConfigMap({
-        namespace: NAMESPACE,
-        name: "scafo-node",
-      });
-      expect(config.data?.SCAFO_DEPLOY_CREDIT_MB).toBe(TEST_DEPLOY_CREDIT_MB);
       const pods = await nodes();
       expect(pods).toHaveLength(2);
       for (const pod of pods) {
@@ -337,13 +330,7 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
           if (
             new Set(nodeIds).size !== 2 ||
             !placement.value.nodes.every((id) => nodeIds.includes(id)) ||
-            !states.every(
-              (state) =>
-                state.node?.credits?.allocatableMb === 1510 &&
-                state.node.credits.runtimeMb === 512 &&
-                state.node.credits.deployMb === 384 &&
-                state.processes.filter(runsProduction).length === 1,
-            )
+            !states.every((state) => state.processes.filter(runsProduction).length === 1)
           )
             return null;
           return { placement: placement.value, nodeIds, states };
@@ -353,15 +340,9 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
         [...production.placement.nodes].sort((left, right) => left.localeCompare(right)),
       ).toEqual([...production.nodeIds].sort((left, right) => left.localeCompare(right)));
       for (const state of production.states) {
-        expect(state.node?.credits).toEqual({
-          allocatableMb: 1510,
-          runtimeMb: 512,
-          deployMb: 384,
-        });
         expect(state.processes.filter(runsProduction)).toHaveLength(1);
       }
 
-      /* Each 2Gi node-container cgroup fits one runtime plus its protected surge. */
       const retired = await runK3sCli(
         [
           "env",
@@ -511,7 +492,6 @@ async function applyManifest(): Promise<void> {
       object.data.SCAFO_S3_PREFIX = BUCKET.prefix;
       object.data.SCAFO_S3_REGION = BUCKET.region;
       object.data.SCAFO_PLATFORM_DOMAINS = PLATFORM_DOMAIN;
-      object.data.SCAFO_DEPLOY_CREDIT_MB = TEST_DEPLOY_CREDIT_MB;
     }
     if (object.kind === "Deployment" && object.metadata.name === "scafo-node") {
       const spec = object.spec as {

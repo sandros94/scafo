@@ -81,8 +81,8 @@ readonly TARGETS=(
 #                  reads for itself, and a name missing from it is not a denied
 #                  read but an uncatchable NotCapable that kills the daemon at
 #                  runtime, on whichever host first sets it
-#   --allow-sys    cgroup and host totals for capacity planning, `os.homedir()`
-#                  for the default state directory, `process.getuid()`
+#   --allow-sys    `os.homedir()` for the default state directory and
+#                  `process.getuid()`
 #
 # What is DENIED is what is left off: --allow-ffi (no dependency loads a native
 # library, and dlopen would be a way around every line above) and --allow-import

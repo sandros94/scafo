@@ -96,7 +96,7 @@ const EVERY_EVENT: ObserveEventRecord[] = [
     type: "placement.pending",
     project: "shop",
     env: "production",
-    reason: "insufficient-capacity",
+    reason: "placement-unavailable",
   }),
   event({
     type: "reconcile.pass.end",

@@ -11,12 +11,9 @@ import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { checkDomain } from "../core/registry/domains.ts";
 import { isProjectBlocked } from "../core/registry/projects.ts";
 import { isLeaseExpired } from "../core/registry/lease.ts";
-import type { CreditAccount } from "../core/capacity/credits.ts";
-import type { CreditPlacementAccount } from "../core/placement/credits.ts";
 import { coordinatorKey, environmentKey, nodeKey } from "../core/registry/paths.ts";
 import { setNodeSelector } from "../core/registry/placement.ts";
 import { retireEnvironment, unretireEnvironment } from "../core/registry/retirement.ts";
-import type { CapacityPlan } from "../core/capacity/compute.ts";
 import type { IngressDriver } from "../core/types/ingress.ts";
 import {
   DEFAULT_ARTIFACT_BYTES,
@@ -53,7 +50,6 @@ import type { Observability } from "./observe.ts";
 import type { PlacementView, Reconciler, ReconcileStatus } from "./reconcile.ts";
 import { registerStorageRoutes } from "./_storage-routes.ts";
 import type { StorageService } from "./storage.ts";
-import type { CreditController } from "./_credit-controller.ts";
 
 /** Everything the HTTP layer serves from; assembled once while the node boots. */
 export interface DaemonContext {
@@ -75,10 +71,6 @@ export interface DaemonContext {
   signingKey?: NodeSigningKey;
   /** Opens the environments' sealed varsets; without it they cannot be served. */
   varsetKey?: CryptoKey;
-  /** What this node probed about its own hardware; bounds the processes it starts. */
-  capacity?: CapacityPlan;
-  /** The node-wide memory-credit owner shared by local admission consumers. */
-  credits?: CreditController;
   /** The reconcile loop, when this node runs one. */
   reconciler?: Reconciler;
   /**
@@ -151,8 +143,6 @@ export interface CoordinatorView {
    * take a serving environment down over an unsatisfiable constraint.
    */
   unplaced?: AssignmentFailure[];
-  accounts?: CreditPlacementAccount[];
-  overcommitted?: boolean;
 }
 
 /** Body of `GET /v1/state`: what this node believes about itself right now. */
@@ -168,7 +158,6 @@ export interface DaemonState {
    * it still means.
    */
   coordinator: CoordinatorView | null;
-  credits?: CreditAccount;
   processes: ProcessStatus[];
   /**
    * Which nodes serve each environment this node has read a decision for, and
@@ -313,7 +302,6 @@ export function createNodeApp(daemon: DaemonContext): H3 {
         node: node?.value ?? null,
         lease: lease?.value ?? null,
         coordinator: coordinatorView(daemon, lease?.value ?? null),
-        ...(daemon.credits === undefined ? {} : { credits: { ...daemon.credits.account } }),
         processes: daemon.supervisor.list(),
         /* From the reads the reconcile pass already made, rather than a second
            trip to the bucket for state this node has just been told. */
@@ -521,20 +509,7 @@ function coordinatorView(
     ...(unplaced.length === 0
       ? {}
       : {
-          unplaced: unplaced.map((entry) => ({
-            ...entry,
-            ...(entry.pending === undefined ? {} : { pending: { ...entry.pending } }),
-          })),
-        }),
-    ...(assignment === undefined
-      ? {}
-      : {
-          accounts: assignment.accounts.map((account) => ({
-            id: account.id,
-            transient: { ...account.transient },
-            steady: { ...account.steady },
-          })),
-          overcommitted: assignment.overcommitted,
+          unplaced: unplaced.map((entry) => ({ ...entry })),
         }),
   };
 }

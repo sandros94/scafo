@@ -12,10 +12,8 @@ import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import type { DaemonContext } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { type Coordinator, createCoordinator } from "../src/daemon/coordinator.ts";
-import { createObservability } from "../src/daemon/observe.ts";
 import {
   acquireLease,
-  blockProject,
   createBuild,
   createEnvironment,
   createProject,
@@ -38,7 +36,6 @@ import { ctxWith, FaultStore, type ManualClock, rejectsWith } from "./_helpers.t
 
 const PROJECT = "app";
 const BUILD = "b1b1b1b1";
-const BUILD_TWO = "b2b2b2b2";
 const TTL_MS = 15_000;
 const NODE_A = "node-a";
 const NODE_B = "node-b";
@@ -404,297 +401,19 @@ describe("what the coordinator refuses to decide", () => {
   });
 });
 
-describe("credit-profile refusals", () => {
-  it("gives malformed live profiles no new work and preserves work already there", async () => {
-    await register(NODE_B, { tier: "broken" }, { allocatableMb: 100, runtimeMb: 80, deployMb: 40 });
-    await environmentNamed("kept", { nodeSelector: { tier: "broken" } });
-    await environmentNamed("fresh", { nodeSelector: { tier: "broken" } });
-    await store.put(
-      placementKey(PROJECT, "kept"),
-      JSON.stringify({
-        v: 1,
-        nodes: [NODE_B],
-        decidedAt: new Date(clock.nowMs()).toISOString(),
-        fence: 0,
-      }),
-    );
-    const before = await readPlacement(clock.ctx, PROJECT, "kept");
-
-    await coordinatorFor(NODE_A).runOnce();
-
-    expect(await readPlacement(clock.ctx, PROJECT, "kept")).toEqual(before);
-    expect(await readPlacement(clock.ctx, PROJECT, "fresh")).toBeNull();
-  });
-
-  it("leaves fresh work pending and absent when only legacy nodes are live", async () => {
-    for (const id of [NODE_A, NODE_B]) {
-      await registerNode(clock.ctx, {
-        v: 1,
-        id,
-        publicKey: { kty: "OKP", crv: "Ed25519", x: `key-${id}` },
-        addresses: { internal: `10.0.0.${id === NODE_A ? "1" : "2"}`, apiPort: 7400 },
-        heartbeatAt: new Date(clock.nowMs()).toISOString(),
-      });
-    }
-    await environmentNamed("prod");
-
-    const coordinator = coordinatorFor(NODE_A);
-    await coordinator.runOnce();
-
-    expect(await readPlacement(clock.ctx, PROJECT, "prod")).toBeNull();
-    expect(coordinator.status().lastAssignment?.unplaced).toMatchObject([
-      {
-        target: `${PROJECT}/prod`,
-        pending: {
-          reason: "insufficient-capacity",
-          requiredReplicas: "all",
-          eligibleNodes: 2,
-          capacityNodes: 0,
-        },
-      },
-    ]);
-  });
-
-  it("keeps an all placement exact when one live node loses its profile", async () => {
-    await environmentNamed("prod");
-    const coordinator = coordinatorFor(NODE_A);
-    await coordinator.runOnce();
-    const before = await readPlacement(clock.ctx, PROJECT, "prod");
-
-    await registerNode(clock.ctx, {
-      v: 1,
-      id: NODE_B,
-      publicKey: { kty: "OKP", crv: "Ed25519", x: `key-${NODE_B}` },
-      addresses: { internal: "10.0.0.2", apiPort: 7400 },
-      heartbeatAt: new Date(clock.nowMs()).toISOString(),
-    });
-    clock.tick(TTL_MS / 3);
-    await coordinator.runOnce();
-
-    expect(await readPlacement(clock.ctx, PROJECT, "prod")).toEqual(before);
-    expect(coordinator.status().lastAssignment?.unplaced[0]?.pending).toEqual({
-      reason: "profile-unavailable",
-      requiredReplicas: "all",
-      eligibleNodes: 2,
-      capacityNodes: 1,
-    });
-  });
-
-  it("fails over from a dead legacy current node to a live credited node", async () => {
-    await environmentNamed("prod");
-    await setReplicas(clock.ctx, PROJECT, "prod", 1);
-    await store.put(
-      placementKey(PROJECT, "prod"),
-      JSON.stringify({
-        v: 1,
-        nodes: [NODE_B],
-        decidedAt: new Date(clock.nowMs()).toISOString(),
-        fence: 0,
-      }),
-    );
-    await registerNode(clock.ctx, {
-      v: 1,
-      id: NODE_B,
-      publicKey: { kty: "OKP", crv: "Ed25519", x: `key-${NODE_B}` },
-      addresses: { internal: "10.0.0.2", apiPort: 7400 },
-      heartbeatAt: new Date(clock.nowMs()).toISOString(),
-    });
-    clock.tick(NODE_LIVENESS_WINDOW_MS);
-    await heartbeatNode(clock.ctx, NODE_A);
-
-    await coordinatorFor(NODE_A).runOnce();
-
-    expect((await readPlacement(clock.ctx, PROJECT, "prod"))?.nodes).toEqual([NODE_A]);
-  });
-
-  it("keeps an invalid-profile current placement pending without charging a rejected move", async () => {
-    await environmentNamed("prod");
-    await setReplicas(clock.ctx, PROJECT, "prod", 1);
-    const coordinator = coordinatorFor(NODE_A);
-    await coordinator.runOnce();
-    const before = await readPlacement(clock.ctx, PROJECT, "prod");
-    const legacy = before?.nodes[0];
-    if (legacy === undefined) throw new Error("fixture did not place prod");
-
-    await registerNode(clock.ctx, {
-      v: 1,
-      id: legacy,
-      publicKey: { kty: "OKP", crv: "Ed25519", x: `key-${legacy}` },
-      addresses: { internal: "10.0.0.9", apiPort: 7400 },
-      heartbeatAt: new Date(clock.nowMs()).toISOString(),
-    });
-    clock.tick(TTL_MS / 3);
-    await coordinator.runOnce();
-
-    expect(await readPlacement(clock.ctx, PROJECT, "prod")).toEqual(before);
-    const assignment = coordinator.status().lastAssignment;
-    expect(assignment?.unplaced[0]).toMatchObject({
-      target: `${PROJECT}/prod`,
-      reason: "capacity-unavailable",
-      pending: { requiredReplicas: 1 },
-    });
-    const valid = assignment?.accounts.find((account) => account.id !== legacy);
-    expect(valid?.transient.transitionMb).toBe(0);
-    expect(valid?.steady.runtimeMb).toBe(0);
-  });
-});
-
-describe("credit demand follows resolved process multiplicity", () => {
-  beforeEach(async () => {
-    await createBuild(clock.ctx, PROJECT, { id: BUILD_TWO });
-    await register(NODE_A, undefined, { allocatableMb: 70, runtimeMb: 20, deployMb: 1 });
-    clock.tick(NODE_LIVENESS_WINDOW_MS);
-    await heartbeatNode(clock.ctx, NODE_A);
-  });
-
-  it("charges deployed ephemeral environments and not environments with no build", async () => {
-    await register(NODE_A, undefined, { allocatableMb: 60, runtimeMb: 20, deployMb: 1 });
-    await environmentNamed("a", { ephemeral: true });
-    await createEnvironment(clock.ctx, PROJECT, { name: "b" });
-    await environmentNamed("c");
-    for (const env of ["a", "b", "c"]) await setReplicas(clock.ctx, PROJECT, env, 1);
-    clock.tick(1000);
-    await heartbeatNode(clock.ctx, NODE_A);
-
-    const coordinator = coordinatorFor(NODE_A);
-    await coordinator.runOnce();
-
-    for (const env of ["a", "c"]) {
-      expect((await readPlacement(clock.ctx, PROJECT, env))?.nodes).toEqual([NODE_A]);
-    }
-    expect((await readPlacement(clock.ctx, PROJECT, "b"))?.nodes).toEqual([NODE_A]);
-    expect(coordinator.status().lastAssignment?.accounts[0]?.steady.runtimeMb).toBe(40);
-  });
-});
-
-describe("one fleet-wide credit plan", () => {
-  it("admits one deterministic project and leaves the other pending on a constrained fleet", async () => {
-    const other = "blog";
-    await environmentNamed("prod");
-    await setReplicas(clock.ctx, PROJECT, "prod", 1);
-    await createProject(clock.ctx, { slug: other });
-    await createBuild(clock.ctx, other, { id: BUILD });
-    await createEnvironment(clock.ctx, other, { name: "prod" });
-    await recordDeployment(clock.ctx, other, "prod", BUILD);
-    await setReplicas(clock.ctx, other, "prod", 1);
-    await registerNode(clock.ctx, {
-      v: 1,
-      id: NODE_A,
-      publicKey: { kty: "OKP", crv: "Ed25519", x: `key-${NODE_A}` },
-      addresses: { internal: "10.0.0.1", apiPort: 7400 },
-      heartbeatAt: new Date(clock.nowMs()).toISOString(),
-      credits: { allocatableMb: 1024, runtimeMb: 512, deployMb: 256 },
-    });
-    clock.tick(NODE_LIVENESS_WINDOW_MS);
-    await heartbeatNode(clock.ctx, NODE_A);
-    const coordinator = coordinatorFor(NODE_A);
-
-    await coordinator.runOnce();
-
-    expect((await readPlacement(clock.ctx, PROJECT, "prod"))?.nodes).toEqual([NODE_A]);
-    expect(await readPlacement(clock.ctx, other, "prod")).toBeNull();
-    expect(coordinator.status().lastAssignment?.unplaced).toMatchObject([
-      { target: `${other}/prod`, reason: "capacity-unavailable" },
-    ]);
-    expect(coordinator.status().lastAssignment?.accounts).toMatchObject([
-      { id: NODE_A, transient: { transitionMb: 512 }, steady: { runtimeMb: 512 } },
-    ]);
-  });
-
-  it("charges a blocked project zero, admits its neighbour, and preserves its placement", async () => {
-    const alpha = "alpha";
-    const beta = "beta";
-    for (const project of [alpha, beta]) {
-      await createProject(clock.ctx, { slug: project });
-      await createBuild(clock.ctx, project, { id: BUILD });
-      await createEnvironment(clock.ctx, project, { name: "prod" });
-      await recordDeployment(clock.ctx, project, "prod", BUILD);
-      await setReplicas(clock.ctx, project, "prod", 1);
-    }
-    await register(NODE_A, undefined, {
-      allocatableMb: 1024,
-      runtimeMb: 512,
-      deployMb: 256,
-    });
-    clock.tick(NODE_LIVENESS_WINDOW_MS);
-    await heartbeatNode(clock.ctx, NODE_A);
-    const coordinator = coordinatorFor(NODE_A);
-    await coordinator.runOnce();
-    const alphaPlacement = await readPlacement(clock.ctx, alpha, "prod");
-    expect(alphaPlacement?.nodes).toEqual([NODE_A]);
-    expect(await readPlacement(clock.ctx, beta, "prod")).toBeNull();
-
-    await blockProject(clock.ctx, alpha);
-    clock.tick(TTL_MS / 3);
-    await coordinator.runOnce();
-
-    /* Blocking is a reversible pause: alpha disappears from runtime demand but
-       its decision remains intact for unblocking, leaving the credit for beta. */
-    expect(await readPlacement(clock.ctx, alpha, "prod")).toEqual(alphaPlacement);
-    expect((await readPlacement(clock.ctx, beta, "prod"))?.nodes).toEqual([NODE_A]);
-    expect(coordinator.status().lastAssignment).toMatchObject({
-      removed: [],
-      unplaced: [],
-      accounts: [{ id: NODE_A, steady: { runtimeMb: 512 } }],
-    });
-  });
-});
-
-describe("placement pending observations", () => {
-  it("emits on entry and material change, then again after resolution", async () => {
-    await environmentNamed("prod");
-    await setReplicas(clock.ctx, PROJECT, "prod", 3);
-    const observe = createObservability({ enabled: true, now: () => new Date(clock.nowMs()) });
-    const coordinator = createCoordinator(daemonFor(NODE_A, observe), {
-      ttlMs: TTL_MS,
-      reapIntervalMs: 0,
-    });
-
-    await coordinator.runOnce();
-    expect(observe.snapshot().events.filter((event) => event.type === "placement.pending")).toEqual(
-      [
-        expect.objectContaining({
-          project: PROJECT,
-          env: "prod",
-          reason: "insufficient-candidates",
-        }),
-      ],
-    );
-    clock.tick(TTL_MS / 3);
-    await coordinator.runOnce();
-    expect(
-      observe.snapshot().events.filter((event) => event.type === "placement.pending"),
-    ).toHaveLength(1);
-
-    await setReplicas(clock.ctx, PROJECT, "prod", 4);
-    clock.tick(TTL_MS / 3);
-    await coordinator.runOnce();
-    expect(
-      observe.snapshot().events.filter((event) => event.type === "placement.pending"),
-    ).toHaveLength(2);
-
-    await setReplicas(clock.ctx, PROJECT, "prod", 1);
-    clock.tick(TTL_MS / 3);
-    await coordinator.runOnce();
-    await setReplicas(clock.ctx, PROJECT, "prod", 3);
-    clock.tick(TTL_MS / 3);
-    await coordinator.runOnce();
-    expect(
-      observe.snapshot().events.filter((event) => event.type === "placement.pending"),
-    ).toHaveLength(3);
-  });
-});
-
 describe("a decision another coordinator got to first", () => {
-  it("abandons the dependent plan, leaving the winner's decision standing", async () => {
+  it("skips the raced decision and continues the independent assignment pass", async () => {
     await environmentNamed("prod");
+    await environmentNamed("staging");
     await setReplicas(clock.ctx, PROJECT, "prod", 1);
+    await setReplicas(clock.ctx, PROJECT, "staging", 1);
     const coordinator = coordinatorFor(NODE_A);
     await coordinator.runOnce();
 
     /* A competing write lands between this coordinator's read and its own put. */
     const key = placementKey(PROJECT, "prod");
     await setReplicas(clock.ctx, PROJECT, "prod", 2);
+    await setReplicas(clock.ctx, PROJECT, "staging", 2);
     store.onBeforePut = async (touched: string): Promise<void> => {
       written.push(touched);
       if (touched !== key) return;
@@ -706,10 +425,16 @@ describe("a decision another coordinator got to first", () => {
 
     await coordinator.runOnce();
 
-    expect(coordinator.status().lastAssignment).toBeNull();
-    expect(coordinator.status().lastAssignFailure).toContain("placement changed during assignment");
+    expect(coordinator.status().lastAssignment).toMatchObject({
+      changed: [{ target: `${PROJECT}/staging`, nodes: [NODE_A, NODE_B] }],
+      skipped: [{ target: `${PROJECT}/prod`, reason: "cas-conflict" }],
+    });
+    expect(coordinator.status().lastAssignFailure).toBeNull();
     expect(await readPlacement(clock.ctx, PROJECT, "prod")).toMatchObject({ nodes: [NODE_B] });
-    /* The next tick re-reads rather than applying a plan whose assumptions lost a write. */
+    expect(await readPlacement(clock.ctx, PROJECT, "staging")).toMatchObject({
+      nodes: [NODE_A, NODE_B],
+    });
+    /* The next tick re-reads and replaces only the raced decision. */
     clock.tick(TTL_MS / 3);
     await coordinator.runOnce();
     expect(coordinator.status().lastAssignFailure).toBeNull();
@@ -717,46 +442,6 @@ describe("a decision another coordinator got to first", () => {
       { target: `${PROJECT}/prod`, nodes: [NODE_A, NODE_B] },
     ]);
     expect(coordinator.status().holding).toBe(true);
-  });
-});
-
-describe("dependent credit-plan writes", () => {
-  it("stops after a conflicting move and never admits a later workload against it", async () => {
-    await register(NODE_A, { tier: "x" }, { allocatableMb: 60, runtimeMb: 20, deployMb: 1 });
-    await register(NODE_B, { tier: "y" }, { allocatableMb: 60, runtimeMb: 20, deployMb: 1 });
-    await environmentNamed("a", { nodeSelector: { tier: "y" } });
-    await environmentNamed("b", { nodeSelector: { tier: "x" } });
-    await environmentNamed("c", { nodeSelector: { tier: "x" } });
-    for (const env of ["a", "b", "c"]) await setReplicas(clock.ctx, PROJECT, env, 1);
-    for (const env of ["a", "b"]) {
-      await store.put(
-        placementKey(PROJECT, env),
-        JSON.stringify({
-          v: 1,
-          nodes: [NODE_A],
-          decidedAt: new Date(clock.nowMs()).toISOString(),
-          fence: 0,
-        }),
-      );
-    }
-    const move = placementKey(PROJECT, "a");
-    store.onBeforePut = async (key: string): Promise<void> => {
-      written.push(key);
-      if (key !== move) return;
-      store.onBeforePut = (later: string): void => {
-        written.push(later);
-      };
-      await store.put(move, JSON.stringify(rival()));
-    };
-    const coordinator = coordinatorFor(NODE_A);
-
-    await coordinator.runOnce();
-
-    expect(await readPlacement(clock.ctx, PROJECT, "a")).toMatchObject({ nodes: [NODE_B] });
-    expect(await readPlacement(clock.ctx, PROJECT, "b")).toMatchObject({ nodes: [NODE_A] });
-    expect(await readPlacement(clock.ctx, PROJECT, "c")).toBeNull();
-    expect(coordinator.status().lastAssignment).toBeNull();
-    expect(written).not.toContain(placementKey(PROJECT, "c"));
   });
 });
 
@@ -886,18 +571,13 @@ async function environmentNamed(
 }
 
 /** Registers `id` as a node that has just beaten, carrying `labels` if any. */
-async function register(
-  id: string,
-  labels?: Record<string, string>,
-  credits = { allocatableMb: 10_000, runtimeMb: 512, deployMb: 1024 },
-): Promise<NodeRecord> {
+async function register(id: string, labels?: Record<string, string>): Promise<NodeRecord> {
   return registerNode(clock.ctx, {
     v: 1,
     id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: `key-${id}` },
     addresses: { internal: `10.0.0.${id === NODE_A ? "1" : "2"}`, apiPort: 7400 },
     heartbeatAt: new Date(clock.nowMs()).toISOString(),
-    credits,
     ...(labels === undefined ? {} : { labels }),
   });
 }

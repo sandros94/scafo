@@ -10,13 +10,6 @@
 import { S3Client } from "uns3";
 import type { DaemonConfig } from "../daemon/config.ts";
 import { advertisedAddress, parseHostPort } from "../daemon/config.ts";
-import {
-  DEFAULT_DAEMON_OVERHEAD_MB,
-  DEFAULT_MEMORY_FRACTION,
-  type CapacityPlan,
-} from "../core/capacity/compute.ts";
-import { assertCreditProfile } from "../core/capacity/profile.ts";
-import { type HostReader, probeCapacity } from "../core/capacity/reader.ts";
 import { isScafoError, ScafoError } from "../core/error.ts";
 import { updateJson } from "../core/registry/cas.ts";
 import { nowIso, type RegistryContext } from "../core/registry/context.ts";
@@ -26,8 +19,6 @@ import type { NodeRecord, NodeWireguard } from "../core/types/registry.ts";
 import { withRetry } from "../core/utils/backoff.ts";
 import { isLoopbackHost } from "../core/utils/host.ts";
 import { createUns3Store } from "../drivers/store/uns3.ts";
-import { DEFAULT_RUNTIME_CREDIT_MB } from "../daemon/_credit-controller.ts";
-import { DEFAULT_DEPLOY_CREDIT_MB } from "../daemon/_deploy-scheduler.ts";
 import { loadOrCreateNodeState, type NodeState } from "./_node-state.ts";
 import { loadOrCreateStorageToken, writeStorageToken } from "./_storage-token.ts";
 import { resolveDefaultStateDir } from "./_utils.ts";
@@ -59,23 +50,6 @@ export function createRegistry(config: DaemonConfig): RegistryContext {
       { bucket: config.bucket.bucket, prefix: config.bucket.prefix },
     ),
   };
-}
-
-/** Probes this node and derives the sole profile both boot paths publish. */
-export async function probeNodeCredits(
-  config: DaemonConfig,
-  reader: HostReader,
-): Promise<{ capacity: CapacityPlan; credits: NonNullable<NodeRecord["credits"]> }> {
-  const capacity = await probeCapacity(reader, {
-    rssFraction: config.capacity?.memoryFraction ?? DEFAULT_MEMORY_FRACTION,
-    daemonOverheadMb: config.capacity?.daemonOverheadMb ?? DEFAULT_DAEMON_OVERHEAD_MB,
-  });
-  const credits = assertCreditProfile({
-    allocatableMb: capacity.rssBudgetMb,
-    runtimeMb: config.runtime.creditMb ?? DEFAULT_RUNTIME_CREDIT_MB,
-    deployMb: config.deploy?.creditMb ?? DEFAULT_DEPLOY_CREDIT_MB,
-  });
-  return { capacity, credits };
 }
 
 /**
@@ -212,9 +186,6 @@ export function nodeStateDir(config: DaemonConfig, opts?: NodeIdentityOptions): 
 export interface RegisterNodeOptions {
   config: DaemonConfig;
   state: NodeState;
-  capacity?: CapacityPlan;
-  /** Credit denominations derived from this node's resolved boot configuration. */
-  credits?: NodeRecord["credits"];
   /**
    * Where this node sits on the tunnel, when it runs one. It is published here
    * because a peer cannot build a route to a node it has not been told the key,
@@ -228,7 +199,7 @@ export interface RegisterNodeOptions {
  * Writes this node's record: who it is, where it is reached and what it can run.
  *
  * Written on every boot rather than only on the first one. The record is derived
- * state — a node that has lost it, or whose address or capacity has changed,
+ * state — a node that has lost it, or whose address has changed,
  * must be able to state the truth again — and the identity it is filed under
  * comes from the node's own state directory, so re-registering never takes over
  * another node's entry.
@@ -261,17 +232,6 @@ function nodeRecord(registry: RegistryContext, opts: RegisterNodeOptions): NodeR
     publicKey: { kty: "OKP", crv: "Ed25519", x: opts.state.publicKey.x },
     addresses: { internal: reachable.host, apiPort: reachable.port },
     heartbeatAt: nowIso(registry),
-    ...(opts.capacity === undefined
-      ? {}
-      : {
-          capacity: {
-            cores: opts.capacity.cores,
-            memMb: opts.capacity.memMb,
-            cgroup: opts.capacity.cgroup,
-            probedAt: opts.capacity.probedAt,
-          },
-        }),
-    ...(opts.credits === undefined ? {} : { credits: assertCreditProfile(opts.credits) }),
     ...(opts.wireguard === undefined ? {} : { wireguard: opts.wireguard }),
     ...(opts.config.node.labels === undefined ? {} : { labels: { ...opts.config.node.labels } }),
   };
@@ -344,7 +304,7 @@ export async function drainThisNode(
  * wholesale from the configuration it is handed, and `scafo wg init` is run from
  * an operator's shell rather than from the daemon's own environment — one run
  * with a config the daemon does not use would otherwise move the node's
- * advertised address and capacity along with its tunnel details, and nothing
+ * advertised address along with its tunnel details, and nothing
  * would report it until a peer failed to reach it.
  *
  * A node with no record yet is registered outright: `scafo wg init` before the

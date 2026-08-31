@@ -29,10 +29,8 @@ import { createStorageService } from "../../daemon/storage.ts";
 import { DEFAULT_ARCHIVE_ENTRIES, DEFAULT_ARTIFACT_BYTES } from "../../core/types/deploy.ts";
 import { initRegistry, readMeta } from "../../core/registry/meta.ts";
 import { createDeployService } from "../../daemon/deploys.ts";
-import { assertCreditAdmission, createCreditController } from "../../daemon/_credit-controller.ts";
 import { createCelldDeployRunner } from "../../drivers/deploy/celld.ts";
 import { createFileArtifactStager } from "../../drivers/artifact/file.ts";
-import { createNodeHostReader } from "../../drivers/host/node.ts";
 import { type AccessLogTailer, createAccessLogTailer } from "../../drivers/observe/access-log.ts";
 import { createCaddyDriver } from "../../drivers/ingress/caddy.ts";
 import { createTraefikDriver, DEFAULT_ENTRY_POINT } from "../../drivers/ingress/traefik.ts";
@@ -47,10 +45,8 @@ import {
   loadVarsetKey,
   loadWireguardRecord,
   nodeStateDir,
-  probeNodeCredits,
   registerThisNode,
 } from "../_bootstrap.ts";
-import { creditArgs } from "../_credit-args.ts";
 import { STORAGE_TOKEN_FILE, storageTokenNotice } from "../_storage-token.ts";
 import { deprecatedAlias, readPackageVersion, readTextFile, reportFailure } from "../_utils.ts";
 
@@ -108,7 +104,6 @@ export const sailArgs: ArgsDef = {
     type: "string",
     description: "Seconds a cell may sit idle before eviction frees its memory (0 = never)",
   },
-  ...creditArgs,
   "artifact-bytes": {
     type: "string",
     description: "Maximum compressed and expanded bytes per deploy artifact",
@@ -205,20 +200,6 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
      never been set up on must not register an address its peers cannot reach. */
   const wireguard = await loadWireguardRecord(config);
 
-  /* Capacity is local boot configuration. Refuse an unusable node before the
-     registry bootstrap can mutate the shared bucket. */
-  const { capacity, credits: creditProfile } = await probeNodeCredits(
-    config,
-    createNodeHostReader(),
-  );
-  const runtimeCreditMb = creditProfile.runtimeMb;
-  const credits = createCreditController({
-    allocatableMb: creditProfile.allocatableMb,
-    surgeMb: runtimeCreditMb,
-  });
-  const deployCreditMb = creditProfile.deployMb;
-  assertCreditAdmission(credits, runtimeCreditMb, deployCreditMb);
-
   const state = await loadNodeIdentity(config);
   const storageTokens = await loadStorageTokens(config);
   const varsetKey = await loadVarsetKey(config);
@@ -233,8 +214,6 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   await registerThisNode(registry, {
     config,
     state,
-    capacity,
-    credits: creditProfile,
     ...(wireguard === undefined ? {} : { wireguard }),
   });
 
@@ -251,8 +230,6 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
     registry,
     supervisor,
     version,
-    capacity,
-    credits,
     /* Kept for the node tokens this node will sign for calls to its peers. */
     signingKey: state.privateKey,
   };
@@ -358,8 +335,6 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
       ? undefined
       : {
           scheduler: {
-            credits,
-            creditMb: config.deploy.creditMb,
             artifactBytes: config.deploy.artifactBytes,
             activeTasks: config.deploy.activeTasks,
             projectActiveTasks: config.deploy.projectActiveTasks,
@@ -411,8 +386,8 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
 
   await untilSignalled(async () => {
     /* CLOSED SYNCHRONOUSLY, before the first shutdown await below. The bucket
-       and lease work can take time, and no timer or credit release may
-       start a process while this node is already leaving. */
+       and lease work can take time, and no timer may start a process while this
+       node is already leaving. */
     const reconcilerShutdown = reconciler.shutdown();
     /*
      * Written FIRST, before anything is stopped: this is what tells placement

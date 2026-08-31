@@ -6,7 +6,6 @@
 import { ScafoError } from "../../core/error.ts";
 import { formatProcessId } from "../../core/placement/ids.ts";
 import { fleetPrefix } from "../../core/registry/paths.ts";
-import { assertPositiveSafeInteger } from "../../core/utils/number.ts";
 import type { RuntimeDriver, RuntimeSpecInput } from "../../core/types/runtime.ts";
 import type { ProcessSpec } from "../../core/types/supervisor.ts";
 
@@ -77,10 +76,6 @@ export const RESERVED_ENV: string[] = [
   "CELLD_INTERNAL_ADDR",
   "CELLD_ADVERTISE",
   "CELLD_SHUTDOWN_DRAIN_MS",
-  /* Kept aligned with Scafo's transitional admission accounting until that
-     accounting is removed as one unit. */
-  "CELLD_MAX_RSS_MB",
-  "CELLD_MAX_RESIDENT_CELLS",
   /* Derived from the ingress topology: a caller silently winning over it would
      undo the node's trust decision. */
   "CELLD_TRUST_FORWARDED_HEADERS",
@@ -129,8 +124,8 @@ export interface CelldDriverOptions {
    *
    * A name in {@link RESERVED_ENV} put here is OVERWRITTEN rather than refused:
    * the driver derives those from the node's configuration and from the ports
-   * its processes actually bound. Refusing them belongs where they are
-   * configured, which is the only place an operator can be told in time.
+   * its processes actually bound. Runtime policy such as `CELLD_MAX_RSS_MB`
+   * remains operator-owned and therefore is not reserved.
    */
   operatorEnv?: Record<string, string>;
 }
@@ -236,20 +231,6 @@ function processEnv(input: RuntimeSpecInput, settings: EnvSettings): Record<stri
      `fleet` (ack at follower fsync, bucket upload behind). On one node the
      two are identical; on a fleet they are the RPO trade the operator made. */
   env.CELLD_DURABILITY = settings.durability;
-
-  const capacity = input.capacity;
-  if (input.maxRssMb !== undefined) {
-    assertPositiveSafeInteger(input.maxRssMb, "maxRssMb");
-    env.CELLD_MAX_RSS_MB = String(input.maxRssMb);
-  }
-  if (capacity !== undefined) {
-    if (input.maxRssMb === undefined && capacity.maxRssMbPerProcess >= 1) {
-      env.CELLD_MAX_RSS_MB = String(capacity.maxRssMbPerProcess);
-    }
-    if (capacity.maxResidentCells >= 1) {
-      env.CELLD_MAX_RESIDENT_CELLS = String(capacity.maxResidentCells);
-    }
-  }
 
   /* A node configures each environment through its own CELLD_VAR_* entries.
      An inherited shared file would merge unrelated configuration into it. */

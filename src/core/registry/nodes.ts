@@ -135,7 +135,7 @@ export async function listNodeRecords(ctx: RegistryContext): Promise<NodeRecord[
  *
  * Narrow on purpose: a node re-registering rewrites its record wholesale from
  * its own configuration, and a heartbeat is not the moment to restate an
- * address or a capacity. Throws `ScafoError("not-found")` when the node has no
+ * address or its labels. Throws `ScafoError("not-found")` when the node has no
  * record — a heartbeat cannot bring one into being, because the record says what
  * this node IS and only registration knows that.
  */
@@ -170,11 +170,9 @@ export async function drainNode(ctx: RegistryContext, id: string): Promise<strin
  * Whether `record` counts as live for placement: it is not draining, and its
  * last sign of life is newer than {@link NODE_LIVENESS_WINDOW_MS}.
  *
- * `heartbeatAt` is that sign; `capacity.probedAt` stands in for a record written
- * by a node too old to refresh one, so a rolling upgrade does not read the fleet
- * as empty. A record carrying neither is NOT live: nothing in it says when the
- * node was last seen, and guessing "recently" would hand environments to a node
- * that may be years gone.
+ * `heartbeatAt` is that sign. A record carrying none is NOT live: nothing in it
+ * says when the node was last seen, and guessing "recently" would hand
+ * environments to a node that may be years gone.
  *
  * `drainingAt` outranks all of it. A node on its way out has usually just
  * beaten — it is stopping in an orderly fashion, not failing — so judging it by
@@ -187,7 +185,7 @@ export async function drainNode(ctx: RegistryContext, id: string): Promise<strin
 export function isNodeLive(record: NodeRecord, now: Date, opts?: { windowMs?: number }): boolean {
   if (record.drainingAt !== undefined) return false;
 
-  const seenAt = record.heartbeatAt ?? record.capacity?.probedAt;
+  const seenAt = record.heartbeatAt;
   if (seenAt === undefined) return false;
 
   const seen = Date.parse(seenAt);

@@ -41,7 +41,6 @@ import type { DeployMeta, DeployService, DeployStatus } from "../src/daemon/depl
 import type { OperatorsResult } from "../src/daemon/_operator-routes.ts";
 import type { Reconciler, ReconcileStatus } from "../src/daemon/reconcile.ts";
 import { signNodeToken } from "../src/core/auth/index.ts";
-import { accountCredits } from "../src/core/capacity/credits.ts";
 import { registerOperatorKey } from "../src/cli/_operator-key.ts";
 import {
   acquireLease,
@@ -444,14 +443,6 @@ describe("GET /v1/state is filtered to what the caller reaches", () => {
     expect(state.node?.id).toBe(NODE_ID);
     expect(state.lease?.node).toBe(NODE_ID);
     expect(state.coordinator?.node).toBe(NODE_ID);
-    expect(state.coordinator?.accounts).toEqual([
-      {
-        id: NODE_ID,
-        transient: accountCredits({ allocatableMb: 2048, surgeMb: 512 }),
-        steady: accountCredits({ allocatableMb: 2048, surgeMb: 512 }),
-      },
-    ]);
-    expect(state.coordinator?.overcommitted).toBe(false);
   });
 
   it("marks the answer as filtered whenever the caller is a non-admin operator", async () => {
@@ -664,14 +655,6 @@ function coordinatorWithUnplaced(): Coordinator {
     changed: [],
     removed: [],
     skipped: [],
-    accounts: [
-      {
-        id: NODE_ID,
-        transient: accountCredits({ allocatableMb: 2048, surgeMb: 512 }),
-        steady: accountCredits({ allocatableMb: 2048, surgeMb: 512 }),
-      },
-    ],
-    overcommitted: false,
     unplaced: [MINE, THEIRS].map((project) => ({
       target: `${project}/${ENVIRONMENT}`,
       reason: "placement-unavailable",

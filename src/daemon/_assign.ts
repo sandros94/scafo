@@ -9,10 +9,9 @@
  */
 
 import { ScafoError } from "../core/error.ts";
-import { planCreditPlacement, type CreditPlacementPending } from "../core/placement/credits.ts";
+import { assignNodes } from "../core/placement/rendezvous.ts";
 import { resolveReplicas } from "../core/placement/replicas.ts";
 import { describeSelector, eligibleNodes } from "../core/placement/selector.ts";
-import { readCreditProfile } from "../core/capacity/profile.ts";
 import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { listEnvironments } from "../core/registry/environments.ts";
@@ -26,13 +25,7 @@ import {
   writePlacement,
 } from "../core/registry/placement.ts";
 import { isProjectBlocked, listProjects } from "../core/registry/projects.ts";
-import type {
-  EnvironmentRecord,
-  NodeRecord,
-  NodeSelector,
-  ReplicaCount,
-} from "../core/types/registry.ts";
-import { resolveEnvironmentDeployment } from "./_desired.ts";
+import type { EnvironmentRecord, NodeRecord, NodeSelector } from "../core/types/registry.ts";
 
 /**
  * Why one environment could not be placed on a pass, as a stable code.
@@ -41,7 +34,7 @@ import { resolveEnvironmentDeployment } from "./_desired.ts";
  * always a selector no live node satisfies: an empty FLEET refuses the whole
  * pass instead, before any environment is considered.
  */
-export type AssignmentFailureReason = "placement-unavailable" | "capacity-unavailable";
+export type AssignmentFailureReason = "placement-unavailable";
 
 /** One environment a pass could decide nothing for, and why. */
 export interface AssignmentFailure {
@@ -50,7 +43,6 @@ export interface AssignmentFailure {
   reason: AssignmentFailureReason;
   /** What an operator has to act on, naming the constraint that went unsatisfied. */
   detail: string;
-  pending?: CreditPlacementPending;
 }
 
 /** What one assignment pass decided. */
@@ -72,8 +64,6 @@ export interface AssignmentResult {
    * a constraint has gone unsatisfiable, so it is reported rather than logged.
    */
   unplaced: AssignmentFailure[];
-  accounts: Awaited<ReturnType<typeof planCreditPlacement>>["accounts"];
-  overcommitted: boolean;
 }
 
 export interface AssignmentOptions {
@@ -132,35 +122,25 @@ export async function runAssignment(
     removed: [],
     skipped: [],
     unplaced: [],
-    accounts: [],
-    overcommitted: false,
   };
 
-  return runCreditAssignment(ctx, lease, fleet, result);
+  return runAssignmentOverFleet(ctx, lease, fleet, result);
 }
 
-async function runCreditAssignment(
+async function runAssignmentOverFleet(
   ctx: RegistryContext,
   lease: LeaseHandle,
   fleet: NodeRecord[],
   result: AssignmentResult,
 ): Promise<AssignmentResult> {
   const projects = await listProjects(ctx);
-  const current = new Map<string, string[]>();
-  const active: Array<{
-    project: string;
-    env: string;
-    replicas: ReplicaCount;
-    selector?: NodeSelector;
-    processes: number;
-  }> = [];
   const removals: Array<{ project: string; env: string }> = [];
 
   for (const project of projects) {
     /* Blocking is the canonical reversible full stop. Runtime desired state
-       omits this project, so it consumes no credit here either; skip before the
-       placement listing as well, because every nested record must survive for
-       unblocking rather than being mistaken for orphaned state. */
+       omits this project; skip before the placement listing as well, because
+       every nested record must survive for unblocking rather than being
+       mistaken for orphaned state. */
     if (await isProjectBlocked(ctx, project)) continue;
 
     const [names, placements] = await Promise.all([
@@ -174,92 +154,49 @@ async function runCreditAssignment(
       if (found.value.retiredAt !== undefined) continue;
       served.add(env);
       const target = `${project}/${env}`;
-      current.set(target, [...(placements.get(env)?.nodes ?? [])]);
-      const wanted = resolveEnvironmentDeployment(project, found.value);
-      active.push({
+      const candidates = eligibleNodes(fleet, found.value.nodeSelector);
+      if (candidates.length === 0) {
+        result.unplaced.push({
+          target,
+          reason: "placement-unavailable",
+          detail:
+            `no live node carries every label of ` +
+            `"${describeSelector(found.value.nodeSelector as NodeSelector)}", which "${target}" selects`,
+        });
+        continue;
+      }
+
+      const nodes = await assignNodes({
         project,
         env,
+        nodes: candidates.map((record) => record.id),
         replicas: resolveReplicas(found.value),
-        processes: wanted === null ? 0 : 1,
-        ...(found.value.nodeSelector === undefined ? {} : { selector: found.value.nodeSelector }),
       });
+      const previous = placements.get(env)?.nodes ?? [];
+      if (sameNodes(previous, nodes)) {
+        result.skipped.push({ target, reason: "unchanged" });
+        continue;
+      }
+
+      const write = await writePlacement(ctx, project, env, nodes, lease);
+      if (write.outcome === "written") result.changed.push({ target, nodes });
+      else if (write.outcome === "unchanged" || write.outcome === "cas-conflict")
+        result.skipped.push({ target, reason: write.outcome });
+      else if (write.outcome === "stale") {
+        throw new ScafoError("lease-lost", "Coordinator placement fence is stale", {
+          detail: `refusing later placement writes after "${target}" was decided at a higher fence`,
+        });
+      }
     }
     for (const env of placements.keys()) if (!served.has(env)) removals.push({ project, env });
   }
 
-  const nodes = fleet.map((record) => {
-    const credits = readCreditProfile(record.credits);
-    return {
-      id: record.id,
-      labels: record.labels,
-      profile:
-        credits === null
-          ? null
-          : { allocatableMb: credits.allocatableMb, runtimeMb: credits.runtimeMb },
-    };
-  });
-  const byTarget = new Map(active.map((entry) => [`${entry.project}/${entry.env}`, entry]));
-  const plan = await planCreditPlacement({
-    nodes,
-    workloads: active.map((entry) => ({
-      project: entry.project,
-      env: entry.env,
-      replicas: entry.replicas,
-      processes: entry.processes,
-      ...(entry.selector === undefined ? {} : { selector: entry.selector }),
-      current: current.get(`${entry.project}/${entry.env}`) ?? [],
-    })),
-  });
-  for (const decision of plan.placements) {
-    const [project, env] = decision.target.split("/") as [string, string];
-    const previous = current.get(decision.target) ?? [];
-    const entry = byTarget.get(decision.target);
-    if (entry === undefined) throw new Error(`missing active placement target ${decision.target}`);
-    const selectorUnavailable = eligibleNodes(fleet, entry.selector).length === 0;
-    if (decision.pending !== undefined) {
-      result.unplaced.push({
-        target: decision.target,
-        reason: selectorUnavailable ? "placement-unavailable" : "capacity-unavailable",
-        ...(selectorUnavailable
-          ? {}
-          : {
-              pending: decision.pending,
-            }),
-        detail: selectorUnavailable
-          ? `no live node carries every label of "${describeSelector(entry.selector as NodeSelector)}", ` +
-            `which "${decision.target}" selects`
-          : `"${decision.target}" cannot be given its requested replicas while preserving its ` +
-            `current placement: give every live candidate a valid credit profile or add capacity`,
-      });
-      continue;
-    }
-    if (sameNodes(previous, decision.nodes)) {
-      result.skipped.push({ target: decision.target, reason: "unchanged" });
-      continue;
-    }
-    const write = await writePlacement(ctx, project, env, decision.nodes, lease);
-    if (write.outcome === "written")
-      result.changed.push({ target: decision.target, nodes: decision.nodes });
-    else if (write.outcome === "unchanged")
-      result.skipped.push({ target: decision.target, reason: write.outcome });
-    else if (write.outcome === "stale") {
-      throw new ScafoError("lease-lost", "Coordinator placement fence is stale", {
-        detail: `refusing later placement writes after "${decision.target}" was decided at a higher fence`,
-      });
-    } else {
-      throw new ScafoError("cas-conflict", "Coordinator placement changed during assignment", {
-        detail: `refusing later placement writes after "${decision.target}" changed during this plan`,
-      });
-    }
-  }
   for (const entry of removals.sort((left, right) =>
     compare(`${left.project}/${left.env}`, `${right.project}/${right.env}`),
   )) {
     const removed = await deletePlacement(ctx, entry.project, entry.env, lease);
     if (removed !== null) result.removed.push(removed);
   }
-  result.accounts = plan.accounts;
-  result.overcommitted = plan.overcommitted;
   return result;
 }
 

@@ -18,7 +18,6 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { type DaemonContext, createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { createDeployService, type DeployStatus } from "../src/daemon/deploys.ts";
-import { createCreditController } from "../src/daemon/_credit-controller.ts";
 import {
   DEPLOY_METADATA_HEADER,
   DEPLOY_METADATA_MAX_BYTES,
@@ -128,7 +127,6 @@ beforeEach(async () => {
     supervisor: fakeSupervisor(),
     version: "0.0.0-test",
     reconciler: fakeReconciler(),
-    credits: createCreditController({ allocatableMb: 10_000, surgeMb: 512 }),
   };
   daemon.deploys = createDeployService(daemon, fakeRunner());
   daemon.artifactStager = createFileArtifactStager();
@@ -314,7 +312,7 @@ describe("who may deploy", () => {
     expect(daemon.deploys.get(retained)).not.toBeNull();
   });
 
-  it("keeps pre-handoff capacity charged when staged-artifact disposal fails", async () => {
+  it("keeps pre-handoff accounting charged when staged-artifact disposal fails", async () => {
     let disposals = 0;
     daemon.artifactStager = {
       stage: () =>

@@ -706,7 +706,7 @@ describe("what the traces come to", () => {
       type: "placement.pending",
       project: "blog",
       env: "production",
-      reason: "insufficient-capacity",
+      reason: "placement-unavailable",
     });
 
     expect(selectTraces([own, other], { project: "shop" }).events).toEqual([own]);

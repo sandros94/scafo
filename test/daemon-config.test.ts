@@ -633,7 +633,6 @@ describe("deploy resource limits", () => {
     const config = await loadDaemonConfig({ env: REQUIRED_ENV });
 
     expect(config.deploy).toEqual({
-      creditMb: 1024,
       artifactBytes: DEFAULT_ARTIFACT_BYTES,
       archiveEntries: DEFAULT_ARCHIVE_ENTRIES,
       activeTasks: DEFAULT_ACTIVE_TASKS,
@@ -793,87 +792,6 @@ describe("deploy resource limits", () => {
   });
 });
 
-describe("memory credit configuration", () => {
-  it("ships the selected denominations and resolves file, environment, then flags", async () => {
-    const file = JSON.stringify({
-      capacity: { memoryFraction: 0.5, daemonOverheadMb: 100 },
-      runtime: { creditMb: 200 },
-      deploy: { creditMb: 300 },
-    });
-    const fromFile = await loadDaemonConfig({
-      configPath: CONFIG_PATH,
-      readFile: fileAt(CONFIG_PATH, file),
-      env: REQUIRED_ENV,
-    });
-    const fromEnv = await loadDaemonConfig({
-      configPath: CONFIG_PATH,
-      readFile: fileAt(CONFIG_PATH, file),
-      env: {
-        ...REQUIRED_ENV,
-        SCAFO_MEMORY_FRACTION: "0.6",
-        SCAFO_DAEMON_OVERHEAD_MB: "101",
-        SCAFO_RUNTIME_CREDIT_MB: "201",
-        SCAFO_DEPLOY_CREDIT_MB: "301",
-      },
-    });
-    const fromFlags = await loadDaemonConfig({
-      configPath: CONFIG_PATH,
-      readFile: fileAt(CONFIG_PATH, file),
-      env: {
-        ...REQUIRED_ENV,
-        SCAFO_MEMORY_FRACTION: "0.6",
-        SCAFO_DAEMON_OVERHEAD_MB: "101",
-        SCAFO_RUNTIME_CREDIT_MB: "201",
-        SCAFO_DEPLOY_CREDIT_MB: "301",
-      },
-      flags: {
-        "memory-fraction": "0.7",
-        "daemon-overhead-mb": "102",
-        "runtime-credit-mb": "202",
-        "deploy-credit-mb": "302",
-      },
-    });
-
-    expect((await loadDaemonConfig({ env: REQUIRED_ENV })).capacity).toEqual({
-      memoryFraction: 0.8,
-      daemonOverheadMb: 128,
-    });
-    expect(fromFile).toMatchObject({
-      capacity: { memoryFraction: 0.5, daemonOverheadMb: 100 },
-      runtime: { creditMb: 200 },
-      deploy: { creditMb: 300 },
-    });
-    expect(fromEnv).toMatchObject({
-      capacity: { memoryFraction: 0.6, daemonOverheadMb: 101 },
-      runtime: { creditMb: 201 },
-      deploy: { creditMb: 301 },
-    });
-    expect(fromFlags).toMatchObject({
-      capacity: { memoryFraction: 0.7, daemonOverheadMb: 102 },
-      runtime: { creditMb: 202 },
-      deploy: { creditMb: 302 },
-    });
-  });
-
-  it("refuses invalid credit-pool settings with typed input errors", async () => {
-    for (const env of [
-      { SCAFO_MEMORY_FRACTION: "0" },
-      { SCAFO_MEMORY_FRACTION: "1.01" },
-      { SCAFO_MEMORY_FRACTION: "Infinity" },
-      { SCAFO_DAEMON_OVERHEAD_MB: "0" },
-      { SCAFO_DAEMON_OVERHEAD_MB: "1.5" },
-      { SCAFO_RUNTIME_CREDIT_MB: "0" },
-      { SCAFO_RUNTIME_CREDIT_MB: "1.5" },
-      { SCAFO_DEPLOY_CREDIT_MB: String(Number.MAX_SAFE_INTEGER + 1) },
-    ]) {
-      await rejectsWith(
-        () => loadDaemonConfig({ env: { ...REQUIRED_ENV, ...env } }),
-        "invalid-input",
-      );
-    }
-  });
-});
-
 describe("JSON request limit", () => {
   it("ships a finite 64 KiB safeguard", async () => {
     const config = await loadDaemonConfig({ env: REQUIRED_ENV });
@@ -1006,26 +924,43 @@ describe("the variables an operator hands every runtime process", () => {
     }
   });
 
-  it.each(["CELLD_MAX_RSS_MB", "CELLD_VARS_FILE"])(
-    "refuses reserved %s written in the config file",
-    async (name) => {
-      const error = await rejectsWith(
-        () =>
-          loadDaemonConfig({
-            configPath: CONFIG_PATH,
-            readFile: fileAt(
-              CONFIG_PATH,
-              JSON.stringify({ runtime: { celldEnv: { [name]: "unsafe" } } }),
-            ),
-            env: REQUIRED_ENV,
-          }),
-        "invalid-input",
-      );
+  it.each(["CELLD_VARS_FILE"])("refuses reserved %s written in the config file", async (name) => {
+    const error = await rejectsWith(
+      () =>
+        loadDaemonConfig({
+          configPath: CONFIG_PATH,
+          readFile: fileAt(
+            CONFIG_PATH,
+            JSON.stringify({ runtime: { celldEnv: { [name]: "unsafe" } } }),
+          ),
+          env: REQUIRED_ENV,
+        }),
+      "invalid-input",
+    );
 
-      expect(error.detail).toContain(name);
-      expect(error.detail).toContain("runtime.celldEnv");
-    },
-  );
+    expect(error.detail).toContain(name);
+    expect(error.detail).toContain("runtime.celldEnv");
+  });
+
+  it("passes celld's own memory limits through to every runtime", async () => {
+    const config = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(
+        CONFIG_PATH,
+        JSON.stringify({
+          runtime: {
+            celldEnv: { CELLD_MAX_RSS_MB: "512", CELLD_MAX_RESIDENT_CELLS: "64" },
+          },
+        }),
+      ),
+      env: REQUIRED_ENV,
+    });
+
+    expect(config.runtime.celldEnv).toEqual({
+      CELLD_MAX_RSS_MB: "512",
+      CELLD_MAX_RESIDENT_CELLS: "64",
+    });
+  });
 
   it.each(["CELLD_OTEL", "=1", "9LIVES=1", "CELLD-OTEL=1", "CELLD OTEL=1", "A=1,A=2", " , "])(
     "refuses %p, naming the setting",
