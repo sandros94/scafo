@@ -170,7 +170,7 @@ export function formatProject(project: ProjectRecord): string {
   if (project.blocked === true) {
     lines.push(
       ``,
-      `  Nothing of it is served, woken or deployed to while it is blocked, and`,
+      `  Nothing of it is served or deployed to while it is blocked, and`,
       `  nothing of it has been deleted: "scafo project unblock ${project.slug}" puts it`,
       `  all back on the next pass of every node.`,
     );

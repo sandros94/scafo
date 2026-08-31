@@ -208,7 +208,7 @@ export interface ProjectRecord {
    *
    * A FULL STOP AND A REVERSIBLE ONE. A blocked project is served nowhere — no
    * node runs a process for it, no route names it, no certificate is issued for
-   * its domains — its hosts are not woken, and deploys into it are refused. The
+   * its domains, and deploys into it are refused. The
    * environment, build, deployment, domain and placement records are all left exactly
    * as they stand, which is what makes the way back one call: the next reconcile
    * pass wants everything it wanted before.

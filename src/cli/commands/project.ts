@@ -8,7 +8,7 @@
  * the two statements an ADMIN can make about one.
  *
  * BLOCK IS THE VERB WORTH READING TWICE. It is a full stop: a blocked project is
- * served nowhere in the fleet, its hosts are not woken, it gets no certificates
+ * served nowhere in the fleet, its hosts leave ingress, it gets no certificates
  * and it accepts no deploys — while every build, environment, deployment notice and domain
  * it has is left exactly where it was. Unblocking is one call, and the next pass
  * of every node puts it all back. It is admin-only, and deliberately: the case
@@ -85,7 +85,7 @@ const show: CommandDef = defineCommand({
 const block: CommandDef = defineCommand({
   meta: {
     name: "block",
-    description: "Stop serving, waking and deploying a project, reversibly (admin only)",
+    description: "Stop serving and deploying a project, reversibly (admin only)",
   },
   args: slugArgs,
   run: guarded(runBlock),
@@ -152,7 +152,7 @@ async function runBlock(flags: Record<string, unknown>): Promise<void> {
 
   console.log(
     `scafo: blocked "${blocked.slug}" through ${api.via}; every node stops serving it on its ` +
-      `next pass, its hosts stop being woken and it accepts no deploys — nothing of it has ` +
+      `next pass, its hosts leave ingress and it accepts no deploys — nothing of it has ` +
       `been deleted, and "scafo project unblock ${blocked.slug}" puts it all back`,
   );
 }

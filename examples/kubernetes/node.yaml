@@ -284,13 +284,9 @@ spec:
             limits:
               memory: "2Gi"
         - name: traefik
-          # v3 specifically. The routing the node publishes is a v3 dynamic
-          # configuration: `HostRegexp` takes a plain Go regular expression
-          # there, where v2 takes a named-group pattern of its own. A v2 Traefik
-          # loads the same document without complaining and reports the routers
-          # as enabled — the ones matching a single host work, and the platform
-          # domain's catch-all matches nothing, so a host waiting to be woken is
-          # answered 404 by the ingress instead of reaching the node.
+          # v3 specifically. This manifest and the dynamic configuration the
+          # node publishes are tested against that major; changing it is a
+          # compatibility decision rather than an image refresh.
           image: traefik:v3
           args: ["--configFile=/etc/traefik/traefik.yml"]
           securityContext:
