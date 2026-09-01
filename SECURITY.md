@@ -62,6 +62,10 @@ buckets and host or VM security boundaries.
   registry and lease traffic. Intermittent latency or errors can prevent a Celld
   node lease from renewing; that process self-fences, exits, and restarts. Scafo
   does not turn an unreliable object store into a highly available control plane.
+  Celld 0.4.0 also waits a full third of the lease lifetime after an ambiguous
+  renewal reads back the unchanged prior lease. Two missed attempts can therefore
+  fence a node even when the store recovers before the lease expires. Track the
+  upstream fix in [Celld issue #182](https://github.com/denoland/celld/issues/182).
 - Deploy admission bounds compressed and expanded artifact bytes, archive
   entries, retained builder output, node and project concurrency and queue
   depth, node and project staged bytes, and receive, queue, and task deadlines.
@@ -102,8 +106,14 @@ buckets and host or VM security boundaries.
 - Use external host, VM, or container resource controls for CPU, memory,
   process, filesystem, network, and cleanup limits.
 - Configure upstream runtime policy through `runtime.celldEnv`, `--celld-env`,
-  or `SCAFO_CELLD_ENV`; Scafo supplies no durability, idle-eviction, or memory
-  policy defaults.
+  or `SCAFO_CELLD_ENV`; Scafo supplies no Celld policy defaults.
+- Celld 0.4.0 operators whose store has intermittent multi-second stalls may opt
+  into `CELLD_TTL_MS=30000`. Set it consistently on every Scafo node. This makes
+  Celld renew every 10 seconds and gives short interruptions more absolute
+  recovery margin, but an unplanned node failure can then take up to 30 seconds
+  to become eligible for takeover. Scafo deliberately preserves Celld's
+  10-second default when the variable is absent. Re-evaluate this workaround
+  when adopting a release that fixes Celld issue #182.
 - Use separate installations, buckets, and host or VM boundaries for different
   trust domains.
 - Pin and review the Scafo build you deploy, and use a current supported Celld

@@ -126,6 +126,13 @@ services:
       # loopback is honest here; a fleet advertises the address the other nodes
       # actually reach it at.
       SCAFO_ADVERTISE: 127.0.0.1:7400
+      # CELLD 0.4.0 AVAILABILITY WORKAROUND, OPT-IN. Brief object-store faults
+      # can otherwise consume both renewal attempts before the lease expires:
+      # https://github.com/denoland/celld/issues/182. A 30s lease renews every
+      # 10s, but can also delay unplanned failure takeover for up to 30s. Use
+      # the same value on every node, and remove it after validating an upstream
+      # fix. Scafo preserves Celld's 10s default while this remains commented.
+      # SCAFO_CELLD_ENV: CELLD_TTL_MS=30000
       # Caddy's admin API, on the loopback the two containers share.
       SCAFO_CADDY_ADMIN: http://127.0.0.1:2019
       # OPTIONAL, AND BOTH LINES GO TOGETHER. The first turns the node's own

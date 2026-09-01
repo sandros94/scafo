@@ -57,6 +57,13 @@ but Scafo does not expose old-build hosts or a historical deployment selector. F
 lifecycle discussion. See [SECURITY.md](./SECURITY.md) for the trust boundary and
 links to Celld's current security and limitation notes.
 
+Celld 0.4.0 also has a known node-lease retry limitation under intermittent
+object-store failures. Scafo keeps Celld's upstream lease default unchanged;
+operators who accept slower failure detection for more interruption tolerance
+can opt into `CELLD_TTL_MS=30000`. See the exact tradeoff in
+[SECURITY.md](./SECURITY.md#deploy-safely) and follow
+[Celld issue #182](https://github.com/denoland/celld/issues/182).
+
 ## Running it for real
 
 - **One host, no containers:** [`scripts/install.sh`](./scripts/install.sh) — a

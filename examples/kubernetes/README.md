@@ -250,6 +250,27 @@ exits, and restarts. Size Kubernetes resources separately from that availability
 requirement. Celld documents the storage contract in its
 [guarantees](https://github.com/denoland/celld/blob/main/docs/guarantees.md).
 
+Celld 0.4.0 has a known retry limitation: after an ambiguous lease renewal
+reads back the unchanged prior lease, it waits a full third of the TTL before
+trying again. Two missed attempts can fence the process even when the store
+recovers before expiry. Track the upstream fix in
+[Celld issue #182](https://github.com/denoland/celld/issues/182).
+
+Scafo preserves Celld's 10-second default. If the store has intermittent
+multi-second stalls, an operator may instead set this ConfigMap value on every
+Scafo node:
+
+```yaml
+SCAFO_CELLD_ENV: "CELLD_TTL_MS=30000"
+```
+
+Celld then renews every 10 seconds, but an unplanned node failure can take up to
+30 seconds to become eligible for takeover. This mitigates the retry issue; it
+does not repair it. Re-evaluate and remove the override after validating a Celld
+release that fixes issue #182. If the optional idle-eviction setting above is
+also enabled, combine the two values as
+`CELLD_IDLE_EVICT_S=60,CELLD_TTL_MS=30000`.
+
 ## Three rules that must not be violated
 
 **The stop grace stays at 50 seconds or more.** On SIGTERM a node writes that it
