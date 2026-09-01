@@ -22,7 +22,6 @@ import type {
   DeployRunOptions,
 } from "../../core/types/deploy.ts";
 import { unpackArchive } from "../archive/tar-zst.ts";
-import { esbuildBinaryPath } from "./_esbuild.ts";
 import { assertProcessGroups, processGroupId, stopProcessGroup } from "../_process-group.ts";
 
 /** Command run when the caller does not name one. */
@@ -33,9 +32,6 @@ const CONFIG_NAMES: string[] = ["wrangler.jsonc", "wrangler.json"];
 
 /** The version shape celld uses in deployment object keys. */
 const VERSION_RE = /^[\da-f]{8,64}$/i;
-
-/** Variable the runtime is told which esbuild executable to build with. */
-const ESBUILD_ENV = "CELLD_ESBUILD";
 
 /** Independent bound for celld's one machine-output deployment record. */
 const DEPLOY_RECORD_BYTES = 4096;
@@ -76,10 +72,6 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
 
   return {
     async run(input: DeployRunInput, runOpts: DeployRunOptions): Promise<DeployRunResult> {
-      /* Resolved before anything is unpacked: a node with no builder cannot
-         publish, and finding that out after writing megabytes to disk helps
-         nobody. */
-      const esbuild = esbuildBinaryPath(globalThis.process?.env ?? {});
       const dir = await mkdtemp(join(staging, "scafo-deploy-"));
 
       try {
@@ -88,7 +80,7 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
           ...(opts?.archiveEntries === undefined ? {} : { maxEntries: opts.archiveEntries }),
           signal: runOpts.signal,
         });
-        const config = await prepareConfig(dir, input.script);
+        const config = await prepareConfig(dir, input.script, input.noBundle);
 
         const version = await run(
           binPath,
@@ -110,7 +102,6 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
               AWS_ACCESS_KEY_ID: input.target.accessKey,
               AWS_SECRET_ACCESS_KEY: input.target.secretKey,
               AWS_REGION: input.target.region,
-              [ESBUILD_ENV]: esbuild,
             },
           },
         );
@@ -137,7 +128,11 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
  * that named itself something else would deploy into a second fleet directory
  * the daemon never serves, so the recorded name wins.
  */
-async function prepareConfig(dir: string, script: string): Promise<string> {
+async function prepareConfig(
+  dir: string,
+  script: string,
+  noBundle: true | undefined,
+): Promise<string> {
   for (const name of CONFIG_NAMES) {
     const path = join(dir, name);
     let text: string;
@@ -154,7 +149,15 @@ async function prepareConfig(dir: string, script: string): Promise<string> {
       });
     }
 
-    await writeFile(path, JSON.stringify({ ...parsed, name: script }, null, 2), "utf8");
+    await writeFile(
+      path,
+      JSON.stringify(
+        { ...parsed, name: script, ...(noBundle === true ? { no_bundle: true } : {}) },
+        null,
+        2,
+      ),
+      "utf8",
+    );
     return path;
   }
 

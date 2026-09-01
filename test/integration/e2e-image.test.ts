@@ -5,8 +5,8 @@
  * already proven twice over — once through Caddy, once through Traefik — and
  * both run the daemon off a bind-mounted worktree, which is exactly what an
  * operator never does. What is unproven until here is the artifact: that the
- * repository's Dockerfile builds, that the image carries celld and esbuild where
- * the code looks for them, that its entrypoint takes `sail` and its arguments,
+ * repository's Dockerfile builds, that the image carries celld and its builder,
+ * that its entrypoint takes `sail` and its arguments,
  * that a node works with no write access outside its state directory because it
  * does not run as root, and that a container stopped inside the grace the image
  * documents exits cleanly.
@@ -162,7 +162,7 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
         SCAFO_CADDY_ADMIN: `http://127.0.0.1:${String(CADDY_ADMIN_PORT)}`,
         SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
         /* Deliberately NOT set here, unlike every other suite: the image pins
-           ESBUILD_BINARY_PATH and names its own state directory, and a node that
+           CELLD_ESBUILD and names its own state directory, and a node that
            needed either of them from outside would be a packaging failure. */
       })
       /* The image's ENTRYPOINT supplies `node /app/dist/cli/index.mjs`; this is
@@ -198,9 +198,7 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
 
       const celld = await node.exec(["celld", "--version"]);
       const esbuild = await node.exec(["esbuild", "--version"]);
-      /* Pinned in the image so deploy intake never resolves it across packages
-         at runtime, where the answer depends on the layout it was started under. */
-      const pinned = await node.exec(["sh", "-c", "echo $ESBUILD_BINARY_PATH"]);
+      const pinned = await node.exec(["sh", "-c", "echo $CELLD_ESBUILD"]);
 
       expect(celld.exitCode, celld.output).toBe(0);
       expect(celld.output).toContain("0.4.0");
@@ -211,7 +209,7 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
         uid: uid.output.trim(),
         celld: celld.output.trim(),
         esbuild: esbuild.output.trim(),
-        esbuildBinaryPath: pinned.output.trim(),
+        celldEsbuild: pinned.output.trim(),
       };
     },
     STEP_TIMEOUT_MS,

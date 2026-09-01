@@ -531,11 +531,10 @@ fetch_caddy_plain() {
   CADDY_CHECKSUM_SOURCE="pinned in this script (caddy ${CADDY_VERSION})"
 }
 
-# esbuild is not optional and it is not a scafo dependency in the usual sense:
-# `celld deploy` bundles every artifact with it, so a node without one accepts
-# deploys and then fails every single one of them. It ships only as a per-platform
-# npm package, which is why this is a registry tarball rather than a release
-# asset — the file inside it is a plain native executable.
+# esbuild is bundled with a batteries-included node for Celld's ordinary
+# source-bundle path. It ships only as a per-platform npm package, which is why
+# this is a registry tarball rather than a release asset — the file inside it is
+# a plain native executable.
 fetch_esbuild() {
   expected="$ESBUILD_SHA256_amd64"
   npm_arch='x64'
@@ -767,10 +766,9 @@ User=${SERVICE_USER}
 Group=${SERVICE_USER}
 EnvironmentFile=${CONFIG_DIR}/node.env
 Environment=SCAFO_STATE_DIR=${STATE_DIR}
-# Pinned rather than resolved: the node hands this path to "celld deploy" for
-# every build, and which esbuild builds a customer's code must not depend on
-# what happens to be on PATH.
-Environment=ESBUILD_BINARY_PATH=${BIN_DIR}/esbuild
+# Celld's source-bundle path uses this pinned builder unless the operator sets
+# its upstream `CELLD_ESBUILD` setting elsewhere.
+Environment=CELLD_ESBUILD=${BIN_DIR}/esbuild
 Environment=SCAFO_CELLD_BIN=${BIN_DIR}/celld
 ExecStart=${BIN_DIR}/scafo sail
 Restart=on-failure
@@ -980,7 +978,7 @@ explain_manual_setup() {
   say ''
   say "  install -d -m ${STATE_DIR_MODE} ${STATE_DIR}"
   say "  SCAFO_STATE_DIR=${STATE_DIR} \\"
-  say "  ESBUILD_BINARY_PATH=${BIN_DIR}/esbuild SCAFO_CELLD_BIN=${BIN_DIR}/celld \\"
+  say "  CELLD_ESBUILD=${BIN_DIR}/esbuild SCAFO_CELLD_BIN=${BIN_DIR}/celld \\"
   say "  SCAFO_S3_ENDPOINT=... SCAFO_S3_BUCKET=... SCAFO_S3_ACCESS_KEY=... \\"
   say "  SCAFO_S3_SECRET_KEY=... SCAFO_PLATFORM_DOMAINS=... \\"
   say "  SCAFO_CADDY_ADMIN=http://127.0.0.1:2019 \\"

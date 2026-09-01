@@ -35,6 +35,8 @@ export interface DeployRunInput {
   environment: string;
   /** Name the runtime files this application under within the fleet. */
   script: string;
+  /** Ask Celld to use the artifact's already self-contained Worker entry. */
+  noBundle?: true;
   /** The uploaded archive, exactly as it arrived and staged outside memory. */
   artifact: StagedArtifact;
   target: DeployTarget;

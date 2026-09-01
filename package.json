@@ -96,7 +96,6 @@
     "citty": "^0.2.2",
     "confbox": "^0.2.4",
     "consola": "^3.4.2",
-    "esbuild": "^0.28.2",
     "h3": "2.0.1-rc.26",
     "tar": "^7.5.22",
     "tavolato": "^0.0.1",
@@ -109,6 +108,7 @@
     "@types/node": "^24",
     "@vitest/coverage-v8": "^4.1.10",
     "automd": "^0.4.3",
+    "esbuild": "^0.28.2",
     "obuild": "^0.4.38",
     "oxfmt": "^0.63.0",
     "oxlint": "^1.78.0",
@@ -132,6 +132,5 @@
       "version": ">=24.17.0",
       "onFail": "error"
     }
-  },
-  "packageManager": "pnpm@11.18.0"
+  }
 }

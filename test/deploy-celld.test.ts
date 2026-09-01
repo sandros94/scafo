@@ -49,6 +49,81 @@ it("accepts positive safe-integer endpoints at the runner boundary", () => {
   }
 });
 
+it("hands Celld the no-bundle assertion and upstream builder path", async () => {
+  const root = await mkdtemp(join(tmpdir(), "scafo-deploy-no-bundle-"));
+  const source = join(root, "source");
+  const staging = join(root, "staging");
+  const bin = join(root, "celld-test");
+  const observed = join(root, "observed.json");
+  try {
+    await writeFile(
+      bin,
+      [
+        `#!${process.execPath}`,
+        'const { readFileSync, writeFileSync, writeSync } = require("node:fs");',
+        'const config = process.argv[process.argv.indexOf("--config") + 1];',
+        `writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ config: JSON.parse(readFileSync(config, "utf8")), env: { esbuild: process.env.CELLD_ESBUILD } }));`,
+        'writeSync(1, JSON.stringify({ worker: "shop", version: "abcdef12", location: "s3://bucket/deploy/shop/abcdef12", dry_run: false }) + "\\n");',
+      ].join("\n"),
+    );
+    await chmod(bin, 0o755);
+    await Promise.all([mkdir(source), mkdir(staging)]);
+    await writeFile(join(source, "wrangler.jsonc"), '{ "name": "other", "no_bundle": false }');
+
+    const artifact = await packDirectory(source);
+    await createCelldDeployRunner({
+      binPath: bin,
+      stagingDir: staging,
+      baseEnv: { CELLD_ESBUILD: "/opt/esbuild" },
+    }).run({ ...input(artifact), noBundle: true }, { signal: new AbortController().signal });
+
+    await expect(readFile(observed, "utf8")).resolves.toContain('"no_bundle":true');
+    await expect(readFile(observed, "utf8")).resolves.toContain('"esbuild":"/opt/esbuild"');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it.each([
+  ["wrangler.jsonc", true],
+  ["wrangler.json", false],
+] as const)(
+  "preserves %s no_bundle when the deploy carries no assertion",
+  async (name, noBundle) => {
+    const root = await mkdtemp(join(tmpdir(), "scafo-deploy-no-bundle-preserve-"));
+    const source = join(root, "source");
+    const staging = join(root, "staging");
+    const bin = join(root, "celld-test");
+    const observed = join(root, "observed.json");
+    try {
+      await writeFile(
+        bin,
+        [
+          `#!${process.execPath}`,
+          'const { readFileSync, writeFileSync, writeSync } = require("node:fs");',
+          'const config = process.argv[process.argv.indexOf("--config") + 1];',
+          `writeFileSync(${JSON.stringify(observed)}, readFileSync(config));`,
+          'writeSync(1, JSON.stringify({ worker: "shop", version: "abcdef12", location: "s3://bucket/deploy/shop/abcdef12", dry_run: false }) + "\\n");',
+        ].join("\n"),
+      );
+      await chmod(bin, 0o755);
+      await Promise.all([mkdir(source), mkdir(staging)]);
+      await writeFile(join(source, name), JSON.stringify({ name: "other", no_bundle: noBundle }));
+
+      await createCelldDeployRunner({ binPath: bin, stagingDir: staging }).run(
+        input(await packDirectory(source)),
+        { signal: new AbortController().signal },
+      );
+
+      await expect(readFile(observed, "utf8").then(JSON.parse)).resolves.toMatchObject({
+        no_bundle: noBundle,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
 it("cancels mid-expansion and removes the partial extraction directory", async () => {
   const root = await mkdtemp(join(tmpdir(), "scafo-deploy-expand-cancel-"));
   const source = join(root, "source");

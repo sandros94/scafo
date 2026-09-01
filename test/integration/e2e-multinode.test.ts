@@ -1072,7 +1072,7 @@ async function startNode(id: string, labels?: string): Promise<Node> {
          which nothing on the other node can reach; the advertised address above
          is only useful if something is listening on it. */
       SCAFO_BIND_HOST: "0.0.0.0",
-      ESBUILD_BINARY_PATH: "/usr/local/bin/esbuild",
+      CELLD_ESBUILD: "/usr/local/bin/esbuild",
       ...(labels === undefined ? {} : { SCAFO_NODE_LABELS: labels }),
     })
     .withCommand(["node", "dist/cli/index.mjs", "sail", "--listen", `0.0.0.0:${String(NODE_PORT)}`])

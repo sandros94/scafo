@@ -33,6 +33,10 @@ const deployArgs: ArgsDef = {
   "project": { type: "string", description: "Project slug to deploy into", required: true },
   "env": { type: "string", description: "Environment to deploy into (production)" },
   "script": { type: "string", description: "Name the runtime files the app under" },
+  "no-bundle": {
+    type: "boolean",
+    description: "Use a pre-bundled, self-contained Worker entry",
+  },
   "replicas": {
     type: "string",
     description: "How many nodes serve this environment: a whole number, or all",
@@ -102,6 +106,7 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
   const meta = {
     environment,
     script: text(flags.script) ?? project,
+    ...(flags["no-bundle"] === true ? { noBundle: true as const } : {}),
     /* Only when they were asked for: a deploy that names no replica count and no
        selector must leave whatever the environment already carries exactly as it
        is. Neither flag can lift a constraint — that is `scafo env selector`. */

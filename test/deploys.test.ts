@@ -662,6 +662,8 @@ describe("what an upload must carry", () => {
       { project: "Not A Slug" },
       { environment: "UPPER" },
       { buildId: "nothex" },
+      { noBundle: false },
+      { noBundle: "true" },
       { replicas: 0 },
       { replicas: "every" },
       { nodeSelector: "tier=fast" },
@@ -679,6 +681,16 @@ describe("what an upload must carry", () => {
 });
 
 describe("what happens to an accepted deploy", () => {
+  it("carries the no-bundle assertion to the deploy runner", async () => {
+    const id = (await responseId(
+      await upload(await operatorToken(), { ...meta(), noBundle: true }),
+    )) as string;
+
+    await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ noBundle: true });
+  });
+
   it("publishes the artifact, records the build and makes it current", async () => {
     const id = (await responseId(await upload(await operatorToken()))) as string;
 

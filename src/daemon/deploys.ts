@@ -79,6 +79,8 @@ export interface DeployMeta {
   environment: string;
   /** Name the runtime files this application under within the environment's fleet. */
   script: string;
+  /** Ask Celld to use the artifact's already self-contained Worker entry. */
+  noBundle?: true;
   /** Id to record the build as; defaults to the version the runtime assigned. */
   buildId?: string;
   /**
@@ -182,6 +184,7 @@ export function createDeployService(
           project: meta.project,
           environment: meta.environment,
           script: meta.script,
+          ...(meta.noBundle === true ? { noBundle: true } : {}),
           artifact,
           target: {
             endpoint: bucket.endpoint,

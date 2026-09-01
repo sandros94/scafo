@@ -318,7 +318,7 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
     daemon,
     createCelldDeployRunner({
       binPath: config.runtime.binPath,
-      baseEnv,
+      baseEnv: deployBaseEnv(process.env),
       artifactBytes: config.deploy?.artifactBytes ?? DEFAULT_ARTIFACT_BYTES,
       archiveEntries: config.deploy?.archiveEntries ?? DEFAULT_ARCHIVE_ENTRIES,
       outputBytes: config.deploy?.outputBytes,
@@ -423,6 +423,14 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
         .map((status) => supervisor.stop(status.id, { graceMs: driver.stopGraceMs })),
     );
   });
+}
+
+/** The one upstream build setting a deploy may share with the daemon's environment. */
+export function deployBaseEnv(env: Record<string, string | undefined>): Record<string, string> {
+  const base = runtimeBaseEnv(env);
+  const esbuild = env.CELLD_ESBUILD;
+  if (esbuild !== undefined) base.CELLD_ESBUILD = esbuild;
+  return base;
 }
 
 /**

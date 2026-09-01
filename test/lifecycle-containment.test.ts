@@ -21,8 +21,10 @@ afterAll(async () => {
 
 describe("lifecycle containment artifacts", () => {
   it("renders a systemd unit that contains every remaining cgroup member", async () => {
-    const directives = directivesOf(await renderedNodeUnit());
+    const unit = await renderedNodeUnit();
+    const directives = directivesOf(unit);
 
+    expect(unit).toContain("\nEnvironment=CELLD_ESBUILD=/usr/local/bin/esbuild\n");
     expect(directives).toMatchObject({
       KillMode: "mixed",
       KillSignal: "SIGTERM",

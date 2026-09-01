@@ -239,7 +239,7 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
         SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
         SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
         SCAFO_BIND_HOST: "0.0.0.0",
-        ESBUILD_BINARY_PATH: "/usr/local/bin/esbuild",
+        CELLD_ESBUILD: "/usr/local/bin/esbuild",
         /* No ingress: this node routes nothing, it only holds the bucket. What
            terminates TLS here is the Caddy beside it, which is the point. */
       })

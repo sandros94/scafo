@@ -213,6 +213,11 @@ function parseMeta(parsed: unknown, project: string): DeployMeta {
     script,
   };
 
+  if (body.noBundle !== undefined) {
+    if (body.noBundle !== true) throw invalid(`"noBundle" must be true when given`);
+    meta.noBundle = true;
+  }
+
   /* Absent means "say nothing about placement", which is not the same as saying
      "all": the environment keeps whatever it already carries. */
   if (body.replicas !== undefined && body.replicas !== null) {

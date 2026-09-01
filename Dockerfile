@@ -38,17 +38,9 @@ COPY tsconfig.json build.config.ts ./
 COPY src ./src
 RUN pnpm build
 
-# What dist actually loads at runtime: the packages `build.config.ts` marks
-# external (uns3, unjwt, h3, confbox, citty, tar) plus esbuild, which the deploy
-# intake resolves through `createRequire` rather than importing. Everything else
-# was bundled into dist/ and everything that built it is dropped here.
-RUN pnpm prune --prod --ignore-scripts
-
 # esbuild ships its compiled binary in a per-platform package and publishes no
-# API saying where that package landed; this is the resolution esbuild performs
-# for itself, run once here so the image carries the answer instead of the node
-# working it out on every deploy. Written without a template literal on purpose:
-# `${...}` inside a RUN reaches the shell, not node.
+# API saying where that package landed. Extract it while development dependencies
+# still exist, then prune them from the image's runtime tree.
 RUN set -eux; \
   bin="$(node -e 'const {createRequire}=require("node:module"); \
     const here=createRequire(process.cwd()+"/"); \
@@ -56,6 +48,10 @@ RUN set -eux; \
     process.stdout.write(fromEsbuild.resolve("@esbuild/"+process.platform+"-"+process.arch+"/bin/esbuild"))')"; \
   install -D -m 0755 "$bin" /out/esbuild; \
   /out/esbuild --version
+
+# What dist actually loads at runtime: the packages `build.config.ts` marks
+# external. Everything else that built it is dropped here.
+RUN pnpm prune --prod --ignore-scripts
 
 # ---------------------------------------------------------------------------
 # The image an operator runs.
@@ -70,10 +66,9 @@ RUN apt-get update \
 COPY --from=celld /usr/local/bin/celld /usr/local/bin/celld
 COPY --from=build /out/esbuild /usr/local/bin/esbuild
 
-# Pinned to the image's own binary so deploy intake never resolves esbuild
-# across packages at runtime — the resolution depends on the node_modules layout
-# it happens to be started under, and a node's builder must not.
-ENV ESBUILD_BINARY_PATH=/usr/local/bin/esbuild
+# Celld's source-bundle path uses the image's pinned builder when an operator
+# has not chosen another upstream path.
+ENV CELLD_ESBUILD=/usr/local/bin/esbuild
 
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules

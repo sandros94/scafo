@@ -177,9 +177,8 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
         /* Peers reach a single node on loopback; without this the advertised
            host would be the wildcard the listener binds. */
         SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
-        /* Belt and braces: the image's own esbuild, rather than whichever one
-           the bind-mounted node_modules resolves to. */
-        ESBUILD_BINARY_PATH: "/usr/local/bin/esbuild",
+        /* Keep Celld on the image's builder despite the bind-mounted worktree. */
+        CELLD_ESBUILD: "/usr/local/bin/esbuild",
       })
       .withCommand([
         "node",

@@ -24,23 +24,15 @@
 #   curl -fsSL https://deno.land/install.sh | sh   # into ~/.deno
 #
 # WHAT THE BINARY STILL DOES NOT CARRY, and must not: celld (the runtime), an
-# ingress, wireguard-tools, and esbuild. esbuild in particular is a per-platform
-# native executable that the deploy path hands to `celld deploy` by PATH —
-# `ESBUILD_BINARY_PATH` names it — so embedding it would put a second copy of a
-# toolchain inside a daemon that only ever passes its path along. See
-# scripts/install.sh, which installs the prerequisites beside the binary.
+# ingress, wireguard-tools, or a builder. Celld owns source bundling and looks
+# for its own upstream builder setting or PATH; see scripts/install.sh for the
+# batteries-included host setup.
 
 set -euo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 stage="${root}/build/.stage"
 out="${root}/build"
-
-# The npm package `deno compile` must NOT resolve. It is a runtime dependency of
-# the project (the deploy path locates the executable it ships), but the binary
-# reaches that executable through ESBUILD_BINARY_PATH or PATH, and resolving the
-# package here would embed ~10MB of native toolchain per platform in every copy.
-readonly EXCLUDED_DEPS="esbuild"
 
 # Targets, as `<os>-<arch>:<deno target triple>`. Only Linux is built by default:
 # a node daemon supervises cgroup-limited processes and drives an ingress, which
@@ -74,7 +66,7 @@ readonly TARGETS=(
 #                  anywhere on the host) and `wg` (key generation only —
 #                  `wg-quick` is PRINTED for the operator to run, never spawned)
 #   --allow-env    ~60 names: SCAFO_*, AWS_*, the CELLD_* the runtime driver
-#                  composes, ESBUILD_BINARY_PATH, XDG_STATE_HOME, and the
+#                  composes, CELLD_ESBUILD, XDG_STATE_HOME, and the
 #                  PATH/HOME/TMPDIR/TZ/RUST_LOG a supervised process inherits.
 #                  Enumerable, and deliberately not enumerated: the list would
 #                  have to include whatever the h3/srvx/tar/uns3 dependency tree
@@ -151,7 +143,7 @@ stage_sources() {
   # The manifest the CLI reads its version out of, at the path it looks for it:
   # `../../package.json` from dist/cli/index.mjs. Only the three fields that are
   # read — a copy of the real one would carry `dependencies`, which Deno would
-  # then try to resolve, esbuild included.
+  # then try to resolve.
   node -e '
     const fs = require("node:fs");
     const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
@@ -171,12 +163,10 @@ stage_sources() {
   node -e '
     const fs = require("node:fs");
     const path = require("node:path");
-    const [manifestPath, modulesDir, excluded, outPath] = process.argv.slice(1);
+    const [manifestPath, modulesDir, outPath] = process.argv.slice(1);
     const deps = JSON.parse(fs.readFileSync(manifestPath, "utf8")).dependencies ?? {};
-    const skip = new Set(excluded.split(",").filter(Boolean));
     const imports = {};
     for (const name of Object.keys(deps).sort()) {
-      if (skip.has(name)) continue;
       const own = path.join(modulesDir, name, "package.json");
       if (!fs.existsSync(own)) {
         throw new Error(`${name} is not installed; run \`pnpm install\``);
@@ -189,7 +179,7 @@ stage_sources() {
       outPath,
       JSON.stringify({ nodeModulesDir: "none", imports }, null, 2) + "\n",
     );
-  ' "${root}/package.json" "${root}/node_modules" "$EXCLUDED_DEPS" "${stage}/deno.json"
+  ' "${root}/package.json" "${root}/node_modules" "${stage}/deno.json"
 
   # ONE MTIME FOR EVERY STAGED FILE, AND WITHOUT IT THE ARTIFACT IS NOT
   # REPRODUCIBLE. `deno compile` records each embedded file's modification time
