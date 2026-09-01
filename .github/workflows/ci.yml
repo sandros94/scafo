@@ -87,10 +87,7 @@ jobs:
 
       - name: Test pure code
         run: >-
-          pnpm vitest run
-          --config vitest.no-store.config.ts
-          --exclude "test/integration/**"
-          --slowTestThreshold=1000
+          pnpm vitest run --config vitest.no-store.config.ts --exclude "test/integration/**" --slowTestThreshold=1000
 
       - name: Build packages
         run: pnpm build
@@ -125,9 +122,7 @@ jobs:
 
       - name: Test store compatibility
         run: >-
-          pnpm vitest run
-          test/integration/store.test.ts
-          --slowTestThreshold=1000
+          pnpm vitest run test/integration/store.test.ts --slowTestThreshold=1000
 
   test-docker-e2e:
     runs-on: ubuntu-latest
@@ -139,12 +134,10 @@ jobs:
         include:
           - shard: product-image
             files: >-
-              test/integration/e2e.test.ts
-              test/integration/e2e-image.test.ts
+              test/integration/e2e.test.ts test/integration/e2e-image.test.ts
           - shard: traefik-tls
             files: >-
-              test/integration/e2e-traefik.test.ts
-              test/integration/e2e-tls.test.ts
+              test/integration/e2e-traefik.test.ts test/integration/e2e-tls.test.ts
           - shard: multinode
             files: test/integration/e2e-multinode.test.ts
 
@@ -174,11 +167,7 @@ jobs:
 
       - name: Test Docker end to end
         run: >-
-          pnpm vitest run
-          --config vitest.no-store.config.ts
-          --no-file-parallelism
-          --slowTestThreshold=1000
-          ${{ matrix.files }}
+          pnpm vitest run --config vitest.no-store.config.ts --no-file-parallelism --slowTestThreshold=1000 ${{ matrix.files }}
 
   test-k3s-e2e:
     runs-on: ubuntu-latest
@@ -205,10 +194,7 @@ jobs:
 
       - name: Test K3s end to end
         run: >-
-          pnpm vitest run
-          --config vitest.no-store.config.ts
-          test/integration/e2e-k3s.test.ts
-          --slowTestThreshold=1000
+          pnpm vitest run --config vitest.no-store.config.ts test/integration/e2e-k3s.test.ts --slowTestThreshold=1000
 
   preview:
     # Continuous preview packages via pkg.pr.new — published only once the same
