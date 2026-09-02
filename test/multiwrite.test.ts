@@ -1,8 +1,4 @@
-/*
- * Every multi-object flow is killed at each of its writes in turn. Whatever is
- * on disk afterwards must still be referentially safe, and re-running the flow
- * must carry it to the state it was headed for.
- */
+/* Fault injection proves multi-write flows remain referentially safe and retryable. */
 
 import { beforeAll, describe, expect, it } from "vitest";
 import { recordDeployment } from "../src/core/registry/_deployment.ts";

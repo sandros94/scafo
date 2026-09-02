@@ -15,16 +15,8 @@ export const SECRET_FILE_MODE: number = 0o600;
 /** Mode a state directory scafo created itself is given. */
 export const STATE_DIR_MODE: number = 0o700;
 
-/**
- * Writes key material into a state directory, creating the directory when it is
- * not there, so that neither can be read by anyone but their owner.
- *
- * The mode is applied twice on purpose. `writeFile`'s own only applies to a file
- * this call created, and a private key that briefly existed readable by everyone
- * is a private key that has to be assumed read; the directory is narrowed only
- * when this call created it, because an operator who pointed scafo at a
- * directory of their own chose its mode themselves.
- */
+/** Writes key material with owner-only permissions; applies file mode after
+    writing and changes directory mode only when it created the directory. */
 export async function writeSecretFile(
   stateDir: string,
   path: string,
@@ -47,16 +39,8 @@ export async function readTextFile(path: string): Promise<string | null> {
   }
 }
 
-/**
- * Where a node keeps its state when the configuration names no directory:
- * {@link SYSTEM_STATE_DIR} for root, `$XDG_STATE_HOME/scafo` for a user who has
- * one, and `~/.local/state/scafo` otherwise.
- *
- * Always an absolute path, and never derived from the working directory — a node
- * is launched from wherever the operator happened to be standing, and an
- * identity written there would be a different identity on the next boot. A
- * relative `XDG_STATE_HOME` is ignored for the same reason.
- */
+/** Default absolute state path: system, XDG, then `~/.local/state`; ignores
+    relative XDG paths to preserve node identity across working directories. */
 export function resolveDefaultStateDir(
   env: Record<string, string | undefined> = process.env,
 ): string {
@@ -97,21 +81,7 @@ export interface DeprecatedAlias {
   warn?: (line: string) => void;
 }
 
-/**
- * An old command name, kept working and kept out of the way.
- *
- * HIDDEN, WORKING, AND NOISY EXACTLY ONCE. Hidden because help is what the
- * surface IS, and an old name listed there teaches it to somebody who has never
- * typed it; working because a rename is not a reason to break a script that is
- * already deployed; noisy once because the person running it has to learn the
- * new name before the old one goes.
- *
- * Delegation is a spread rather than a wrapper: the alias cannot drift from what
- * it aliases, because it IS what it aliases, with a different `meta` and one
- * line said first.
- *
- * These live only until the surface goes public, and are then deleted.
- */
+/** Creates a hidden deprecated command alias with one warning and delegated behavior. */
 export function deprecatedAlias(spec: DeprecatedAlias): CommandDef {
   const say =
     spec.warn ??
@@ -136,20 +106,7 @@ export function deprecatedAlias(spec: DeprecatedAlias): CommandDef {
   };
 }
 
-/**
- * Prints a failure the way the API would answer it — problem title, detail and
- * type — and marks the process as failed.
- *
- * A FAILURE SCAFO NEVER WRAPPED IS PRINTED IN THE SAME SHAPE, never as a raw
- * stack. An `EACCES` on a state directory, a refused connection, a full disk:
- * these are ordinary ways for a command to end, and a Node stack trace in front
- * of one tells an operator that scafo crashed rather than that a directory is
- * not writable. So it becomes one line saying what was raised and what that says
- * it was caused by — the message is where the useful specifics of a runtime
- * failure are (`EACCES: permission denied, open '<path>'` names the syscall and
- * the path), and the frames above it name only scafo's own call stack, which is
- * the one thing the operator cannot act on.
- */
+/** Prints structured errors or concise unexpected-cause chains and sets failure exit code. */
 export function reportFailure(error: unknown): void {
   if (isScafoError(error)) {
     const problem = error.toProblem();

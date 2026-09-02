@@ -45,27 +45,8 @@ export interface SelectorRequest {
   selector: NodeSelector | null;
 }
 
-/**
- * Authenticates a caller that may be an operator holding a node key, or a
- * project's own CI workload holding an OIDC token.
- *
- * The bearer is tried as a node token first, because that needs nothing but the
- * token itself. Only when that fails as authentication is it offered to the
- * project's trust policy — `project` is `null` when there is no project to check
- * it against, and the node token is then the only way in.
- *
- * A caller that fails both is answered with the one `ScafoError("auth-invalid")`
- * every rejection shares, so it cannot learn which of the two it failed, nor
- * whether the project exists. A trust denial is the single exception: the caller
- * proved who it is and the project simply does not admit it, which is
- * authorization and stays distinguishable as `ScafoError("trust-mismatch")`.
- *
- * An admitted operator's PROJECT SCOPE is checked here too, and here rather than
- * in each route, because this function is already the place a caller and a
- * project meet: a scoped key naming a project outside its list is
- * `ScafoError("auth-scope")`. A `null` project is nothing to check against, and
- * a workload's own scoping is its project's trust policy.
- */
+/** Authenticates node/operator or project OIDC callers. Uniform auth failures
+    hide token/project details; proven trust denials stay `trust-mismatch`. */
 export async function verifyCaller(
   verifiers: DeployVerifiers,
   event: H3Event,
@@ -79,21 +60,13 @@ export async function verifyCaller(
     return operator;
   }
 
-  /* Nothing to check a workload token against, so the node token was the only
-     way in and its rejection stands. */
+  /* OIDC needs a project trust policy. */
   if (project === null) throw authInvalid();
   return verifyWorkload(verifiers, event, project);
 }
 
-/**
- * The operator half of {@link verifyCaller}, on its own: it needs nothing but
- * the `Authorization` header, so a route with a body worth not reading can try
- * it before reading one.
- *
- * Resolves null when the token is simply not a valid node token — including when
- * there is no token at all. Anything that is not an authentication failure, such
- * as the registry being unreadable, is raised instead of swallowed.
- */
+/** Tries node-token authentication before reading a deploy body. Only
+    `auth-invalid` becomes null; registry failures propagate. */
 export async function tryNodeToken(
   verifiers: DeployVerifiers,
   event: H3Event,
@@ -166,15 +139,7 @@ export function encodeDeployMetadata(meta: DeployMetadata): string {
   return toBase64Url(new TextEncoder().encode(stableStringify(meta)));
 }
 
-/**
- * Reads the JSON body of a node-selector change: `{"selector": {...}}` to
- * constrain the environment, `{"selector": null}` to lift the constraint.
- *
- * The two are spelled differently because they mean different things, and a
- * MISSING `selector` is neither — it is a request that forgot to say what it
- * wanted, and clearing a constraint is far too consequential to be what an
- * omission defaults to.
- */
+/** Reads selector change JSON. `null` clears; omission is refused. */
 export async function readSelectorRequest(
   event: H3Event,
   opts?: JsonBodyOptions,
@@ -218,16 +183,13 @@ function parseMeta(parsed: unknown, project: string): DeployMeta {
     meta.noBundle = true;
   }
 
-  /* Absent means "say nothing about placement", which is not the same as saying
-     "all": the environment keeps whatever it already carries. */
+  /* Omitted placement preserves existing environment settings. */
   if (body.replicas !== undefined && body.replicas !== null) {
     assertReplicas(body.replicas);
     meta.replicas = body.replicas;
   }
 
-  /* Read the same way, and for the same reason: a pipeline that never mentions a
-     selector must not lift one an operator set. Clearing it is `scafo env
-     selector --clear`, which says so out loud. */
+  /* Omitted selector preserves existing constraints. */
   if (body.nodeSelector !== undefined && body.nodeSelector !== null) {
     assertSelector(body.nodeSelector);
     meta.nodeSelector = body.nodeSelector;

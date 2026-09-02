@@ -1,147 +1,27 @@
 #!/bin/sh
+# Installs verified scafo, Celld, Caddy, and esbuild binaries.
+# Root on a systemd host also writes, but does not start, node and ingress units.
+# `scafo-caddy` is the default: it stores TLS material through the node storage API
+# without bucket credentials. Set `SCAFO_INSTALL_CADDY=plain` for upstream Caddy.
+# The ingress receives a systemd credential copy of the storage token; do not widen
+# the token's source-file permissions.
 #
-# scafo — single-host bootstrap.
-#
-#   curl -fsSL https://raw.githubusercontent.com/sandros94/scafo/main/scripts/install.sh | sh
-#
-# Installs the four executables one scafo node is made of, each verified by
-# sha256 before it is put anywhere:
-#
-#   scafo    the node daemon and the CLI, one binary
-#   celld    the runtime every deployed application runs on
-#   caddy    the ingress that terminates TLS and routes to the runtime. By
-#            DEFAULT this is scafo-caddy — see the next section — and
-#            SCAFO_INSTALL_CADDY=plain installs upstream Caddy instead. Either
-#            one is installed AS `caddy`, so nothing else on this host, in the
-#            unit or in scripts/uninstall.sh, has to know which it is.
-#   esbuild  the bundler `celld deploy` builds an artifact with
-#
-# and, when it is run by root on a host with systemd, the two units that keep the
-# first and the third of them running.
-#
-# WHAT IT DELIBERATELY DOES NOT DO
-#
-#   * It does not start anything. A node cannot boot without a bucket to keep its
-#     registry in, and those credentials are yours to write — see the closing
-#     output, which names the file and the commands.
-#   * It does not install wireguard-tools. A tunnel needs a kernel module and
-#     NET_ADMIN; that is the distribution's package manager's business and the
-#     hint is printed rather than acted on.
-#
-# WHICH CADDY, AND WHY THE DEFAULT IS THE ONE WITH THE MODULE
-#
-#   Plain Caddy keeps its certificates on this host's disk. That is PER-NODE
-#   TLS: correct for one host, and on a fleet it means every node issues its own
-#   certificate for the same names — fine until it is a rate limit. So the
-#   default installed here is scafo-caddy: the same Caddy, built with the
-#   `caddy.storage.scafo` module, which keeps the certificates, their keys and
-#   the ACME account IN THE BUCKET and reaches them through this node's own
-#   /v1/storage. It is given a loopback URL and a bearer token and holds no
-#   bucket credential of its own, which is the point of the module: a TLS
-#   terminator is the last process that should be able to address the bucket.
-#
-#   SCAFO_INSTALL_CADDY=plain opts down to upstream Caddy, pinned by the
-#   checksums below, with an ingress config carrying no `storage` block. Moving
-#   between the two is a re-run of this script with /etc/scafo/caddy.json moved
-#   out of the way, because that file is never overwritten once it exists.
-#
-#   THE TOKEN IS NOT READABLE BY THE INGRESS, AND IS NOT MADE READABLE. The node
-#   mints it 0600 as `scafo` inside a 0700 state directory, and the `caddy`
-#   account cannot open it — widening either mode would hand every process
-#   running as `caddy` the key to this node's storage API, a surface that
-#   carries private keys in both directions. systemd is what crosses the gap:
-#   `LoadCredential=` has the service manager read the file AS ROOT and place a
-#   private read-only copy in $CREDENTIALS_DIRECTORY that only the service's own
-#   UID may open, and the config points `token_file` at that copy. The comments
-#   in render_ingress_unit() carry the first-boot ordering that goes with it,
-#   which is the other half of the problem.
-#
-# WHAT IT READS FROM THE ENVIRONMENT
-#
-#   SCAFO_INSTALL_BASE     where the scafo binary and its .sha256 are fetched
-#                          from. Defaults to this repository's GitHub releases,
-#                          which do not exist yet — point it at your own
-#                          `pnpm compile` output (a plain `python3 -m
-#                          http.server` over build/ is enough) until they do.
-#   SCAFO_VERSION          release tag to install (`latest`, or `1.2.3`).
-#   SCAFO_SHA256           the expected checksum of the scafo binary. Defaults
-#                          to whatever `<binary>.sha256` says beside it, which
-#                          only proves the download was not corrupted — pin this
-#                          to a checksum you got elsewhere to prove it is the
-#                          binary you meant.
-#   SCAFO_INSTALL_BIN_DIR  where the executables go. Defaults to
-#                          /usr/local/bin as root or with passwordless sudo, and
-#                          to ~/.local/bin otherwise.
-#   SCAFO_INSTALL_CADDY    which ingress binary to install: "scafo" (the
-#                          default — Caddy built with the caddy.storage.scafo
-#                          module, from sandros94/scafo-certmagic) or "plain"
-#                          (upstream Caddy, pinned below). Anything else is
-#                          refused before a single byte is downloaded.
-#   SCAFO_CADDY_BASE       where the scafo-caddy binary and its .sha256 are
-#                          fetched from. Defaults to the latest release of
-#                          sandros94/scafo-certmagic. The same shape as
-#                          SCAFO_INSTALL_BASE and the same escape hatch: point
-#                          it at your own `xcaddy build` output while there is
-#                          no release to fetch.
-#   SCAFO_CADDY_SHA256     the expected checksum of the scafo-caddy binary.
-#                          Defaults to whatever `<binary>.sha256` says beside
-#                          it, exactly as SCAFO_SHA256 does above and for the
-#                          same reason: a "latest" URL cannot carry a constant
-#                          pin, so integrity is verified by default and
-#                          authenticity is yours to pin.
-#   SCAFO_INSTALL_MIRROR   one base URL to fetch celld, upstream Caddy and
-#                          esbuild from instead of their upstreams, keeping
-#                          their file names. For a host that cannot reach GitHub
-#                          or npm. IT CANNOT WEAKEN ANYTHING: the pinned
-#                          checksums below are still what every download is held
-#                          to, so a mirror serving other bytes is refused
-#                          exactly as a corrupted download is. It covers only
-#                          the three PINNED artifacts; `scafo` and `scafo-caddy`
-#                          have bases of their own, above, because neither is
-#                          pinned here for the reason the next paragraph gives.
-#   SCAFO_INSTALL_SKIP_UNITS=1   never write systemd units.
-#
-# celld, upstream Caddy and esbuild are PINNED — a version and a sha256 per
-# architecture, written down below and verified before install. Moving to a new
-# one of them is an edit of those constants. The two binaries that come out of
-# this project's own releases cannot be: both are fetched from a "latest" URL
-# that a constant could only go stale against, so each is held to the `.sha256`
-# published beside it — which catches a corrupted download and proves nothing
-# about provenance — and SCAFO_SHA256 and SCAFO_CADDY_SHA256 are how an operator
-# turns that into provenance. Every run says out loud which of the two it did.
-#
-# UNDOING IT: scripts/uninstall.sh, which stops and removes the units, the
-# executables and /etc/scafo and KEEPS the state directory unless --purge says
-# otherwise. It reads the manifest this script writes to /var/lib/scafo, and
-# works without one. THE TWO SCRIPTS ARE ONE LIST IN TWO FILES — see the comment
-# above the constants below.
+# Environment: `SCAFO_INSTALL_BASE`, `SCAFO_VERSION`, and `SCAFO_SHA256` select
+# and verify scafo; `SCAFO_CADDY_BASE` and `SCAFO_CADDY_SHA256` do the same for
+# scafo-caddy; `SCAFO_INSTALL_BIN_DIR` changes the destination; and
+# `SCAFO_INSTALL_MIRROR` mirrors pinned third-party artifacts. `SCAFO_INSTALL_SKIP_UNITS=1`
+# skips systemd units. A sidecar `.sha256` verifies integrity; set the checksum
+# variable to authenticate a latest-release download.
 
 set -eu
 
-# ---------------------------------------------------------------------------
-# What is installed, and the bytes it must be.
-#
-# THIS LIST AND scripts/uninstall.sh's CONSTANTS ARE ONE LIST IN TWO FILES AND
-# MUST CHANGE TOGETHER. A binary, a unit, a directory or a system user added here
-# and not there is one left on every host forever — and the failure is invisible,
-# because an uninstall that removes four of five things still ends by reporting
-# success. write_manifest() below records what cannot be derived (which bin
-# directory, which accounts this run created); the uninstall does not depend on
-# it, so these constants have to stay true on their own.
-#
-# The checksums were computed from the artifacts these URLs serve. Caddy's own
-# `caddy_<v>_checksums.txt` publishes SHA-512; the sha256 below were taken from
-# the same files after their SHA-512 matched that list, so verifying either one
-# verifies the same bytes.
+# Keep these install targets aligned with `scripts/uninstall.sh`; its manifest is optional.
 
 CELLD_VERSION='0.4.0'
 CELLD_SHA256_amd64='0488628597154725db2f61f85434fb381e1b2535d1e9f097c6d20727cd337973'
 CELLD_SHA256_arm64='d95ec7108d2c280144599727ac66106c0123d09c573f5724d3b4d3bc33f7603e'
 
-# Upstream Caddy, which is what SCAFO_INSTALL_CADDY=plain installs. The DEFAULT
-# ingress is scafo-caddy, which carries no version here at all: it comes from a
-# "latest" release URL and is verified against the .sha256 beside it, exactly as
-# the scafo binary is. See fetch_caddy_scafo().
+# `SCAFO_INSTALL_CADDY=plain` installs this pinned upstream Caddy release.
 CADDY_VERSION='2.11.4'
 CADDY_SHA256_amd64='527fbf917c39189a1e3b31d34fa955601680b2d5c8055d2a87b8b9588dec7bb9'
 CADDY_SHA256_arm64='52d42ae12b3462097e9868da6dfed3c9648ae12edd3b3638102312af84cb6904'
@@ -150,39 +30,22 @@ ESBUILD_VERSION='0.28.2'
 ESBUILD_SHA256_amd64='9573bb2233aab0f9ea7647d5cca9726113cc1768de61d66b17267f4db84488f6'
 ESBUILD_SHA256_arm64='a96dbfa41d3ef5dbd1ef22b1c10d5187be9267e86093a870f06402a7ec931596'
 
-# Where a node keeps its identity, and how. Both are the repository's own rule:
-# the Ed25519 pair that speaks for this node is written 0600 into a directory
-# created 0700, and a node that lost it would register a fresh id and leave a
-# stale public key behind in the registry.
+# The state directory holds node identity and must remain private.
 STATE_DIR='/var/lib/scafo'
 STATE_DIR_MODE='0700'
 CONFIG_DIR='/etc/scafo'
 INGRESS_LOG_DIR='/var/log/scafo-ingress'
 SERVICE_USER='scafo'
 CADDY_USER='caddy'
-# Where the ingress keeps its certificates and its ACME account. It is also what
-# `StateDirectory=caddy` in the unit below resolves to, so the two must agree.
-# scafo-caddy keeps its TLS material in the BUCKET instead and leaves this
-# directory nearly empty; the unit sets it either way, because which flavour is
-# running must not change where a stray file lands.
+# This matches the ingress unit's `StateDirectory`; plain Caddy stores TLS material here.
 CADDY_STATE_DIR='/var/lib/caddy'
 
-# The token the ingress presents to the node's /v1/storage, and it is ONE name
-# in three places that must agree: the file the node mints in the state
-# directory, the systemd credential the ingress unit loads it as, and the
-# `token_file` the ingress config points at inside $CREDENTIALS_DIRECTORY. One
-# constant so they cannot drift apart.
+# Keep the node token, ingress credential, and ingress config name aligned.
 STORAGE_TOKEN_NAME='storage-token'
-# Where the ingress reaches the node's storage API. This host's loopback, and it
-# must agree with SCAFO_LISTEN in the node.env written below: they are the two
-# ends of the same socket.
+# Must match `SCAFO_LISTEN` in the generated node environment.
 STORAGE_ENDPOINT='http://127.0.0.1:7400'
 
-# The stop grace is part of the product, not a tuning preference: on SIGTERM the
-# daemon marks itself draining, releases the coordinator lease, stops
-# reconciling, closes its listener and only THEN stops the runtime processes,
-# each of which has a 40s complete shutdown bound and is killed at 45s. The
-# daemon gets the remaining 5s around that sequence.
+# Allow node draining plus the runtime's 40-second shutdown bound.
 STOP_TIMEOUT='50'
 
 DEFAULT_INSTALL_BASE_LATEST='https://github.com/sandros94/scafo/releases/latest/download'
@@ -192,7 +55,7 @@ DEFAULT_CADDY_BASE='https://github.com/sandros94/scafo-certmagic/releases/latest
 # ---------------------------------------------------------------------------
 
 main() {
-  # What this particular run made, for the manifest at the end of it.
+  # Recorded by `write_manifest` for precise uninstall behavior.
   INSTALLED_BINARIES=''
   CREATED_USERS=''
 
@@ -214,10 +77,7 @@ main() {
   WORK="$(mktemp -d)"
   trap 'rm -rf "$WORK"' EXIT INT TERM
 
-  # EVERYTHING IS FETCHED AND VERIFIED BEFORE ANYTHING IS INSTALLED. A run that
-  # gave up halfway would leave a host carrying a new scafo and the old celld
-  # beside it — two versions that were never tested together, and no note
-  # anywhere saying so. Four checksums pass, or nothing on this host changes.
+  # Verify all downloads before changing the host.
   fetch_scafo
   fetch_celld
   fetch_caddy
@@ -263,9 +123,7 @@ detect_platform() {
       ;;
   esac
 
-  # Every binary installed here is dynamically linked against glibc. On musl they
-  # fail at exec with a message about a missing loader, which is a far worse
-  # thing to find out than this.
+  # All installed binaries require glibc.
   if [ -f /etc/alpine-release ] || (ldd --version 2>&1 | grep -qi musl); then
     die "this host's C library is musl (Alpine or similar), and every binary
   installed here — scafo, celld, caddy — is linked against glibc. Run the node
@@ -274,11 +132,7 @@ detect_platform() {
   fi
 }
 
-# Which of the two Caddys this run installs, decided BEFORE anything is fetched
-# or any directory is made, so a typo costs a message rather than a download. It
-# is one variable from here on: the binary is installed as `caddy` either way,
-# and only fetch_caddy(), the `storage` block and two lines of the ingress unit
-# read it.
+# Validate the selected ingress before downloading or creating directories.
 resolve_caddy_flavor() {
   case "${SCAFO_INSTALL_CADDY:-scafo}" in
     scafo)
@@ -308,13 +162,7 @@ detect_downloader() {
   fi
 }
 
-# Decides where the executables go, and whether this run may write to it.
-#
-# Three cases, in order: an explicit SCAFO_INSTALL_BIN_DIR, root or passwordless
-# sudo (which get /usr/local/bin), and everyone else (who gets ~/.local/bin and
-# is told about PATH at the end). Passwordless is the only sudo worth testing
-# for: this script is meant to be readable from a pipe, and a pipe has no
-# terminal for a password prompt.
+# Use an explicit directory, `/usr/local/bin` with non-interactive privilege, or `~/.local/bin`.
 resolve_destination() {
   SUDO=''
   if [ "$(id -u)" -ne 0 ]; then
@@ -335,9 +183,7 @@ resolve_destination() {
   as_root mkdir -p "$BIN_DIR"
 }
 
-# Runs a command with whatever privilege this install has. Never elevates on its
-# own: with no sudo, `as_root` is the caller's own user and a write it may not do
-# fails loudly instead of half-succeeding.
+# Use only already available non-interactive privilege.
 as_root() {
   if [ -n "$SUDO" ]; then
     $SUDO "$@"
@@ -356,9 +202,7 @@ want_units() {
 # ---------------------------------------------------------------------------
 # Downloads
 
-# The third argument is for the one download whose failure is EXPECTED to happen
-# to somebody: a "latest" release that does not exist yet 404s, and "could not
-# download" would leave the reader with no idea that there is a way forward.
+# An optional failure message can describe recovery for unavailable release assets.
 download() {
   # download <url> <destination> [what to say when it fails]
   download_msg="${3:-could not download ${1}}"
@@ -378,9 +222,7 @@ download_text() {
   fi
 }
 
-# Refuses anything whose bytes are not the ones expected. Everything downloaded
-# here goes through this before it is unpacked, made executable or moved: an
-# installer that verified only some of what it installs verifies nothing.
+# Verify every downloaded artifact before extracting or installing it.
 verify() {
   # verify <file> <expected sha256> <what>
   verify_actual="$(sha256sum "$1" | cut -d' ' -f1)"
@@ -402,9 +244,7 @@ install_binary() {
   say "installed ${BIN_DIR}/$2"
 }
 
-# Where a third-party artifact is fetched from: its upstream, or the same file
-# name under SCAFO_INSTALL_MIRROR. The checksum is pinned either way, which is
-# what makes a mirror safe to point at.
+# Mirrors retain the pinned checksum verification.
 artifact_url() {
   # artifact_url <upstream url> <file name>
   if [ -n "${SCAFO_INSTALL_MIRROR:-}" ]; then
@@ -427,10 +267,7 @@ fetch_scafo() {
   name="scafo-${OS}-${ARCH}"
   download "${base}/${name}" "${WORK}/scafo"
 
-  # The checksum is the operator's to pin. SCAFO_SHA256 wins; failing that the
-  # `.sha256` `pnpm compile` writes beside the binary is fetched, which catches a
-  # truncated or corrupted download but proves nothing about provenance —
-  # whoever served one served the other. It is said out loud at the end.
+  # A supplied checksum authenticates the binary; a sidecar checksum checks integrity only.
   if [ -n "${SCAFO_SHA256:-}" ]; then
     expected="$SCAFO_SHA256"
     SCAFO_CHECKSUM_SOURCE='pinned by SCAFO_SHA256'
@@ -461,8 +298,7 @@ fetch_celld() {
   gzip -dc "${WORK}/celld.gz" > "${WORK}/celld"
 }
 
-# Whichever flavour was chosen, the result is ${WORK}/caddy and the caller does
-# not care which one it is.
+# Both ingress variants are staged as `${WORK}/caddy`.
 fetch_caddy() {
   if [ "$CADDY_FLAVOR" = 'plain' ]; then
     fetch_caddy_plain
@@ -471,11 +307,7 @@ fetch_caddy() {
   fi
 }
 
-# The DEFAULT. A plain binary out of the scafo-certmagic repository's latest
-# release, held to the .sha256 beside it or to SCAFO_CADDY_SHA256 — the same
-# integrity-by-default, authenticity-by-pin posture the scafo binary has, and
-# for the same reason: a URL that always means "the newest one" cannot be given
-# a checksum in this file that stays true past the next release.
+# Latest scafo-caddy releases require an explicit checksum pin for authentication.
 fetch_caddy_scafo() {
   base="${SCAFO_CADDY_BASE:-$DEFAULT_CADDY_BASE}"
   name="scafo-caddy-${OS}-${ARCH}"
@@ -514,9 +346,7 @@ fetch_caddy_scafo() {
   verify "${WORK}/caddy" "$expected" "$name"
 }
 
-# The opt-down: SCAFO_INSTALL_CADDY=plain. Pinned by version and checksum above,
-# fetchable through SCAFO_INSTALL_MIRROR because a pin is what makes a mirror
-# safe to point at.
+# The plain Caddy variant is pinned and may use `SCAFO_INSTALL_MIRROR`.
 fetch_caddy_plain() {
   expected="$CADDY_SHA256_amd64"
   [ "$ARCH" = 'arm64' ] && expected="$CADDY_SHA256_arm64"
@@ -531,10 +361,7 @@ fetch_caddy_plain() {
   CADDY_CHECKSUM_SOURCE="pinned in this script (caddy ${CADDY_VERSION})"
 }
 
-# esbuild is bundled with a batteries-included node for Celld's ordinary
-# source-bundle path. It ships only as a per-platform npm package, which is why
-# this is a registry tarball rather than a release asset — the file inside it is
-# a plain native executable.
+# Esbuild is distributed as a platform npm package rather than a release asset.
 fetch_esbuild() {
   expected="$ESBUILD_SHA256_amd64"
   npm_arch='x64'
@@ -556,13 +383,7 @@ fetch_esbuild() {
 # The host
 
 create_users() {
-  # System accounts, because neither of these ever logs in. The node's is what
-  # owns its identity; Caddy's is what owns its certificates.
-  #
-  # WHICH OF THEM THIS RUN CREATED IS RECORDED, and it is the one fact the
-  # uninstall cannot work out for itself: a "caddy" account a distribution's own
-  # package made owns a Caddy neither script knows anything about, and deleting
-  # it would be a far worse mistake than leaving an unused account behind.
+  # Record only accounts created by this install so uninstall does not remove host-owned accounts.
   if ! id "$SERVICE_USER" >/dev/null 2>&1; then
     useradd --system --home-dir "$STATE_DIR" --shell /usr/sbin/nologin "$SERVICE_USER" \
       || die "could not create the \"${SERVICE_USER}\" system user"
@@ -583,8 +404,7 @@ create_users() {
 write_config() {
   install -d -m 0755 "$CONFIG_DIR"
 
-  # Written once and never overwritten: this is where an operator's bucket
-  # credentials live, and a second run of the installer must not take them away.
+  # Preserve operator-provided bucket credentials across reinstalls.
   if [ -f "${CONFIG_DIR}/node.env" ]; then
     say "keeping ${CONFIG_DIR}/node.env"
   else
@@ -637,10 +457,7 @@ EOF
   fi
 
   if [ -f "${CONFIG_DIR}/caddy.json" ]; then
-    # Never overwritten, which is also what makes changing flavour a deliberate
-    # act: a re-run with SCAFO_INSTALL_CADDY=plain over a scafo-caddy install
-    # would otherwise leave a `storage` block a plain Caddy cannot load, and the
-    # reverse would leave a scafo-caddy storing certificates on local disk.
+    # Preserve the existing config; changing ingress variants requires a matching config.
     say "keeping ${CONFIG_DIR}/caddy.json"
     if ! caddy_json_matches_flavor; then
       warn "${CONFIG_DIR}/caddy.json was written for the OTHER ingress flavour;
@@ -653,8 +470,7 @@ EOF
   fi
 }
 
-# Whether the file already on this host is the one this run's flavour needs. The
-# `storage` block is the whole difference, so its presence is the whole test.
+# The storage block distinguishes the two ingress configurations.
 caddy_json_matches_flavor() {
   if grep -q '"module": "scafo"' "${CONFIG_DIR}/caddy.json" 2>/dev/null; then
     [ "$CADDY_FLAVOR" = 'scafo' ]
@@ -663,18 +479,8 @@ caddy_json_matches_flavor() {
   fi
 }
 
-# The ingress config, printed rather than written so that what goes on a host
-# and what a test reads are the same bytes.
-#
-# The one thing this file must have is a server the node may write into: the
-# driver adds and removes routes carrying its own "scafo_" @id prefix inside it
-# and touches nothing else, so an operator's own routes can live in the same
-# array and survive every reconcile pass.
-#
-# The access log is written here because it costs nothing while
-# SCAFO_INGRESS_ACCESS_LOG stays commented out, and turning counting on later is
-# then one line in node.env rather than a Caddy restart. "mode": "0644" is what
-# lets the node, running as another user, read what Caddy writes as its own.
+# Generate the tested ingress config. The node updates only `scafo_` routes,
+# preserving other routes in the same server. The readable access log supports opt-in counters.
 render_caddy_json() {
   cat <<EOF
 {
@@ -683,13 +489,7 @@ render_caddy_json() {
   },
 EOF
 
-  # THE ONLY DIFFERENCE BETWEEN THE TWO FLAVOURS, and the reason the token_file
-  # is not the path the node actually mints: that file is 0600 `scafo` inside a
-  # 0700 directory and the `caddy` account cannot open it. The unit loads it as
-  # a systemd credential — read by the service manager as root, copied read-only
-  # into a directory only this service's UID may enter — and this is where that
-  # copy lands. The module resolves {env....} itself: its Provision() runs
-  # Caddy's ReplaceKnown over both fields before it reads the file.
+  # The unit exposes a private systemd credential copy, not the source token.
   [ "$CADDY_FLAVOR" != 'scafo' ] || cat <<EOF
   "storage": {
     "module": "scafo",
@@ -734,9 +534,7 @@ write_units() {
 
   say 'wrote /etc/systemd/system/scafo-node.service'
   say "wrote /etc/systemd/system/${CADDY_USER}.service"
-  # The files are the deliverable; the reload is a convenience. Failing the whole
-  # install because it did not run would leave a host that is correctly set up
-  # and told it is not.
+  # Unit files remain usable if the optional daemon reload fails.
   if systemctl daemon-reload 2>/dev/null; then
     say 'ran systemctl daemon-reload'
   else
@@ -744,11 +542,7 @@ write_units() {
   fi
 }
 
-# THE ORDER IS THE POINT. scafo-caddy stores its TLS material through the node:
-# it reads the node's /v1/storage and the storage token the node MINTS ON ITS
-# FIRST BOOT. Started first, it finds neither. Plain Caddy does not care, and
-# the ordering is written for it anyway so that changing flavour changes nothing
-# here.
+# Start the node before ingress so the storage token exists on first boot.
 render_node_unit() {
   cat <<EOF
 [Unit]
@@ -766,27 +560,19 @@ User=${SERVICE_USER}
 Group=${SERVICE_USER}
 EnvironmentFile=${CONFIG_DIR}/node.env
 Environment=SCAFO_STATE_DIR=${STATE_DIR}
-# Celld's source-bundle path uses this pinned builder unless the operator sets
-# its upstream `CELLD_ESBUILD` setting elsewhere.
+  # Default Celld source builds to the bundled esbuild binary.
 Environment=CELLD_ESBUILD=${BIN_DIR}/esbuild
 Environment=SCAFO_CELLD_BIN=${BIN_DIR}/celld
 ExecStart=${BIN_DIR}/scafo sail
 Restart=on-failure
 RestartSec=5s
 
-# KillMode=mixed, and it is load-bearing: systemd's default signals every
-# process in the cgroup at once, which would SIGTERM the runtime processes
-# beside the daemon instead of letting the daemon stop them in its own order —
-# mark draining, release the lease, stop reconciling, close the listener, and
-# only then drain each runtime. "mixed" signals the daemon alone, exactly as a
-# container runtime signals PID 1. Once the daemon exits or this timeout elapses,
-# systemd hard-kills every remaining process in this unit's cgroup.
+  # Signal the daemon first so it drains runtimes; kill remaining cgroup processes on timeout.
 KillMode=mixed
 KillSignal=SIGTERM
 SendSIGKILL=yes
 TimeoutStopSec=${STOP_TIMEOUT}s
-# Runtime processes must remain in this unit's cgroup for the hard-kill above to
-# contain an abrupt daemon death.
+  # Keep runtimes in this cgroup for timeout containment.
 Delegate=no
 
 StateDirectory=scafo
@@ -811,32 +597,9 @@ Wants=network-online.target
 After=network-online.target scafo-node.service
 EOF
 
-  # THE FIRST BOOT IS A RACE THIS UNIT LOSES, ON PURPOSE, AND COMES BACK FROM.
-  #
-  # After= only says the node's process was exec'd. The token appears a moment
-  # later, once the node has reached its bucket and registered itself — so on a
-  # host's first boot this service starts before there is anything to load. A
-  # LoadCredential= whose source does not exist is FATAL: the service manager
-  # fails the start at status 243/CREDENTIALS before ANY of this unit's own
-  # commands runs, which is exactly why a wait loop in ExecStartPre cannot help
-  # — that command would be the one failing. (Verified against systemd 255:
-  # "Failed to set up credentials: No such file or directory", control process
-  # exited 243/CREDENTIALS, and the ExecStartPre never ran.)
-  #
-  # What works is letting it fail and come straight back. Restart=on-failure
-  # below already covers that status, and StartLimitIntervalSec=0 turns off the
-  # rate limiter that would otherwise stop retrying after five starts and leave
-  # the ingress failed for good over a gap that lasts seconds. So this unit
-  # fails a few times in the first moments of a host's life, says why each time,
-  # and starts the moment the token is there.
-  #
-  # It also means a node that never boots leaves the ingress retrying rather
-  # than failed, which is the honest state to be in: without the node there is
-  # no storage, and without storage this Caddy has no certificates to serve.
-  #
-  # Requires=scafo-node.service is deliberately NOT set. A RUNNING Caddy is
-  # unaffected by the node stopping — its certificates are in memory — and
-  # binding the two would take TLS down for every restart of the node.
+  # The token is unavailable on first boot until the node starts. `LoadCredential=`
+  # fails before `ExecStartPre`, so disable start-rate limiting and retry on failure.
+  # Do not add `Requires=`: running ingress may continue through a node restart.
   [ "$CADDY_FLAVOR" != 'scafo' ] || cat <<EOF
 StartLimitIntervalSec=0
 EOF
@@ -849,19 +612,7 @@ User=${CADDY_USER}
 Group=${CADDY_USER}
 EOF
 
-  # THE TOKEN, AND WHY IT IS NOT SIMPLY A PATH.
-  #
-  # The node mints the storage token 0600, owned by the account it runs as,
-  # inside a 0700 directory — and this service runs as another account, which
-  # can open neither. That is not an oversight to fix by widening a mode: the
-  # storage API that token opens carries private keys in both directions.
-  # systemd carries it across instead. LoadCredential= has THE SERVICE MANAGER
-  # read the file, as root, before this service has a process at all, and place
-  # a read-only copy in $CREDENTIALS_DIRECTORY — a directory only this unit's own
-  # UID and root may enter (verified on systemd 255: the copy lands r--------,
-  # owned by the service user). caddy.json's token_file points at that copy, and
-  # the module resolves the {env....} placeholder itself in its Provision().
-  # Nothing about the source file's ownership or mode changes.
+  # `LoadCredential=` gives ingress a private copy without exposing the source token.
   [ "$CADDY_FLAVOR" != 'scafo' ] || cat <<EOF
 LoadCredential=${STORAGE_TOKEN_NAME}:${STATE_DIR}/${STORAGE_TOKEN_NAME}
 EOF
@@ -899,30 +650,11 @@ WantedBy=multi-user.target
 EOF
 }
 
-# The record of what this run made, written where the node's own state lives —
-# and read by scripts/uninstall.sh, which removes exactly what is in it.
-#
-# Two of these lines cannot be derived from anywhere else on the host: which
-# directory the executables went into when SCAFO_INSTALL_BIN_DIR moved them, and
-# which of the two system accounts this run CREATED rather than found. The rest
-# is written down for the same reason a receipt lists what is already obvious —
-# so that changing the installer changes what the uninstall is told, rather than
-# leaving the two to agree by memory.
-#
-# IT IS NOT A DEPENDENCY. The uninstall falls back to these same constants, to
-# the ExecStart of the unit below, and to whatever `scafo` is on PATH, so a host
-# installed before this file existed — or one whose state directory has already
-# been purged — comes apart just as cleanly, only more carefully. Written here
-# rather than under /etc because it describes THIS host's install and belongs
-# beside the identity that install has; a run that writes no units writes no
-# manifest either, having made no directory of its own to keep one in.
+# Record install-specific paths and created accounts for precise uninstall;
+# uninstall can derive safe defaults if the manifest is absent.
 write_manifest() {
   manifest="${STATE_DIR}/install.manifest"
-  # A reinstall over kept state finds the accounts already existing and creates
-  # none — but the FACT that an earlier run created them must outlive that run,
-  # or the rewrite below erases it and a later --purge leaves both accounts
-  # behind while reporting it kept nothing. Prior created_user lines are folded
-  # back in before the file is replaced.
+  # Preserve prior created accounts across reinstalls for a later `--purge`.
   if [ -f "$manifest" ]; then
     while IFS= read -r prior_line; do
       case "$prior_line" in
@@ -951,11 +683,7 @@ write_manifest() {
     printf 'caddy_state_dir=%s\n' "$CADDY_STATE_DIR"
     printf 'service_user=%s\n' "$SERVICE_USER"
     printf 'caddy_user=%s\n' "$CADDY_USER"
-    # Which of the two Caddys the `caddy` in bin_dir actually is. The uninstall
-    # removes the same file either way — that is the whole reason both are
-    # installed under one name — so this is for its REPORT, and for anyone
-    # reading the host afterwards to know whether the certificates it served
-    # were this host's or the bucket's.
+    # Records TLS storage location for the uninstall report.
     printf 'caddy_flavor=%s\n' "$CADDY_FLAVOR"
     for name in $CREATED_USERS; do printf 'created_user=%s\n' "$name"; done
   } > "$manifest"
@@ -987,12 +715,7 @@ explain_manual_setup() {
   say "  ${BIN_DIR}/caddy run --config ./caddy.json"
   say ''
   if [ "$CADDY_FLAVOR" = 'scafo' ]; then
-    # No unit means no systemd credential, so the config this host would need is
-    # NOT the one write_config() writes: token_file has to name the real file,
-    # and whoever runs the ingress has to be able to open a 0600 file owned by
-    # the account that runs the node. Saying so is the whole point — the
-    # alternative is a caddy that fails at startup with a permissions error and
-    # an operator with no idea it was ever going to.
+    # Manual ingress must read the source token; generated systemd config cannot do that.
     say 'THAT CADDY IS scafo-caddy, and it needs a "storage" block naming the'
     say 'node — write ./caddy.json with:'
     say ''
@@ -1119,9 +842,7 @@ scafo_version() {
   "${BIN_DIR}/scafo" --version 2>/dev/null || echo '(unknown)'
 }
 
-# What to call the `caddy` that was just installed. The plain one carries the
-# version this script pinned; scafo-caddy came from a "latest" URL and has to be
-# asked, because nothing in this file knows which release it was.
+# Plain Caddy is pinned; query latest scafo-caddy for its installed version.
 caddy_label() {
   if [ "$CADDY_FLAVOR" = 'plain' ]; then
     printf '%s\n' "$CADDY_VERSION"

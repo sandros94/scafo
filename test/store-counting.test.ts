@@ -1,11 +1,4 @@
-/*
- * The counted store: what it says a piece of work cost the bucket, and the
- * property everything else depends on — that it is indistinguishable from the
- * store under it in every other respect.
- *
- * The store under it is the ordinary in-memory one, so the CAS semantics being
- * passed through are the real ones rather than a stand-in's.
- */
+/* Counted-store operations and transparent store semantics. */
 
 import { describe, expect, it } from "vitest";
 import { createCountingStore, countingRegistry, storeOpsOf } from "../src/core/registry/index.ts";
@@ -24,8 +17,6 @@ describe("what it counts", () => {
     await store.get("b.json");
 
     expect(store.counts()).toEqual({ get: 2, put: 2, del: 1, list: 1 });
-    /* Round trips together, listings apart: one listing costs a page per
-       thousand keys rather than a trip, so the two are not comparable. */
     expect(storeOpsOf(store.counts())).toBe(5);
   });
 
@@ -35,8 +26,6 @@ describe("what it counts", () => {
 
     await rejectsWith(() => store.put("a.json", "{}", { ifNoneMatch: "*" }), "cas-conflict");
 
-    /* A pass that spent its time failing is exactly the one whose cost is worth
-       reading, so a refused write is counted like any other. */
     expect(store.counts()).toEqual({ get: 0, put: 2, del: 0, list: 0 });
   });
 
@@ -62,10 +51,8 @@ describe("what it passes through", () => {
     const missing = await counted.get("nothing.json");
     const listed = await counted.list("");
 
-    /* The ETag round-trips verbatim, which is the whole of the CAS contract. */
     expect(read).toEqual({ body: `{"v":1}`, etag: written.etag });
     expect(await inner.get("shop.json")).toEqual(read);
-    /* A key that does not exist is null rather than a failure. */
     expect(missing).toBeNull();
     expect(listed).toEqual(["shop.json"]);
   });
@@ -104,8 +91,6 @@ describe("the registry wrapping one", () => {
     await counted.registry.store.put("a.json", "{}");
     await counted.registry.store.list("");
 
-    /* The clock is the reason this is a wrapper rather than a new context: a
-       registry whose time moved would date every record it wrote differently. */
     expect(counted.registry.now).toBe(now);
     expect(counted.counts()).toEqual({ get: 0, put: 1, del: 0, list: 1 });
   });
@@ -116,8 +101,6 @@ describe("the registry wrapping one", () => {
 
     await original.store.put("a.json", "{}");
 
-    /* The wrapper is per-caller on purpose: work done through the original is
-       somebody else's and must not land in these numbers. */
     expect(counted.counts()).toEqual({ get: 0, put: 0, del: 0, list: 0 });
     expect(counted.registry.store).not.toBe(original.store);
   });

@@ -1,15 +1,4 @@
-/*
- * Internal: the operator keypair, and the two files it is written in.
- *
- * The KEY FILE is what `scafo operator keygen` has always written: an id and both halves
- * of an Ed25519 pair, and nothing about where it is meant to be used. The
- * PORTABLE FILE wraps one together with the endpoints it reaches, so a single
- * self-contained value carries a whole remote to a machine that has never seen
- * this installation — a CI secret, a password-store entry, a pipe.
- *
- * The two are told apart by what they carry rather than guessed at: a portable
- * file states its `kind` and its version, a key file states neither.
- */
+/* Operator keypair, portable remote document, and public enrollment document. */
 
 import { readFile } from "node:fs/promises";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
@@ -80,15 +69,7 @@ export const PUBLIC_KIND: string = "scafo-operator-public";
 /** Version of the public format written today. */
 export const PUBLIC_VERSION: number = 1;
 
-/**
- * An operator's public half as a document: what `scafo operator show` prints and
- * what `scafo operator enroll` takes in.
- *
- * THE WHOLE POINT IS WHAT IS NOT IN IT. This is the artifact that travels — over
- * chat, in a ticket, through a pipe — from somebody who wants to be admitted to
- * somebody who can admit them, so it carries the id and the verifying key and
- * nothing that could sign.
- */
+/** Public enrollment document: identity and verifying key, never signing material. */
 export interface PublicOperator extends PublicHalf {
   v: number;
   kind: string;

@@ -1,12 +1,4 @@
-/*
- * What the CLI says when a command does not go through.
- *
- * A scafo failure is rendered as the problem document the API would answer with,
- * which is the format an operator learns to read. EVERYTHING ELSE HAS TO READ
- * THE SAME WAY: an `EACCES` on a state directory is a perfectly ordinary way for
- * a command to end, and answering it with a raw Node stack trace tells an
- * operator that scafo crashed rather than that a directory is not writable.
- */
+/* What the CLI says when a command does not go through. */
 
 import type { CommandContext, CommandDef } from "citty";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -119,8 +111,6 @@ describe.skipIf(asRoot)("a command that cannot reach its state directory", () =>
     expect(said()[0]).toContain("EACCES");
   });
 });
-
-/* ------------------------------------------------------------------ internal */
 
 /**
  * Collects what the command wrote to stderr, one entry per call.

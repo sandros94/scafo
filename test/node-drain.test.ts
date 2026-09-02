@@ -1,12 +1,4 @@
-/*
- * A node that is stopping on purpose, and the difference it makes.
- *
- * The whole point of draining is timing: a node that simply stops looks exactly
- * like one that crashed, and a crash is only noticed once the liveness window
- * has run out. So the clock in these tests never moves — every reassignment
- * asserted here happens with the draining node's heartbeat perfectly fresh,
- * which is the state a crash reading would call "live".
- */
+/* A node that is stopping on purpose, and the difference it makes. */
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { recordDeployment } from "../src/core/registry/_deployment.ts";
@@ -38,7 +30,7 @@ const NODE_B = "node-b";
 let store: FaultStore;
 let clock: ManualClock;
 let lease: LeaseHandle;
-/** Everything `drainThisNode` said, so a silent shutdown can be told from a loud one. */
+/** Drain results distinguish a silent shutdown from an announced one. */
 let logged: string[];
 
 beforeEach(async () => {
@@ -224,8 +216,6 @@ describe("drainThisNode, as a shutdown calls it", () => {
     expect(tries).toBe(2);
   });
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 /** An environment with a build to serve, so it is a real placement target. */
 async function deployed(name: string): Promise<void> {

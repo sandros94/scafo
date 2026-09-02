@@ -1,10 +1,6 @@
 /*
- * The coordinator's other duty: deciding which nodes serve which environment,
- * and writing that down only when it changed.
- *
- * The loop is driven a tick at a time and the clock is the injected one, so
- * every assertion is about what the coordinator decided rather than about how
- * long a test was willing to wait.
+ * The coordinator's other duty: deciding which nodes serve which environment, and writing that
+ * down only when it changed.
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
@@ -65,9 +61,6 @@ describe("assigning environments to nodes", () => {
 
     await coordinator.runOnce();
 
-    /* The default of a long-lived environment is "all", so placement changes
-       nothing about which nodes run it — it only writes down what was already
-       true, which is what makes the record safe to start filtering on. */
     expect(await readPlacement(clock.ctx, PROJECT, "prod")).toMatchObject({
       nodes: [NODE_A, NODE_B],
       fence: 1,
@@ -104,8 +97,6 @@ describe("assigning environments to nodes", () => {
     written = [];
     await coordinator.runOnce();
 
-    /* The lease renewal is the only write a settled installation makes on a
-       tick; rewriting every placement each time would churn the whole registry. */
     expect(written.filter((key) => key.startsWith("_scafo/placement/"))).toEqual([]);
     expect(coordinator.status().lastAssignment?.skipped).toEqual([
       { target: `${PROJECT}/prod`, reason: "unchanged" },
@@ -118,7 +109,6 @@ describe("assigning environments to nodes", () => {
     await coordinator.runOnce();
     expect((await readPlacement(clock.ctx, PROJECT, "prod"))?.nodes).toEqual([NODE_A, NODE_B]);
 
-    /* node-b goes quiet; node-a keeps beating right up to the moment it decides. */
     clock.tick(NODE_LIVENESS_WINDOW_MS);
     await heartbeatNode(clock.ctx, NODE_A);
     await coordinator.runOnce();
@@ -147,8 +137,6 @@ describe("assigning under a node selector", () => {
   const FAST: NodeSelector = { tier: "fast" };
 
   beforeEach(async () => {
-    /* Re-registered with labels: registration replaces a node's record
-       wholesale, which is exactly how an operator relabels a machine. */
     await register(NODE_A, { tier: "fast", region: "eu-west-1" });
     await register(NODE_B, { tier: "slow", region: "eu-west-1" });
   });
@@ -159,9 +147,6 @@ describe("assigning under a node selector", () => {
 
     await coordinator.runOnce();
 
-    /* A long-lived environment defaults to "all", and under a selector "all"
-       means every MATCHING node — so the constraint is what narrows it here,
-       not the replica count. */
     expect((await readPlacement(clock.ctx, PROJECT, "prod"))?.nodes).toEqual([NODE_A]);
     expect(coordinator.status().lastAssignment?.unplaced).toEqual([]);
   });
@@ -176,8 +161,6 @@ describe("assigning under a node selector", () => {
 
     const placed = (await readPlacement(clock.ctx, PROJECT, "prod"))?.nodes ?? [];
     expect(placed).toHaveLength(1);
-    /* The selector narrowed the candidates and rendezvous chose among THOSE, so
-       the one node it picked is necessarily a matching one. */
     expect([NODE_A, "node-c"]).toContain(placed[0]);
   });
 
@@ -202,8 +185,6 @@ describe("assigning under a node selector", () => {
     clock.tick(TTL_MS / 3);
     await coordinator.runOnce();
 
-    /* Stating the intent is one act and placing it is another: the change lands
-       on the coordinator's next pass, under the same fenced write as always. */
     expect((await readPlacement(clock.ctx, PROJECT, "prod"))?.nodes).toEqual([NODE_B]);
   });
 
@@ -235,21 +216,12 @@ describe("an environment whose selector no live node satisfies", () => {
     const before = await readPlacement(clock.ctx, PROJECT, "prod");
     expect(before?.nodes).toEqual([NODE_A, NODE_B]);
 
-    /* The labels go away under it — a node not back from maintenance, a fleet
-       mid-relabelling, a typo'd selector. */
     await setNodeSelector(clock.ctx, PROJECT, "prod", IMPOSSIBLE);
     clock.tick(TTL_MS / 3);
     written = [];
     const deletesBefore = store.dels;
     await coordinator.runOnce();
 
-    /*
-     * THE RULE THIS FEATURE HANGS FROM. An empty decision would stop the
-     * environment on every node serving it, and removing the record would stop
-     * it just as dead — a selector-bearing environment has no run-everywhere
-     * fallback. A stale-but-serving placement beats an outage, so the last
-     * decision stands untouched and the operator is told instead.
-     */
     expect(await readPlacement(clock.ctx, PROJECT, "prod")).toEqual(before);
     expect(placementWrites()).toEqual([]);
     expect(store.dels).toBe(deletesBefore);
@@ -265,8 +237,6 @@ describe("an environment whose selector no live node satisfies", () => {
     expect(unplaced).toHaveLength(1);
     expect(unplaced[0].target).toBe(`${PROJECT}/prod`);
     expect(unplaced[0].reason).toBe("placement-unavailable");
-    /* The detail has to carry what an operator acts on: which environment, and
-       which labels nothing satisfied. */
     expect(unplaced[0].detail).toContain(`${PROJECT}/prod`);
     expect(unplaced[0].detail).toContain("gpu=a100");
   });
@@ -277,8 +247,6 @@ describe("an environment whose selector no live node satisfies", () => {
 
     await coordinator.runOnce();
 
-    /* Not an empty decision, and not a decision naming an arbitrary node: no
-       record, which is the state the node-side reader refuses to serve on. */
     expect(await readPlacement(clock.ctx, PROJECT, "prod")).toBeNull();
     expect(placementWrites()).toEqual([]);
   });
@@ -313,8 +281,6 @@ describe("an environment whose selector no live node satisfies", () => {
   });
 
   it("still removes the placement of one that is RETIRED, selector or not", async () => {
-    /* Retirement is a decision to stop; an unsatisfiable selector is a failure
-       to decide. Only the second is a reason to leave a placement standing. */
     await environmentNamed("prod", { nodeSelector: IMPOSSIBLE });
     const coordinator = coordinatorFor(NODE_A);
     await register("node-gpu", { gpu: "a100" });
@@ -336,18 +302,10 @@ describe("what the coordinator refuses to decide", () => {
     await coordinator.runOnce();
     const before = await readPlacement(clock.ctx, PROJECT, "prod");
 
-    /* Nobody beats: a bucket that could not be reached, a fleet mid-restart, a
-       clock that jumped. Every one of them reads as an empty node list. */
     clock.tick(NODE_LIVENESS_WINDOW_MS * 10);
     written = [];
     await coordinator.runOnce();
 
-    /*
-     * The refusal that keeps an installation up. Deciding from an empty fleet
-     * would write "nobody serves this" against every environment, and every node
-     * would then stop every process it runs — over what is far more likely a
-     * registry hiccup than an actually empty fleet.
-     */
     expect(coordinator.status().lastAssignFailure).toContain("No node is live");
     expect(coordinator.status().lastAssignment).toBeNull();
     expect(written.filter((key) => key.startsWith("_scafo/placement/"))).toEqual([]);
@@ -387,16 +345,13 @@ describe("what the coordinator refuses to decide", () => {
     const coordinator = coordinatorFor(NODE_A);
     await coordinator.runOnce();
 
-    /* Long enough that the environment is reapable and both nodes are stale. */
     clock.tick(86_400_001);
     await coordinator.runOnce();
 
     expect(coordinator.status().holding).toBe(true);
     expect(coordinator.status().lastAssignFailure).toContain("No node is live");
-    /* The reap is a separate duty and is not held hostage by the other one. */
     expect(coordinator.status().lastReapFailure).toBeNull();
     await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, "preview"), "not-found");
-    /* And the reap took the placement with it, so nothing is left naming it. */
     expect(await readPlacement(clock.ctx, PROJECT, "preview")).toBeNull();
   });
 });
@@ -410,7 +365,6 @@ describe("a decision another coordinator got to first", () => {
     const coordinator = coordinatorFor(NODE_A);
     await coordinator.runOnce();
 
-    /* A competing write lands between this coordinator's read and its own put. */
     const key = placementKey(PROJECT, "prod");
     await setReplicas(clock.ctx, PROJECT, "prod", 2);
     await setReplicas(clock.ctx, PROJECT, "staging", 2);
@@ -434,7 +388,6 @@ describe("a decision another coordinator got to first", () => {
     expect(await readPlacement(clock.ctx, PROJECT, "staging")).toMatchObject({
       nodes: [NODE_A, NODE_B],
     });
-    /* The next tick re-reads and replaces only the raced decision. */
     clock.tick(TTL_MS / 3);
     await coordinator.runOnce();
     expect(coordinator.status().lastAssignFailure).toBeNull();
@@ -451,8 +404,6 @@ describe("placements of environments that are gone", () => {
     const coordinator = coordinatorFor(NODE_A);
     await coordinator.runOnce();
 
-    /* Taken out from under the coordinator — another node's operator-ordered
-       delete, a reap it did not run. Its placement is left pointing at nothing. */
     await deleteKey(clock.ctx, environmentKey(PROJECT, "prod"));
     await coordinator.runOnce();
 
@@ -487,12 +438,6 @@ describe("placements of environments that are retired", () => {
     clock.tick(TTL_MS / 3);
     await coordinator.runOnce();
 
-    /*
-     * An environment on its way out is served by no node, so it is given none.
-     * The record goes with it: a decision naming nodes that have all stopped
-     * running it is one nothing acts on, and every node would re-read it on
-     * every pass until the reap finally arrived.
-     */
     expect(await readPlacement(clock.ctx, PROJECT, "prod")).toBeNull();
     expect(coordinator.status().lastAssignment?.removed).toEqual([placementKey(PROJECT, "prod")]);
     expect(coordinator.status().lastAssignment?.changed).toEqual([]);
@@ -520,9 +465,6 @@ describe("placements of environments that are retired", () => {
     clock.tick(TTL_MS / 3);
     await coordinator.runOnce();
 
-    /* Decided from the same inputs as before, by a pure function of the
-       environments and the live nodes — so unretiring restores exactly what
-       retiring took away. */
     expect((await readPlacement(clock.ctx, PROJECT, "prod"))?.nodes).toEqual([NODE_A, NODE_B]);
   });
 

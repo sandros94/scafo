@@ -1,14 +1,4 @@
-/*
- * Deleting an environment from whichever node the operator happened to ask.
- *
- * Only the coordinator may carry the deletion out, so every other node forwards
- * the request to it. What matters here is what crosses that hop: a token this
- * node signed for itself and never the caller's, exactly one hop, and the
- * coordinator's own answer handed back unchanged.
- *
- * The app is driven through its fetch interface and the hop is a stub, so
- * nothing binds a socket and no second daemon is started.
- */
+/* Deleting an environment from whichever node the operator happened to ask. */
 
 import type { H3 } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
@@ -285,8 +275,6 @@ describe("GET /v1/state", () => {
     expect(state.coordinator).toBeNull();
   });
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 interface DaemonUnderTest {
   app: H3;

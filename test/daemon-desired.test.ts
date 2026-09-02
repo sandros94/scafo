@@ -1,12 +1,3 @@
-/*
- * What one node reads out of the registry as its own work.
- *
- * Missing placement is an explicit compatibility choice: production requires a
- * decision and starts nothing, while the legacy reader retains the old
- * unconstrained fallback for rolling upgrades. Both contracts are asserted
- * first so no caller can select one by omission.
- */
-
 import { beforeEach, describe, expect, it } from "vitest";
 import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import { readDesired } from "../src/daemon/_desired.ts";
@@ -63,15 +54,9 @@ describe("an environment nobody has placed", () => {
   });
 
   it("is served only when the caller explicitly selects legacy fallback", async () => {
-    /*
-     * The compatibility seam for a daemon that predates required placement.
-     * Production never selects this mode; an explicit rolling-upgrade reader
-     * retains the former unconstrained behaviour until it is replaced.
-     */
     const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
-    /* And it is reported as undecided rather than as placed on nobody. */
     expect(state.placements).toEqual([]);
   });
 
@@ -100,9 +85,6 @@ describe("an environment that has been placed", () => {
 
     const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
-    /* The environment drops out of this node's desired state, which is what
-       makes the reconcile loop stop whatever it still runs for it. The nodes
-       named pick it up on their own passes. */
     expect(state.environments).toEqual([]);
     expect(state.placements).toEqual([
       { project: PROJECT, env: "prod", nodes: [PEER], self: false },
@@ -124,8 +106,6 @@ describe("an environment that has been placed", () => {
   });
 
   it("is served nowhere when the decision names nobody", async () => {
-    /* A record no coordinator will ever write — it refuses an empty fleet — but
-       one that must be obeyed rather than second-guessed if it appears. */
     await writePlacement(registry, PROJECT, "prod", [], lease);
 
     const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
@@ -152,32 +132,16 @@ describe("an environment that carries a node selector", () => {
   const FAST = { tier: "fast" };
 
   it("is NOT served anywhere while no coordinator has placed it", async () => {
-    /*
-     * THE ASYMMETRY, and the whole reason this is not the fallback above. A
-     * selector is an explicit constraint — the operator has said which nodes may
-     * run this — while the run-everywhere fallback exists to preserve behaviour
-     * nobody ever stated. Serving it here before the coordinator has decided
-     * would break exactly what was asked for, on the widest possible set of
-     * nodes: every one of them, including all the ones the selector excludes.
-     */
     await setNodeSelector(registry, PROJECT, "prod", FAST);
 
     for (const nodeId of [SELF, PEER, "node-c"]) {
       const state = await readDesired(registry, { nodeId, mode: "legacy-fallback" });
       expect(state.environments, nodeId).toEqual([]);
-      /* And it is reported as undecided rather than as placed on nobody: there
-         is no decision to report, which is the state it is waiting out. */
       expect(state.placements, nodeId).toEqual([]);
     }
   });
 
   it("is served the moment a decision names this node, selector and all", async () => {
-    /*
-     * The record WINS over both rules. Which nodes satisfy a selector is the
-     * coordinator's judgement, made over the labels of the whole fleet at once,
-     * and a node that re-decided it locally would fight the only writer there
-     * is — including through every window in which the two disagree.
-     */
     await setNodeSelector(registry, PROJECT, "prod", FAST);
     await writePlacement(registry, PROJECT, "prod", [SELF], lease);
 
@@ -200,8 +164,6 @@ describe("an environment that carries a node selector", () => {
   });
 
   it("reports the constraint beside the decision, so both are read together", async () => {
-    /* A decision naming one node reads very differently once it is clear the
-       environment asked for exactly one kind of node. */
     await deployed(PROJECT, "staging");
     await setNodeSelector(registry, PROJECT, "prod", FAST);
     await writePlacement(registry, PROJECT, "prod", [SELF], lease);
@@ -211,7 +173,6 @@ describe("an environment that carries a node selector", () => {
 
     expect(state.placements).toEqual([
       { project: PROJECT, env: "prod", nodes: [SELF], self: true, selector: FAST },
-      /* No selector, no field: an unconstrained environment says nothing here. */
       { project: PROJECT, env: "staging", nodes: [SELF, PEER], self: true },
     ]);
   });
@@ -224,8 +185,6 @@ describe("an environment that carries a node selector", () => {
 
     await setNodeSelector(registry, PROJECT, "prod", null);
 
-    /* Undecided AND unconstrained is the fallback's case again, so the node
-       takes it straight back rather than waiting for a coordinator. */
     for (const nodeId of [SELF, PEER]) {
       const state = await readDesired(registry, { nodeId, mode: "legacy-fallback" });
       expect(
@@ -241,8 +200,6 @@ describe("an environment that carries a node selector", () => {
 
     const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
-    /* One constrained environment waiting on a coordinator must not hold up the
-       unconstrained ones this node is already meant to be serving. */
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["staging"]);
   });
 });
@@ -254,8 +211,6 @@ describe("what is left out for reasons other than placement", () => {
 
     const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
-    /* "prod" is undecided and served here by the fallback; "fresh" is decided
-       ONTO this node and still contributes nothing, because it has no build. */
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
     expect(state.placements.map((view) => view.env)).toEqual(["fresh"]);
   });
@@ -266,16 +221,7 @@ describe("what is left out for reasons other than placement", () => {
 
     const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
 
-    /*
-     * It leaves by the same door a reassignment uses: it drops out of the
-     * desired state, the next pass stops whatever runs for it, and because the
-     * routing is rendered from what this node actually runs, its hosts stop
-     * resolving with its processes. Nothing in the route renderer knows what
-     * retirement is.
-     */
     expect(state.environments).toEqual([]);
-    /* The decision is still reported as long as the record is there — the
-       coordinator drops it on its next pass, and this is the truth until then. */
     expect(state.placements).toEqual([
       { project: PROJECT, env: "prod", nodes: [SELF], self: true },
     ]);
@@ -289,8 +235,6 @@ describe("what is left out for reasons other than placement", () => {
 
     await unretireEnvironment(registry, PROJECT, "prod");
 
-    /* Reversibility, seen from the node: nothing was taken away from the
-       environment, so nothing has to be rebuilt to serve it again. */
     const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
     expect(state.environments[0].env.deployment?.revision).toBe(1);
@@ -308,12 +252,6 @@ describe("what is left out for reasons other than placement", () => {
   });
 
   it("keeps it out once the coordinator has dropped its placement record too", async () => {
-    /*
-     * The state a retired environment actually settles in, and the one that
-     * reads backwards for this explicit LEGACY reader: the coordinator DELETES
-     * the placement of an environment nothing should serve, and legacy fallback
-     * treats that absence as unconstrained. The retirement check must still win.
-     */
     await writePlacement(registry, PROJECT, "prod", [SELF, PEER], lease);
     await retireEnvironment(registry, PROJECT, "prod");
     await deletePlacement(registry, PROJECT, "prod", lease);
@@ -347,14 +285,6 @@ describe("an old ephemeral environment", () => {
 });
 
 describe("how a pass reads all of that", () => {
-  /*
-   * A pass is a read per environment plus the reads that resolve it, and on a
-   * hundred-millisecond store one after another that is seconds in front of
-   * every runtime start. What is asserted here is that overlapping
-   * them changes the LATENCY and nothing else: the same answer, in the same
-   * order, with the same failure — and never more of the store at once than the
-   * node said it would take.
-   */
   it("overlaps the environments of a project, up to the bound and no further", async () => {
     const { ctx, observing } = await watchedInstallation();
     observing.reset();
@@ -377,8 +307,6 @@ describe("how a pass reads all of that", () => {
 
   it("answers exactly what it answered one read at a time", async () => {
     const { ctx, observing, names } = await watchedInstallation();
-    /* The first environment of the listing answers LAST, so a state assembled
-       as the reads came back would be in another order than the one below. */
     observing.delays.set(environmentKey(PROJECT, names[0]), 20);
 
     const overlapped = await readDesired(ctx, { nodeId: SELF, mode: "legacy-fallback" });
@@ -395,8 +323,6 @@ describe("how a pass reads all of that", () => {
 
   it("surfaces the failure of the FIRST environment, not of the first read to fail", async () => {
     const { ctx, observing, names } = await watchedInstallation();
-    /* The later one fails at once and the earlier one takes its time, so the
-       failure that settles first is not the one a sequential pass would hit. */
     observing.delays.set(environmentKey(PROJECT, names[1]), 20);
     observing.faults.set(environmentKey(PROJECT, names[1]), new Error("the second"));
     observing.faults.set(environmentKey(PROJECT, names[5]), new Error("the sixth"));
@@ -404,7 +330,6 @@ describe("how a pass reads all of that", () => {
     await expect(readDesired(ctx, { nodeId: SELF, mode: "legacy-fallback" })).rejects.toThrow(
       "the second",
     );
-    /* And it is the same failure the pass raised before any of this overlapped. */
     await expect(
       readDesired(ctx, { nodeId: SELF, mode: "legacy-fallback", concurrency: 1 }),
     ).rejects.toThrow("the second");

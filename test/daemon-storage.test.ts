@@ -1,11 +1,4 @@
-/*
- * The `/v1/storage` surface: what it refuses, what it stores, and what it does
- * about a lock while it holds one.
- *
- * The app is invoked through its fetch interface, so nothing binds a socket, and
- * the registry is a memory store behind a clock the test moves itself — which is
- * what makes a lock going stale a matter of one line rather than of ten seconds.
- */
+/* The `/v1/storage` surface: what it refuses, what it stores, and what it does about a lock while it holds one. */
 
 import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";

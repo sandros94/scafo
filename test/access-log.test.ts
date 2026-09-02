@@ -1,12 +1,6 @@
 /*
- * Reading one line of an ingress's access log: which format it is, what comes
- * out of it, and what a line nothing can read costs.
- *
- * The fixtures are shaped from the two documented schemas and checked against
- * lines a Caddy 2.11.4 and a Traefik 3.7.11 actually wrote — including the two
- * `as written` cases below, which are verbatim output of those two servers.
- * Every field either format carries is present, because a parser that only ever
- * sees the fields it reads is not being asked the question.
+ * Reading one line of an ingress's access log: which format it is, what comes out of it, and what
+ * a line nothing can read costs.
  */
 
 import { describe, expect, it } from "vitest";
@@ -47,7 +41,7 @@ describe("what each format is read as", () => {
       method: "GET",
       status: 200,
       bytes: 16,
-      /* `duration` is SECONDS as a float, which is the one unit conversion that
+      /* `duration` is seconds as a float, which is the one unit conversion that
          separates the two formats from each other. */
       durationMs: 0.084058,
     });
@@ -207,8 +201,6 @@ describe("a line that cannot be read", () => {
     ).toMatchObject({ bytes: 0, durationMs: 0 });
   });
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 /**
  * A Caddy access-log line, carrying every field the documented `json` encoder

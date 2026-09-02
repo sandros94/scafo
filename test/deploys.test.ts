@@ -1,10 +1,6 @@
 /*
- * Deploy intake: who may upload an artifact, what an upload must say, and the
- * states a deploy moves through once it has been accepted.
- *
- * Nothing is published for real — the runner is a stand-in and the reconcile
- * loop is a fixed report — but the artifact is a genuine `.tar.zst`, packed by
- * the same code the client uses, so raw streaming and file staging are exercised.
+ * Deploy intake: who may upload an artifact, what an upload must say, and the states a deploy
+ * moves through once it has been accepted.
  */
 
 import { mkdtemp, readdir, writeFile } from "node:fs/promises";
@@ -504,10 +500,10 @@ describe("a project an admin has blocked", () => {
     const response = await upload(await operatorToken());
 
     /*
-     * NAMED PLAINLY, because the caller reaches this project: a scoped operator
+     * named plainly, because the caller reaches this project: a scoped operator
      * whose own project has been stopped is owed the reason, or their only
      * signal is a deploy that fails for no stated cause. What is never named is
-     * a block on a project the caller does NOT reach — that refusal is the
+     * a block on a project the caller does not reach — that refusal is the
      * ordinary out-of-scope one and says nothing about the project at all.
      */
     expect(response.status).toBe(409);
@@ -942,8 +938,6 @@ describe("retired deployment-selection endpoints", () => {
   });
 });
 
-/* ---- fixtures ---- */
-
 function daemonConfig(): DaemonConfig {
   return {
     bucket: {
@@ -1010,8 +1004,6 @@ function fakeRunner(): DeployRunner {
 function meta(): Record<string, unknown> {
   return { project: PROJECT, environment: ENVIRONMENT };
 }
-
-/* ---- driving the app ---- */
 
 /** Uploads the artifact with `sent` as the whole of its meta part. */
 async function upload(
@@ -1108,8 +1100,6 @@ async function problemOf(response: Response): Promise<ProblemDetails> {
   expect(response.headers.get("content-type")).toBe("application/problem+json");
   return (await response.json()) as ProblemDetails;
 }
-
-/* ---- tokens ---- */
 
 /** A token this node's registered operator key verifies, good for one request. */
 function operatorToken(): Promise<string> {

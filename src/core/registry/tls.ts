@@ -1,20 +1,5 @@
-/*
- * The TLS material an ingress running beside a node persists through it —
- * certificates, account keys, and whatever else it must keep across restarts —
- * kept in the installation's own bucket so that no other process needs a
- * credential for it.
- *
- * BINARY-SAFE OVER A STRING-BODIED STORE. A value arrives as raw bytes and some
- * of them are DER rather than text, so each is wrapped in a JSON envelope
- * carrying the value base64-encoded beside the time it was written. Nothing here
- * reads a value or cares what is in one.
- *
- * WRITES ARE LAST WRITER WINS, deliberately outside the CAS discipline every
- * registry record follows: one object is one write, so a value is never half
- * replaced, and two writers of the same key are writing the same material.
- * Serializing the work that PRODUCES a value is what the locks beside this file
- * are for.
- */
+/* Binary TLS material in base64 envelopes over the string store. Object writes
+   are last-writer-wins; TLS locks serialize material production. */
 
 import { ScafoError } from "../error.ts";
 import { fromBase64, toBase64 } from "../utils/base64.ts";

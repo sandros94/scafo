@@ -1,16 +1,5 @@
-/*
- * Internal: the token guarding this node's storage surface.
- *
- * It lives beside the node's identity, in the state directory, readable by its
- * owner alone, and is generated on the first boot that finds none — or written
- * from what the operator supplied, when they chose the token themselves. Handing
- * it to the colocated process that stores through this node is the operator's
- * step — mount the file, or read it out of the state directory.
- *
- * Unlike the node's identity it is REPLACEABLE: deleting the file mints a new
- * token on the next boot and costs nothing but reconfiguring whoever presents
- * it, because no record anywhere is filed under it.
- */
+/* Node-local storage bearer token, minted or supplied in an owner-readable state
+   file. It is replaceable and not a registry identity. */
 
 import { join } from "node:path";
 import { ScafoError } from "../core/error.ts";
@@ -21,17 +10,7 @@ import { readTextFile, writeSecretFile } from "./_utils.ts";
 /** Name of the token file within the state directory. */
 export const STORAGE_TOKEN_FILE: string = "storage-token";
 
-/**
- * Reads this node's storage token, writing a fresh one on the first boot that
- * has none.
- *
- * The file is read as text and TRIMMED, so a token an operator wrote with a
- * trailing newline is the token the node compares against.
- *
- * Throws `ScafoError("invalid-input")` when the file is there but holds nothing:
- * an empty token would guard the surface with the empty string, and the check
- * would then be one a caller presenting anything at all could pass.
- */
+/** Reads or mints storage token. Trims file input and refuses an empty token. */
 export async function loadOrCreateStorageToken(stateDir: string): Promise<string> {
   const path = join(stateDir, STORAGE_TOKEN_FILE);
 
@@ -53,19 +32,8 @@ export async function loadOrCreateStorageToken(stateDir: string): Promise<string
   return token;
 }
 
-/**
- * Puts the token an operator supplied where every consumer that reads the file
- * looks for it, at the permissions a minted one gets.
- *
- * The file is the handoff and nothing else: a node admits what its configuration
- * lists, so this is what keeps a mounted file, a systemd credential and a `cat`
- * of the state directory all telling the truth about the token in use. Rotating
- * moves it, because the value written is whichever token the operator put first.
- *
- * A file that already holds this token is LEFT ALONE, down to its timestamp —
- * the boot that changed nothing must not be the boot that fails on a file
- * somebody mounted read-only.
- */
+/** Writes a supplied token with secret permissions; identical existing files are
+    left unchanged for read-only mounts. */
 export async function writeStorageToken(stateDir: string, token: string): Promise<void> {
   const path = join(stateDir, STORAGE_TOKEN_FILE);
 

@@ -1,27 +1,7 @@
-# The scafo node image: the daemon, the runtime it supervises, and the builder
-# it hands deploys to — everything one node needs and nothing it does not.
-#
-#   docker build -t scafo .
-#   docker run --rm scafo --help
-#
-# See examples/compose.yaml for a runnable single-host stack and
-# examples/kubernetes/ for the same node as a Deployment.
-
-# ---------------------------------------------------------------------------
-# celld — the runtime under every application this node serves.
-#
-# PINNED BY DIGEST as well as by tag, and deliberately the only thing here that
-# is. A tag is a pointer its publisher can move; this binary runs every
-# customer's code and holds every cell's replication chain, so the bytes it is
-# built from must be the same ones that were tested. The digest is the
-# multi-architecture index, so amd64 and arm64 both resolve from it.
-#
-# Moving to a new celld is an explicit edit of both lines, and belongs with the
-# process contract the driver encodes (src/drivers/runtime/celld.ts).
+# Pin the runtime by tag and multi-architecture digest.
 FROM ghcr.io/denoland/celld:0.4.0@sha256:f73157548ed8e54a4b50e9cecfcb0fb8e209fb4d35cf78b7c45815ce78a7929f AS celld
 
-# ---------------------------------------------------------------------------
-# Build: the repository's own toolchain, which does not survive into the image.
+# Build stage.
 FROM node:24-slim AS build
 
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
@@ -29,8 +9,7 @@ RUN corepack enable
 
 WORKDIR /app
 
-# The manifest and the lockfile alone, so the install layer is only invalidated
-# by a dependency change rather than by every edit to src/.
+# Keep dependency installation cacheable across source changes.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile --ignore-scripts
 
@@ -38,9 +17,7 @@ COPY tsconfig.json build.config.ts ./
 COPY src ./src
 RUN pnpm build
 
-# esbuild ships its compiled binary in a per-platform package and publishes no
-# API saying where that package landed. Extract it while development dependencies
-# still exist, then prune them from the image's runtime tree.
+# Extract the platform-specific esbuild binary before pruning dependencies.
 RUN set -eux; \
   bin="$(node -e 'const {createRequire}=require("node:module"); \
     const here=createRequire(process.cwd()+"/"); \
@@ -49,16 +26,13 @@ RUN set -eux; \
   install -D -m 0755 "$bin" /out/esbuild; \
   /out/esbuild --version
 
-# What dist actually loads at runtime: the packages `build.config.ts` marks
-# external. Everything else that built it is dropped here.
+# Keep only runtime dependencies.
 RUN pnpm prune --prod --ignore-scripts
 
-# ---------------------------------------------------------------------------
-# The image an operator runs.
+# Runtime stage.
 FROM node:24-slim
 
-# The bucket is reached over TLS in every real installation, and node:*-slim
-# ships no root store at all.
+# The slim base lacks a root certificate store.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates \
   && rm -rf /var/lib/apt/lists/*
@@ -66,21 +40,16 @@ RUN apt-get update \
 COPY --from=celld /usr/local/bin/celld /usr/local/bin/celld
 COPY --from=build /out/esbuild /usr/local/bin/esbuild
 
-# Celld's source-bundle path uses the image's pinned builder when an operator
-# has not chosen another upstream path.
+# Default Celld source builds to the bundled esbuild binary.
 ENV CELLD_ESBUILD=/usr/local/bin/esbuild
 
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-# Read for its version alone, which the daemon announces and registers with.
+# The daemon reads the package version at runtime.
 COPY package.json ./
 
-# A node's identity — its id and the Ed25519 pair that speaks for it — is the one
-# thing it must keep across restarts, and it is written 0600 into a directory
-# created 0700. Owned here so a volume mounted over it inherits the ownership,
-# and it is also the user's home, so anything else that reaches for $HOME lands
-# in the same place.
+# Persist the node identity in a private, non-login user's home directory.
 RUN groupadd --gid 10001 scafo \
   && useradd --uid 10001 --gid scafo --home-dir /var/lib/scafo \
   --shell /usr/sbin/nologin scafo \
@@ -89,39 +58,15 @@ ENV SCAFO_STATE_DIR=/var/lib/scafo
 
 USER scafo
 
-# The node API. NOT bound here: `node.listen` defaults to 127.0.0.1:7400, and
-# widening it to 0.0.0.0 is what makes the node refuse to boot until
-# `transport` says whether that network is a tunnel or a trusted private one.
-# That acknowledgement is the operator's, so the examples pass both together and
-# this image ships neither.
+# The default listener remains loopback; wider binding requires explicit transport configuration.
 EXPOSE 7400
 
-# Docker can ask the daemon without adding a second binary to the image: Node
-# already carries fetch, and the fixed loopback/default port is the image's own
-# contract. Deployments that change the listener carry their probes explicitly.
+# This probe assumes the default loopback listener; custom listeners need a custom probe.
 HEALTHCHECK --interval=5s --timeout=3s --start-period=30s --retries=3 CMD ["node", "-e", "fetch(\"http://127.0.0.1:7400/.well-known/scafo/health\").then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
 
-# STOP GRACE MUST BE AT LEAST 50 SECONDS. This is not a tuning preference.
-#
-# On SIGTERM the daemon marks itself draining, releases the coordinator lease,
-# stops reconciling, closes its listener, and only then stops the celld
-# processes it supervises. celld 0.4 bounds its own shutdown at 40s; each child
-# gets another 5s before SIGKILL, and the container gives the daemon 5s around
-# that sequence. A container killed before it has run leaves requests dropped
-# mid-flight and a node the fleet has to time out instead of being told about.
-#
-#   compose:    stop_grace_period: 50s
-#   kubernetes: terminationGracePeriodSeconds: 50
-#   docker run: docker stop -t 50 <container>
-#
-# If runtime.celldEnv raises CELLD_SHUTDOWN_TOTAL_MS above its 40000 default,
-# raise the enclosing grace to at least that value plus 10 seconds as well.
-#
-# Docker's own default is 10s, which is not enough. See examples/.
+# Configure at least 50s stop grace (or CELLD_SHUTDOWN_TOTAL_MS + 10s) so the node can drain.
 STOPSIGNAL SIGTERM
 
-# Keep this direct Node entrypoint as container process 1. Container lifecycle
-# containment relies on a private PID namespace; do not insert a persistent
-# wrapper or run this image with the host PID namespace.
+# Keep the Node entrypoint as PID 1 in a private PID namespace.
 ENTRYPOINT ["node", "/app/dist/cli/index.mjs"]
 CMD ["sail"]

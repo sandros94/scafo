@@ -1,11 +1,4 @@
-/*
- * The transport a node runs on, and the refusal that guards it: a node whose
- * addresses reach past loopback carries traffic that commands it across a
- * network, and must be told what kind of network that is before it boots.
- *
- * The configuration is loaded with everything injected, and the check is a pure
- * function of it, so nothing here binds a socket.
- */
+/* Transport classification is required before listeners extend beyond loopback. */
 
 import { describe, expect, it } from "vitest";
 import { loadDaemonConfig } from "../src/daemon/config.ts";

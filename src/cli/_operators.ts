@@ -1,20 +1,5 @@
-/*
- * Internal: the people. Who this operator is, who else the fleet admits, and the
- * two ways a key gets in.
- *
- * EVERY HUMAN HERE IS AN OPERATOR; admin is a role an operator holds. The tiers
- * decide who may admit whom, and nothing else about them is a different kind of
- * person.
- *
- * The bucket and the wire are the two ways to the same records. Administering
- * them goes through a NODE by default, on purpose: the credential it needs is a
- * key the fleet already trusts, and nothing else — an operator who had to hold
- * the bucket's access key to change their own would be carrying the credential
- * that makes the whole exercise unnecessary. The BUCKET remains for the two
- * cases the wire cannot serve: an installation being bootstrapped, which has no
- * trusted key yet, and one whose operator keys have all been lost, which no
- * longer has one.
- */
+/* Operator-key CLI helpers. Wire is the ordinary path; bucket access is for
+   bootstrap and recovery. */
 
 import { ScafoError } from "../core/error.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
@@ -54,16 +39,7 @@ export interface OperatorGrant {
   role?: OperatorRole;
   /** Key this one replaces; a node accepts only the CALLER's own id here. */
   supersedes?: string;
-  /**
-   * Projects to scope the key to, or `["*"]` for every project.
-   *
-   * Optional for the same reason the two above are, and NOT optional in
-   * practice for an operator-tier key: absent lets the node take the CALLER's
-   * own scope, which is what a rotation and a scoped caller's enrollment want —
-   * but an admin carries none to hand down, so a node refuses an operator-tier
-   * registration that comes out with no projects at all. The rule is the node's
-   * to state, so this stays a plain pass-through.
-   */
+  /** Requested scope; the node applies inheritance and grant policy. */
   projects?: string[];
 }
 
@@ -79,14 +55,7 @@ export interface RemoteKeyOptions {
 export interface OperatorListing {
   /** The keys the node was willing to show this caller, in id order. */
   operators: TrustedOperator[];
-  /**
-   * Set when the node FILTERED the answer to the caller's own key lineage,
-   * rather than answering with every key the fleet trusts.
-   *
-   * Carried rather than inferred from the length: one key is a plausible answer
-   * for a solo installation and for a tenant on a fleet of fifty, and only the
-   * node knows which it just gave.
-   */
+  /** `true` when the node returned only caller lineage. */
   scoped?: true;
 }
 
@@ -311,8 +280,6 @@ export function formatScope(key: Pick<TrustedOperator, "role" | "projects">): st
   if (key.projects !== undefined) return key.projects.join(",");
   return key.role === "admin" ? "all" : "none";
 }
-
-/* ------------------------------------------------------------ who I am */
 
 /** This operator's public half, and where it was resolved from. */
 export interface ShownOperator {

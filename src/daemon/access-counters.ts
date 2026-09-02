@@ -1,47 +1,15 @@
-/*
- * What the ingress served, counted per environment.
- *
- * THE INGRESS IS THE ONLY COMPLETE OBSERVER OF TENANT TRAFFIC. Every application request
- * goes ingress → process and never passes through the node's own
- * surface. So the numbers a platform is measured by — requests, bytes, status,
- * latency, per project and environment — can only be read off the ingress's own
- * access log, which is what this counts.
- *
- * OPT-IN BY PRESENCE, SEPARATELY FROM THE OBSERVABILITY SWITCH. Counting needs a
- * file an operator's ingress writes, and most operators run their ingress their
- * own way. There is no default path and no warning for not having one: absent
- * `observability.ingressAccessLog`, nothing here is built at all.
- *
- * IN MEMORY, MONOTONIC, AND NOTHING PERSISTS IT — the same terms as the event
- * ring beside it (`src/daemon/observe.ts`). {@link IngressCounters.snapshot}
- * reads totals since the counters were made; windowing them and writing them to
- * the bucket is a later phase, and a restarted daemon counts from zero.
- */
+/* Monotonic in-memory per-environment ingress access-log counters. Built only
+   with an ingress log; observation flushing persists snapshots. */
 
 import { parsePlatformHost } from "../core/placement/hosts.ts";
 import { APEX_ENVIRONMENT, type RouteClaim } from "../core/placement/routes.ts";
 import type { IngressRoute } from "../core/types/ingress.ts";
 import { parseAccessLogLine } from "../core/utils/access-log.ts";
 
-/**
- * Upper boundaries, in milliseconds, of the duration bands a request is counted
- * in. A request lands in the FIRST band whose boundary it does not exceed, and
- * anything past the last one lands in a band of its own — so the counts are one
- * longer than this list, and a histogram is a running sum over them.
- *
- * Fixed rather than configurable: bands that differ per node cannot be added up
- * across a fleet, which is the only thing anyone ever wants to do with them.
- */
+/** Shared millisecond histogram upper bounds; fixed for fleet-wide aggregation. */
 export const DURATION_BANDS_MS: number[] = [10, 50, 100, 300, 1000, 3000];
 
-/**
- * The project and environment a request is counted under when its Host resolved
- * to nothing this node serves.
- *
- * A single hyphen is not a slug — every real project and environment name is
- * alphanumeric segments joined by single hyphens — so this bucket can never
- * collide with a real one.
- */
+/** Reserved non-slug bucket for hosts not attributed to this node. */
 export const UNATTRIBUTED: string = "-";
 
 /** Status classes a response is counted in; `other` is anything outside 200-599. */
@@ -81,15 +49,7 @@ export interface IngressCountersSnapshot {
   buckets: IngressBucket[];
 }
 
-/**
- * What the routing this node published says a host belongs to.
- *
- * BOTH HALVES ARE NEEDED AND THEY COVER DIFFERENT GAPS. `routes` is what the
- * ingress is actually serving, so it names every host with a ready process
- * behind it — an environment's label, its apex or a custom domain — and it
- * carries the environment each of them reaches. `claims` is every custom domain
- * an environment's record holds, preserving attribution across route changes.
- */
+/** Current served routes plus durable custom-domain claims for attribution. */
 export interface RoutingAttribution {
   routes: IngressRoute[];
   claims: RouteClaim[];
@@ -97,22 +57,11 @@ export interface RoutingAttribution {
 
 /** Where an ingress's access log is turned into what each environment was served. */
 export interface IngressCounters {
-  /**
-   * Reads one line and counts it. Never throws: an unreadable line is counted as
-   * malformed and dropped.
-   */
+  /** Counts one line; malformed input increments `malformed` and does not throw. */
   ingest(line: string): void;
-  /**
-   * Takes the routing this node last published as the answer to "whose host is
-   * this". Restated wholesale on every reconcile pass, because a host that
-   * stopped being served must stop being attributed to what used to serve it.
-   */
+  /** Replaces routing attribution after reconciliation. */
   observeRouting(routing: RoutingAttribution): void;
-  /**
-   * The totals as they stand. Reading does NOT consume and does not reset:
-   * counters are monotonic, and a reader that wants a window subtracts two
-   * snapshots.
-   */
+  /** Non-consuming monotonic snapshot; callers derive windows by subtraction. */
   snapshot(): IngressCountersSnapshot;
 }
 
@@ -123,24 +72,8 @@ export interface IngressCountersOptions {
   now?: () => Date;
 }
 
-/**
- * Builds the counters an access-log adapter feeds.
- *
- * HOW A HOST BECOMES A PROJECT AND AN ENVIRONMENT, in two steps that are tried
- * in this order and no other:
- *
- * 1. THE ROUTING, when it names the host. This is the authority, and it has to
- *    be: it is the only thing that knows a custom domain belongs to an
- *    environment.
- * 2. THE PLATFORM HOST GRAMMAR, for everything else under a platform domain —
- *    `<project>.<domain>` as the apex environment, `<project>--<ref>.<domain>`
- *    as that ref. This attributes a platform host even when it currently has no
- *    route.
- *
- * Anything else — a domain this installation never minted, an address, a
- * scanner's invention — is {@link UNATTRIBUTED}, counted in full in its own
- * bucket and reported as a total of its own.
- */
+/** Creates ingress counters. Attribute current routing first, then platform
+    host grammar; all other hosts use {@link UNATTRIBUTED}. */
 export function createIngressCounters(opts: IngressCountersOptions): IngressCounters {
   const now = opts.now ?? ((): Date => new Date());
   const since = now().toISOString();
@@ -182,9 +115,7 @@ export function createIngressCounters(opts: IngressCountersOptions): IngressCoun
 
     observeRouting(input: RoutingAttribution): void {
       const next = new Map<string, Attributed>();
-      /* Claims first, so a custom domain whose environment has something ready
-         is answered by the route rather than by the claim; the two agree, and
-         the route is the one the request actually took. */
+      /* Routes override claims because they represent the request target. */
       for (const claim of input.claims) {
         next.set(claim.host, { project: claim.project, env: claim.environment });
       }
@@ -200,8 +131,7 @@ export function createIngressCounters(opts: IngressCountersOptions): IngressCoun
         lines,
         malformed,
         unattributed,
-        /* Copied out: a reader must not be able to reach back into the counters,
-           and a snapshot taken now must not change when the next line lands. */
+        /* Snapshot must not alias mutable counters. */
         buckets: [...buckets.values()]
           .map((bucket) => ({
             ...bucket,

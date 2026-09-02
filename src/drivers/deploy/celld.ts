@@ -1,11 +1,4 @@
-/*
- * Deploy runner for celld 0.4.0: unpacks an uploaded artifact and publishes it
- * into an environment's fleet as a new version.
- *
- * Publishing is a task, not a service — it starts, does one thing and exits — so
- * it runs as a plain child process rather than through the supervisor, which
- * exists to keep long-lived processes alive.
- */
+/* Unpacks an artifact and publishes it through a short-lived Celld CLI process. */
 
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -41,11 +34,7 @@ export interface CelldDeployRunnerOptions {
   binPath?: string;
   /** Directory the unpacked artifact is staged under. Defaults to the OS temp directory. */
   stagingDir?: string;
-  /**
-   * Environment the publish starts from; it REPLACES the child's rather than
-   * extending it, so it must carry at least a usable `PATH`. Defaults to none,
-   * which only works when `binPath` is an absolute path.
-   */
+  /** Child environment replacing the inherited environment; include PATH as needed. */
   baseEnv?: Record<string, string>;
   /** In-flight subprocess output retained. */
   outputBytes?: number;
@@ -120,14 +109,7 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
   };
 }
 
-/**
- * Points the artifact's config at the name scafo recorded for it, and returns
- * the path to it.
- *
- * The runtime files a version under the name its config carries. An artifact
- * that named itself something else would deploy into a second fleet directory
- * the daemon never serves, so the recorded name wins.
- */
+/** Rewrites the artifact config with the environment name used by the runtime. */
 async function prepareConfig(
   dir: string,
   script: string,
@@ -166,10 +148,7 @@ async function prepareConfig(
   });
 }
 
-/**
- * Runs the publish to completion and hands back everything it said. Output is
- * kept whole: it is the only account of what a failed publish did.
- */
+/** Runs a publish and retains bounded stdout/stderr for failure diagnostics. */
 function run(
   command: string,
   args: string[],
@@ -207,8 +186,7 @@ function run(
 
     const cancel = (): void => {
       cancelled = true;
-      /* A stale builder is an integrity risk, not a graceful shutdown: celld
-         may publish the deployment at any point before it exits. */
+      /* A lost lease may leave a publish completed; stop the whole process group. */
       beginCleanup();
     };
     opts.signal.addEventListener("abort", cancel, { once: true });
@@ -218,9 +196,7 @@ function run(
       if (cancelled) beginCleanup();
     });
 
-    /* `close` waits for stdio. A descendant can inherit those pipes after the
-       leader exits, so group teardown must begin at leader exit or `close`
-       would be the event cleanup itself is waiting to make possible. */
+    /* Descendants can retain stdio; begin group teardown at leader exit. */
     child.on("exit", beginCleanup);
 
     child.on("error", (error) => {

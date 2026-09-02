@@ -42,25 +42,11 @@ export interface ReapResult {
 
 /** What {@link deleteEnvironment} is allowed to act on; see {@link assertDeletable}. */
 export interface DeleteEnvironmentOptions extends RetirementOptions {
-  /**
-   * Deletes the environment whatever state it is in, skipping BOTH the ephemeral
-   * and the retirement-grace requirement. The escape hatch for an operator who
-   * has already made the decision the two steps exist to slow down — a preview
-   * fleet gone wrong, an environment created by a typo — and the one path that
-   * discards a long-lived environment in a single call.
-   */
+  /** Bypasses ephemeral and retirement-grace deletion requirements. */
   force?: boolean;
 }
 
-/**
- * Lists what is currently reapable. The plan is advisory: {@link executeReap}
- * re-checks every item against fresh state before deleting anything.
- *
- * An environment qualifies only when it is retired and its grace has run out,
- * whether or not it is ephemeral. A build qualifies only when it is older than
- * the configured retention. Build records are deployment history, not runtime
- * pointers.
- */
+/** Plans reapable items. Execution rechecks fresh state before deletion. */
 export async function planReap(ctx: RegistryContext, opts?: ReapOptions): Promise<ReapPlan> {
   const plan: ReapPlan = { environments: [], builds: [] };
   const now = nowDate(ctx).getTime();
@@ -92,15 +78,8 @@ export async function planReap(ctx: RegistryContext, opts?: ReapOptions): Promis
   return plan;
 }
 
-/**
- * Carries out a plan under the coordinator lease. The lease is re-verified
- * before every item and a lost lease aborts the whole run — deletes cannot be
- * conditional, so the lease is the only thing keeping two reapers apart.
- *
- * Each item is re-read and re-checked first; anything that changed since
- * planning is skipped. Deletions go references-before-referents so a crash
- * mid-run never leaves a pointer to something gone.
- */
+/** Executes a plan under a rechecked coordinator lease. Re-reads items and
+    deletes references before referents for crash recovery. */
 export async function executeReap(
   ctx: RegistryContext,
   plan: ReapPlan,
@@ -164,27 +143,8 @@ export async function executeReap(
   return result;
 }
 
-/**
- * Deletes one environment on an operator's explicit order, under the coordinator
- * lease. This is the reaper's machinery run against a named target instead of a
- * plan, so the deletion order and the fencing are the same. The order to delete
- * is the decision.
- *
- * Which environments it will act on is {@link assertDeletable}'s to decide:
- * ephemeral ones, ones retired for longer than the grace, and — bypassing both —
- * ones the caller has explicitly forced. Anything else is refused with
- * `ScafoError("invalid-input")` at status 409, and the refusal names the route
- * that applies rather than only the rule that was broken: a long-lived
- * environment is the one name that outlives every build it ever served, and
- * nothing here can tell a deliberate request from a typo in a path.
- *
- * The lease is verified before every destructive step, so a coordinator that has
- * been superseded mid-run stops rather than racing the node that replaced it —
- * the partial deletion it leaves is the same self-repairing state a crash leaves.
- *
- * Throws `ScafoError("not-found")` when there is no such environment, and
- * `ScafoError("lease-lost")` once the lease is gone.
- */
+/** Deletes an explicit environment under coordinator fencing and
+    {@link assertDeletable}; lease loss stops remaining destructive steps. */
 export async function deleteEnvironment(
   ctx: RegistryContext,
   project: string,
@@ -199,17 +159,8 @@ export async function deleteEnvironment(
   return { deleted };
 }
 
-/**
- * Deletes one environment's records in the only safe order: the domain claims
- * that name it, then its fleet state, then its placement decision, then the
- * environment record itself. `guard` runs before every destructive step and
- * aborts the rest by throwing.
- *
- * A run cut short — by a crash or by a lost lease — therefore leaves the
- * environment record in place, so the next pass finds it again and the deletion
- * self-repairs. Deleting the record first would orphan its claims forever:
- * nothing iterates an environment that no longer exists.
- */
+/** Deletes claims, fleet state, placement, then the environment. `guard` runs
+    before each step so interruption leaves an iterable recovery state. */
 async function purgeEnvironment(
   ctx: RegistryContext,
   project: string,

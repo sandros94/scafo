@@ -1,20 +1,5 @@
-/*
- * Internal: the remotes an operator has registered, and the keys that speak for
- * them.
- *
- * A REMOTE IS AN ADDRESS BOOK ENTRY, in git's sense of the word: a NAME for
- * somewhere this operator can reach, and the credential that speaks there. What
- * is at the far end is a fleet — an installation, its machines — but the entry
- * is not the fleet any more than `origin` is the repository it points at, which
- * is why one operator can hold several names for the same installation and why
- * removing one says nothing to the installation itself.
- *
- * One file lists the remotes by NAME — where each is reached, and a REFERENCE to
- * the key it signs with. The reference is an object rather than a path so that a
- * key kept somewhere other than a file, one day, is a new kind rather than a new
- * format. Nothing secret is in the list itself: the keys are their own files,
- * readable by their owner alone.
- */
+/* Local remote registry: endpoints and private-key references. The registry
+   contains no key material. */
 
 import { rm, writeFile } from "node:fs/promises";
 import { type JSONCParseError, parseJSONC } from "confbox";
@@ -53,17 +38,7 @@ export interface RemoteKeyRef {
 export interface RemoteEntry {
   endpoints: string[];
   key: RemoteKeyRef;
-  /**
-   * A key minted for this remote that the remote does not yet sign with — the
-   * half-finished state of a rotation, and the only state one has.
-   *
-   * It is written before the new key is registered and cleared by the flip that
-   * makes it {@link RemoteEntry.key}, so an entry carrying one says exactly this:
-   * a rotation reached at least as far as minting, and did not reach its flip.
-   * Rerunning the rotation picks that key up instead of minting another, which
-   * is what keeps an interrupted run from leaving a key behind in the
-   * installation that nothing here points at.
-   */
+  /** Pending key retained across interrupted rotation until the local flip. */
   rotating?: RemoteKeyRef;
 }
 

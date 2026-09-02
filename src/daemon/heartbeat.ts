@@ -1,12 +1,4 @@
-/*
- * The heartbeat: this node saying it is still there, often enough that the
- * coordinator can tell a node that is running from one that stopped.
- *
- * It is the ONLY signal placement has. A node that stops beating is counted out
- * after three intervals and its environments are given to nodes that are still
- * beating, so this loop keeps running for exactly as long as the node is willing
- * to serve — and stops the moment it is not.
- */
+/* Periodically refreshes node liveness for coordinator placement. */
 
 import { heartbeatNode, NODE_HEARTBEAT_INTERVAL_MS } from "../core/registry/nodes.ts";
 import { isScafoError } from "../core/error.ts";
@@ -34,15 +26,7 @@ export interface HeartbeatOptions {
   intervalMs?: number;
 }
 
-/**
- * Builds the heartbeat loop for this node. Nothing runs until
- * {@link Heartbeat.start} is called, or {@link Heartbeat.beat} is awaited.
- *
- * A beat that fails is recorded and nothing more. One lost beat costs nothing —
- * the liveness window is three of them — and a node that took itself down over
- * an unreachable bucket would turn a registry blip into an outage of everything
- * it runs.
- */
+/** Builds a heartbeat loop. Failures are recorded and retried within liveness tolerance. */
 export function createHeartbeat(daemon: DaemonContext, opts?: HeartbeatOptions): Heartbeat {
   const intervalMs = opts?.intervalMs ?? NODE_HEARTBEAT_INTERVAL_MS;
 
@@ -52,8 +36,7 @@ export function createHeartbeat(daemon: DaemonContext, opts?: HeartbeatOptions):
   let lastFailure: string | null = null;
 
   async function beat(): Promise<void> {
-    /* Beats must not overlap: a slow bucket would otherwise queue up writes of
-       timestamps that are already stale by the time they land. */
+    /* Prevent queued stale heartbeat writes. */
     if (inFlight) return;
     inFlight = true;
 
@@ -74,7 +57,7 @@ export function createHeartbeat(daemon: DaemonContext, opts?: HeartbeatOptions):
       if (timer !== null) return;
 
       timer = setInterval(() => void beat(), intervalMs);
-      /* The loop must never be the reason the process stays alive. */
+      /* Timer must not keep the process alive. */
       const handle = timer as { unref?: () => void };
       handle.unref?.();
     },

@@ -1,46 +1,5 @@
-/*
- * Internal: replacing the key a remote signs with, expand-contract.
- *
- * THE ORDER IS THE DESIGN. A rotation is three writes in three different places
- * — a key file here, a trust record in the fleet, a reference in this home — and
- * any of them can be the last thing that happens before the process is killed,
- * the laptop closed or the network taken away. They are sequenced so that every
- * stopping point leaves a remote the operator can still reach, and so that the
- * command is simply run again:
- *
- *   1. MINT the new key into the home, and record it on the remote's entry as
- *      pending. Nothing has been told to the fleet yet. Interrupted here, the
- *      fleet is untouched and the rerun picks the pending key up.
- *   2. EXPAND: register the public half with the fleet, AUTHENTICATED BY THE OLD
- *      KEY — the only credential this operator has — and SUPERSEDING it.
- *      Idempotent, so the rerun of an interrupted run re-registers what it had
- *      already registered.
- *
- *      The lineage is not bookkeeping: below the admin tier it is the only thing
- *      that authorizes step 5. An operator-tier key may revoke nothing but the
- *      key it was registered to replace, so a rotation that did not record what
- *      it replaces would leave its own contract step refused. It also settles
- *      the new key's TIER — a node gives a key that supersedes the caller the
- *      caller's own tier — so a rotation is never a promotion or a demotion.
- *   3. CONFIRM: an authenticated call made WITH THE NEW KEY. Read-back alone
- *      would only say the record was written; this says the fleet accepts what
- *      the key signs, which is the thing about to be relied on. Interrupted at
- *      or before this point, BOTH keys are trusted and the home still points at
- *      the old one: every other command goes on working, and nothing is lost.
- *   4. FLIP: the home's reference moves to the new key and the pending mark is
- *      cleared. This is the only irreversible-feeling step, and it happens after
- *      the new key has been proved rather than before.
- *   5. CONTRACT: deregister the old key, authenticated by the NEW one. Doing it
- *      last, and doing it under the new key's signature, is what makes the whole
- *      sequence safe — the old key is never taken away until the new one has
- *      demonstrably been accepted in its place. Interrupted here, the old key
- *      stays trusted: a key too many, never a key too few, cleared by rerunning
- *      or by `scafo operator revoke`.
- *
- * The order that must never be written is contract-before-confirm. It is the one
- * arrangement whose interruption can leave a fleet trusting no key this operator
- * holds, and the only way back from that is the bucket.
- */
+/* Expand-contract remote key rotation: write pending key, trust it, confirm its
+   signature, flip local reference, then revoke old key. */
 
 import { rm } from "node:fs/promises";
 import { ScafoError } from "../core/error.ts";

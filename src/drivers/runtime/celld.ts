@@ -1,8 +1,4 @@
-/*
- * Runtime driver for celld 0.4.0: one environment-owned process and its
- * start-time configuration. Celld owns deployment adoption, application
- * readiness and runtime resource policy.
- */
+/* Materializes one environment-owned Celld process and its start-time config. */
 
 import { ScafoError } from "../../core/error.ts";
 import { formatProcessId } from "../../core/placement/ids.ts";
@@ -13,14 +9,7 @@ import type { ProcessSpec } from "../../core/types/supervisor.ts";
 /** Command run when the caller does not name one. */
 export const DEFAULT_CELLD_BIN: string = "celld";
 
-/**
- * Address a runtime process binds its listeners to when the caller names none.
- *
- * Loopback, because it is the only setting that is safe without knowing the
- * network: the peer listener carries no authentication of its own, so binding it
- * wider is a decision an operator makes about a network they have classified,
- * never a default.
- */
+/** Default loopback bind; wider peer exposure requires an explicit network decision. */
 export const DEFAULT_BIND_HOST: string = "127.0.0.1";
 
 /** celld 0.4.0's complete process shutdown bound when the operator does not set one. */
@@ -32,16 +21,7 @@ const STOP_HEADROOM_MS = 5_000;
 /** Largest delay Node timers can represent without overflowing to an immediate timeout. */
 const MAX_TIMER_MS = 2_147_483_647;
 
-/**
- * The runtime's own telemetry switch, and the ONE name that is neither derived
- * here nor reserved from a caller.
- *
- * It is exported for the same reason the reserved names are — so that whatever
- * turns a node's observability on can default it UNDER the operator's own
- * `runtime.celldEnv` without the two spellings ever drifting apart — and it is
- * absent from {@link RESERVED_ENV} on purpose: an operator who states it
- * themselves, on or off, wins over that default.
- */
+/** Operator-settable Celld telemetry switch; unlike reserved variables it may override a default. */
 export const TELEMETRY_ENV: string = "CELLD_OTEL";
 
 /**
@@ -57,8 +37,7 @@ export const OPERATOR_RESERVED_ENV: string[] = [
   "CELLD_ADDR",
   "CELLD_INTERNAL_ADDR",
   "CELLD_ADVERTISE",
-  /* Derived from the ingress topology: a caller silently winning over it would
-     undo the node's trust decision. */
+  /* Derived from ingress topology, not environment input. */
   "CELLD_TRUST_FORWARDED_HEADERS",
   "CELLD_VARS_FILE",
 ];
@@ -81,26 +60,11 @@ export const RESERVED_ENV: string[] = [
 export interface CelldDriverOptions {
   /** Executable to run; resolved against `PATH` unless it is a path. */
   binPath?: string;
-  /**
-   * Variables the operator hands EVERY process this driver spawns, on top of
-   * the environment it is given and under everything the driver writes itself.
-   * The runtime's own switches are what this is for — `CELLD_OTEL` and the
-   * `CELLD_OTEL_*` tuning above all — since no typed option carries them and
-   * the environment a node starts from is a narrow allowlist.
-   *
-   * Node-wide policy names in {@link RESERVED_ENV} are allowed here. Values the
-   * driver must derive are overwritten; settings Celld owns, including its
-   * shutdown and resource limits, pass through.
-   */
+  /** Base variables for every process. Driver-derived values override conflicts. */
   operatorEnv?: Record<string, string>;
 }
 
-/**
- * Builds the driver that runs environments as celld processes.
- *
- * Throws `ScafoError("invalid-input")` when the operator's
- * `CELLD_SHUTDOWN_TOTAL_MS` is not a positive integer the supervisor can time.
- */
+/** Builds the Celld runtime driver; validates its shutdown timeout. */
 export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
   const binPath = opts.binPath ?? DEFAULT_CELLD_BIN;
   const operatorEnv = opts.operatorEnv === undefined ? undefined : { ...opts.operatorEnv };
@@ -112,9 +76,7 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
     processSpec(input: RuntimeSpecInput): ProcessSpec {
       const fleet = fleetPrefix(input.project, input.env.name);
       const objectPrefix = joinPrefix(input.node.keyPrefix, fleet);
-      /* Both listeners bind the same address: the public one is dialled by this
-         node's ingress and the internal one by peers, and a process reachable at
-         its advertised address must actually be listening on it. */
+      /* Public and peer listeners bind the address advertised to their callers. */
       const bindHost = input.node.bindHost ?? DEFAULT_BIND_HOST;
       const listen = `${bindHost}:${String(input.ports.public)}`;
       const internalListen = `${bindHost}:${String(input.ports.internal)}`;
@@ -145,32 +107,21 @@ function processEnv(
   input: RuntimeSpecInput,
   operatorEnv?: Record<string, string>,
 ): Record<string, string> {
-  /*
-   * Precedence, weakest first: the environment the daemon was started from, then
-   * the variables the operator handed this node, then everything this driver
-   * derives — credentials and forwarded-header trust — then the environment's
-   * varset and caller extras.
-   * The driver's half is written AFTER the operator's on purpose: those values
-   * come from the node's configuration and from the ports these processes
-   * actually bound, so a variable that disagreed with them could only describe a
-   * process that does not exist. `RESERVED_ENV` is that half, by name.
-   */
+  /* Base environment, then node configuration; derived variables cannot be
+     overridden by an environment. */
   const env: Record<string, string> = { ...input.baseEnv, ...operatorEnv };
 
   env.AWS_ACCESS_KEY_ID = input.node.accessKey;
   env.AWS_SECRET_ACCESS_KEY = input.node.secretKey;
   env.AWS_REGION = input.node.region;
 
-  /* The node is reached through an ingress that terminates TLS and rewrites
-     both forwarded headers, so the application sees its own public origin. */
+  /* The node ingress terminates TLS and supplies forwarded headers. */
   env.CELLD_TRUST_FORWARDED_HEADERS = "1";
 
-  /* A node configures each environment through its own CELLD_VAR_* entries.
-     An inherited shared file would merge unrelated configuration into it. */
+  /* A shared inherited vars file could merge unrelated environment settings. */
   delete env.CELLD_VARS_FILE;
 
-  /* The name after the prefix becomes the binding name verbatim, so a variable
-     reaches the application under exactly the name the varset gave it. */
+  /* Preserve each varset name after the Celld variable prefix. */
   for (const [name, entry] of Object.entries(input.vars ?? {})) {
     if (name !== "") env[`CELLD_VAR_${name}`] = entry.value;
   }
@@ -202,7 +153,7 @@ function invalidShutdownTotal(value: string): ScafoError {
   });
 }
 
-/** Refuses what a caller may not set, and passes the rest through. */
+/** Rejects environment-scoped overrides of node-wide or derived values. */
 function checkedExtraEnv(extraEnv?: Record<string, string>): Record<string, string> {
   if (extraEnv === undefined) return {};
 

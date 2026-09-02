@@ -1,14 +1,4 @@
-/*
- * Environment variables as an operator hands them to a process: the names a
- * process reads them back under, and the `NAME=value,NAME2=value2` text a flag
- * or an environment variable carries a set of them in.
- *
- * The syntax is the labels parser's next door — same separator, same spacing,
- * same refusal on a duplicate name — because an operator writes both in the same
- * three places and a second syntax is one more thing to get wrong. The CHARSET
- * is not: a variable name is what the process looks itself up by, and those are
- * upper-case with underscores where a label may hold neither case nor emptiness.
- */
+/* Process environment validation and `NAME=value` list parsing. */
 
 import { ScafoError } from "../error.ts";
 

@@ -1,13 +1,4 @@
-/*
- * `scafo env retire|unretire|delete`, and the two ways it reaches an
- * installation.
- *
- * Both are driven against the same registry: the node route runs the REAL node
- * app over an injected `fetch`, so what these tests exercise is the whole
- * path an operator's command takes — token, route, registry — rather than a
- * stand-in for it. The direct route writes into the same bucket, which is what
- * makes the two comparable at all.
- */
+/* `scafo env retire|unretire|delete`, and the two ways it reaches an installation. */
 
 import { generateJWK } from "unjwt/jwk";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
@@ -56,7 +47,7 @@ let clock: ManualClock;
 let keys: { privateKey: JWK_OKP_Private<"EdDSA">; publicKey: JWK_OKP_Public<"EdDSA"> };
 /** Every URL the node transport asked for, in order. */
 let called: string[];
-/** ONE node for the whole test: a second app would be a second coordinator. */
+/** one node for the whole test: a second app would be a second coordinator. */
 let daemonOps: EnvironmentOps;
 
 beforeEach(async () => {
@@ -80,8 +71,6 @@ beforeEach(async () => {
   await recordDeployment(clock.ctx, PROJECT, "prod", BUILD);
 });
 
-/* Both transports must answer the same questions the same way, so the retire and
-   unretire cases are written once and run against each. */
 describe.each([
   ["through a node daemon", (): EnvironmentOps => throughNode()],
   ["straight through the bucket", (): EnvironmentOps => throughBucket()],
@@ -114,8 +103,6 @@ describe.each([
   });
 });
 
-/* Choosing which nodes may serve an environment is a plain record update, so it
-   goes the same two ways retirement does and must answer identically on both. */
 describe.each([
   ["through a node daemon", (): EnvironmentOps => throughNode()],
   ["straight through the bucket", (): EnvironmentOps => throughBucket()],
@@ -132,8 +119,6 @@ describe.each([
 
     const environment = await build().setSelector(PROD, null);
 
-    /* The field is gone rather than emptied: the next assignment may use every
-       live node again, while an empty object would remain a stated selector. */
     expect("nodeSelector" in environment).toBe(false);
     expect((await getEnvironment(clock.ctx, PROJECT, "prod")).nodeSelector).toBeUndefined();
   });
@@ -158,8 +143,6 @@ describe.each([
   });
 
   it("takes no coordinator lease to do it", async () => {
-    /* Unlike a deletion: there is nothing here two nodes doing it at once could
-       corrupt, so neither transport has to become the coordinator. */
     await build().setSelector(PROD, { tier: "fast" });
 
     const lease = await readJson<CoordinatorLease>(clock.ctx, coordinatorKey());
@@ -189,8 +172,6 @@ describe("what --set and --clear are read as", () => {
   });
 
   it("refuses NEITHER rather than reading it as a clear", async () => {
-    /* An accidental `scafo env selector` that lifted a constraint would move an
-       application across a fleet without anyone having asked it to. */
     const error = await rejectsWith(
       () => Promise.resolve(readSelectorFlags({ set: undefined, clear: false })),
       "invalid-input",
@@ -214,11 +195,6 @@ describe("deleting through a node daemon", () => {
   it("refuses a long-lived environment, relaying the grace the node named", async () => {
     const error = await rejectsWith(() => throughNode().delete(PROD), "invalid-input");
 
-    /*
-     * The refusal survives the wire intact, which is the point of relaying the
-     * node's problem document rather than summarising it: what reaches the
-     * operator is the route forward, not "the node said no".
-     */
     expect(error.status).toBe(409);
     expect(error.detail).toContain("scafo env retire");
     expect(error.detail).toContain("force");
@@ -250,8 +226,6 @@ describe("deleting through a node daemon", () => {
 
     const deleted = await throughNode().delete(PROD, { force: true });
 
-    /* `--force` has to reach the node as a query the node reads; a flag the
-       client swallowed would refuse a deletion the operator did state. */
     expect(called.at(-1)).toBe(`${NODE_URL}/v1/environments/${PROJECT}/prod?force=1`);
     expect(deleted).toContain(environmentKey(PROJECT, "prod"));
   });
@@ -271,12 +245,6 @@ describe("deleting straight through the bucket", () => {
     const deleted = await throughBucket().delete(PREVIEW);
 
     expect(deleted).toContain(environmentKey(PROJECT, "preview"));
-    /*
-     * Released rather than left to expire: the CLI has to BE the coordinator
-     * for the length of a deletion, and an installation whose coordinator is a
-     * laptop that has already exited would sit out the whole TTL before a node
-     * took the work back.
-     */
     const lease = await readJson<CoordinatorLease>(clock.ctx, coordinatorKey());
     expect(lease?.value.node).toBe(CLI_NODE_ID);
     expect(lease?.value.ttlMs).toBe(0);
@@ -300,8 +268,6 @@ describe("deleting straight through the bucket", () => {
 
     const error = await rejectsWith(() => throughBucket().delete(PREVIEW), "lease-lost");
 
-    /* A node holds the lease, so the request belongs to the node: it will reach
-       the coordinator wherever it is, without disturbing the election. */
     expect(error.detail).toContain("--node");
     await expect(getEnvironment(clock.ctx, PROJECT, "preview")).resolves.toMatchObject({
       name: "preview",
@@ -312,8 +278,6 @@ describe("deleting straight through the bucket", () => {
     expect(await acquireLease(clock.ctx, NODE_ID, { ttlMs: 1000 })).not.toBeNull();
     clock.tick(HOUR_MS);
 
-    /* An expired lease is a record nobody stands behind; taking it over is
-       exactly what any surviving node would do. */
     expect(await throughBucket().delete(PREVIEW)).toContain(environmentKey(PROJECT, "preview"));
   });
 });
@@ -341,8 +305,6 @@ describe("what the command puts on the terminal", () => {
     const printed = describeSelectorChange(PROD, environment);
 
     expect(printed).toContain("tier=fast");
-    /* Stating the intent is not placing it: the coordinator does that, and the
-       operator has to know that is what they are waiting for. */
     expect(printed).toContain("coordinator");
   });
 
@@ -353,14 +315,12 @@ describe("what the command puts on the terminal", () => {
   });
 });
 
-/* ------------------------------------------------------------------ helpers */
-
 /** The one node this test talks to, as the CLI's node transport sees it. */
 function throughNode(): EnvironmentOps {
   return daemonOps;
 }
 
-/** The CLI talking to a REAL node app over an injected `fetch`. */
+/** The CLI talking to a real node app over an injected `fetch`. */
 function buildNodeOps(): EnvironmentOps {
   const app = createNodeApp({
     config: daemonConfig(),
@@ -368,8 +328,6 @@ function buildNodeOps(): EnvironmentOps {
     registry: clock.ctx,
     supervisor: idleSupervisor(),
     version: "0.0.0-test",
-    /* The app deletes through the lease it holds; without a coordinator loop it
-       would only ever forward, which is a different test. */
     coordinator: soleCoordinator(),
   });
 
@@ -379,7 +337,6 @@ function buildNodeOps(): EnvironmentOps {
     fetchFn: async (input, init) => {
       const url = String(input);
       called.push(url);
-      /* The app may answer synchronously; `fetch` never does. */
       return app.request(url, init);
     },
   });

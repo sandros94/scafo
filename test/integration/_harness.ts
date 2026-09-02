@@ -1,15 +1,4 @@
-/*
- * What every end-to-end suite needs and none of them is about: the images and
- * deadlines they agree on, a bucket to point at, the fixture application staged
- * with a version in it, requests that can set a `Host` header, the built CLI run
- * the way an operator runs it, and a poll that fails with something worth
- * reading.
- *
- * Deliberately stateless — functions and constants, no module-level containers —
- * so a suite owns its own topology and this owns none of it. The topology is
- * exactly what differs between the suites (one node or two, Caddy or Traefik),
- * and it is the part worth reading in each of them.
- */
+/* Shared E2E fixtures, commands, and polling. Suites own their topology. */
 
 import { spawn } from "node:child_process";
 import { cp, mkdtemp, readFile, writeFile } from "node:fs/promises";
@@ -41,8 +30,8 @@ export const STORE_PORT: number = 8333;
  * Every container stays on docker's default bridge, and the containers address
  * each other by address on it.
  *
- * Deliberately NOT a user-defined network: testcontainers attaches a container
- * given one to that network AND to the default bridge, and a container on two
+ * Deliberately not a user-defined network: testcontainers attaches a container
+ * given one to that network and to the default bridge, and a container on two
  * networks answers a published-port connection from the wrong address, so the
  * host's connection is reset. The bridge alone gives both what these suites need
  * — the containers reach each other, and the host reaches the published ports.

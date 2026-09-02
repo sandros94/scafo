@@ -1,17 +1,5 @@
-/*
- * Internal: the project surface of one node, and how a listing of it prints.
- *
- * WIRE ONLY, unlike `scafo env`, which falls back to writing the bucket when no
- * node is named. That is not an oversight and not a limitation to lift later:
- * blocking and labelling are ADMIN-ONLY acts, and the tier that makes them so is
- * a property of an operator KEY checked by a node. A bucket-side path would
- * authorize with bucket credentials instead — which are root, and would
- * therefore answer "yes" to everything, quietly turning an admin-only verb into
- * one anybody holding the bucket can take.
- *
- * Whoever holds the bucket can of course still write the flag by hand; the point
- * is that this command does not offer it as though it were the same act.
- */
+/* Node-only project administration. Bucket fallback would bypass operator-tier
+   authorization for blocking and labels. */
 
 import { ScafoError } from "../core/error.ts";
 import type { ProjectRecord } from "../core/types/registry.ts";
@@ -20,16 +8,7 @@ import { assertSlug } from "../core/utils/slug.ts";
 
 /** What a node answers `GET /v1/projects` with. */
 export interface ProjectListing {
-  /**
-   * WHOLE records for an admin; for anybody else the node strips each one's
-   * `labels` before it answers, because those are the fleet's notes about a
-   * tenant rather than the tenant's own.
-   *
-   * So a non-admin's rows print `-` in the LABELS column whether or not the
-   * project carries any, and that is the redaction working rather than a bug to
-   * fix here: the two cases are byte-identical on the wire on purpose, and
-   * nothing on this side could tell them apart if it wanted to.
-   */
+  /** Admin records; non-admin responses redact labels without revealing presence. */
   projects: ProjectRecord[];
   /** Set when the node showed only what this key reaches, rather than the fleet. */
   scoped?: true;
@@ -88,16 +67,7 @@ export function projectApi(opts: NodeOptions): ProjectApi {
   };
 }
 
-/**
- * `k=v` pairs as the map the API takes.
- *
- * WHOLESALE is the contract, so this is what the whole map will BE rather than
- * what to add to it — see `setProjectLabels`. Naming no pair at all is therefore
- * how labels are cleared, which is stated in the command's own help rather than
- * left to be discovered.
- *
- * Throws `ScafoError("invalid-input")` for anything that is not a pair.
- */
+/** Parses replacement `k=v` labels; no pairs clears labels. */
 export function readLabelArgs(pairs: string[]): Record<string, string> {
   const labels: Record<string, string> = {};
 

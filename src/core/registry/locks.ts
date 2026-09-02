@@ -1,18 +1,5 @@
-/*
- * Named locks in the bucket: the mechanics every family of them shares.
- *
- * A lock is one record taken with `If-None-Match` and kept alive by refreshing
- * it. Its holder restamps every {@link LOCK_REFRESH_MS}, and a record left
- * unrefreshed for {@link LOCK_STALE_MS} may be taken over, so a holder that
- * crashed blocks the next one for that long rather than forever.
- * {@link acquireLock} NEVER WAITS: a caller that wants a held lock asks again,
- * every {@link LOCK_POLL_MS}, which is what {@link withLock} does for it.
- *
- * A family is a {@link LockSpace} — where its records live, and the three
- * durations it waits on. There are two: `tls-lock.ts`, whose names come from the
- * colocated ingress storing its issuance state through this node, and
- * fleet-owned locks, which live under a separate prefix.
- */
+/* Bucket-backed named locks: conditional creation, periodic refresh, stale
+   takeover. `acquireLock` is non-blocking; `withLock` polls. */
 
 import { ScafoError } from "../error.ts";
 import { startBudget } from "../utils/budget.ts";
@@ -75,16 +62,8 @@ export function isLockStale(lock: NamedLock, now: Date, staleMs: number): boolea
   return refreshed + staleMs <= now.getTime();
 }
 
-/**
- * Takes the lock for `holder`, or throws `ScafoError("cas-conflict")` when
- * somebody else has a live one. IT NEVER WAITS — a caller that wants it polls.
- *
- * A record whose holder stopped refreshing it is taken over rather than waited
- * out: that holder is gone, and a lock nobody is left to release would refuse
- * every later attempt forever. The takeover is conditioned on the very record
- * the staleness was read from, so two callers racing to take one over cannot
- * both win it.
- */
+/** Takes a lock or throws cas-conflict. Stale takeover is conditional on the
+ * record read, so competing takeovers cannot both win. */
 export async function acquireLock(
   ctx: RegistryContext,
   space: LockSpace,
@@ -116,14 +95,7 @@ export async function acquireLock(
   }
 }
 
-/**
- * Keeps the lock alive: same holder, same `acquiredAt`, fresh `refreshedAt`,
- * conditioned on the record this handle names.
- *
- * Throws `ScafoError("lease-lost")` when that record has changed since — the
- * lock belongs to somebody else now, and the caller must stop behaving as though
- * it held one.
- */
+/** Refreshes a held lock. Any failed conditional write is lease-lost. */
 export async function refreshLock(
   ctx: RegistryContext,
   space: LockSpace,
@@ -135,23 +107,13 @@ export async function refreshLock(
     const { etag } = await putJson(ctx, space.keyOf(handle.name), lock, { ifMatch: handle.etag });
     return { name: handle.name, lock, etag };
   } catch (error) {
-    /* A refused conditional write and a store this holder cannot reach are
-       indistinguishable here: neither proves the refresh landed. */
+    /* Neither conflict nor transport failure proves the refresh landed. */
     throw lost(handle, error);
   }
 }
 
-/**
- * Gives the lock up, answering whether this handle still held it. False means
- * the lock had already been taken over, and NOTHING was removed.
- *
- * IT NEVER TAKES A LOCK AWAY FROM WHOEVER HOLDS IT NOW, which is the whole point
- * of reading before removing. CAVEAT: the store has no conditional delete, so
- * the ETag is checked by that read rather than by the removal itself. What
- * closes the window between them is the freshness rule — a lock this caller
- * still holds was restamped within `refreshMs`, and nobody may take one over
- * before `staleMs`.
- */
+/** Releases only the handle's current record. The store lacks conditional delete,
+ * so refresh/stale intervals protect the read-delete window. */
 export async function releaseLock(
   ctx: RegistryContext,
   space: LockSpace,
@@ -166,29 +128,8 @@ export async function releaseLock(
   return true;
 }
 
-/**
- * Runs `fn` holding the named lock, and gives it back whatever happens.
- *
- * Three things it does that a bare {@link acquireLock} does not, and all three
- * are load-bearing for a critical section that outlives one bucket write:
- *
- * - IT WAITS, polling every `pollMs` up to `timeoutMs`, and gives up with
- *   `ScafoError("cas-conflict")` rather than hanging. A caller that cannot have
- *   the lock must find out and decide, not block forever.
- * - IT REFRESHES while `fn` runs. Work worth serializing routinely takes longer
- *   than `staleMs` — bundling and uploading an artifact takes minutes — and an
- *   unrefreshed lock is taken over mid-section, which is the one outcome a lock
- *   exists to prevent.
- * - IT ABORTS `fn` when a refresh does not land, with
- *   `ScafoError("lease-lost")`, and waits for `fn` to clean up. A refused
- *   conditional write and an unreachable bucket are indistinguishable from here
- *   and the safe reading of both is the same: this caller is no longer alone
- *   inside the section. The callback owns cancellation of whatever it launched;
- *   this boundary owns waiting for that cleanup before it reports the loss.
- *
- * A release the bucket refuses is left to go stale, which is the same path a
- * crashed holder takes: it costs the next caller `staleMs` and nothing else.
- */
+/** Polls for and refreshes a lock while `fn` runs. Refresh loss aborts `fn` and
+ * waits for cleanup before surfacing lease-lost. Failed release expires by TTL. */
 export async function withLock<T>(
   ctx: RegistryContext,
   request: LockRequest,
@@ -256,14 +197,12 @@ export async function withLock<T>(
     ending.abort();
     request.signal?.removeEventListener("abort", abortExternal);
     await keepAlive;
-    /* A refresh may have failed while a completed callback was ending the
-       keepalive. Either way, stale work is joined before lease loss escapes. */
+    /* Join canceled work before surfacing lost authority. */
     if ((lockLost || externallyAborted) && running !== undefined) await running.catch(() => {});
     if (!lockLost) await releaseLock(ctx, space, handle).catch(() => {});
   }
 
-  /* The refresh failure is the authority loss that decides this section. A
-     callback cleanup failure stays observed above but cannot replace it. */
+  /* Authority loss takes precedence over callback cleanup failure. */
   if (lockLost) throw lostError;
   if (externallyAborted) throw externalError;
   if (!outcome.ok) throw outcome.error;
@@ -285,16 +224,7 @@ export function lockHolder(nodeId: string): string {
 /** Takes the lock, asking again every `pollMs` until `timeoutMs` has run out. */
 async function take(ctx: RegistryContext, request: LockRequest): Promise<LockHandle> {
   const { space, name, holder, timeoutMs } = request;
-  /*
-   * TWO CLOCKS, ON PURPOSE, AND THE LINE BETWEEN THEM IS HERE. This budget is a
-   * DURATION — how long this caller goes on asking — so it is measured on the
-   * monotonic one, like the sleeps it is spent on; a wall clock that steps
-   * forward would otherwise spend it without any time having passed and give up
-   * on a lock this caller was still entitled to wait for. Everything the RECORD
-   * carries stays on `ctx`'s wall clock: `acquiredAt`, `refreshedAt` and the
-   * staleness read off them are INSTANTS another node compares against its own,
-   * and only a shared clock makes that comparison mean anything.
-   */
+  /* Waiting uses a monotonic budget; lock timestamps use the shared wall clock. */
   const remaining = startBudget(timeoutMs);
   let refusal: unknown = null;
 

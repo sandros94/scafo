@@ -8,11 +8,7 @@ export interface Uns3StoreOptions {
   prefix?: string;
 }
 
-/**
- * Backs the registry with an S3-compatible bucket. The bucket MUST support
- * conditional writes (`If-Match` / `If-None-Match`) and MUST return an `ETag`
- * header on PUT — stores that do not are rejected with `store-nonconforming`.
- */
+/** S3-compatible registry store requiring conditional writes and PUT ETags. */
 export function createUns3Store(client: S3Client, opts: Uns3StoreOptions): CasStore {
   const bucket = opts.bucket;
   const prefix = normalizePrefix(opts.prefix);
@@ -123,15 +119,7 @@ function etagOf(response: Response, objectKey: string): string {
       detail: `"${objectKey}" was answered without an ETag header, conditional writes are impossible`,
     });
   }
-  /*
-   * The one normalization applied: a `W/` weakness marker is stripped. A store
-   * with a transforming edge in front answers a compressed GET with the SAME
-   * value the PUT returned, marked weak — but `If-Match` mandates strong
-   * comparison, so the weak tag sent back verbatim is refused by the very
-   * store that issued it, deadlocking every read-modify-write chain. Took a
-   * live fleet to surprise us; the strong form is what conditional writes
-   * accept everywhere.
-   */
+  /* Strip weak marker: `If-Match` requires a strong ETag. */
   return etag.startsWith("W/") ? etag.slice(2) : etag;
 }
 

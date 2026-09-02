@@ -1,24 +1,4 @@
-/*
- * The set of operator keys a fleet trusts.
- *
- * An operator key is filed in a KEYSPACE OF ITS OWN, `_scafo/operators/<id>.json`,
- * apart from the machines under `_scafo/nodes/`. A daemon verifies a bearer
- * token against whatever the registry holds under the token's `kid` and reads
- * either prefix, so the two are the same caller to a verifier — while remaining
- * two kinds of thing that are never administered through each other, which is
- * what the surface here is about.
- *
- * The id space is SHARED even though the keyspaces are not: one id belongs to
- * one identity, refused from both write sides, and the operator-facing half of
- * that refusal says only that the id is taken. It used to name the colliding
- * machine's address, which made this surface a probe.
- *
- * The one refusal worth reading twice is the LAST key: a fleet whose trusted set
- * is empty has nobody who can put a key back through a node, and the only way
- * left in is the bucket. Removing the last one is therefore refused rather than
- * carried out — and the last ADMIN is refused for the same reason one tier up,
- * because a fleet whose keys are all operator-tier can never add another admin.
- */
+/* The set of operator keys a fleet trusts. */
 
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -56,8 +36,6 @@ describe("what counts as an operator key", () => {
     await trustOperator(clock.ctx, operator("op-aaaa1111"));
     await registerNode(clock.ctx, machine());
 
-    /* The kinds are told apart by WHERE they are filed rather than by a marker
-       inside them, which is what makes a prefix listing a filtered view. */
     expect(await readJson(clock.ctx, operatorKey("op-aaaa1111"))).not.toBeNull();
     expect(await readJson(clock.ctx, nodeKey("op-aaaa1111"))).toBeNull();
     expect(await readJson(clock.ctx, nodeKey(MACHINE))).not.toBeNull();
@@ -71,17 +49,12 @@ describe("what counts as an operator key", () => {
     const record = await readJson<OperatorRecord>(clock.ctx, operatorKey("op-aaaa1111"));
 
     expect(record?.value.publicKey).toEqual(key.publicKey);
-    /* And nothing that looks like a machine: an operator publishes no address,
-       because nothing ever connects to one. */
     expect(record?.value).not.toHaveProperty("addresses");
   });
 });
 
 describe("what tier a key is", () => {
   it("reads a record written before roles existed as an ADMIN, never as an operator", async () => {
-    /* COMPAT: a role-less record cannot quietly become a demotion. Nothing
-       writes one, so it is a bucket-side write by hand — and demoting a key is
-       an explicit act, never something a read does. */
     await fileByHand("op-aaaa1111", {});
 
     await expect(getOperator(clock.ctx, "op-aaaa1111")).resolves.toMatchObject({ role: "admin" });
@@ -115,9 +88,6 @@ describe("the tier a bucket-side registration lands with", () => {
   it("REFUSES an explicit operator-tier first key, and says why", async () => {
     const error = await rejectsWith(() => bootstrapRole(clock.ctx, "operator"), "invalid-input");
 
-    /* A fleet whose only key is operator-tier can never add an admin through a
-       node again: the way back in would be the bucket, which is the credential
-       the whole exercise exists to avoid carrying. */
     expect(error.detail).toContain("admin");
   });
 
@@ -134,8 +104,6 @@ describe("the tier a bucket-side registration lands with", () => {
   });
 
   it("counts only ADMINS, so a fleet of operator-tier keys still bootstraps one", async () => {
-    /* Only reachable by writing to the bucket directly, and the answer has to be
-       the one that puts the fleet back in a state it can be administered from. */
     await trustOperator(clock.ctx, operator("op-bbbb2222", "operator"));
 
     await expect(bootstrapRole(clock.ctx)).resolves.toBe("admin");
@@ -151,7 +119,6 @@ describe("what a tier may do", () => {
   ];
 
   it.each(grants)("lets a %s grant a %s: %s", (caller, wanted, allowed) => {
-    /* No higher than one's own, which is the whole rule. */
     expect(canGrantRole(caller, wanted)).toBe(allowed);
   });
 
@@ -176,7 +143,6 @@ describe("listing what a fleet trusts", () => {
 
     const trusted = await listOperators(clock.ctx);
 
-    /* In id order, so two callers reading the same registry read the same list. */
     expect(trusted.map((entry) => entry.id)).toEqual(["op-aaaa1111", "op-bbbb2222"]);
   });
 
@@ -200,16 +166,12 @@ describe("trusting a key", () => {
   it("REFUSES an id a machine of this installation already holds", async () => {
     await registerNode(clock.ctx, machine());
 
-    /* Accepting it would replace a machine's identity with an operator's, and
-       the machine would be refused by every peer until it registered again. */
     const error = await rejectsWith(
       () => trustOperator(clock.ctx, operator(MACHINE)),
       "reference-held",
     );
 
     expect(error.detail).toContain(MACHINE);
-    /* The id is named because the caller named it; nothing about the machine
-       standing in the way is, which is what keeps this from being a probe. */
     expect(error.detail).not.toContain("10.0.0.4");
     await expect(getOperator(clock.ctx, MACHINE)).resolves.toBeNull();
     await expect(getNode(clock.ctx, MACHINE)).resolves.toMatchObject({ id: MACHINE });
@@ -228,7 +190,6 @@ describe("revoking a key", () => {
 
   it("REFUSES the last trusted key, and leaves it exactly where it was", async () => {
     await trustOperator(clock.ctx, operator("op-aaaa1111"));
-    /* A node beside it is no help: a machine key administers nothing here. */
     await registerNode(clock.ctx, machine());
 
     const error = await rejectsWith(
@@ -254,9 +215,6 @@ describe("revoking a key", () => {
     await trustOperator(clock.ctx, operator("op-bbbb2222", "operator"));
     await trustOperator(clock.ctx, operator("op-cccc3333", "operator"));
 
-    /* The last-key guard is not enough one tier up: a fleet left with nothing
-       but operator-tier keys can never grant an admin through a node again,
-       because no caller would be allowed to. */
     const error = await rejectsWith(
       () => revokeOperator(clock.ctx, "op-aaaa1111"),
       "reference-held",
@@ -280,13 +238,6 @@ describe("revoking a key", () => {
     await trustOperator(clock.ctx, operator("op-bbbb2222"));
     await registerNode(clock.ctx, machine());
 
-    /*
-     * A MISS, INDISTINGUISHABLE FROM AN ID NOTHING HOLDS. This surface used to
-     * answer "that is a node, at this address" — helpful, and an oracle: any
-     * trusted key could walk the machines' id space and their addresses one
-     * attempt at a time. A revocation could never reach a machine either way,
-     * so nothing a caller could act on was lost.
-     */
     const error = await rejectsWith(() => revokeOperator(clock.ctx, MACHINE), "not-found");
     expect(error.detail).not.toContain("10.0.0.4");
 
@@ -313,10 +264,6 @@ describe("the projects a key is scoped to", () => {
   });
 
   it("reads an operator-tier key that names none as reaching NOTHING", async () => {
-    /* The direction this wave turned round. Nothing GRANTS a record in this
-       shape any more, so one that exists was written to the bucket by hand —
-       and reading it as every project would be the silent widening the whole
-       axis is against. It stays trusted and is worth nothing here. */
     await trustOperator(clock.ctx, operator("op-aaaa1111", "operator"));
 
     const key = (await getOperator(clock.ctx, "op-aaaa1111")) as TrustedOperator;
@@ -357,9 +304,6 @@ describe("the projects a key is scoped to", () => {
   });
 
   it("reads a hand-written mixed wildcard as the two literal names it holds", async () => {
-    /* Refused above, so only a bucket-side write produces one — and the narrow
-       reading is the safe direction: it reaches a project called "*", which is
-       not a project, rather than reaching the fleet. */
     await fileByHand("op-aaaa1111", {
       role: "operator",
       projects: [WILDCARD_PROJECT, "acme"],
@@ -386,8 +330,6 @@ describe("the projects a key is scoped to", () => {
       "invalid-input",
     );
 
-    /* An admin administers every key the fleet trusts — including the keys of
-       every other project — so a scope on one says nothing it could enforce. */
     expect(error.detail).toContain("admin");
     await expect(getOperator(clock.ctx, "op-aaaa1111")).resolves.toBeNull();
   });
@@ -411,8 +353,6 @@ describe("the projects a key is scoped to", () => {
   });
 
   it("reads a hand-written record that claims BOTH as scoped, which is the safe direction", async () => {
-    /* Only reachable by writing to the bucket by hand, since the surface above
-       refuses it — and narrowing is the direction to be wrong in. */
     await fileByHand("op-aaaa1111", { role: "admin", projects: ["acme"] });
 
     const key = (await getOperator(clock.ctx, "op-aaaa1111")) as TrustedOperator;
@@ -423,9 +363,6 @@ describe("the projects a key is scoped to", () => {
 });
 
 describe("which scope a caller may hand out", () => {
-  /* Read as sets, this is one subset test: an admin's reach is every project, a
-     wildcard key's is every project, a scoped key's is its list, and a
-     scope-LESS operator-tier key's is the empty set. */
   const admin: TrustedOperator = operator("op-aaaa1111", "admin");
   const scopeless: TrustedOperator = operator("op-cccc3333", "operator");
   const scoped: TrustedOperator = { ...operator("op-bbbb2222", "operator"), projects: ["acme"] };
@@ -440,15 +377,10 @@ describe("which scope a caller may hand out", () => {
   });
 
   it("lets a WILDCARD key hand out any project, because it reaches every one", () => {
-    /* Whether it may hand out another WILDCARD is a separate question, and the
-       route's rather than this one's: that grant is an admin's to make. */
     expect(canGrantScope(wildcard, ["globex"])).toBe(true);
   });
 
   it("lets a scope-LESS operator-tier key hand out NOTHING but the nothing it holds", () => {
-    /* Which is what makes its own rotation work and nothing else: the carried
-       -over `undefined` is its own scope, and every named project is a widening
-       from the empty set. */
     expect(canGrantScope(scopeless, undefined)).toBe(true);
     expect(canGrantScope(scopeless, ["acme"])).toBe(false);
     expect(canGrantScope(scopeless, [WILDCARD_PROJECT])).toBe(false);
@@ -467,7 +399,6 @@ describe("which scope a caller may hand out", () => {
 
 describe("which scope may be GRANTED at all, as against merely carried over", () => {
   it("refuses an operator-tier key that names no projects", () => {
-    /* The default-deny, at the one surface both ways into a fleet meet. */
     expect(() => assertGrantableScope({ role: "operator" })).toThrow(/name its projects|projects/);
   });
 
@@ -483,15 +414,13 @@ describe("which scope may be GRANTED at all, as against merely carried over", ()
   });
 });
 
-/* ------------------------------------------------------------------ helpers */
-
 /** An operator key with a distinct public half, which is all the registry keeps. */
 function operator(id: string, role: OperatorRole = "admin"): TrustedOperator {
   return { id, publicKey: { kty: "OKP", crv: "Ed25519", x: `x-for-${id}` }, role };
 }
 
 /**
- * An operator record written STRAIGHT TO THE BUCKET, bypassing every rule
+ * An operator record written STRAIGHT TO the BUCKET, bypassing every rule
  * `trustOperator` enforces.
  *
  * That is the only way the shapes below exist at all — a record with no role, a

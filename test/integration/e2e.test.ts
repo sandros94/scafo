@@ -1,38 +1,4 @@
-/*
- * The whole single-node product loop against real infrastructure: a SeaweedFS
- * bucket holding the registry, a Caddy the daemon drives through its admin API,
- * celld running the builds, and the built `scafo` CLI driving all of it from the
- * host the way an operator would.
- *
- * The topology mirrors one real VPS. Caddy and the daemon SHARE a network
- * namespace, which is what makes the loopback contract real: the runtime
- * processes only ever listen on 127.0.0.1, Caddy dials them there, and the daemon
- * reaches Caddy's admin API on the same loopback. The store is a separate
- * container, reached over a docker network by its address on it — so the daemon
- * uses the container-internal endpoint while the test process, on the host, uses
- * the published one.
- *
- * What is not about the topology — the images and deadlines, the bucket, the
- * staged fixture application, requests that can set a `Host` header, the built
- * CLI, the poll — lives in `_harness.ts` and is shared with the Traefik suite,
- * which mirrors this one with the other ingress in Caddy's place. What stays
- * here is what this suite is: its containers, and what it asserts about them.
- *
- * Skipped unless SCAFO_E2E=1, because it is minutes rather than seconds:
- *
- *   SCAFO_E2E=1 pnpm vitest run test/integration/e2e.test.ts
- *
- * Every HTTP assertion polls until a deadline, because a change only reaches
- * Caddy after the reconcile pass that observes it. Any timeout dumps the daemon
- * container's logs into the failure — they are the only account of what the node
- * was doing.
- *
- * The Caddy fixture puts its admin API on `0.0.0.0:2019` so the host can read it
- * too, and therefore has to name the origins it accepts: Caddy only allows a
- * loopback admin's own origin implicitly, and the driver presents one on every
- * call. An operator exposing the admin API beyond loopback owes Caddy the same
- * setting.
- */
+/* End-to-end single-node Caddy deployment path. Caddy and daemon share a network namespace; runtimes bind loopback. */
 
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -140,15 +106,13 @@ let buildV2: string;
 let buildCi: string;
 
 const tmpDirs: string[] = [];
-/** Everything the daemon container has written, kept for failure messages. */
+/** Daemon output retained for failure context. */
 const daemonLog: string[] = [];
 /** Raw observations the report is written from; printed once at the end. */
 const observed: Record<string, unknown> = {};
 
 describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   beforeAll(async () => {
-    /* Built first: the daemon container runs `dist/` off the bind-mounted
-       worktree, so a stale build would test the previous commit. */
     await buildRepo();
 
     store = await startStore(BUCKET_SETTINGS);
@@ -160,10 +124,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         { source: join(FIXTURES, "caddy.json"), target: "/etc/caddy/config.json" },
       ])
       .withCommand(["caddy", "run", "--config", "/etc/caddy/config.json"])
-      /* The daemon's own port is published here: it has no network of its own. */
       .withExposedPorts(CADDY_HTTP_PORT, CADDY_ADMIN_PORT, NODE_PORT)
-      /* Waiting on the admin API rather than on every published port: nothing
-         listens on the daemon's until the daemon itself starts. */
       .withWaitStrategy(
         Wait.forHttp(`/config/apps/http/servers/scafo/routes`, CADDY_ADMIN_PORT).forStatusCode(200),
       )
@@ -174,8 +135,6 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
     apiPort = caddy.getMappedPort(NODE_PORT);
 
     daemon = await new GenericContainer(NODE_IMAGE)
-      /* The whole point of the topology: Caddy's `127.0.0.1:<port>` upstream
-         dials reach the celld processes, and the daemon reaches Caddy's admin. */
       .withNetworkMode(`container:${caddy.getId()}`)
       .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "rw" }])
       .withWorkingDir("/work")
@@ -187,20 +146,11 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         SCAFO_S3_SECRET_KEY: SECRET_KEY,
         SCAFO_S3_REGION: REGION,
         SCAFO_NODE_ID: NODE_ID,
-        /* The listener below binds every interface, which the daemon refuses
-           without being told what network that is. Inside a container of its
-           own, on a private docker network, it is the trusted-network case. */
         SCAFO_TRANSPORT: "none",
-        /* Container-local, and explicitly so: the working directory is this
-           repository bind-mounted at /work, and the node's identity must not be
-           written into a checkout. */
         SCAFO_STATE_DIR: "/var/lib/scafo",
         SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
         SCAFO_CADDY_ADMIN: `http://127.0.0.1:${String(CADDY_ADMIN_PORT)}`,
-        /* Peers reach a single node on loopback; without this the advertised
-           host would be the wildcard the listener binds. */
         SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
-        /* Keep Celld on the image's builder despite the bind-mounted worktree. */
         CELLD_ESBUILD: "/usr/local/bin/esbuild",
       })
       .withCommand([
@@ -210,8 +160,6 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         "--listen",
         `0.0.0.0:${String(NODE_PORT)}`,
       ])
-      /* Consumed from the first byte, so the logs survive even a start that
-         never satisfies the wait strategy. */
       .withLogConsumer((stream: Readable) => {
         stream.on("data", (chunk) => daemonLog.push(String(chunk)));
         stream.on("err", (chunk) => daemonLog.push(String(chunk)));
@@ -222,8 +170,6 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
 
     registry = registryAt(storeFromHost, BUCKET_SETTINGS);
 
-    /* Its own container on the same bridge, so the daemon runs the real discovery
-       and key-set requests against a URL it was handed in a token. */
     issuer = await startStubIssuer({
       network: BRIDGE_NETWORK,
       startupTimeoutMs: BOOT_DEADLINE_MS,
@@ -232,7 +178,6 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   }, SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
-    /* Stopped before Caddy: the daemon lives in Caddy's network namespace. */
     await daemon?.stop().catch(() => {});
     await caddy?.stop().catch(() => {});
     await issuer?.stop();
@@ -280,8 +225,6 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expectCleanExit(result);
 
       operatorKey = JSON.parse(await readFile(keyPath, "utf8")) as OperatorKeyFile;
-      /* Filed under the OPERATORS prefix, in a keyspace of its own: an operator
-         key is not a machine of the fleet and no longer looks like one. */
       const record = await readJson<OperatorRecord>(registry, operatorRecordKey(operatorKey.id));
       expect(record?.value.publicKey.x).toBe(operatorKey.publicKey.x);
       expect(await readJson(registry, nodeKey(operatorKey.id))).toBeNull();
@@ -349,12 +292,6 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   it(
     "answers the fleet's API at the platform domain's own apex, through Caddy",
     async () => {
-      /*
-       * THE APEX IS THE FLEET'S FRONT DOOR. `*.scafo.test` is one label and
-       * never `scafo.test` itself, so nothing served this name before: the node
-       * routes it to its own daemon, and any node of the fleet answers any call
-       * there because the registry is in the bucket.
-       */
       const health = await until(
         `${PLATFORM_DOMAIN} to answer the daemon's health through Caddy`,
         DEADLINE_MS,
@@ -368,19 +305,14 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expect(JSON.parse(health.body)).toMatchObject({ ok: true, node: NODE_ID });
       observed.apexHealth = JSON.parse(health.body);
 
-      /* A path the API does not have is the API's own miss. */
       const missing = await httpGet(caddyHttpPort, "/v1/nope", { host: PLATFORM_DOMAIN });
       expect(missing.status).toBe(404);
       expect(missing.body).not.toContain("urn:scafo:not-found");
 
-      /* The apex takes nothing away from the applications under it. */
       const app = await httpGet(caddyHttpPort, "/", { host: apexHost() });
       expect(app.status).toBe(200);
       expect(app.body).toContain(`"v1"`);
 
-      /* THE CERTIFICATE PATH: the wildcard does not cover this name, so the
-         on-demand ask is the only thing that can mint it one — and it says yes,
-         with no environment, no claim and no process behind it. */
       const ask = await httpGet(apiPort, `/v1/ingress/ask?domain=${PLATFORM_DOMAIN}`, {});
       expect(ask.status).toBe(200);
     },
@@ -390,14 +322,6 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   it(
     "NEVER reaches /v1/storage or the pull-provider route through that apex",
     async () => {
-      /*
-       * THE ONE NON-NEGOTIABLE RULE OF THIS SURFACE, asserted where it is
-       * enforced. `/v1/storage` carries the certificates, the ACME account key
-       * and the issuance locks a colocated ingress persists through this node,
-       * behind a shared token; `/v1/ingress/traefik` is the node's whole routing
-       * map. Both are for a caller on this machine, and the exclusion is CADDY'S
-       * — the daemon behind it is never asked.
-       */
       for (const path of [
         "/v1/storage",
         "/v1/storage/list?prefix=",
@@ -407,15 +331,11 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         const blocked = await httpGet(caddyHttpPort, path, { host: PLATFORM_DOMAIN });
 
         expect(blocked.status, `${path} through the apex`).toBe(404);
-        /* The ingress's own denial: no problem document, no header the daemon
-           puts on its answers, and therefore nothing that reached it. */
         expect(blocked.body, `${path} through the apex`).not.toContain("urn:scafo:");
         expect(blocked.body, `${path} through the apex`).toBe("");
       }
       observed.apexDenied = ["/v1/storage", "/v1/ingress/traefik"];
 
-      /* The surface itself is untouched and still answers a local caller — on
-         the node's own listener, which is where it is meant to be reached. */
       const local = await httpGet(apiPort, "/v1/storage/list?prefix=", {});
       expect(local.status).toBe(401);
       expect(local.body).toContain("urn:scafo:");
@@ -487,13 +407,6 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
     STEP_TIMEOUT_MS,
   );
 
-  /*
-   * From here on the caller is a CI job, not an operator. Everything above ran
-   * with an operator key on disk and, for the registry-facing commands, the
-   * bucket's credentials in the environment; a CI job has neither, and the
-   * assertions below are worth nothing unless it keeps not having them.
-   */
-
   it(
     "records the trust policy that lets a CI job deploy without a key of ours",
     async () => {
@@ -519,8 +432,6 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         { iss: issuer.iss, aud: "scafo", subjects: [WORKLOAD_GLOB] },
       ]);
 
-      /* And an operator can read back what they set, glob intact — the pattern
-         is the thing being checked, so it is printed verbatim. */
       const shown = await runCli(["trust", "show", "--project", PROJECT], storeEnv());
       expectCleanExit(shown);
       expect(shown.output).toContain(WORKLOAD_GLOB);
@@ -537,13 +448,6 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       const token = await issuer.mint({ sub: WORKLOAD_SUBJECT });
       const args = [...deployArgs(await stageApp("v3"), CI_ENVIRONMENT), "--token", token];
 
-      /*
-       * The claim this whole step exists to make. The CI side holds ONE secret,
-       * the token it was minted, and it is short-lived and scoped to a subject:
-       * no operator key file is named, and the bucket's credentials are not in
-       * the environment the command runs with. If either leaked in, this deploy
-       * would still pass while proving nothing.
-       */
       expect(args).not.toContain("--key");
       const ciEnv: Record<string, string> = {};
       expect(Object.keys(ciEnv).filter((name) => name.startsWith("SCAFO_"))).toEqual([]);
@@ -554,8 +458,6 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       observed.workloadDeployOutput = result.output;
 
       expectCleanExit(result);
-      /* Accepted (202), built and published by celld. Every poll re-presented
-         the same token, which a workload token — unlike a node token — survives. */
       expect(result.output, daemonLogTail()).toContain("deployed");
 
       buildCi = buildIdOf(result.output);
@@ -566,12 +468,9 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       const answer = await untilServes(ciHost(), "v3");
       expect(JSON.parse(answer.body).url).toContain(ciHost());
 
-      /* The environment the CI job named did not exist before this deploy. */
       const environment = await getEnvironment(registry, PROJECT, CI_ENVIRONMENT);
       expect(environment.deployment).toMatchObject({ revision: 2 });
 
-      /* And production is untouched: a token scoped to one project deploying a
-         new environment of it must not disturb what was already running. */
       await untilServes(apexHost(), "v2");
     },
     STEP_TIMEOUT_MS,
@@ -590,15 +489,9 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       observed.hostileDeployCode = result.code;
 
       expect(result.code, result.output).not.toBe(0);
-      /*
-       * Distinguishable on purpose, and the only rejection that is: the token
-       * held up as authentication and the project simply does not admit it,
-       * which is authorization and something the caller must be able to act on.
-       */
       expect(result.output).toContain("urn:scafo:trust-mismatch");
       expect(result.output).toContain(HOSTILE_SUBJECT);
 
-      /* Nothing was built and the deployment notice did not advance. */
       const environment = await getEnvironment(registry, PROJECT, CI_ENVIRONMENT);
       expect(environment.deployment).toMatchObject({ revision: 2 });
       await untilServes(ciHost(), "v3");
@@ -606,8 +499,6 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
     STEP_TIMEOUT_MS,
   );
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 function envHost(): string {
   return `${PROJECT}--${ENVIRONMENT}.${PLATFORM_DOMAIN}`;
@@ -675,19 +566,12 @@ async function caddyRoutes(): Promise<Array<Record<string, unknown>>> {
   return Array.isArray(body) ? (body as Array<Record<string, unknown>>) : [];
 }
 
-/**
- * Polls until `probe` returns a value. A deadline that runs out fails with the
- * daemon container's logs attached, because nothing else says what the node did.
- */
+/** Polls until `probe` returns a value, attaching daemon logs on timeout. */
 function until<T>(what: string, deadlineMs: number, probe: () => Promise<T | null>): Promise<T> {
   return untilPolled(what, deadlineMs, probe, { context: daemonLogTail });
 }
 
-/**
- * Fails with everything the command printed, and with what the node was doing
- * while it ran: a CLI that exits non-zero has already reported why, and the
- * reason is almost always on the other side of the request it made.
- */
+/** Fails with command output and daemon logs. */
 function expectCleanExit(result: CommandResult): void {
   expect(result.code, `${result.output}\n${daemonLogTail()}`).toBe(0);
 }

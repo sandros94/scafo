@@ -1,12 +1,4 @@
-/*
- * Retiring an environment, taking it back, and the rule that decides when it may
- * finally be deleted.
- *
- * The refusals are asserted as carefully as the successes: an operator who is
- * told "no" has to be told which of the three routes through applies and, when
- * the answer is "wait", how long is left. A refusal that only names the rule it
- * enforced sends them looking for documentation.
- */
+/* Retiring an environment, taking it back, and the rule that decides when it may finally be deleted. */
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { recordDeployment } from "../src/core/registry/_deployment.ts";
@@ -97,7 +89,7 @@ describe("retiring and taking it back", () => {
 
     const second = await retireEnvironment(clock.ctx, PROJECT, "prod");
 
-    /* A NEW decision, and it gets the whole grace: the environment went back
+    /* A new decision, and it gets the whole grace: the environment went back
        into service in between, and what was learned about the first retirement
        says nothing about this one. */
     expect(second.retiredAt).not.toBe(first.retiredAt);
@@ -270,7 +262,7 @@ describe("what it refuses, and what it tells the operator to do about it", () =>
   });
 
   it("still refuses an environment that is not there, before any of this", async () => {
-    /* Force is about the STATE of an environment, not about conjuring one: a
+    /* Force is about the state of an environment, not about conjuring one: a
        typo in a name must not be answered as a successful deletion. */
     await rejectsWith(
       () => deleteEnvironment(clock.ctx, PROJECT, "ghost", lease, { force: true }),

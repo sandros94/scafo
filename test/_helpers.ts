@@ -1,8 +1,4 @@
-/*
- * Shared fixtures for the test suites: a seeded PRNG and slug generator, a
- * manual clock, a fault-injecting store wrapper, and the registry-wide
- * referential checks every kill-injection run is asserted against.
- */
+/* Shared fixtures: seeded input, manual time, injected store faults, and registry invariants. */
 
 import { expect } from "vitest";
 import { ScafoError, type ScafoErrorCode } from "../src/core/error.ts";
@@ -162,7 +158,7 @@ export class FaultStore implements CasStore {
 }
 
 /**
- * Wraps a {@link CasStore} to observe HOW its reads run — how many were in
+ * Wraps a {@link CasStore} to observe how its reads run — how many were in
  * flight at once, and in what order they started — and to hold one key's read
  * back or fail it outright. Writes and listings pass straight through.
  *
@@ -173,7 +169,7 @@ export class FaultStore implements CasStore {
 export class ObservingStore implements CasStore {
   /** Most reads in flight at one moment, since the last {@link ObservingStore.reset}. */
   peakReads: number = 0;
-  /** Keys read since then, in the order the reads STARTED. */
+  /** Keys read since then, in the order the reads started. */
   reads: string[] = [];
   /** Milliseconds a key's read waits before it answers. */
   readonly delays: Map<string, number> = new Map();

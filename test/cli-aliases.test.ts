@@ -1,15 +1,3 @@
-/*
- * The old names, kept alive until the surface goes public.
- *
- * `scafo up` is now `scafo sail` and `scafo keygen` is now `scafo operator
- * keygen`. Both old names go on working, both are HIDDEN from help — a rename
- * that advertises the name it replaced teaches it to somebody who never typed it
- * — and both say so exactly once, so the person running a script that predates
- * the rename learns what to change it to.
- *
- * These cases and the aliases themselves are deleted together at launch.
- */
-
 import { describe, expect, it } from "vitest";
 import { deprecatedAlias } from "../src/cli/_utils.ts";
 import { keygenAlias, operator } from "../src/cli/commands/operator.ts";
@@ -105,5 +93,5 @@ describe("the two aliases this wave ships", () => {
 });
 
 function warn(): void {
-  /* Swallowed: what the notice SAYS has its own case above. */
+  /* Swallowed: what the notice says has its own case above. */
 }

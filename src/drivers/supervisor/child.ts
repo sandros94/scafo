@@ -13,14 +13,8 @@ import { assertProcessGroups, processGroupId, stopProcessGroup } from "../_proce
 /** Time a stopped process is given between `SIGTERM` and `SIGKILL`. */
 export const DEFAULT_GRACE_MS: number = 30_000;
 
-/**
- * Runs supervised processes as children of the daemon. Statuses of exited
- * processes are kept until their id is started again, so a caller that polls
- * still learns how a process ended.
- *
- * Nothing here restarts anything: an exit the supervisor did not ask for is
- * reported through {@link Supervisor.onExit} and the policy is the caller's.
- */
+/** Runs daemon child processes. Exited status persists until restart; restart
+    policy remains with the caller. */
 export function createChildSupervisor(): Supervisor {
   assertProcessGroups();
   const supervised = new Map<string, Supervised>();
@@ -38,8 +32,7 @@ export function createChildSupervisor(): Supervisor {
       const child = spawn(spec.command, spec.args, {
         cwd: spec.cwd,
         env: spec.env,
-        /* One owned group: stop can address every worker this runtime creates,
-           not only the direct child whose pid the daemon received. */
+        /* Own a group so stop reaches runtime workers too. */
         detached: true,
         /* TODO: capture stdout/stderr per process instead of inheriting the
            daemon's streams — output cannot be attributed to a process today. */
@@ -80,8 +73,7 @@ export function createChildSupervisor(): Supervisor {
         child.on("error", (cause) => {
           /* Errors after a successful spawn are reported by the exit that follows. */
           if (spawned) return;
-          /* The process never ran: drop it so its id is free for another attempt,
-             and mark it so the exit that may follow reaches no listener. */
+          /* Free an unstarted id and suppress any following exit notification. */
           entry.selfInflicted = true;
           supervised.delete(spec.id);
           leaderExit.resolve(null);
@@ -106,8 +98,7 @@ export function createChildSupervisor(): Supervisor {
       try {
         await cleanup;
       } catch (error) {
-        /* The status stays running until teardown is confirmed. Do not pin a
-           rejected attempt: quarantined callers retry stop on a later pass. */
+        /* Keep running status and allow a later stop retry until teardown confirms. */
         if (entry.cleanup === cleanup) entry.cleanup = undefined;
         throw error;
       }

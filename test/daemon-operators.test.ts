@@ -1,18 +1,4 @@
-/*
- * `/v1/operators`: the surface an operator administers a fleet's trusted keys
- * through, and the only routes of the API that a NODE's own token cannot reach.
- *
- * Everything else authenticated accepts any key the registry holds, because a
- * node calling a peer and an operator calling a node are the same kind of caller
- * there. Key administration is not: a node daemon that has been taken over must
- * not be able to add an operator to the installation that runs it, so these
- * routes ask what the verified id IS as well as that it signed. A node's token
- * authenticates and is then refused — `auth-scope`, which is authorization —
- * while a workload's OIDC token is not a node token at all and never reaches
- * that question.
- *
- * The app is invoked through its fetch interface, so nothing binds a socket.
- */
+/* `/v1/operators` administration requires an operator token, not a node token. */
 
 import type { H3 } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
@@ -73,9 +59,6 @@ beforeEach(async () => {
     publicKey: { kty: "OKP", crv: "Ed25519", x: node.publicKey.x },
     addresses: { internal: "10.0.0.4", apiPort: 7400 },
   });
-  /* Role-LESS on purpose: it is what every key an older installation trusts
-     looks like, and it must read as an admin. The tiered cases below file
-     their own keys explicitly. */
   await trust(OPERATOR_ID, operator);
 
   app = createNodeApp({
@@ -97,8 +80,6 @@ describe("GET /v1/operators", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as { operators: TrustedOperator[] };
     expect(body.operators.map((entry) => entry.id)).toEqual([OPERATOR_ID, SECOND_ID]);
-    /* The public half is read back, so a caller can tell WHICH key landed rather
-       than only that an id is trusted. */
     expect(body.operators[0]?.publicKey.x).toBe(operator.publicKey.x);
   });
 });
@@ -153,8 +134,6 @@ describe("what tier a POST may grant", () => {
     if (status === 200) {
       await expect(getOperator(clock.ctx, THIRD_ID)).resolves.toMatchObject({ role: wanted });
     } else {
-      /* Authorization, not authentication: the caller proved which key it holds,
-         so there is nothing left to withhold and the refusal names the rule. */
       const problem = (await response.json()) as { type: string; detail?: string };
       expect(problem.type).toBe("urn:scafo:auth-scope");
       expect(await getOperator(clock.ctx, THIRD_ID)).toBeNull();
@@ -168,8 +147,6 @@ describe("what tier a POST may grant", () => {
       body: JSON.stringify(scopedHalf(SECOND_ID, await generateJWK("EdDSA", { kid: SECOND_ID }))),
     });
 
-    /* Even from an admin: a key is added at the lowest tier unless the caller
-       said otherwise, so an extra deploy key is never a second administrator. */
     await expect(getOperator(clock.ctx, SECOND_ID)).resolves.toMatchObject({ role: "operator" });
   });
 
@@ -186,8 +163,6 @@ describe("what tier a POST may grant", () => {
       }),
     });
 
-    /* A replacement inherits what it replaces — never more, because the caller's
-       own tier is the ceiling either way. */
     await expect(getOperator(clock.ctx, THIRD_ID)).resolves.toMatchObject({
       role: "operator",
       supersedes: SECOND_ID,
@@ -207,8 +182,6 @@ describe("what tier a POST may grant", () => {
       }),
     });
 
-    /* Otherwise lineage would be an escalation: a key claiming to supersede an
-       admin would be authorized to revoke that admin. */
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
     expect(await getOperator(clock.ctx, THIRD_ID)).toBeNull();
@@ -251,8 +224,6 @@ describe("who a DELETE may take away", () => {
       headers: await asKey(THIRD_ID, heir),
     });
 
-    /* The contract half of a rotation, and the only removal an operator-tier
-       key is ever authorized to make. */
     expect(response.status).toBe(200);
     expect(await getOperator(clock.ctx, SECOND_ID)).toBeNull();
   });
@@ -273,12 +244,6 @@ describe("who a DELETE may take away", () => {
   });
 
   it("REFUSES a lineage whose removal would leave the fleet with no admin at all", async () => {
-    /*
-     * The one way an authorized removal could still strand a fleet: the only
-     * admin deliberately registers an operator-tier successor, which is then
-     * entitled by lineage to revoke it. Allowed by the tier rules, refused by
-     * the registry — nothing would be able to grant an admin afterwards.
-     */
     const heir = await generateJWK("EdDSA", { kid: SECOND_ID });
     await trustAs(SECOND_ID, heir, "operator", OPERATOR_ID);
 
@@ -302,9 +267,6 @@ describe("who a DELETE may take away", () => {
       headers: await asOperator(),
     });
 
-    /* Self-revocation is the one removal nothing could verify afterwards, so it
-       is refused whatever the caller's tier — and it is checked first, which is
-       why this is a 400 rather than the registry's last-admin 409. */
     expect(response.status).toBe(400);
     await expect(getOperator(clock.ctx, OPERATOR_ID)).resolves.toMatchObject({ role: "admin" });
   });
@@ -312,18 +274,12 @@ describe("who a DELETE may take away", () => {
 
 describe("the escalation this whole shape exists to stop", () => {
   it("a stolen operator key cannot lock the admins out", async () => {
-    /*
-     * The state before this wave: every trusted key was equal, so ONE stolen
-     * deploy key could revoke every other operator and own the fleet. What the
-     * tiers buy is that the same theft now reaches nothing above itself.
-     */
     const stolen = await generateJWK("EdDSA", { kid: SECOND_ID });
     await trustAs(SECOND_ID, stolen, "operator");
     const colleague = await generateJWK("EdDSA", { kid: THIRD_ID });
     await trustAs(THIRD_ID, colleague, "operator");
     const headers = (): Promise<Record<string, string>> => asKey(SECOND_ID, stolen);
 
-    /* It can add keys — but only at its own tier. */
     const escalated = await app.request("/v1/operators", {
       method: "POST",
       headers: { ...(await headers()), "content-type": "application/json" },
@@ -334,22 +290,18 @@ describe("the escalation this whole shape exists to stop", () => {
     });
     expect(escalated.status).toBe(403);
 
-    /* It cannot revoke the admin that could revoke IT. */
     const againstAdmin = await app.request(`/v1/operators/${OPERATOR_ID}`, {
       method: "DELETE",
       headers: await headers(),
     });
     expect(againstAdmin.status).toBe(403);
 
-    /* Nor an unrelated operator, so no colleague is locked out either. */
     const againstPeer = await app.request(`/v1/operators/${THIRD_ID}`, {
       method: "DELETE",
       headers: await headers(),
     });
     expect(againstPeer.status).toBe(403);
 
-    /* Everything it could not touch is exactly where it was, so the admin's
-       revocation of the stolen key is still available. */
     expect((await listOperators(clock.ctx)).map((entry) => entry.id)).toEqual([
       OPERATOR_ID,
       SECOND_ID,
@@ -400,7 +352,6 @@ describe("what the fleet records about its own keys", () => {
       }),
     });
 
-    /* An audit line says a key WAS trusted; a refusal changed nothing. */
     expect(auditEvents()).toEqual([]);
   });
 });
@@ -416,7 +367,6 @@ describe("POST /v1/operators", () => {
     });
 
     expect(added.status).toBe(200);
-    /* The point of the route: a key registered through it is a key that works. */
     const probe = await app.request("/v1/operators", {
       headers: { authorization: `Bearer ${await signNodeToken(minted.privateKey, SECOND_ID)}` },
     });
@@ -521,9 +471,6 @@ describe("DELETE /v1/operators/:id", () => {
       headers: await asOperator(),
     });
 
-    /* Self-revocation is the one removal that cannot be verified afterwards: the
-       caller would have to prove the fleet still works with a key it just threw
-       away. Rotation proves the new key first, which is the whole ordering. */
     expect(response.status).toBe(400);
     const problem = (await response.json()) as { type: string; detail?: string };
     expect(problem.type).toBe("urn:scafo:invalid-input");
@@ -532,10 +479,6 @@ describe("DELETE /v1/operators/:id", () => {
   });
 
   it("CANNOT empty the trusted set at all, because the last key is always the caller's", async () => {
-    /* The caller is by definition one of the trusted keys, so the self-refusal
-       above is also what makes a fleet with zero operators unreachable through
-       this route. The registry's own last-key guard still stands underneath it,
-       for the bucket-side path that has no caller to compare against. */
     const response = await app.request(`/v1/operators/${OPERATOR_ID}`, {
       method: "DELETE",
       headers: { authorization: `Bearer ${await signNodeToken(operator.privateKey, OPERATOR_ID)}` },
@@ -577,8 +520,6 @@ describe("who may reach /v1/operators at all", () => {
       headers: { authorization: `Bearer ${await signNodeToken(node.privateKey, NODE_ID)}` },
     });
 
-    /* Authenticated and then refused: the node proved who it is, and who it is
-       has no business administering the operators of the fleet it belongs to. */
     expect(response.status).toBe(403);
     const problem = (await response.json()) as { type: string; detail?: string };
     expect(problem.type).toBe("urn:scafo:auth-scope");
@@ -586,9 +527,6 @@ describe("who may reach /v1/operators at all", () => {
   });
 
   it.each(calls)("refuses a workload's OIDC token: %s %s", async (_method, path, init) => {
-    /* A CI token is an RS256 JWS from an issuer, and these routes never consult
-       the OIDC verifier at all — so it is simply not a node token, and lands in
-       the same rejection a forged one does. */
     const response = await app.request(path, {
       ...init,
       headers: { authorization: `Bearer ${await workloadToken()}` },
@@ -612,10 +550,8 @@ describe("who may reach /v1/operators at all", () => {
   });
 });
 
-/* ------------------------------------------------------------------ helpers */
-
 /**
- * The public half of a keypair, as the trust route is given one — with NO role,
+ * The public half of a keypair, as the trust route is given one — with no role,
  * which is the ordinary body and the one that takes the route's own default.
  */
 function publicHalf(id: string, keys: Keypair): Omit<TrustedOperator, "role"> {
@@ -628,7 +564,7 @@ function publicHalf(id: string, keys: Keypair): Omit<TrustedOperator, "role"> {
  *
  * Used wherever the tier a body lands at is `operator`, and left off wherever it
  * is `admin`, which is never scoped. What that refusal looks like on its own is
- * `test/operator-tenancy.test.ts`; these cases are about the TIERS.
+ * `test/operator-tenancy.test.ts`; these cases are about the tiers.
  */
 function scopedHalf(id: string, keys: Keypair): Omit<TrustedOperator, "role"> {
   return { ...publicHalf(id, keys), projects: [PROJECT] };

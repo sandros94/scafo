@@ -1,10 +1,6 @@
 /*
- * The seam the daemon reports through: what it stamps an event with, what the
- * bounded ring keeps, what it admits to having dropped, and what a node that is
- * not observing pays for it.
- *
- * The clock is injected, so every `at` here is a value the case chose rather
- * than the moment it ran.
+ * The seam the daemon reports through: what it stamps an event with, what the bounded ring keeps,
+ * what it admits to having dropped, and what a node that is not observing pays for it.
  */
 
 import { describe, expect, it } from "vitest";
@@ -164,7 +160,7 @@ describe("draining, which is the flusher's reader", () => {
     expect(ids(first.events)).toEqual(["id-2", "id-3", "id-4", "id-5"]);
     expect(first.dropped).toBe(2);
 
-    /* Since the LAST DRAIN, never since the seam was made: the flusher records
+    /* Since the last DRAIN, never since the seam was made: the flusher records
        each flush's own loss, and a total would be counted again every time. */
     for (let index = 6; index < 11; index++) {
       observe.emit({ type: "runtime.started", processId: `id-${String(index)}` });
@@ -212,8 +208,6 @@ describe("a seam that is off", () => {
     expect(observe.nowMs() - before).toBe(700);
   });
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 /** The identities of the events a case emitted, in order. */
 function ids(events: ObservedEvent[]): string[] {

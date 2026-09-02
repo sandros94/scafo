@@ -1,12 +1,4 @@
-/*
- * The problem document a failure crosses a process boundary as, and the failure
- * it is read back into.
- *
- * The code is the contract — messages may change, codes may not — and it only
- * means anything if it survives the round trip. A client that re-labelled every
- * failure answer with a code of its own would hand its caller the one thing the
- * API is careful to keep distinguishable, already thrown away.
- */
+/* The problem document a failure crosses a process boundary as, and the failure it is read back into. */
 
 import { describe, expect, it } from "vitest";
 import {

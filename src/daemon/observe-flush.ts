@@ -1,37 +1,6 @@
-/*
- * What takes a node's own observations off the ring and puts them in the bucket,
- * and what takes them out again when they are old enough.
- *
- * ONE OWNER, ONE DRAIN. The flusher is the only caller of
- * {@link Observability.drain}: it moves the ring's high-water mark, so a second
- * one would take half the events and neither would know it. The daemon builds
- * exactly one, and only while `observability.enabled` is on.
- *
- * WHAT A FLUSH IS: everything drained since the last one, plus a fresh snapshot
- * of the ingress counters when this node counts any, encoded through the codec
- * seam (`src/daemon/observe-records.ts`) and written as ONE plain put of the BYTES
- * that came back, at
- * `_scafo/observe/<node>/<YYYY>/<MM>/<DD>/<HH>/<epochMs>-<seq>.<ext>`. Plain,
- * because a flush is this node's own account of its own past: nothing else
- * writes that key, so there is nothing to serialize against.
- *
- * A FAILED FLUSH LOSES NOTHING IT CAN KEEP. The drained events stay in a pending
- * buffer and go out with the next attempt, at the flush cadence rather than at
- * the drain one — a bucket that is down must not be retried every few seconds.
- * The buffer is BOUNDED ({@link OBSERVE_PENDING_MAX_RECORDS}): past it the oldest
- * records are dropped and counted, because a node whose bucket never comes back
- * must not fill its memory with what it cannot write. The counters are NOT kept
- * across a failure — they are monotonic totals, so the next snapshot supersedes
- * the lost one entirely and only the sample resolution is gone.
- *
- * RETENTION IS THIS NODE'S OWN PREFIX AND NOTHING ELSE. Every so many flushes
- * ({@link OBSERVE_SWEEP_EVERY_FLUSHES}) the sweep lists `_scafo/observe/<node>/`,
- * deletes what is older than {@link OBSERVE_RETENTION_DAYS}, and stops at
- * {@link OBSERVE_SWEEP_MAX_DELETES} — the rest goes next sweep. It never lists or
- * deletes outside its own node segment, so a node cannot take another's history
- * with it, and the listing is what the slow cadence is for: it is one paginated
- * listing of everything that node has kept.
- */
+/* Flushes one node's observation records and optional counters to its bucket
+   prefix. Failed writes retain a bounded event buffer; retention only sweeps
+   that node's prefix. */
 
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { observeKey, observeNodePrefix, parseObserveKey } from "../core/registry/paths.ts";
@@ -53,15 +22,7 @@ import {
 /** Time between flushes, when nothing else has already triggered one. */
 export const OBSERVE_FLUSH_INTERVAL_MS: number = 60_000;
 
-/**
- * Time between drains of the ring.
- *
- * Shorter than the flush interval on purpose, and it is not a second cadence:
- * the ring holds a fixed number of events, and a node that emitted more than
- * that between two flushes would drop the difference. Draining often keeps the
- * ring empty and the pending buffer — which is bounded far higher — is where the
- * events wait. It is also what makes the size trigger below timely.
- */
+/** Ring-drain cadence; the pending buffer prevents ring overflow between flushes. */
 export const OBSERVE_DRAIN_INTERVAL_MS: number = 5_000;
 
 /** Pending records that trigger a flush of their own, ahead of the interval. */
@@ -99,7 +60,7 @@ export interface ObserveFlushStatus {
   swept: number;
 }
 
-/** Where a node's observations go, and what takes the old ones away. */
+/** Bounded observation flushing and retention for one node. */
 export interface ObserveFlusher {
   /**
    * One cycle: drain the ring, and flush when the interval has run or the
@@ -117,7 +78,7 @@ export interface ObserveFlusher {
   status(): ObserveFlushStatus;
   /** Begins draining and flushing on the cadences above. */
   start(): void;
-  /** Stops the cadence. Anything pending stays pending; {@link ObserveFlusher.flush} still writes it. */
+  /** Stops scheduled work; {@link ObserveFlusher.flush} can still write pending records. */
   stop(): void;
 }
 
@@ -148,13 +109,7 @@ export interface ObserveFlusherOptions {
   log?: (message: string) => void;
 }
 
-/**
- * Builds the flusher. Nothing is written until {@link ObserveFlusher.start} is
- * called or {@link ObserveFlusher.flush} is awaited.
- *
- * The clock is the registry's, so the key a flush lands at and the `at` inside
- * it can never come from two different ones.
- */
+/** Builds a flusher; registry clock timestamps both record and key. */
 export function createObserveFlusher(
   registry: RegistryContext,
   opts: ObserveFlusherOptions,
@@ -170,23 +125,20 @@ export function createObserveFlusher(
   const sweepMax = Math.max(1, opts.sweepMaxDeletes ?? OBSERVE_SWEEP_MAX_DELETES);
   const log = opts.log ?? ((message: string): void => console.error(message));
 
-  /* Only ever event records: the flush header and the counters are built at
-     write time, and a failed attempt discards both rather than retrying them. */
+  /* Retry events only; headers and counters are recreated each attempt. */
   let pending: ObserveEventRecord[] = [];
   let ringDropped = 0;
   let pendingDropped = 0;
   let totalRingDropped = 0;
   let totalPendingDropped = 0;
-  /* Counted apart from the flushes that landed, so two attempts in the same
-     millisecond can never be handed the same key. */
+  /* Separate sequence prevents same-millisecond key collisions. */
   let writes = 0;
   let flushes = 0;
   let swept = 0;
   let lastAttemptMs = Number.NEGATIVE_INFINITY;
   let lastFlushAt: string | null = null;
   let lastFailure: string | null = null;
-  /* What the counters last said, so an idle node stops writing identical
-     snapshots once a minute forever. */
+  /* Avoid writing unchanged idle counter snapshots. */
   let lastCounters: string | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
   let inFlight = false;
@@ -204,8 +156,7 @@ export function createObserveFlusher(
         ...event,
       } as ObserveEventRecord);
     }
-    /* The oldest go first: what is still in the buffer is what a reader has the
-       best chance of correlating with something else that is still around. */
+    /* Retain the most recent correlatable events. */
     if (pending.length > pendingMax) {
       const lost = pending.length - pendingMax;
       pending = pending.slice(lost);
@@ -219,9 +170,7 @@ export function createObserveFlusher(
     const deleted: string[] = [];
 
     try {
-      /* Listed under this node's own segment, and every key checked again
-         against it: a sweep must not be able to reach another node's history
-         even if a store answered a listing it was not asked for. */
+      /* Recheck node prefix even if the store returns unexpected keys. */
       for (const key of await store.list(observeNodePrefix(opts.nodeId))) {
         if (deleted.length >= sweepMax) break;
 
@@ -233,8 +182,7 @@ export function createObserveFlusher(
       }
       swept += deleted.length;
     } catch (error) {
-      /* Reported and dropped: retention is housekeeping, and a sweep that could
-         not run costs disk rather than correctness. The next one tries again. */
+      /* Retention failure is logged; the next sweep retries. */
       log(`scafo: observation sweep for node "${opts.nodeId}" failed (${describe(error)})`);
     }
     return deleted;
@@ -296,14 +244,11 @@ export function createObserveFlusher(
     writes++;
     try {
       const encoded = codec.encode(records);
-      /* The bytes go to the store verbatim: a columnar file is not text, and a
-         flush put through a UTF-8 round trip would come back full of replacement
-         characters and stop being one. */
+      /* Persist binary codec output verbatim. */
       await store.put(observeKey(opts.nodeId, at, writes, encoded.extension), encoded.bytes);
     } catch (error) {
       const failure = describe(error);
-      /* Said when the state CHANGES rather than on every attempt: a bucket that
-         is gone would otherwise print a line a minute for as long as it is. */
+      /* Log failure and recovery once per state transition. */
       if (lastFailure === null) {
         log(
           `scafo: observations could not be written (${failure}); ${String(pending.length)} ` +
@@ -323,16 +268,13 @@ export function createObserveFlusher(
     pendingDropped = 0;
     flushes++;
 
-    /* After the write rather than before it: a node that cannot write must not
-       spend its round trips deleting either, and the first flush sweeps so a
-       node coming back from a long stop cleans up without waiting an hour. */
+    /* Sweep only after successful writes; the initial flush sweeps immediately. */
     if ((flushes - 1) % sweepEvery === 0) await sweep();
     return true;
   };
 
   const tick = async (): Promise<void> => {
-    /* Never overlapping: a slow bucket would otherwise have two attempts writing
-       the same pending records under two keys. */
+    /* Single flight prevents duplicate pending records under distinct keys. */
     if (inFlight) return;
     inFlight = true;
 
@@ -373,12 +315,11 @@ export function createObserveFlusher(
 
     start(): void {
       if (timer !== null) return;
-      /* Counted from the start rather than from the epoch, so the first flush is
-         one interval in rather than on the first tick. */
+      /* Start flush cadence after one full interval. */
       lastAttemptMs = nowDate(registry).getTime();
 
       timer = setInterval(() => void tick(), drainIntervalMs);
-      /* The loop must never be the reason the process stays alive. */
+      /* Timers must not keep the process alive. */
       const handle = timer as { unref?: () => void };
       handle.unref?.();
     },
@@ -393,11 +334,7 @@ export function createObserveFlusher(
 
 /* ------------------------------------------------------------------ internal */
 
-/**
- * What makes two counter snapshots comparable: everything but the moment they
- * were taken. `at` moves on every flush; the rest only moves when the ingress
- * served something, which is the whole question an idle node is asking.
- */
+/** Counter fields comparable across flush timestamps. */
 function countersShape(record: ObserveCountersRecord): unknown {
   return {
     since: record.since,

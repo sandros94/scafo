@@ -1,12 +1,7 @@
 /*
- * The assisted WireGuard setup: where a node's tunnel keys come from, what its
- * `wg0.conf` says, what it publishes about itself in the registry, and what a
- * node whose transport is a tunnel refuses to boot without.
- *
- * scafo never computes an X25519 key, so neither does this suite: the keypair
- * comes out of a state directory, or out of a `wg` that is a shell script on a
- * temporary PATH. No interface is ever brought up — that needs a kernel module
- * and NET_ADMIN, and is the operator's step by design.
+ * The assisted WireGuard setup: where a node's tunnel keys come from, what its `wg0.conf` says,
+ * what it publishes about itself in the registry, and what a node whose transport is a tunnel
+ * refuses to boot without.
  */
 
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -65,8 +60,6 @@ describe("where a node's tunnel keys come from", () => {
   it("reads the pair the operator already put in the state directory, running nothing", async () => {
     const dir = await stateDir();
     await writeKeys(dir, STORED_PRIVATE, STORED_PUBLIC);
-    /* Nothing on PATH at all: a node whose keys are on disk must never need the
-       tool that made them, so `scafo sail` works on a host without it. */
     await usePath(await emptyDir());
 
     const keys = await ensureWireguardKeys(dir);
@@ -89,15 +82,11 @@ describe("where a node's tunnel keys come from", () => {
       publicKey: SHIM_PUBLIC,
       from: { privateKey: "wg", publicKey: "wg" },
     });
-    /* Persisted, so the second call is the read above rather than a new key the
-       peers have never been told about. */
     expect(await readFile(join(dir, WG_PRIVATE_KEY_FILE), "utf8")).toBe(`${SHIM_PRIVATE}\n`);
     expect(await readFile(join(dir, WG_PUBLIC_KEY_FILE), "utf8")).toBe(`${SHIM_PUBLIC}\n`);
   });
 
   it("derives only the public half when the private one was supplied by hand", async () => {
-    /* The documented path: an operator runs `wg genkey > wg-private.key`, and
-       scafo works out the rest without ever choosing key material itself. */
     const dir = await stateDir();
     await writeFile(join(dir, WG_PRIVATE_KEY_FILE), `${STORED_PRIVATE}\n`);
     await useShim();
@@ -128,7 +117,6 @@ describe("where a node's tunnel keys come from", () => {
 
     const error = await rejectsWith(() => ensureWireguardKeys(dir), "invalid-input");
 
-    /* Actionable on its own: the exact command, the exact path, the mode. */
     expect(error.detail).toContain(`wg genkey > ${join(dir, WG_PRIVATE_KEY_FILE)}`);
     expect(error.detail).toContain("chmod 600");
     expect(error.detail).toContain("scafo never derives an X25519 key");
@@ -153,18 +141,11 @@ describe("where a node's tunnel keys come from", () => {
 
       const error = await rejectsWith(() => ensureWireguardKeys(dir), "invalid-input");
       expect(error.detail, contents).toContain("44 base64 characters");
-      /* Left exactly as it was: replacing it would strand every peer that had
-         already been told the key it named. */
       expect(await readFile(join(dir, WG_PRIVATE_KEY_FILE), "utf8"), contents).toBe(contents);
     }
   });
 
   it("refuses two key files that are not halves of one pair", async () => {
-    /*
-     * The quiet, expensive failure: an operator re-runs `wg genkey` and leaves
-     * the old public key behind. Every file looks correct, the node publishes a
-     * key no peer's handshake can complete against, and nothing says so.
-     */
     const dir = await stateDir();
     await writeKeys(dir, SHIM_PRIVATE, STORED_PUBLIC);
     await useShim();
@@ -184,8 +165,6 @@ describe("where a node's tunnel keys come from", () => {
       publicKey: SHIM_PUBLIC,
     });
 
-    /* Without `wg` nothing can tell the two apart, and a host that was given a
-       pair keeps it rather than being refused for what cannot be checked. */
     const unchecked = await stateDir();
     await writeKeys(unchecked, SHIM_PRIVATE, STORED_PUBLIC);
     await usePath(await emptyDir());
@@ -262,8 +241,6 @@ describe("what `scafo sail` reads back, and what it will not do", () => {
       loadWireguardRecord(config, { warn: (m) => said.push(m) }),
     ).resolves.toBeUndefined();
 
-    /* Refusal-over-silence, in its mildest form: nothing reads these, and an
-       operator who wrote them meant something by it. */
     expect(said).toHaveLength(1);
     expect(said[0]).toContain("ignored");
     expect(said[0]).toContain("--transport wireguard");
@@ -286,7 +263,6 @@ describe("what `scafo sail` reads back, and what it will not do", () => {
         "invalid-input",
       );
       expect(error.detail, what).toContain(expected);
-      /* Every way it can be given, so the message needs no documentation. */
       expect(error.detail, what).toContain("SCAFO_WG_");
       expect(error.detail, what).toContain("--wg-");
     }
@@ -320,11 +296,6 @@ describe("what `scafo sail` reads back, and what it will not do", () => {
 
 describe("the addresses a tunnelled node uses", () => {
   it("binds its runtime processes to the tunnel and advertises itself there", async () => {
-    /*
-     * Inside a tunnel the only address that means anything is the tunnel's:
-     * loopback is unreachable from the other nodes, and the wildcard the daemon
-     * listener binds names no interface a peer could dial.
-     */
     const config = await tunnelConfig({ SCAFO_LISTEN: "0.0.0.0:7400" });
 
     expect(config.runtime.bindHost).toBe("10.83.0.1");
@@ -332,8 +303,6 @@ describe("the addresses a tunnelled node uses", () => {
   });
 
   it("puts the daemon listener on the tunnel too, so what it advertises is bound", async () => {
-    /* The three move together or not at all: a node advertising an address its
-       listener never bound refuses every peer that dials it and says nothing. */
     const config = await tunnelConfig();
 
     expect(config.node.listen).toBe("10.83.0.1:7400");
@@ -342,8 +311,6 @@ describe("the addresses a tunnelled node uses", () => {
   });
 
   it("refuses a tunnel address that is a wildcard or covers everything", async () => {
-    /* Neither is an address an interface could hold, and a node registering one
-       as what peers should dial is exactly what the tunnel default prevents. */
     for (const address of ["0.0.0.0/0", "0.0.0.0/24", "::/0", "10.83.0.1/0"]) {
       const error = await rejectsWith(
         () =>
@@ -406,8 +373,6 @@ describe("what a node publishes about its place on the tunnel", () => {
       endpoint: "203.0.113.7:51820",
       address: "10.83.0.1/24",
     });
-    /* The advertised address follows the tunnel too, so a peer dials the node
-       inside it rather than on whatever the listener happened to bind. */
     expect(record.addresses).toEqual({ internal: "10.83.0.1", apiPort: 7400 });
     expect((await getNode(ctx, NODE_A)).wireguard?.publicKey).toBe(STORED_PUBLIC);
   });
@@ -422,13 +387,6 @@ describe("what a node publishes about its place on the tunnel", () => {
   });
 
   it("changes nothing but the tunnel field of a record the daemon already wrote", async () => {
-    /*
-     * `scafo wg init` is run from an operator's shell, not from the daemon's
-     * environment, so the configuration it resolves may not be the one the node
-     * is running on. Rewriting the record from it would move the node's
-     * advertised address along with its tunnel details, and nothing
-     * would report it until a peer failed to reach it.
-     */
     const { ctx } = ctxWith(new MemoryCasStore());
     const running = await loadDaemonConfig({
       env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "none", SCAFO_ADVERTISE: "10.0.0.4:9000" },
@@ -438,7 +396,6 @@ describe("what a node publishes about its place on the tunnel", () => {
       state: nodeState(NODE_A),
     });
 
-    /* A different shell entirely: no advertise, so the defaults would apply. */
     const elsewhere = await loadDaemonConfig({ env: REQUIRED_ENV });
     const after = await publishWireguard(ctx, {
       config: elsewhere,
@@ -500,8 +457,6 @@ describe("what a node publishes about its place on the tunnel", () => {
   });
 
   it("registers a node outright when it has no record yet", async () => {
-    /* `scafo wg init` before the first `scafo sail` is the order the setup
-       instructions ask for, so there is nothing to narrow an update to. */
     const { ctx } = ctxWith(new MemoryCasStore());
     const config = await tunnelConfig();
 
@@ -551,8 +506,6 @@ describe("the interface configuration a node renders", () => {
         "[Peer]",
         `PublicKey = ${STORED_PUBLIC}`,
         "Endpoint = 203.0.113.8:51820",
-        /* The peer's own address alone: allowing the /24 it names would claim
-           every other node's route and leave the winner to section order. */
         "AllowedIPs = 10.83.0.2/32",
         "",
       ].join("\n"),
@@ -568,8 +521,6 @@ describe("the interface configuration a node renders", () => {
   });
 
   it("skips a node that is not on the tunnel yet rather than refusing to render", async () => {
-    /* A fleet is migrated one node at a time, and the ones already tunnelled
-       have to keep reaching each other while the rest catch up. */
     const registry = await fleet();
     await registerNode(registry, plainRecord(NODE_C, "10.0.0.9"));
 
@@ -579,9 +530,6 @@ describe("the interface configuration a node renders", () => {
   });
 
   it("skips a node that was deregistered while the list was being read", async () => {
-    /* The listing and the reads are not one atomic view, and the coordinator
-       deregisters nodes as it reaps them: a node that left mid-render is not a
-       peer, and taking the whole fleet's configuration down over it is worse. */
     const registry = await fleet();
     await registerNode(registry, tunnelRecord(NODE_C, "10.83.0.3/24", "203.0.113.9:51820"));
     await registry.store.del(nodeKey(NODE_C));
@@ -621,8 +569,6 @@ describe("the interface configuration a node renders", () => {
     expect(conf).toContain("AllowedIPs = fd83::3/128");
   });
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 /** A configuration for a node whose transport is the tunnel, with the defaults applied. */
 async function tunnelConfig(env: Record<string, string> = {}): Promise<DaemonConfig> {
@@ -716,8 +662,6 @@ async function useShim(): Promise<void> {
       "#!/bin/sh",
       'case "$1" in',
       `  genkey) echo "${SHIM_PRIVATE}" ;;`,
-      /* `wg pubkey` reads the private key on stdin; draining it keeps the
-         caller's write from failing on a closed pipe. */
       `  pubkey) cat > /dev/null; echo "${SHIM_PUBLIC}" ;;`,
       '  *) echo "unexpected: $*" >&2; exit 1 ;;',
       "esac",

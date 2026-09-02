@@ -1,13 +1,5 @@
-/*
- * The node-local half of the `/v1/storage` surface: the token that guards it,
- * and the locks this process holds for as long as it holds them.
- *
- * A lock only stays a lock while somebody restamps it, so taking one here puts
- * it in a set this process refreshes on a timer and drops the moment a refresh
- * does not land. Nothing about that set survives a restart — a lock a stopped
- * daemon still held is taken over by the next caller once it goes stale, which
- * is the same path a crash takes.
- */
+/* Node-local `/v1/storage` authentication and renewable locks. Failed refreshes
+   drop local ownership; stale locks are recoverable after restart. */
 
 import type { H3Event } from "h3";
 import { isScafoError, ScafoError } from "../core/error.ts";

@@ -1,26 +1,10 @@
-/*
- * Running independent work in parallel WITHOUT letting the fan-out grow with the
- * size of the registry. A read loop over a listing is the shape this exists for:
- * sequential it costs one round trip per item, unbounded it points a whole
- * installation's worth of requests at the store at once.
- */
+/* Bounded parallel work for independent operations. */
 
 /** Work in flight at a time when a caller states no other bound. */
 export const DEFAULT_CONCURRENCY: number = 8;
 
-/**
- * A number of slots, handed out in the order they were asked for.
- *
- * Pass ONE of these to several {@link mapConcurrent} calls to bound them
- * TOGETHER: nested maps that each hold their own bound multiply, and the product
- * is what actually reaches the store.
- *
- * THE SLOT MUST NEVER BE HELD AROUND WORK THAT ASKS FOR ONE. Every holder has to
- * be able to finish without the gate, or a full gate has nothing left to hand
- * the work that would release it. In practice: take a slot at the LEAVES — the
- * reads themselves, or one item's whole sequence of them — and never around the
- * fan-out above them.
- */
+/** FIFO concurrency slots. Share one gate across nested work, but never hold a
+    slot while awaiting work that needs that gate. */
 export interface ConcurrencyGate {
   /** Slots this gate hands out at a time; at least 1. */
   readonly limit: number;
@@ -89,25 +73,8 @@ export function createConcurrencyGate(
   };
 }
 
-/**
- * `items` mapped through `fn`, at most `limit` at a time.
- *
- * ANSWERS IN INPUT ORDER, never in completion order, so what a caller reads out
- * of this does not depend on which store round trip came back first.
- *
- * REJECTS EXACTLY AS A SEQUENTIAL LOOP WOULD. Nothing is STARTED once a failure
- * has been recorded, whatever is already in flight is awaited before this
- * rejects — so no read outlives the call, and no rejection goes unhandled — and
- * the error raised is the one belonging to the LOWEST INDEX that failed. That is
- * the error `for (const item of items) await fn(item)` would have thrown: items
- * are started in order, so every index below a failing one has already been
- * started and is therefore accounted for. What differs is only that items after
- * the failure may have run: `fn` must be free of side effects a caller would
- * notice, which is what "independent reads" means here.
- *
- * `limit` may be a {@link ConcurrencyGate} shared with other calls; read its
- * caveat before nesting one map inside another.
- */
+/** Maps independent work with bounded concurrency. Results preserve input order;
+    failure waits in-flight work and rejects with the lowest failing index. */
 export async function mapConcurrent<T, R>(
   items: readonly T[],
   limit: number | ConcurrencyGate,

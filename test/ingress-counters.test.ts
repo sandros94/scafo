@@ -1,9 +1,6 @@
 /*
- * What the ingress served, counted per environment: which host is read as
- * whose, what a status and a latency land in, and what a snapshot promises.
- *
- * Every input is stated — the lines, the routing, the clock — so nothing here
- * reads a file or waits for anything.
+ * What the ingress served, counted per environment: which host is read as whose, what a status
+ * and a latency land in, and what a snapshot promises.
  */
 
 import { describe, expect, it } from "vitest";
@@ -337,8 +334,6 @@ describe("what the reconcile pass hands over", () => {
     }
   });
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 function counting(): IngressCounters {
   return createIngressCounters({

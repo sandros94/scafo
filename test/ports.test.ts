@@ -1,11 +1,7 @@
 /*
- * The loopback port-pair allocator: which pairs a node hands to the processes it
- * starts, which it must step over because something already listens there, and
- * what happens once its range is used up.
- *
- * A pair is two consecutive ports — public and internal — of one process, so the
- * unit that is allocated, skipped and exhausted is always the pair, never a
- * single port.
+ * The loopback port-pair allocator: which pairs a node hands to the processes it starts, which it
+ * must step over because something already listens there, and what happens once its range is used
+ * up.
  */
 
 import { describe, expect, it } from "vitest";

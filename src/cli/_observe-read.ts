@@ -1,30 +1,5 @@
-/*
- * Internal: reading a fleet's own observations back out of the bucket.
- *
- * STRAIGHT THROUGH THE BUCKET, NEVER THROUGH A NODE. What a node holds in memory
- * is one node's recent past; what is in the bucket is every node's, including the
- * ones that have since been replaced. So `scafo metrics` and `scafo traces` take
- * the same `SCAFO_S3_*` configuration every other registry-reading command does,
- * and no daemon has to be running for them to answer.
- *
- * ONE LISTING, THEN ONLY THE FILES THAT COULD MATTER. The keyspace is calendar
- * ordered under each node, so a key's own timestamp says whether the file can
- * hold anything inside the window — with {@link OBSERVE_READ_SLACK_MS} of slack
- * BELOW it and none above. The slack is one-directional on purpose: a file is
- * written when its records are flushed, so it can be much NEWER than the records
- * in it (a flush that had to be retried carries old events) and is never
- * meaningfully older. Records are then filtered exactly, by their own `at`.
- *
- * NOTHING IN THE WINDOW IS AN ANSWER, NOT A FAILURE. A file whose extension no
- * codec here reads is counted and skipped, so is one whose bytes turn out not to
- * be that encoding at all, a row that is not a record is counted and skipped, and
- * a run that found nothing at all says so in the one way that is actually useful
- * — by naming the switch that would have recorded it.
- *
- * THE OBJECTS ARE READ AS BYTES, because the encoding is columnar. That is what
- * `CasStore.getBytes` is for: `get` applies the UTF-8 decode every record in the
- * registry wants and every observation file would be destroyed by.
- */
+/* Reads persisted observations directly from the bucket. File timestamps narrow
+   reads with lower slack; record timestamps enforce the exact window. */
 
 import { observePrefix, parseObserveKey } from "../core/registry/paths.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
@@ -32,13 +7,7 @@ import { ScafoError } from "../core/error.ts";
 import { DEFAULT_CONCURRENCY, mapConcurrent } from "../core/utils/concurrency.ts";
 import { type ObserveRecord, observeCodecFor } from "../daemon/observe-records.ts";
 
-/**
- * How far before the window a file may have been written and still be read.
- *
- * Sized well past the flush interval, because that is the ordinary lag between a
- * record and the file carrying it. It bounds a listing rather than an answer:
- * every record read is checked against the window itself.
- */
+/** Lower key-timestamp slack; records are filtered against the exact window. */
 export const OBSERVE_READ_SLACK_MS: number = 900_000;
 
 /** Window a reader asks about, in epoch milliseconds. */
@@ -59,11 +28,7 @@ export interface ObserveReadResult {
   files: number;
   /** Rows no record could be read out of. Skipped, never thrown over. */
   malformed: number;
-  /**
-   * Keys nothing here could read: an extension no codec claims, or bytes that
-   * were not the encoding the extension promised. A newer daemon's file, or a
-   * truncated one — either way it is reported rather than failed over.
-   */
+  /** Unsupported-codec or invalid-encoding files, reported but skipped. */
   unreadable: string[];
 }
 
@@ -75,13 +40,7 @@ export interface ObserveReadOptions {
   concurrency?: number;
 }
 
-/**
- * Reads every observation inside a window.
- *
- * Ordered by the record's OWN timestamp and then by the node that wrote it, so
- * two nodes' accounts of the same second interleave the way they happened rather
- * than the way they were listed.
- */
+/** Reads window observations ordered by record time then node. */
 export async function readObservations(
   registry: RegistryContext,
   opts: ObserveReadOptions,
@@ -120,9 +79,7 @@ export async function readObservations(
       try {
         decoded = codec.decode(bytes);
       } catch {
-        /* The extension promised an encoding the bytes are not: a half-written
-           object, or one something else put there. One unreadable file must not
-           take the whole window with it. */
+        /* One unreadable file must not fail the window. */
         unread.push(key);
         return [];
       }
@@ -141,18 +98,7 @@ export async function readObservations(
   };
 }
 
-/**
- * What `--since` meant, in epoch milliseconds.
- *
- * Two forms, because the two questions are different: a DURATION back from now
- * (`90s`, `15m`, `1h`, `7d`) is what an operator looking at right now writes,
- * and an ISO-8601 INSTANT is what someone correlating with an incident writes.
- * Absent means {@link DEFAULT_SINCE_MS} back.
- *
- * Throws `ScafoError("invalid-input")` naming both forms rather than guessing: a
- * `--since` that silently fell back to the default would answer a question
- * nobody asked, and read as if the window were empty.
- */
+/** Parses `--since` as duration or ISO instant; invalid input is refused. */
 export function parseSince(value: string | undefined, nowMs: number): number {
   if (value === undefined || value === "") return nowMs - DEFAULT_SINCE_MS;
 

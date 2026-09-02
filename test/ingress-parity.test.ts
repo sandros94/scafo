@@ -1,19 +1,4 @@
-/*
- * Golden parity between the ingress drivers: whatever a node is serving, Caddy
- * and Traefik are told the SAME THING in their own formats.
- *
- * The two documents have nothing in common to compare directly — one is an array
- * of Caddy routes addressed by `@id`, the other a map of Traefik routers and
- * services — so neither is asserted against the other. Both are reduced to what
- * a routing actually means, a set of `host → upstream` pairs, and it is those
- * that must be identical. A format may change freely; what may not change is
- * which host reaches which process.
- *
- * The fixtures are built by `renderRoutes` rather than written out by hand, so
- * what is compared is routing the product really produces — an environment host
- * with its apex, a claimed domain, several projects at once —
- * rather than a shape chosen to make the comparison easy.
- */
+/* Caddy and Traefik must encode the same routes and API denials. */
 
 import { describe, expect, it } from "vitest";
 import {
@@ -64,11 +49,11 @@ interface Upstream {
   host: string;
   upstream: string;
   /**
-   * WHICH PATHS the entry answers for, in a vocabulary both formats are read
+   * which paths the entry answers for, in a vocabulary both formats are read
    * into: `"all"`, `"all except <prefixes>"` for the API apex, `"only
    * <prefixes>"` for the denial guarding it.
    *
-   * PART OF THE ESSENCE, not an extra. Two ingresses that agreed on the SET of
+   * part OF the ESSENCE, not an extra. Two ingresses that agreed on the set of
    * hosts reaching the daemon but not on which paths reach it through them would
    * be one installation publishing `/v1/storage` — the surface that carries the
    * fleet's TLS private keys — on the internet through one of them and not the
@@ -183,16 +168,11 @@ describe("the two drivers say the same thing about the same routing", () => {
       const traefik = traefikUpstreams(renderTraefikConfig(desired));
 
       expect(traefik).toEqual(caddy);
-      /* And what they agree on is the routing itself, rather than both being
-         empty because both failed to render anything. */
       expect(caddy).toEqual(essenceOf(desired));
     });
   }
 
   it("agrees that an empty routing means an empty routing, in both formats", () => {
-    /* Said in opposite ways, which is the whole difference between the two: a
-       pushed ingress is told by being given no routes to hold, a polled one by
-       being handed a document with nothing in it. */
     expect(renderCaddyRoutes({ routes: [] })).toEqual([]);
     expect(renderTraefikConfig({ routes: [] })).toEqual({});
   });
@@ -204,9 +184,6 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
       const caddy = caddyUpstreams(renderCaddyRoutes(desired));
       const traefik = traefikUpstreams(renderTraefikConfig(desired));
 
-      /* Paths and all: the reduction carries what each apex entry answers for,
-         so two drivers agreeing on the hosts and not on the prefixes cannot
-         pass here. */
       expect(traefik).toEqual(caddy);
       expect(caddy).toEqual(essenceOf(desired));
     });
@@ -234,14 +211,6 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
     }
   });
 
-  /*
-   * THE ONE NON-NEGOTIABLE RULE OF THIS SURFACE. `/v1/storage` carries the
-   * fleet's TLS private keys and `/v1/ingress/traefik` its whole routing map;
-   * both are unauthenticated-or-shared-token surfaces for a COLOCATED caller,
-   * and the apex is a public name. Neither driver may proxy them there — the
-   * exclusion is at the INGRESS, so no reading of a header or a route behind it
-   * can open it.
-   */
   it("NEVER proxies the excluded prefixes through an apex, in either format", () => {
     expect(API_DENIED_PREFIXES).toEqual(["/v1/storage", "/v1/ingress/traefik"]);
     const denied = [...API_DENIED_PREFIXES].sort().join(",");
@@ -255,12 +224,10 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
           const at = driver.filter((leg) => leg.host === apex);
           const where = `${name}: ${format} at ${apex}`;
 
-          /* Everything that DIALS the daemon there answers every path but these. */
           expect(
             at.filter((leg) => leg.upstream !== DENIED).map((leg) => leg.paths),
             where,
           ).toEqual([`all except ${denied}`]);
-          /* And these are answered by the ingress itself, reaching nothing. */
           expect(
             at.filter((leg) => leg.upstream === DENIED).map((leg) => leg.paths),
             where,
@@ -272,9 +239,6 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
 
   it("puts the denial ahead of the apex, in whatever way its own format ranks", () => {
     for (const { name, desired } of API_FIXTURES) {
-      /* Caddy matches in array order and every route is terminal, so the denial
-         is simply written first — and both sit after every host route and
-         after every application host route. */
       const caddy = renderCaddyRoutes(desired).map((route) => route["@id"]);
       for (const apex of desired.api?.hosts ?? []) {
         const deny = caddy.indexOf(`${API_DENY_ID_PREFIX}${apex}`);
@@ -292,8 +256,6 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
         -1,
       );
       expect(firstTail, name).toBeGreaterThan(lastHost);
-      /* Traefik scores rules rather than reading an array, so the rank is
-         stated: the denial above the apex. */
       for (const [key, router] of Object.entries(
         renderTraefikConfig(desired).http?.routers ?? {},
       )) {
@@ -309,9 +271,6 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
   });
 
   it("sends the denial to a service that reaches nothing, and declares no server for it", () => {
-    /* A router naming a service nothing declares is DISABLED by Traefik, and a
-       disabled denial is a request falling through to the apex. Traefik's own
-       internal no-op is what makes the router valid and the backend absent. */
     for (const { name, desired } of API_FIXTURES) {
       const config = renderTraefikConfig(desired);
 
@@ -326,9 +285,6 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
   });
 
   it("leaves an apex alone when something else already answers on it", () => {
-    /* A platform apex claimed as a custom domain, and serving. The application
-       an operator deliberately put there keeps the name; the API takes the
-       apexes nothing else has. */
     const desired = renderRoutes({
       platformDomains: [DOMAIN, OTHER_DOMAIN],
       environments: [environment(PROJECT, APEX_ENVIRONMENT, BUILD, [DOMAIN])],
@@ -349,8 +305,6 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
   });
 
   it("publishes nothing at any apex when the routing carries no api at all", () => {
-    /* `api.public` off: byte-identical to the routing scafo rendered before the
-       apex answered anything. */
     for (const { name, desired } of FIXTURES) {
       expect(desired.api, name).toBeUndefined();
 
@@ -374,8 +328,6 @@ describe("both renders are deterministic", () => {
     it(`renders ${name} identically twice`, () => {
       expect(renderCaddyRoutes(desired)).toEqual(renderCaddyRoutes(desired));
       expect(renderTraefikConfig(desired)).toEqual(renderTraefikConfig(desired));
-      /* Byte-for-byte for Traefik, where key order is observable: it hashes the
-         document it polls, and reorders would read as changes. */
       expect(JSON.stringify(renderTraefikConfig(desired))).toBe(
         JSON.stringify(renderTraefikConfig(desired)),
       );
@@ -384,13 +336,6 @@ describe("both renders are deterministic", () => {
 });
 
 describe("neither namespace can collide with a host", () => {
-  /*
-   * Both drivers put their own prefix in front of a host to name what they own —
-   * `scafo_<host>` as a Caddy `@id`, `scafo_<host>` as a Traefik router and
-   * service key. That is only unambiguous while the separator cannot occur in a
-   * host, so the property is asserted against the validators every host has
-   * already passed rather than against a list of examples.
-   */
   it("refuses the separators the prefixes are built from", () => {
     for (const separator of ["_", "/", "@"]) {
       expect(isHost(`shop${separator}apps.test`), separator).toBe(false);
@@ -406,7 +351,6 @@ describe("neither namespace can collide with a host", () => {
     for (const key of Object.keys(traefik.http?.routers ?? {})) {
       const host = key.slice(TRAEFIK_KEY_PREFIX.length);
       expect(key.startsWith(TRAEFIK_KEY_PREFIX), key).toBe(true);
-      /* One underscore in the whole key, and it is the driver's own. */
       expect(key.split("_")).toHaveLength(2);
       expect(isHost(host), host).toBe(true);
     }
@@ -426,7 +370,6 @@ describe("neither namespace can collide with a host", () => {
     const caddyIds = renderCaddyRoutes(desired).map((route) => route["@id"]);
     expect(new Set(traefikKeys).size).toBe(desired.routes.length);
     expect(new Set(caddyIds).size).toBe(desired.routes.length);
-    /* The same set of names, arrived at independently. */
     expect([...traefikKeys].sort()).toEqual([...caddyIds].sort());
   });
 });
@@ -446,8 +389,6 @@ function essenceOf(desired: IngressDesired): Upstream[] {
       upstream: `127.0.0.1:${String(route.backend.port)}`,
       paths: "all",
     })),
-    /* Two entries per apex, and both are load-bearing: what the API answers for,
-       and what is answered by the ingress itself and never proxied. */
     ...(api?.hosts ?? []).flatMap((host) => [
       { host, upstream: DENIED, paths: `only ${denied}` },
       {
@@ -469,8 +410,6 @@ function caddyUpstreams(routes: CaddyRoute[]): Upstream[] {
         const paths = caddyPaths(match);
         return match.host.flatMap((host) =>
           route.handle.flatMap((handle) => {
-            /* A static answer dials nothing, which is the whole of what it
-               promises: it is read as the denial it is rather than skipped. */
             if (handle.handler === "static_response") {
               return [{ host, upstream: DENIED, paths }];
             }
@@ -524,9 +463,6 @@ function traefikUpstreams(config: TraefikDynamicConfig): Upstream[] {
     .flatMap((router) => {
       const { host, paths } = ruleOf(router.rule);
 
-      /* Traefik's own service for a router that reaches no backend. Read as the
-         denial it is rather than resolved: nothing in this document declares it,
-         and nothing is supposed to. */
       if (router.service === NOOP_SERVICE) {
         return [{ host, upstream: DENIED, paths }];
       }
@@ -534,8 +470,6 @@ function traefikUpstreams(config: TraefikDynamicConfig): Upstream[] {
       const service = resolve(router.service);
       return service.loadBalancer.servers.map((server) => ({
         host,
-        /* Down to the same authority the Caddy dial is written as; the scheme
-             is the format's business, the destination is the routing's. */
         upstream: new URL(server.url).host,
         paths,
       }));
@@ -565,8 +499,6 @@ function rulePaths(rest: string): string {
   const named = [...rest.matchAll(/Path(?:Prefix)?\(`([^`]+)`\)/g)].map((match) => match[1]);
   if (named.length === 0) throw new Error(`rule tail "${rest}" names no path at all`);
 
-  /* Negation is what tells the two apart, and there is no rule here that mixes
-     them: the apex negates every prefix, the denial asserts every prefix. */
   return `${rest.includes("!") ? "all except" : "only"} ${prefixesOf(named)}`;
 }
 

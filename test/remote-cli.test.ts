@@ -1,10 +1,7 @@
 /*
- * `scafo remote add|list|remove|export`: what registering a remote writes, what
- * unregistering one takes away, and the portable file that carries one remote to
- * a machine that has never seen this installation.
- *
- * Every case runs against a temporary home of its own, so nothing here touches
- * the home of whoever is running the suite.
+ * `scafo remote add|list|remove|export`: what registering a remote writes, what unregistering one
+ * takes away, and the portable file that carries one remote to a machine that has never seen this
+ * installation.
  */
 
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -181,7 +178,7 @@ describe("importing a remote from a portable file", () => {
   it("reads anything without the prefix as a path, however much it looks like base64", async () => {
     const home = await scratch();
 
-    /* THE PREFIX DECIDES. A path that is not there is a path failure, and never
+    /* the prefix DECIDES. A path that is not there is a path failure, and never
        a value quietly decoded instead. */
     const error = await rejectsWith(
       () => addRemote(home, { name: "prod", from: "eyJ2IjoxfQ==" }),
@@ -307,8 +304,6 @@ describe("exporting a remote", () => {
     await rejectsWith(() => exportRemote(home, "ghost", { write: () => {} }), "not-found");
   });
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 async function scratch(): Promise<string> {
   const home = await mkdtemp(join(tmpdir(), "scafo-remote-"));

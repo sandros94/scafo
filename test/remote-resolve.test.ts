@@ -1,16 +1,4 @@
-/*
- * Which remote a command acts on, and which key it signs with.
- *
- * The precedence chain is the whole contract of the redesign: a flag beats the
- * environment, which beats what the project pinned, which beats the single remote
- * a home holds — and an ambiguous home is REFUSED rather than guessed at. The
- * interactive pick is driven through the same seam consola is wired into, so the
- * terminal path is pinned here without a terminal.
- *
- * The last case runs the resolution into the REAL node app over an injected
- * `fetch`, so what it proves is that a remote-resolved key signs tokens a node
- * actually accepts.
- */
+/* Which remote a command acts on, and which key it signs with. */
 
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -87,7 +75,7 @@ describe("which remote a command acts on", () => {
       readFile: pinned("staging"),
     });
 
-    /* The pin holds NO SECRET — a name and nothing else — so committing it is
+    /* The pin holds no SECRET — a name and nothing else — so committing it is
        the point of it. */
     expect(resolved.remote).toBe("staging");
   });
@@ -173,7 +161,7 @@ describe("which remote a command acts on", () => {
       defaultKeyPath: join(home, "absent.json"),
     });
 
-    /* Refused where a key is actually WANTED: a command that turns out to reach
+    /* Refused where a key is actually wanted: a command that turns out to reach
        the bucket needs none, and must not fail for the want of one. */
     const error = await rejectsWith(() => resolved.readKey(), "invalid-input");
 
@@ -195,7 +183,7 @@ describe("which key a command signs with", () => {
     });
 
     expect((await resolved.readKey()).id).toBe(loose.key.id);
-    /* The remote still says WHERE, because --key only ever said WITH WHAT. */
+    /* The remote still says where, because --key only ever said with WHAT. */
     expect(resolved.nodeUrl).toBe(PROD_URL);
   });
 
@@ -373,8 +361,6 @@ describe("the resolved remote against a real node", () => {
     expect((await getEnvironment(clock.ctx, "app", "prod")).retiredAt).toBe(environment.retiredAt);
   });
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 async function scratch(): Promise<string> {
   const home = await mkdtemp(join(tmpdir(), "scafo-resolve-"));

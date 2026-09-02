@@ -1,11 +1,5 @@
-/*
- * Deploy intake: what happens to an artifact between the request that uploads it
- * and the environment that ends up serving it.
- *
- * A deploy is accepted and answered immediately, then carried out in the
- * background — publishing an artifact takes longer than a request should wait on.
- * Progress is reported through a status object the caller polls.
- */
+/* Asynchronous deploy intake: accepts staged artifacts, schedules publishing,
+   and exposes bounded in-memory status history. */
 
 import { describeError, isScafoError, ScafoError } from "../core/error.ts";
 import { createBuild } from "../core/registry/builds.ts";
@@ -42,24 +36,11 @@ import {
   type DeploySchedulerOptions,
 } from "./_deploy-scheduler.ts";
 
-/**
- * Deploys remembered at once. The map is soft state with no upper bound of its
- * own, so the oldest are forgotten to keep a long-lived daemon from growing.
- */
+/** Maximum in-memory deploy statuses. */
 export const DEFAULT_HISTORY: number = 256;
 
-/**
- * How far a deploy has got. Exactly two of these are final — `deployed` and
- * `failed` — so a client polls until it reaches one of them and
- * never has to guess whether a state it sees is still moving.
- *
- * - `accepted` — the project and environment exist and the artifact is in hand.
- * - `uploading` — work is under way: the artifact is being published, and when
- *   its immutable history and environment notice are persisted afterwards.
- * - `deployed` — celld published the deployment and Scafo persisted its metadata.
- * - `failed` — the deploy did not complete. Its detail states when celld may
- *   already have published before Scafo could record matching metadata.
- */
+/** Deploy lifecycle. `deployed` and `failed` are terminal; failure can follow
+    a publish not yet recorded. */
 export type DeployState = "accepted" | "uploading" | "deployed" | "failed";
 
 /** What a caller polling a deploy is told. */
@@ -83,16 +64,9 @@ export interface DeployMeta {
   noBundle?: true;
   /** Id to record the build as; defaults to the version the runtime assigned. */
   buildId?: string;
-  /**
-   * How many nodes should serve the environment. Absent says nothing about
-   * placement, and an environment that already exists keeps what it has.
-   */
+  /** Optional placement intent; existing environments keep it when omitted. */
   replicas?: ReplicaCount;
-  /**
-   * Which nodes may serve the environment, by the labels they carry. Absent says
-   * nothing about placement, and an environment that already exists keeps the
-   * selector it has.
-   */
+  /** Optional placement intent; existing environments keep it when omitted. */
   nodeSelector?: NodeSelector;
   source?: BuildSource;
   /** Verified workload identity, assigned only by the deploy-auth boundary. */
@@ -126,15 +100,7 @@ export interface DeployAdmission {
   start(artifact: StagedArtifact, reservation: DeployReservation): DeployStatus;
 }
 
-/**
- * Builds the deploy intake for this node.
- *
- * Statuses live in memory only: a daemon that restarts forgets every deploy that
- * was in flight, including ones it had already accepted. What it does not forget
- * is the registry — a build recorded before the restart is still there, and
- * still startable — so a client that loses track of a deploy re-runs it rather
- * than being left with a half-applied one.
- */
+/** Builds deploy intake. Statuses are daemon-local; persisted builds survive a restart. */
 export function createDeployService(
   daemon: DaemonContext,
   runner: DeployRunner,
@@ -228,22 +194,9 @@ export function createDeployService(
     },
 
     async admit(meta): Promise<DeployAdmission> {
-      /* Done before the deploy is acknowledged: a project or environment name
-         the registry refuses is the caller's mistake and must be answered as
-         one, not buried in a status it has to poll for. */
+      /* Reject invalid identity before acknowledging the deploy. */
       const project = await createProject(daemon.registry, { slug: meta.project });
-      /*
-       * A BLOCKED PROJECT ACCEPTS NOTHING, checked off the record `createProject`
-       * has just handed back rather than with a read of its own — an existing
-       * project is returned as it stands, and a project this call brought into
-       * being cannot be blocked.
-       *
-       * Refused HERE, at intake, so nothing is bundled, uploaded or pointed at,
-       * and the caller is told outright instead of polling a status for a
-       * failure. It names the block because whoever reaches this line has
-       * already been shown to reach the project — a caller outside its scope was
-       * refused before the artifact was read.
-       */
+      /* Reject blocked projects before artifact work begins. */
       assertProjectUnblocked(project);
       await ensureEnvironment(daemon, meta.project, meta.environment, {
         ...(meta.replicas === undefined ? {} : { replicas: meta.replicas }),
@@ -263,8 +216,7 @@ export function createDeployService(
             project: meta.project,
             state: "accepted",
           };
-          /* Enqueue owns the handoff. It must succeed before an id becomes
-             observable; a refused one leaves no ghost status or history row. */
+          /* Enqueue before exposing an id to avoid ghost statuses. */
           const scheduled = reserved.enqueue(artifact, (signal) =>
             publish(id, meta, artifact, signal),
           );
@@ -296,26 +248,8 @@ export function createDeployService(
   };
 }
 
-/**
- * The environment a deploy names, created when it is not there yet.
- *
- * A deploy asks for an environment to EXIST; it says nothing about how that
- * environment is configured. Creating one outright would say something:
- * `ephemeral` is part of an environment's identity and defaults to false, so a
- * deploy aimed at a preview environment that was created ephemeral would be
- * refused for disagreeing about a setting the deploy never expressed.
- *
- * Reading first and creating only what is missing is the same intent without
- * that opinion. Two deploys racing to create one environment still both end in
- * `createEnvironment`, which is idempotent for matching settings.
- *
- * The two PLACEMENT settings — `replicas` and `nodeSelector` — are the only ones
- * a deploy may state about an environment that already exists, and only when
- * they were asked for explicitly: where and how widely an application runs is an
- * operational decision, and a deploy that silently rewrote it would move that
- * application because someone re-ran a pipeline with a stale flag. Neither can
- * be CLEARED here for the same reason; that takes a command that says so.
- */
+/** Ensures an environment exists. Existing placement changes only when requested;
+    creation remains idempotent under races. */
 async function ensureEnvironment(
   daemon: DaemonContext,
   project: string,

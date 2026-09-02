@@ -1,10 +1,6 @@
 /*
- * What a node writes about itself: what a flush carries, where it lands, what a
- * failed one keeps, and what a retention sweep is allowed to delete.
- *
- * The clock is injected everywhere, so every key and every `at` is a value the
- * case chose. Nothing here reaches a real bucket — `MemoryCasStore` honours the
- * same contract, and a flush is a plain put.
+ * What a node writes about itself: what a flush carries, where it lands, what a failed one keeps,
+ * and what a retention sweep is allowed to delete.
  */
 
 import { readParquet } from "tavolato";
@@ -63,8 +59,6 @@ function flusherWith(
 async function written(from: CasStore = store): Promise<ObserveRecord[]> {
   const records: ObserveRecord[] = [];
   for (const key of await from.list("_scafo/observe/")) {
-    /* Read as BYTES, which is the whole point of a columnar flush: the same
-       object through `get` is a UTF-8 decode and no longer a Parquet file. */
     const bytes = await from.getBytes(key);
     if (bytes !== null) records.push(...PARQUET_CODEC.decode(bytes).records);
   }
@@ -122,8 +116,6 @@ describe("what a flush carries", () => {
   });
 
   it("reports the events the ring dropped before a drain could reach them", async () => {
-    /* A ring of two under a node emitting five: the flusher's own loss, which is
-       the only place it is ever admitted. */
     observe = createObservability({
       enabled: true,
       ringSize: 2,
@@ -157,8 +149,6 @@ describe("what a flush carries", () => {
       ["shop", "preview", 1],
       ["shop", "production", 2],
     ]);
-    /* Monotonic TOTALS since the adapter was made, not a window: the reader
-       differences two of these, and the `since` is what makes that possible. */
     expect(records[1].since).toBe(new Date(CLOCK_START_MS).toISOString());
     expect(records[1].status).toEqual({ "2xx": 1, "3xx": 0, "4xx": 0, "5xx": 1, "other": 0 });
     expect(records[1].durations).toHaveLength(DURATION_BANDS_MS.length + 1);
@@ -201,8 +191,6 @@ describe("what a flush carries", () => {
 
     expect(await flusher.flush()).toBe(true);
     clock.tick(OBSERVE_FLUSH_INTERVAL_MS);
-    /* Nothing served in between: an object an hour per idle node, every one of
-       them differencing to zero, is what this avoids. */
     expect(await flusher.flush()).toBe(false);
 
     counters.ingest(caddyLine(`shop.${DOMAIN}`, 200, 10, 0.01));
@@ -212,8 +200,6 @@ describe("what a flush carries", () => {
 
 describe("where a flush lands", () => {
   it("files it under the node, the UTC calendar and the moment it was written", async () => {
-    /* 2026-03-04T05:06:07.008Z, so every segment is one a padding bug would
-       show up in. */
     clock = ctxWith(store, Date.parse("2026-03-04T05:06:07.008Z"));
     observe = createObservability({ enabled: true, now: (): Date => new Date(clock.nowMs()) });
     observe.emit({ type: "runtime.started", processId: "shop--prod" });
@@ -283,9 +269,6 @@ describe("the encoder seam", () => {
     const encoded = PARQUET_CODEC.encode(records);
 
     expect(encoded.extension).toBe(OBSERVE_PARQUET_EXTENSION);
-    /* The decisive property of the seam, and the only one that matters to a
-       reader: what the flusher wrote is what a reader gets back, field for
-       field, across all three record kinds and both nested fields. */
     expect(PARQUET_CODEC.decode(encoded.bytes)).toEqual({ records, malformed: 0 });
   });
 
@@ -297,9 +280,6 @@ describe("the encoder seam", () => {
   });
 
   it("puts the codec's bytes at the codec's extension, and puts them WHOLE", async () => {
-    /* The bytes have to arrive intact — a columnar file is not UTF-8, so a store
-       that took only text would hand back replacement characters and a
-       `.parquet` object that is no longer a Parquet file. */
     observe.emit({ type: "runtime.started", processId: "shop--prod" });
     const counters = createIngressCounters({
       platformDomains: [DOMAIN],
@@ -318,8 +298,6 @@ describe("the encoder seam", () => {
     expect(magic.decode((bytes as Uint8Array).subarray(0, 4))).toBe("PAR1");
     expect(magic.decode((bytes as Uint8Array).subarray(-4))).toBe("PAR1");
 
-    /* And not a byte lost on the way: the object decodes to the header, the
-       drained event and the one counters snapshot the flush was made of. */
     const decoded = PARQUET_CODEC.decode(bytes as Uint8Array);
     expect(decoded.malformed).toBe(0);
     expect(decoded.records.map((record) => record.record)).toEqual(["flush", "event", "counters"]);
@@ -333,11 +311,7 @@ describe("the encoder seam", () => {
     const [key] = await store.list("_scafo/observe/");
     const bytes = (await store.getBytes(key)) as Uint8Array;
 
-    /* The compression is stamped into every column chunk rather than agreed out
-       of band, which is how DuckDB and anything else reads these without being
-       told: a reader that registers no decompressor refuses BY NAME. */
     expect(() => readParquet(bytes)).toThrow(new RegExp(OBSERVE_PARQUET_COMPRESSION));
-    /* And registering one is the whole difference. */
     expect(PARQUET_CODEC.decode(bytes).records).toHaveLength(2);
   });
 });
@@ -364,8 +338,6 @@ describe("the cadence", () => {
 
     for (let index = 0; index < 3; index++)
       observe.emit({ type: "runtime.started", processId: `shop--${String(index)}` });
-    /* Well inside the interval: the size bound is the other trigger, and it is
-       what keeps a busy node's ring from overflowing between flushes. */
     clock.tick(5_000);
     await flusher.tick();
 
@@ -390,8 +362,6 @@ describe("the cadence", () => {
     clock.tick(60_000);
     await flusher.tick();
 
-    /* Four events through a ring of two, and none of them lost: the drain ran
-       between the flushes even though no flush was due. */
     expect(eventRecords(await written())).toHaveLength(4);
     expect(flushRecords(await written())[0].ringDropped).toBe(0);
   });
@@ -399,8 +369,6 @@ describe("the cadence", () => {
   it("does not keep the process alive", () => {
     const flusher = flusherWith();
     flusher.start();
-    /* The same rule every other loop on the node follows: a timer that held the
-       event loop open would stop `scafo sail` from ever exiting. */
     expect(() => flusher.stop()).not.toThrow();
   });
 });
@@ -419,8 +387,6 @@ describe("a flush that does not land", () => {
     faults.clearFaults();
     expect(await flusher.flush()).toBe(true);
 
-    /* Both of them, in order: the failed attempt held the first back rather than
-       dropping it, and the retry carried it out with the second. */
     expect(eventRecords(await written()).map((record) => record.at)).toHaveLength(2);
     expect(flusher.status().pending).toBe(0);
     expect(flusher.status().lastFailure).toBeNull();
@@ -428,8 +394,6 @@ describe("a flush that does not land", () => {
 
   it("retries at the flush cadence, never at the drain one", async () => {
     const faults = new FaultStore(store);
-    /* Counted before the fault is spent, because a put that threw is still an
-       attempt and it is attempts this case is about. */
     let attempts = 0;
     faults.onBeforePut = (): void => {
       attempts++;
@@ -443,8 +407,6 @@ describe("a flush that does not land", () => {
     await flusher.tick();
     expect(attempts).toBe(1);
 
-    /* Two drains later and still inside the interval: a bucket that is down must
-       not be hammered every five seconds for as long as it is. */
     clock.tick(5_000);
     await flusher.tick();
     clock.tick(5_000);
@@ -474,9 +436,6 @@ describe("a flush that does not land", () => {
     await flusher.flush();
 
     const records = eventRecords(await written());
-    /* The three newest survived, the three oldest were dropped, and the header
-       says how many — a bucket that never comes back must not take the node's
-       memory with it, and it must not do so silently either. */
     expect(records.map((record) => ("processId" in record ? record.processId : ""))).toEqual([
       "shop--id-3",
       "shop--id-4",
@@ -501,8 +460,6 @@ describe("a flush that does not land", () => {
     faults.clearFaults();
     await flusher.flush();
 
-    /* One record, holding the total as it stands now. Counters are monotonic, so
-       the lost snapshot is superseded rather than missed. */
     const records = counterRecords(await written());
     expect(records).toHaveLength(1);
     expect(records[0].requests).toBe(2);
@@ -511,8 +468,6 @@ describe("a flush that does not land", () => {
 
 describe("retention", () => {
   beforeEach(async () => {
-    /* A day of this node's own history, plus another node's, written by hand at
-       the keys a flusher would have used. */
     for (const node of [NODE, "node-b"]) {
       for (const age of [0, 10, 31, 400]) {
         const at = new Date(CLOCK_START_MS - age * DAY_MS);
@@ -528,8 +483,6 @@ describe("retention", () => {
 
     expect(deleted).toHaveLength(2);
     expect(deleted.every((key) => key.startsWith(`_scafo/observe/${NODE}/`))).toBe(true);
-    /* The other node's whole history is untouched, including the parts this one
-       would have swept: a node only ever sweeps its own segment. */
     expect(await store.list("_scafo/observe/node-b/")).toHaveLength(4);
     expect(await store.list(`_scafo/observe/${NODE}/`)).toHaveLength(2);
   });
@@ -542,15 +495,12 @@ describe("retention", () => {
 
     expect(await flusher.sweep()).toHaveLength(1);
     expect(await store.list(`_scafo/observe/${NODE}/`)).toHaveLength(2);
-    /* And nothing more: what is left is inside the window. */
     expect(await flusher.sweep()).toEqual([]);
   });
 
   it("runs on the flush cadence rather than on every flush", async () => {
     const flusher = flusherWith({ sweepEveryFlushes: 3 });
 
-    /* The first flush sweeps, so a node coming back from a long stop cleans up
-       without waiting an hour for it. */
     observe.emit({ type: "runtime.started", processId: "shop--one" });
     await flusher.flush();
     expect(flusher.status().swept).toBe(2);
@@ -560,8 +510,6 @@ describe("retention", () => {
       clock.tick(1);
       await flusher.flush();
     }
-    /* Two more flushes, no more sweeps: the listing is the cost, and it is why
-       the cadence is slow. */
     expect(flusher.status().swept).toBe(2);
   });
 
@@ -573,8 +521,6 @@ describe("retention", () => {
     await expect(flusher.sweep()).resolves.toEqual([]);
   });
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 /** The key a flush of `node` at `at` would have landed at. */
 function observeKeyFor(node: string, at: Date): string {

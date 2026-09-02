@@ -1,10 +1,4 @@
-/*
- * Daemon configuration, merged from a JSONC file, the environment and the command
- * line — each source overriding the one before it.
- *
- * The loader is runtime-agnostic: reading files is injected by the caller (the
- * CLI hands in a reader backed by `node:fs`), so nothing here imports a runtime.
- */
+/* Runtime-agnostic daemon configuration; flags override environment, then JSONC. */
 
 import { type JSONCParseError, parseJSONC } from "confbox";
 import { ScafoError } from "../core/error.ts";
@@ -16,10 +10,7 @@ import type { TransportConfig, TransportMode } from "../core/types/transport.ts"
 import { assertEnvVars, parseEnvVars } from "../core/utils/env.ts";
 import { assertHost, isHost, parseInterfaceAddress } from "../core/utils/host.ts";
 import { assertLabels, parseLabels } from "../core/utils/labels.ts";
-/* Names only, taken from the driver that writes them so the two can never
-   drift: what an operator may not hand a runtime process is decided by what the
-   driver derives for itself, and a copy here would go stale the first time that
-   list grew. */
+/* Import the driver's reserved names instead of duplicating that contract. */
 import { OPERATOR_RESERVED_ENV, TELEMETRY_ENV } from "../drivers/runtime/celld.ts";
 import { DEFAULT_JSON_BYTES } from "./_json.ts";
 import {
@@ -48,11 +39,7 @@ export interface DaemonConfig {
     secretKey: string;
   };
   node: {
-    /**
-     * Id this node registers under, when the operator pins one. Absent leaves it
-     * to the node's persistent state, which generates an id on first boot and
-     * keeps it thereafter — pinning a different one replaces that identity.
-     */
+    /** Pinned registry id; otherwise persistent node state supplies one. */
     id?: string;
     /** `host:port` the node API binds to. */
     listen: string;
@@ -60,22 +47,9 @@ export interface DaemonConfig {
     internalListen?: string;
     /** `host:port` other nodes should reach this one at, when it differs from the listener. */
     advertise?: string;
-    /**
-     * Directory holding what this node must remember across restarts — its
-     * identity above all. Absent means the caller decides: the CLI resolves a
-     * default for the user it runs as.
-     */
+    /** Persistent node state directory; the CLI chooses its default. */
     stateDir?: string;
-    /**
-     * What this node IS, as the operator describes it: `region=eu-west-1`,
-     * `tier=fast`, `gpu=a100`. An environment's node selector is matched against
-     * these, and nothing else reads them.
-     *
-     * BOOT CONFIGURATION: they are written into the node's record on every
-     * registration, which replaces that record wholesale, so this file is the
-     * single source of truth for them and a label taken out of it is gone from
-     * the fleet's view of this node on the next start.
-     */
+    /** Selector labels, written wholesale to the node record at registration. */
     labels?: Record<string, string>;
   };
   /** Apex domains the platform serves wildcard subdomains under. */
@@ -135,15 +109,7 @@ export interface DeployConfig {
   outputBytes: number;
 }
 
-/**
- * What an operator stated about this node's WireGuard interface.
- *
- * `address` and `endpoint` are both required of a node whose transport is
- * `wireguard` — the first is what the interface is given and what peers route
- * to, the second is what peers send its traffic to — but they are optional here
- * because a half-written pair must be reported as the missing setting it is,
- * naming the flag and the variable, rather than as a parse failure.
- */
+/** WireGuard interface values. Both address and endpoint are required with that transport. */
 export interface WireguardConfig {
   /** The node's own address on the tunnel, with its prefix length: `10.83.0.1/24`. */
   address?: string;
@@ -153,65 +119,16 @@ export interface WireguardConfig {
   port: number;
 }
 
-/**
- * Whether this node reports on itself, which is ONE switch and not a set of
- * them.
- *
- * OFF BY DEFAULT, and turning it on does exactly two things. The daemon starts
- * emitting the events its own seams are instrumented with, into a bounded
- * in-memory ring (`src/daemon/observe.ts`); and every runtime process this node
- * spawns is given {@link TELEMETRY_ENV}`=1` as a DEFAULT UNDER
- * {@link RuntimeConfig.celldEnv}, so a node that is observing itself is also
- * running a runtime that is. An operator who states that variable themselves
- * wins in both directions — theirs is what the process gets, `0` included.
- *
- * Nothing else changes: no listener, no route, no bucket write. The one cost of
- * leaving it off is that the ring is never allocated and the emission sites are
- * never even evaluated.
- */
+/** Opt-in local observability. Enables the bounded event ring and defaults
+ * {@link TELEMETRY_ENV} to `1` unless runtime configuration overrides it. */
 export interface ObservabilityConfig {
   enabled: boolean;
-  /**
-   * File the operator's ingress writes its JSON access log to, when the node
-   * should count the requests it records.
-   *
-   * A SEPARATE SWITCH, AND IT IS OPT-IN BY PRESENCE. Application traffic goes
-   * ingress → process and never touches the node API, so per-request numbers can only come off the
-   * ingress's own log, and only an operator knows where their ingress writes it
-   * or whether it writes one at all. Absent means no adapter, no error and no
-   * warning: bringing your own ingress is simply never naming this.
-   *
-   * ONLY MEANINGFUL WHILE {@link ObservabilityConfig.enabled} IS ON, and naming
-   * one with observability off is REFUSED rather than ignored — a file nothing
-   * would ever read is a misreading of the surface worth telling the operator
-   * about while they are still looking at what they wrote.
-   */
+  /** JSON access-log path. Requires observability to be enabled. */
   ingressAccessLog?: string;
 }
 
-/**
- * Whether each platform domain's BARE APEX serves the fleet's API, which is ONE
- * switch and it is ON.
- *
- * `dev.example.com` is the name every `<project>.dev.example.com` hangs off and
- * nothing has ever served it — the wildcard does not cover it, so it is refused
- * a certificate too. Turning this on makes it the installation's front door: the
- * ingress routes it to the node's own daemon, and because the registry lives in
- * the bucket, ANY node answers ANY call — so a CI job, a CLI or a dashboard has
- * one well-known name to reach the fleet at, whichever machine picks the request
- * up. `/v1/ingress/ask` approves the apex while this is on, which is what lets
- * on-demand issuance mint the certificate the wildcard never covered.
- *
- * NOTHING IS OPENED BY IT. Every route keeps the token gating it already had,
- * and the two surfaces that are unauthenticated because they are COLOCATED —
- * `/v1/storage`, which carries private keys, and `/v1/ingress/traefik`, which is
- * the node's whole routing map — are excluded from the apex AT THE INGRESS, by
- * both drivers, and never reach the daemon through it. Health and the on-demand
- * ask stay reachable: they answer yes or no about names that are already public.
- *
- * Off, the apex is refused a certificate and routed nowhere, exactly as before
- * this existed.
- */
+/** Enables the fleet API at platform-domain apexes. Token gates remain in force;
+ * storage and Traefik configuration are denied at ingress. */
 export interface ApiConfig {
   public: boolean;
   /** Maximum bytes accepted by any JSON control request. */
@@ -224,51 +141,16 @@ export interface VarsetsConfig {
   keyFile: string;
 }
 
-/**
- * The tokens an operator chose for this node's `/v1/storage` surface, in place
- * of the one the node would mint for itself.
- *
- * SUPPLYING ANY REPLACES MINTING ENTIRELY: nothing random is generated, every
- * listed value is admitted, and the FIRST is written to the state directory's
- * token file at the permissions a minted one gets — so every consumer that reads
- * that file goes on working unchanged, and one value an operator holds can
- * configure both the node and whatever stores through it.
- *
- * IT IS A LIST BECAUSE ROTATION IS EXPAND-CONTRACT, driven by the operator in
- * two deliberate steps: set `[new, old]` and restart the daemon, which admits
- * both; move the callers onto the new one at whatever pace suits them; then
- * contract to `[new]` and restart again, which is the moment the old one stops
- * working. Nothing is remembered between boots and no grace period runs down —
- * the set in the configuration is the set that is admitted, and the file holds
- * whichever token is first in it.
- *
- * THE DAEMON MOVES FIRST AND THE CALLERS FOLLOW, in both phases. An ingress
- * reloaded onto a token this node does not admit yet cannot refill its
- * certificate cache from storage, which is exactly what a reload makes it do;
- * the other order costs nothing, because a token that is still listed still
- * works.
- *
- * A SOLO INSTALLATION MAY SIMPLY SWAP ONE VALUE. This surface is off the TLS
- * handshake path — a running ingress serves from the certificate cache in its
- * own memory — so the gap between restarting the node and reloading what stores
- * through it costs background renewals, OCSP refreshes and the issuance of names
- * being seen for the first time, all of which are retried.
- */
+/** Explicit storage tokens replace minting. Rotate by expanding to `[new, old]`,
+ * restart and migrate consumers, then contract to `[new]`. The first token is
+ * persisted for local consumers. */
 export interface StorageConfig {
   /** Every token admitted, primary first. Never empty. */
   token: [string, ...string[]];
 }
 
-/**
- * Which ingress a node drives, and how it is reached.
- *
- * The two implemented ingresses are reached in opposite directions, which is why
- * only one of them has settings here. `caddy` is PUSHED: the node calls its admin
- * API, so it must be told where that is. `traefik` PULLS: the node renders its
- * routing and serves it at `/v1/ingress/traefik`, and it is the operator's
- * Traefik that is configured with the address — in Traefik's own static
- * configuration, which scafo neither writes nor reads.
- */
+/** Ingress configuration: Caddy is pushed through its admin API; Traefik pulls
+ * from the node's configuration endpoint. */
 export interface IngressConfig {
   /** Which ingress this node drives; anything else fails the boot. */
   driver: IngressDriverName;
@@ -276,14 +158,7 @@ export interface IngressConfig {
   adminUrl?: string;
   /** Caddy server this node writes its routes into. */
   serverName?: string;
-  /**
-   * Traefik entryPoints the rendered routers attach to — `["web", "websecure"]`
-   * for a Traefik terminating TLS on the second one. The driver's own default
-   * applies when absent, and naming any is only meaningful with that driver.
-   *
-   * The list is never empty: Traefik reads an absent `entryPoints` as "every
-   * entryPoint there is", which includes the ones scafo has no business on.
-   */
+  /** Traefik entry points; never empty because omission attaches to all of them. */
   entryPoints?: string[];
 }
 
@@ -299,31 +174,9 @@ export interface RuntimeConfig {
   binPath: string;
   /** First port of the range runtime processes are given pairs from. */
   portRangeStart: number;
-  /**
-   * Address runtime processes bind their listeners to. Loopback by default,
-   * which is everything a single node needs.
-   *
-   * A fleet spread over several nodes needs more: one process owns each cell,
-   * and the others reach it at the address this node advertises — which nothing
-   * answers on while the listeners are on loopback. Widening it exposes a peer
-   * listener that carries no authentication of its own, so a non-loopback value
-   * refuses to boot until `transport` says what network that is.
-   */
+  /** Runtime listener address. Non-loopback requires an explicit transport. */
   bindHost: string;
-  /**
-   * Variables handed to every runtime process this node spawns, on top of the
-   * ones the settings above are turned into. The escape hatch for what has no
-   * typed setting of its own — the runtime's own telemetry switches above all
-   * (`CELLD_OTEL`, and the `CELLD_OTEL_*` tuning beside it), which nothing else
-   * can reach a process with: the environment the daemon was started from is
-   * passed on as a narrow allowlist, and none of these are on it.
-   *
-   * Absent when the operator handed over none. A name the runtime driver writes
-   * ITSELF is refused here rather than dropped at the process: those are derived
-   * from this node's configuration and from the ports its processes bound, so a
-   * value set here would never take effect, and an operator who set one is owed
-   * the refusal while they are still reading their own configuration.
-   */
+  /** Variables for every runtime process. Driver-derived names are rejected. */
   celldEnv?: Record<string, string>;
 }
 
@@ -359,15 +212,7 @@ const WILDCARD_BIND_HOSTS: string[] = ["0.0.0.0", "::"];
 /** UDP port a WireGuard interface listens on when none is configured. */
 export const DEFAULT_WIREGUARD_PORT: number = 51_820;
 
-/**
- * Whether the platform apexes serve the fleet's API when nobody said: yes.
- *
- * ON is the default because the apex answered NOTHING before this — no route, no
- * certificate — so there is no behaviour to preserve and every installation
- * gains one name its tooling can reach it at. What the switch is FOR is the
- * operator who wants that name for something else, or who keeps their API off
- * the public internet entirely.
- */
+/** Platform apex API is public unless disabled. */
 export const DEFAULT_API_PUBLIC: boolean = true;
 
 /** A `host:port` pair, as written for a listener or an advertised address. */
@@ -396,8 +241,7 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
   const stateDir = resolve("stateDir", sources);
   const labels = resolveNodeLabels(sources);
 
-  /* Parsed for their side effect: an unusable address must fail the boot, not
-     the first request that tries to use it. */
+  /* Reject malformed addresses before starting the daemon. */
   if (configuredListen !== undefined) parseHostPort(configuredListen, ORIGINS.listen.file);
   const internalAddress =
     internalListen === undefined
@@ -411,26 +255,14 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
   const ingress = resolveIngress(sources);
   const observing = resolveBoolean("observability", sources, false);
   const ingressAccessLog = resolveIngressAccessLog(sources, observing);
-  /* Composed HERE rather than in the driver: the runtime's telemetry switch is
-     one more variable an operator may state, so the node's own switch has to
-     meet it where the variables are resolved and lose to it if it is there. */
+  /* Operator runtime config overrides the observability telemetry default. */
   const celldEnv = withTelemetry(resolveCelldEnv(sources), observing);
   const keyFile = resolve("varsetKeyFile", sources);
   const storageTokens = resolveStorageTokens(sources);
   const transport = resolveTransport(sources);
   const wireguard = resolveWireguard(sources);
 
-  /*
-   * Inside a tunnel, the only address that means anything is the tunnel's. A
-   * node told to run WireGuard therefore puts its whole surface there — the
-   * daemon listener, the address it advertises, and the runtime processes —
-   * rather than on loopback no peer can reach or on a wildcard that names no
-   * interface a peer could dial.
-   *
-   * All three remain plain defaults: anything the operator wrote wins. They
-   * move together on purpose, because advertising an address the listener never
-   * bound is a node whose peers are refused by it and told nothing.
-   */
+  /* WireGuard supplies aligned defaults for API, advertised, and runtime binds. */
   const tunnelHost =
     transport?.driver === "wireguard" && wireguard?.address !== undefined
       ? (parseInterfaceAddress(wireguard.address)?.host ?? undefined)
@@ -507,16 +339,8 @@ export function advertisedAddress(node: DaemonConfig["node"]): HostPort {
   return parseHostPort(node.listen, "node.listen");
 }
 
-/**
- * Where THIS NODE dials a runtime process it started, which is wherever that
- * process BINDS: loopback while the listeners are on a wildcard (loopback is
- * among what a wildcard answers on), and the EXACT configured address otherwise
- * — a process bound to a tunnel address alone answers nothing on `127.0.0.1`,
- * however local the caller is.
- *
- * The ingress routes are rendered against this address (`upstreamHost` on both
- * ingress drivers).
- */
+/** Local runtime dial address. Wildcard binds use loopback; specific binds stay
+ * specific, including tunnel addresses. */
 export function runtimeDialHost(runtime: DaemonConfig["runtime"]): string {
   return WILDCARD_BIND_HOSTS.includes(runtime.bindHost) ? DEFAULT_BIND_HOST : runtime.bindHost;
 }
@@ -538,8 +362,7 @@ export function parseHostPort(value: string, field: string): HostPort {
       detail: `"${field}" must be "host:port" with a port in 1-65535, got "${value}"`,
     });
   }
-  /* A bracketed literal is taken as given; anything else must be a DNS name or
-     an IPv4 address, both of which are plain lowercase labels. */
+  /* Non-bracketed hosts must be lowercase DNS names or IPv4 addresses. */
   if (bracketed === undefined && !isHost(host)) {
     throw new ScafoError("invalid-input", "Invalid address", {
       detail: `"${field}" has host "${host}", which is not a lowercase DNS name or IPv4 address`,
@@ -558,11 +381,7 @@ interface Origin {
   file: string;
 }
 
-/**
- * Every configurable setting and the sources that can carry it. The `AWS_*` and
- * `S3_*` names are accepted below the `SCAFO_*` ones so a shell already set up
- * for the bucket works, without letting it override an explicit scafo setting.
- */
+/** Configuration origins. Scafo-specific bucket variables outrank AWS/S3 ones. */
 const ORIGINS = {
   endpoint: {
     flag: "endpoint",
@@ -685,11 +504,7 @@ const ORIGINS = {
   wgPort: { flag: "wg-port", env: ["SCAFO_WG_PORT"], file: "wireguard.port" },
 } satisfies Record<string, Origin>;
 
-/**
- * How one WireGuard setting is asked for, spelled out in every way it can be
- * given. What the refusal for a missing one is written from, so an operator
- * reading it does not have to find the documentation first.
- */
+/** Formats a WireGuard setting with its config, flag, and environment spellings. */
 export function describeWireguardSetting(setting: "address" | "endpoint" | "port"): string {
   const origin: Origin =
     setting === "address"
@@ -735,10 +550,7 @@ function required(setting: Setting, sources: Sources): string {
   });
 }
 
-/**
- * A port-valued setting. The file may carry it as a JSON number while a flag or
- * an environment variable can only carry text, so both spellings are accepted.
- */
+/** Resolves a port from numeric JSON or text-based flags and environment. */
 function resolvePort(setting: Setting, sources: Sources, fallback: number): number {
   const origin: Origin = ORIGINS[setting];
   const raw = flagOrEnv(origin, sources) ?? fileValue(sources.file, origin.file);
@@ -832,15 +644,7 @@ function resolveDeploy(sources: Sources): DeployConfig {
   return deploy;
 }
 
-/**
- * A switch, in every spelling the sources can carry it.
- *
- * The config file holds the JSON boolean; a flag and an environment variable can
- * only carry text, so `"1"`, `"true"`, `"0"` and `"false"` are accepted for it,
- * in any case. Anything else is REFUSED rather than read as false: a switch
- * silently off is the failure mode this whole surface exists to avoid, and
- * `SCAFO_OBSERVABILITY=yes` is a node the operator believes is reporting.
- */
+/** Resolves JSON booleans or `1`/`true` and `0`/`false`; rejects ambiguity. */
 function resolveBoolean(setting: Setting, sources: Sources, fallback: boolean): boolean {
   const origin: Origin = ORIGINS[setting];
   const raw = flagOrEnv(origin, sources) ?? fileValue(sources.file, origin.file);
@@ -858,16 +662,7 @@ function resolveBoolean(setting: Setting, sources: Sources, fallback: boolean): 
   });
 }
 
-/**
- * The variables every runtime process gets, with the runtime's own telemetry
- * switch turned on UNDER them when this node is observing itself.
- *
- * The escape hatch stays the escape hatch: a `runtime.celldEnv` that names
- * {@link TELEMETRY_ENV} is left exactly as it was written, whichever value it
- * holds, because an operator who turned the runtime's telemetry OFF while the
- * daemon reports on itself has stated something the node has no business
- * overruling. The default only ever fills a gap.
- */
+/** Defaults runtime telemetry on for observation without overriding operator config. */
 function withTelemetry(
   configured: Record<string, string> | undefined,
   observing: boolean,
@@ -877,18 +672,7 @@ function withTelemetry(
   return { ...configured, [TELEMETRY_ENV]: "1" };
 }
 
-/**
- * The ingress access log this node counts requests off, or undefined when the
- * operator named none — which is the ordinary case and not a warning.
- *
- * NAMING ONE WITH OBSERVABILITY OFF IS REFUSED. The two are separate switches on
- * purpose: observability is what this node reports about ITSELF, and the access
- * log is the only complete account of what its ingress served. But the second
- * only ever feeds the first, so a file named while the first is off is a file
- * nothing opens — an operator who wrote it believes they are counting requests
- * and is not, which is exactly the silent-off failure this surface refuses
- * everywhere else.
- */
+/** Returns the access log path; rejects it when observability is disabled. */
 function resolveIngressAccessLog(sources: Sources, observing: boolean): string | undefined {
   const origin: Origin = ORIGINS.ingressAccessLog;
   const path = resolve("ingressAccessLog", sources);
@@ -903,20 +687,12 @@ function resolveIngressAccessLog(sources: Sources, observing: boolean): string |
   });
 }
 
-/**
- * The address runtime processes bind to, or undefined when the operator named
- * none. A bare host rather than `host:port`: the ports come from the allocator,
- * and only the interface is configurable.
- *
- * Undefined rather than the default, because the caller has one more thing to
- * consider first — a node inside a tunnel binds to the tunnel.
- */
+/** Resolves an explicit runtime bind host; tunnel configuration supplies its own default. */
 function resolveBindHost(sources: Sources): string | undefined {
   const value = resolve("bindHost", sources);
   if (value === undefined) return undefined;
 
-  /* `0.0.0.0` and `::` are not DNS names, but they are the whole point of this
-     setting — the wildcards that make a process reachable from another node. */
+  /* Wildcard bind addresses are valid runtime interfaces, not DNS names. */
   if (value !== "0.0.0.0" && value !== "::" && !isHost(value)) {
     throw new ScafoError("invalid-input", "Invalid configuration value", {
       detail:
@@ -993,22 +769,8 @@ function resolveCelldEnv(sources: Sources): Record<string, string> | undefined {
   return Object.keys(vars).length === 0 ? undefined : vars;
 }
 
-/**
- * The tokens an operator supplied for the storage surface, or undefined when
- * they supplied none and this node is to mint its own.
- *
- * Two spellings, as the Traefik entryPoints have: a flag and an environment
- * variable can only carry text, written `new,old`, while the config file carries
- * that same text or the array it parses into. AN ARRAY ENTRY IS TAKEN WHOLE,
- * which is how a value carrying the separator is written; anywhere a string
- * appears, a comma separates one token from the next.
- *
- * A VALUE THAT IS THERE AND HOLDS NOTHING IS REFUSED rather than read as unset.
- * An empty spelling is what an unnamed variable expands to, and minting over it
- * would leave the node admitting a token nothing else on the host has ever seen
- * — every call the operator's own caller makes refused, for a reason neither of
- * them states anywhere.
- */
+/** Resolves explicit storage tokens. Text uses comma separation; JSON arrays
+ * retain entries verbatim. An explicit empty value is rejected, not treated as absent. */
 function resolveStorageTokens(sources: Sources): [string, ...string[]] | undefined {
   const origin: Origin = ORIGINS.storageToken;
   const written = suppliedFlagOrEnv(origin, sources) ?? fileValue(sources.file, origin.file);
@@ -1042,13 +804,7 @@ function refuseStorageTokens(written: unknown, why: string): ScafoError {
   });
 }
 
-/**
- * The first flag or variable that CARRIES a setting at all, blank or not.
- *
- * {@link flagOrEnv} reads a blank value as unset, which is right for a setting
- * that has a default and wrong for one whose absence changes what the node does:
- * that difference has to reach the resolver rather than being flattened here.
- */
+/** Returns the first explicitly supplied flag or environment value, including blank. */
 function suppliedFlagOrEnv(origin: Origin, sources: Sources): string | undefined {
   const flag = sources.flags[origin.flag];
   if (flag !== undefined) return flag;
@@ -1075,32 +831,15 @@ function resolvePlatformDomains(sources: Sources): string[] {
   return domains;
 }
 
-/**
- * The ingress this node drives, or undefined when it drives none.
- *
- * Naming a Caddy admin API is enough to ask for Caddy: it was the only driver
- * when the setting was introduced, and a configuration that already worked must
- * go on working. Every other ingress is asked for by name. Configuring nothing
- * but a server name leaves the ingress off, because nothing says where to reach
- * it.
- *
- * A setting belonging to the OTHER ingress is REFUSED rather than ignored, in
- * both directions. The two are configured from opposite ends — Caddy is told
- * where its admin API is, Traefik is told which of ITS entryPoints the routers
- * this node publishes should attach to — so an operator who wrote one against
- * the other has misread which of them applies, and silently dropping half of
- * what they wrote leaves a node routing through an ingress they did not think
- * they had selected.
- */
+/** Resolves the selected ingress. A Caddy admin URL retains its implicit-Caddy
+ * compatibility; settings for the other driver are rejected. */
 function resolveIngress(sources: Sources): IngressConfig | undefined {
   const driver = resolve("ingressDriver", sources);
   const adminUrl = resolve("caddyAdmin", sources);
   const serverName = resolve("caddyServer", sources);
   const entryPoints = resolveEntryPoints(sources);
 
-  /* An entryPoint list turns the ingress on for the same reason an admin URL
-     does — so that naming one under the wrong driver is refused below rather
-     than dropped on the floor. */
+  /* Entry points select Traefik even without an explicit driver name. */
   if (driver === undefined && adminUrl === undefined && entryPoints === undefined) return undefined;
   if (driver !== undefined && !(INGRESS_DRIVERS as string[]).includes(driver)) {
     throw new ScafoError("invalid-input", "Invalid configuration value", {
@@ -1141,20 +880,8 @@ function resolveIngress(sources: Sources): IngressConfig | undefined {
   };
 }
 
-/**
- * The Traefik entryPoints this node's routers attach to, or undefined when the
- * operator named none.
- *
- * Two spellings, as the node labels have: a flag and an environment variable can
- * only carry text, written `web,websecure`, while the config file carries the
- * array that text parses into.
- *
- * A list that parses to nothing is REFUSED rather than left empty, because empty
- * does not mean empty here: Traefik reads routers with no entryPoints as
- * attached to EVERY entryPoint it has — a TLS listener scafo holds no
- * certificate for, the port the dashboard is on — so the quiet reading of a
- * mistyped list claims far more surface than was offered.
- */
+/** Resolves Traefik entry points from comma text or JSON. Empty is rejected:
+ * Traefik otherwise attaches routers to every entry point. */
 function resolveEntryPoints(sources: Sources): string[] | undefined {
   const origin: Origin = ORIGINS.traefikEntryPoints;
   const inline = flagOrEnv(origin, sources);
@@ -1196,12 +923,7 @@ function refuseForeign(
   });
 }
 
-/**
- * The transport this node runs, or undefined when the operator has said nothing.
- *
- * Undefined is a distinct answer, not a default: a node whose addresses reach
- * beyond loopback refuses to boot until it is told which network it is on.
- */
+/** Resolves explicit transport. Non-loopback configuration may not infer one. */
 function resolveTransport(sources: Sources): TransportConfig | undefined {
   const driver = resolve("transport", sources);
   if (driver === undefined) return undefined;
@@ -1217,15 +939,7 @@ function resolveTransport(sources: Sources): TransportConfig | undefined {
   return { driver: driver as TransportMode };
 }
 
-/**
- * Where this node sits on the tunnel, or undefined when nothing was configured.
- *
- * A missing half is left missing rather than refused here: whether it is
- * required at all depends on the transport, and the refusal that knows the
- * answer is the one that boots the node. What IS refused is a value that could
- * never work — an address without a prefix length, an endpoint that is not
- * `host:port` — because those are typos wherever they were written.
- */
+/** Resolves WireGuard fields. Transport validation decides whether both are required. */
 function resolveWireguard(sources: Sources): WireguardConfig | undefined {
   const address = resolve("wgAddress", sources);
   const endpoint = resolve("wgEndpoint", sources);
@@ -1251,7 +965,7 @@ function resolveWireguard(sources: Sources): WireguardConfig | undefined {
 async function readConfigFile(
   opts: LoadConfigOptions | undefined,
 ): Promise<Record<string, unknown> | undefined> {
-  /* No file is read unless the caller injects a reader — this module has no I/O. */
+  /* File access remains caller-injected to keep this loader runtime-agnostic. */
   const readFile = opts?.readFile ?? (async (): Promise<null> => null);
   const explicit = opts?.configPath;
 
@@ -1275,8 +989,7 @@ async function readConfigFile(
     return parsed as Record<string, unknown>;
   }
 
-  /* A named file that is not there is a typo worth reporting; the defaults are
-     only defaults, so their absence means "everything comes from elsewhere". */
+  /* Explicit config paths must exist; default paths are optional. */
   if (explicit !== undefined) {
     throw new ScafoError("invalid-input", "Config file not found", {
       detail: `"${explicit}" could not be read`,

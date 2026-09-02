@@ -1,10 +1,7 @@
 /*
- * The TLS material an ingress keeps in the installation's bucket: the envelope
- * that carries bytes through a string-bodied store, what a listing of a key
- * space answers, and the named locks that serialize issuance.
- *
- * Everything runs against a memory store and a clock the test moves itself, so
- * a takeover that waits ten seconds costs nothing to assert.
+ * The TLS material an ingress keeps in the installation's bucket: the envelope that carries bytes
+ * through a string-bodied store, what a listing of a key space answers, and the named locks that
+ * serialize issuance.
  */
 
 import { describe, expect, it } from "vitest";

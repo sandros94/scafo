@@ -1,42 +1,5 @@
-/*
- * The COLUMNAR encoding of what a node writes about itself: one wide flat table
- * per flush, written and read back with `tavolato`, and queryable where it lands.
- *
- * ONE WIDE TABLE, NOT THREE. The three record kinds share a file (see
- * `src/daemon/observe-records.ts`), and Parquet has one schema per file — so they
- * share a SCHEMA too: every field of every kind is a column, every column but the
- * four each record carries is NULLABLE, and the `record` discriminant is what a
- * query filters on. A flush of one header, forty events and three counter
- * snapshots is one file with 44 rows and a great many nulls, which is what a
- * columnar format is cheap at: a null column chunk is a definition-level bitmap
- * and nothing else.
- *
- * FLAT, BECAUSE THE WRITER IS. `tavolato` writes named columns of `string`,
- * `f64`, `i64`, `bool` and `timestamp` and will never write a nested one — that
- * is its scope freeze rather than a gap — so the two nested fields are flattened
- * by hand and named after their path: a counters record's `status` object becomes
- * `status_2xx`…`status_other`, and its `durations` array becomes one column per
- * band, named after the band's own boundary. Nothing else nests, so nothing else
- * needs a JSON escape hatch.
- *
- * THE UNION IS CLOSED AND THE BUILD PROVES IT. {@link COLUMN_OF} is a `Record`
- * over the record union's own keys, so a field added to any record kind — a new
- * `ObservedEvent` variant, or one more field on an existing one — is a MISSING
- * PROPERTY there and the build stops. A field silently dropped at flush time is
- * the one failure a telemetry encoder must not have. {@link COLUMN_OF} is also
- * what the READ side inverts, so the two directions cannot describe different
- * tables.
- *
- * THE FILES ARE COMPRESSED, AND THE COMPRESSOR IS THE RUNTIME'S OWN. Every data
- * page is a ZSTD frame ({@link OBSERVE_PARQUET_COMPRESSION}), compressed and
- * decompressed with `node:zlib`'s SYNCHRONOUS pair — which is what keeps the
- * whole codec synchronous, because `tavolato` defers only when the codec it was
- * given does. A flush is a wide table of mostly-null columns and repeated node
- * ids and record kinds, which is close to the best case a general compressor
- * has. Nothing about reading these files elsewhere changes: compression is
- * per-column-chunk metadata in the file itself, and every Parquet reader worth
- * the name — DuckDB included — follows it without being told.
- */
+/* ZSTD Parquet encoding for observation records. A shared flat nullable schema
+   represents all record kinds; closed field mapping keeps read/write aligned. */
 
 import { zstdCompressSync, zstdDecompressSync } from "node:zlib";
 import { createWriter, defineSchema, readParquet } from "tavolato";
@@ -69,20 +32,7 @@ export const OBSERVE_PARQUET_CREATED_BY: string = "scafo (tavolato)";
 /** The compression stamped into every column chunk of a flush. */
 export const OBSERVE_PARQUET_COMPRESSION: CodecName = "ZSTD";
 
-/**
- * What compresses a flush, and what reads one back.
- *
- * SYNCHRONOUS ON BOTH SIDES, and that is the requirement rather than a
- * preference: `tavolato`'s writer and reader return a promise exactly when the
- * codec hands them one, and {@link ObserveCodec} is a synchronous seam. The
- * wrappers are what keep them so — `zstdDecompressSync` takes an OPTIONS object
- * as its second argument and `tavolato` passes the uncompressed size there, so
- * handing the function over bare would quietly configure it with a number.
- *
- * Exported because a reader that goes to `tavolato` directly — a test, or
- * anything reading a flush without the record mapping — needs the same
- * registration to get past a compressed chunk.
- */
+/** Synchronous ZSTD codecs for the synchronous observation codec. */
 export const OBSERVE_PARQUET_WRITER_CODEC: WriterCodec = {
   name: OBSERVE_PARQUET_COMPRESSION,
   compress: (page: Uint8Array): Uint8Array => zstdCompressSync(page),
@@ -157,19 +107,7 @@ const FIXED_COLUMNS = {
  */
 type ObserveParquetColumn = keyof typeof FIXED_COLUMNS;
 
-/**
- * The column one duration band lands in, named after the band's own boundary in
- * milliseconds — `durations_le_10ms` through `durations_le_3000ms`, and
- * `durations_gt_3000ms` for everything past the last one.
- *
- * The SAME semantics the record's own `durations` array carries, spelled out
- * instead of positional: index `i` counts the requests that did not exceed
- * `DURATION_BANDS_MS[i]`, and the extra index past the end counts the rest. It is
- * derived from that constant rather than written down beside it, so a band added
- * to the fleet's histogram adds a column here and cannot drift from it. It is the
- * SQL-safe spelling of `bandLabel` in `src/cli/_metrics.ts`, which says the same
- * thing to a human (`<=10ms`, `>3s`).
- */
+/** SQL-safe column for a duration upper-bound band or final overflow band. */
 export function durationBandColumn(index: number): string {
   const bound = DURATION_BANDS_MS[index];
   return bound === undefined
@@ -199,14 +137,7 @@ export const OBSERVE_PARQUET_SCHEMA: ParquetSchema = defineSchema({
 /** One record as the wide row it becomes: the columns it has a value for, and no others. */
 export type ObserveParquetRow = Record<string, string | number | boolean>;
 
-/**
- * Every field the record union can carry, and the column it lands in.
- *
- * Written as a `Record` over the union's OWN KEYS so the build proves the schema
- * covers it: a field added to any record kind is a missing property here, and a
- * column added without a field is a key that does not exist. {@link SPREAD} marks
- * the two that do not land in one column of their own — see {@link putField}.
- */
+/** Closed record-field mapping. Spread fields flatten into status/band columns. */
 const SPREAD = null;
 
 const COLUMN_OF: Record<ObserveField, ObserveParquetColumn | typeof SPREAD> = {
@@ -252,23 +183,11 @@ const COLUMN_OF: Record<ObserveField, ObserveParquetColumn | typeof SPREAD> = {
   durations: SPREAD,
 };
 
-/**
- * One record as a row of the wide table.
- *
- * A column the record says nothing about is ABSENT rather than zero, which
- * `tavolato` writes as a real Parquet null: a `requests` of 0 and a record that
- * counts no requests at all are different answers, and a reader that could not
- * tell them apart would report an idle environment as a busy one serving nothing.
- *
- * @throws {ScafoError} `invalid-input` when a timestamp is not an instant, which
- * is a record that cannot be written down rather than one worth guessing at.
- */
+/** Maps one record to nullable columns. Omitted differs from an observed zero. */
 export function observeParquetRow(record: ObserveRecord): ObserveParquetRow {
   const row: ObserveParquetRow = {};
   for (const [field, value] of Object.entries(record)) {
-    /* Absent and null are the same answer, and a field this build does not know
-       is a newer daemon's: the schema is this build's, and a column nobody
-       declared cannot be written. */
+    /* Unknown/newer fields and nulls have no declared column in this schema. */
     if (value === undefined || value === null) continue;
     if (!Object.hasOwn(COLUMN_OF, field)) continue;
 
@@ -277,29 +196,12 @@ export function observeParquetRow(record: ObserveRecord): ObserveParquetRow {
   return row;
 }
 
-/**
- * The one line that says how a flush is read WITHOUT scafo, given the prefix to
- * read under. Said by whatever tells an operator what their node is writing.
- *
- * `scafo metrics` and `scafo traces` read these files themselves, so this is not
- * a workaround for anything — it is the other half of the point of a columnar
- * format: the fleet's own telemetry answers arbitrary SQL where it already sits,
- * with no daemon up and nothing exported. The compression needs no mention because
- * a Parquet reader takes it off the file.
- */
+/** Returns a DuckDB read hint for externally querying flushed observations. */
 export function parquetReadHint(prefix: string): string {
   return `query them with DuckDB: read_parquet('s3://<bucket>/${prefix}**/*.parquet')`;
 }
 
-/**
- * The one encoding a flush is written in: one wide flat table per file, ZSTD
- * compressed, and read back by the same library that wrote it.
- *
- * SYNCHRONOUS THROUGHOUT, because {@link ObserveCodec} is. `tavolato` types both
- * halves as maybe-promises since a codec MAY defer; the one configured here
- * cannot, so each cast below is the branch a synchronous codec is able to
- * produce and nothing else.
- */
+/** Synchronous wide-table ZSTD Parquet codec. */
 export const PARQUET_CODEC: ObserveCodec = {
   extension: OBSERVE_PARQUET_EXTENSION,
 
@@ -309,17 +211,13 @@ export const PARQUET_CODEC: ObserveCodec = {
       createdBy: OBSERVE_PARQUET_CREATED_BY,
       codec: OBSERVE_PARQUET_WRITER_CODEC,
     }) as SyncParquetWriter;
-    /* A flush of nothing still writes a whole file: schema present, no row
-       groups, `num_rows = 0` — which reads as an empty table rather than as a
-       truncated one. */
+    /* Empty flushes remain valid schema-bearing Parquet files. */
     writer.appendAll(records.map((record) => observeParquetRow(record)));
     return { bytes: writer.finish(), extension: OBSERVE_PARQUET_EXTENSION };
   },
 
   decode(bytes: Uint8Array): ObserveDecoded {
-    /* And the read a synchronous decompressor produces. Bytes that are not a
-       Parquet file raise from here: a row that is not a record is data and is
-       counted below, a file that is not a file is neither. */
+    /* Invalid files throw; invalid rows are counted below. */
     const file = readParquet(bytes, { codecs: OBSERVE_PARQUET_READER_CODECS }) as ParquetFile;
 
     const records: ObserveRecord[] = [];
@@ -333,23 +231,8 @@ export const PARQUET_CODEC: ObserveCodec = {
   },
 };
 
-/**
- * One row of the wide table read back as the record it was written from, or null
- * when it is not one.
- *
- * THE INVERSE OF {@link observeParquetRow}, AND DELIBERATELY SHALLOW IN THE SAME
- * PLACES. The discriminant, the node and the timestamp are what every reader
- * dispatches on, so those three decide whether the row is a record at all;
- * everything else is taken as the file wrote it. A column this build has no field
- * for is a NEWER DAEMON'S and is skipped, exactly as a field this build has no
- * column for is dropped on the way in — a reader that refused rows a later daemon
- * added a column to would be the opposite of what a telemetry format is for.
- *
- * The three column types that do not survive a round trip on their own are put
- * back here: `i64` reads as a `bigint` and the records hold numbers, `timestamp`
- * reads as a `Date` and the records hold ISO-8601 instants, and the two flattened
- * fields are gathered back into the object and the array they came from.
- */
+/** Reconstructs a record row. Required identity columns validate the row; newer
+ * columns are skipped, and flattened status/duration fields are restored. */
 export function observeRecordOf(row: ReadRow): ObserveRecord | null {
   const kind = row.record;
   if (kind !== "flush" && kind !== "event" && kind !== "counters") return null;
@@ -370,8 +253,7 @@ export function observeRecordOf(row: ReadRow): ObserveRecord | null {
   const durations = new Map<number, number>();
 
   for (const [column, value] of Object.entries(row)) {
-    /* A null is a column this record kind says nothing about, which is the whole
-       point of the shared table. The three above are already placed. */
+    /* Null means this record kind has no value for the column. */
     if (value === null || SHARED_COLUMNS.has(column)) continue;
 
     const klass = STATUS_CLASS_OF.get(column);
@@ -391,8 +273,7 @@ export function observeRecordOf(row: ReadRow): ObserveRecord | null {
     record[field] = value instanceof Date ? value.toISOString() : scalar(value);
   }
 
-  /* Written last, so a row carrying both spellings of `status` — which only a
-     hand-made file can — reads as the counter snapshot its columns describe. */
+  /* Flattened counter columns win for malformed hand-written duplicate fields. */
   if (Object.keys(status).length > 0) record.status = { ...EMPTY_STATUS, ...status };
   if (durations.size > 0) {
     record.durations = Array.from(

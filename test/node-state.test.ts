@@ -1,10 +1,6 @@
 /*
- * The identity a node keeps between boots: what is written on the first one,
- * what is read back on the next, and what happens to a state file that no longer
- * says who this node is.
- *
- * Every case runs against a temporary directory of its own, so nothing here
- * touches the state of the machine running the suite.
+ * The identity a node keeps between boots: what is written on the first one, what is read back on
+ * the next, and what happens to a state file that no longer says who this node is.
  */
 
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -70,8 +66,6 @@ describe("the first boot of a node", () => {
   });
 
   it("keeps a key the installation's own verifier accepts", async () => {
-    /* The point of persisting the private half: this node can sign tokens that
-       every other node verifies against the public half in the registry. */
     const dir = await stateDir();
     const state = await loadOrCreateNodeState(dir, { id: "node-signer" });
     const { ctx } = ctxWith(new MemoryCasStore());
@@ -109,8 +103,6 @@ describe("every boot after the first", () => {
   });
 
   it("replaces the identity when the configuration pins a different id, and says so", async () => {
-    /* The id and the key that speaks for it are one thing: a node moved to a new
-       id must not keep answering with a key filed under the old one. */
     const dir = await stateDir();
     const first = await loadOrCreateNodeState(dir, { id: "node-old" });
     const said: string[] = [];
@@ -128,9 +120,6 @@ describe("every boot after the first", () => {
 
 describe("a state file that no longer says who this node is", () => {
   it("refuses to boot on unparseable contents rather than generating a new identity", async () => {
-    /* Silently regenerating would leave the registry holding the old public key
-       while the node signs with a new one — every token rejected, and nothing on
-       the node explaining why. Deleting the file is the operator's call. */
     const dir = await stateDir();
     await write(dir, "{ not json");
 
@@ -186,9 +175,6 @@ describe("a state file that no longer says who this node is", () => {
 
 describe("where the state lives when nothing configures it", () => {
   it("resolves an absolute path outside whatever directory the node was started in", async () => {
-    /* A node is launched from wherever the operator happened to be standing —
-       inside a checkout, more often than not — and an identity written there
-       would be a different identity on the next boot. */
     const resolved = resolveDefaultStateDir({ XDG_STATE_HOME: "relative/state" });
 
     expect(resolved.startsWith("/")).toBe(true);

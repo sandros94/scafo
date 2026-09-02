@@ -1,14 +1,5 @@
-/*
- * Internal: what `scafo env retire|unretire|selector|delete` does, and the two
- * ways it can reach the installation.
- *
- * Through a NODE (`--node`) is the ordinary one: the node is already running,
- * already holds the coordinator lease or knows who does, and the operator needs
- * nothing but their own key. Through the BUCKET is the fallback for the
- * installation that has no node to ask — the same shape `scafo trust` and
- * `scafo varset` are written in, because a registry is often edited before or
- * after there is a node to edit it through.
- */
+/* Environment administration through a node, with bucket fallback when no node
+   is available. */
 
 import { ScafoError } from "../core/error.ts";
 import { describeSelector } from "../core/placement/selector.ts";

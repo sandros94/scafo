@@ -1,10 +1,7 @@
 import { ScafoError } from "../../core/error.ts";
 import type { CasHeaders, CasStore, StoredObject } from "../../core/types/store.ts";
 
-/**
- * In-process {@link CasStore} with the same conditional-write semantics as the
- * S3 driver. Intended for tests and local development — nothing is persisted.
- */
+/** In-process `CasStore` matching S3 conditional-write semantics; not persistent. */
 /** An object as it was written, before a reader asked for it as text. */
 interface StoredBytes {
   body: string | Uint8Array;
@@ -12,10 +9,7 @@ interface StoredBytes {
 }
 
 export class MemoryCasStore implements CasStore {
-  /* Bodies are held EXACTLY as they were written, text or bytes, because a real
-     bucket does: `get` is what applies the text decode, mirroring the S3 driver's
-     own `Response.text()`. Keeping bytes as a string here instead would make this
-     store the one place a Parquet flush silently stopped being one. */
+  /* Preserve bytes exactly, including binary observations. */
   readonly #objects = new Map<string, StoredBytes>();
   #sequence = 0;
 
@@ -33,10 +27,7 @@ export class MemoryCasStore implements CasStore {
     });
   }
 
-  /**
-   * The object exactly as it was written, which is what a bucket holds and what a
-   * reader of a NON-TEXT encoding needs. Null when the key does not exist.
-   */
+  /** Original bytes, or null when absent. */
   getBytes(key: string): Promise<Uint8Array | null> {
     const found = this.#objects.get(key);
     if (found === undefined) return Promise.resolve(null);

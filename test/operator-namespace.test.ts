@@ -1,20 +1,4 @@
-/*
- * WHERE AN OPERATOR KEY LIVES, which used to be "among the machines" and is now
- * a namespace of its own.
- *
- * An operator record was once a NodeRecord under `_scafo/nodes/<id>.json`
- * carrying a fake address as its discriminator. That made one id space do two
- * jobs: a node and an operator could collide, every listing of the machines had
- * to know what an operator looked like, and the refusal that kept the two apart
- * named the colliding node's INTERNAL ADDRESS — an enumeration oracle any
- * operator-tier caller could drive through `POST /v1/operators`.
- *
- * The split is the structural fix: `_scafo/operators/<id>.json` holds operator
- * records, `_scafo/nodes/<id>.json` holds machines, and neither surface reads
- * the other's keyspace. What survives is ONE ID = ONE IDENTITY, enforced from
- * both sides — and enforced without saying anything about the record that is in
- * the way beyond the fact that it is there.
- */
+/* Operator keys have their own keyspace but share the node identity namespace. */
 
 import { generateJWK, type JWK_OKP_Public } from "unjwt/jwk";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -63,9 +47,6 @@ describe("where the two kinds of record live", () => {
     const stored = await readJson<OperatorRecord>(clock.ctx, operatorKey(OPERATOR_ID));
     expect(stored?.value).toMatchObject({ v: 1, id: OPERATOR_ID, role: "admin" });
 
-    /* The whole point of the split: nothing of an operator is written into the
-       machines' keyspace, so nothing that lists machines has to know what an
-       operator looks like. */
     expect(await readJson(clock.ctx, nodeKey(OPERATOR_ID))).toBeNull();
     expect(await clock.ctx.store.list(nodesPrefix())).toEqual([]);
   });
@@ -75,9 +56,6 @@ describe("where the two kinds of record live", () => {
 
     const stored = await readJson<Record<string, unknown>>(clock.ctx, operatorKey(OPERATOR_ID));
 
-    /* The fake `{internal: "operator", apiPort: 0}` sentinel is gone rather than
-       merely unread: a record shaped like a machine is what made an operator
-       show up in the fleet listing as a node that never answers. */
     expect(stored?.value.addresses).toBeUndefined();
   });
 
@@ -123,13 +101,6 @@ describe("one id is one identity, from both sides", () => {
     );
 
     expect(error.detail).toContain(NODE_ID);
-    /*
-     * THE REFUSAL SAYS THE ID IS TAKEN AND NOTHING MORE. It used to name the
-     * node's internal address, which handed any operator-tier caller a probe:
-     * post an id, read back where a machine of this installation answers. What
-     * is left is existence — which the caller has to be told, or it cannot
-     * choose another id — and no fact about the machine at all.
-     */
     expect(error.detail).not.toContain(NODE_ADDRESS);
     expect(JSON.stringify(error.toProblem())).not.toContain(NODE_ADDRESS);
   });
@@ -148,8 +119,6 @@ describe("one id is one identity, from both sides", () => {
       "reference-held",
     );
 
-    /* Bucket-plane — the caller holds the bucket's own credentials and is root
-       here — so the wording is free. It is kept symmetrical anyway. */
     expect(error.detail).toContain(OPERATOR_ID);
     expect(await getOperator(clock.ctx, OPERATOR_ID)).not.toBeNull();
   });
@@ -167,7 +136,6 @@ describe("one id is one identity, from both sides", () => {
     const error = await rejectsWith(() => revokeOperator(clock.ctx, NODE_ID), "not-found");
 
     expect(error.detail).not.toContain(NODE_ADDRESS);
-    /* Still a machine of the fleet: a revocation cannot reach across. */
     await expect(getNode(clock.ctx, NODE_ID)).resolves.toMatchObject({ id: NODE_ID });
   });
 });
@@ -187,9 +155,6 @@ describe("what the token verifier resolves a key out of", () => {
       headers: { authorization: `Bearer ${await signNodeToken(keys.privateKey, OPERATOR_ID)}` },
     });
 
-    /* A machine and an operator are the SAME kind of caller here, and were
-       before the split — the verifier resolves a public key out of whichever
-       namespace holds one. */
     expect(response.status).toBe(200);
   });
 
@@ -225,8 +190,6 @@ describe("what the token verifier resolves a key out of", () => {
       headers: { authorization: `Bearer ${await signNodeToken(keys.privateKey, NODE_ID)}` },
     });
 
-    /* Authenticated, then asked WHO it is: a node daemon that has been taken
-       over must not be able to write its installation a new operator. */
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
   });
@@ -255,8 +218,6 @@ describe("the record a fleet trusts", () => {
     await expect(getOperator(clock.ctx, OPERATOR_ID)).resolves.toMatchObject({ role: "admin" });
   });
 });
-
-/* ---------------------------------------------------------------- fixtures */
 
 function publicHalf(key?: JWK_OKP_Public<"EdDSA">): { kty: "OKP"; crv: "Ed25519"; x: string } {
   return { kty: "OKP", crv: "Ed25519", x: key?.x ?? "AAAA" };

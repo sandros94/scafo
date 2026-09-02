@@ -383,7 +383,7 @@ describe("mapConcurrent", () => {
     const error = await rejectsWith(
       async () =>
         mapConcurrent([0, 1, 2, 3], 4, async (item) => {
-          /* Settles LAST and wins, because a sequential loop would have stopped
+          /* Settles last and wins, because a sequential loop would have stopped
              here and never reached the one that settled first. */
           if (item === 0) {
             await delay(5);

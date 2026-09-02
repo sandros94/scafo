@@ -54,20 +54,13 @@ import type { StorageService } from "./storage.ts";
 /** Everything the HTTP layer serves from; assembled once while the node boots. */
 export interface DaemonContext {
   config: DaemonConfig;
-  /**
-   * Id this node answers as and is registered under. It comes from the node's
-   * persistent state rather than from the configuration, which only pins it.
-   */
+  /** Persistent node identity; configuration may only pin it. */
   nodeId: string;
   registry: RegistryContext;
   supervisor: Supervisor;
   /** Build of the daemon, reported by `GET /.well-known/scafo/health`. */
   version: string;
-  /**
-   * Private half of this node's identity, when it holds one: what signs the node
-   * tokens its calls to other nodes carry. Its public half is what the registry
-   * files under {@link DaemonContext.nodeId}.
-   */
+  /** Node private key used for peer tokens; its public half is in the registry. */
   signingKey?: NodeSigningKey;
   /** Opens the environments' sealed varsets; without it they cannot be served. */
   varsetKey?: CryptoKey;
@@ -80,25 +73,9 @@ export interface DaemonContext {
   coordinator?: Coordinator;
   /** How this node calls its peers; defaults to the global `fetch`. */
   fetchFn?: typeof fetch;
-  /**
-   * Where this node reports what it did, when it reports at all.
-   *
-   * ABSENT IS THE OFF STATE, and it is off that this is optional FOR: every
-   * emission site is written `daemon.observability?.emit({ ... })`, and optional
-   * chaining short-circuits the argument too — so a node that is not observing
-   * never builds a single event object. A seam is only ever attached here while
-   * `observability.enabled` says so.
-   */
+  /** Optional observability seam. Its absence avoids event-object allocation. */
   observability?: Observability;
-  /**
-   * Where the requests this node's INGRESS served are counted, when an operator
-   * named the access log it writes them to.
-   *
-   * ABSENT IS THE OFF STATE, exactly as above, and it is the ordinary one: the
-   * adapter is built only when `observability.ingressAccessLog` names a file.
-   * The routing is fed to it after every reconcile pass, because the routing is
-   * what says which environment a host in that log belongs to.
-   */
+  /** Optional ingress counters, updated with routing after reconciliation. */
   ingressCounters?: IngressCounters;
   /**
    * Where the node publishes what it serves. Without one the processes still
@@ -109,11 +86,7 @@ export interface DaemonContext {
   deploys?: DeployService;
   /** Stages request bodies outside memory; without it this node refuses deploys. */
   artifactStager?: ArtifactStager;
-  /**
-   * Guards and keeps the `/v1/storage` surface, where a colocated process
-   * persists its TLS material through this node. Without it that surface is not
-   * served at all.
-   */
+  /** Optional token-protected local TLS storage surface. */
   storage?: StorageService;
 }
 
@@ -132,16 +105,7 @@ export interface CoordinatorView {
   fence: number;
   /** True when the node answering is the one coordinating. */
   self: boolean;
-  /**
-   * Environments the last assignment pass could decide nothing for, each naming
-   * the constraint that went unsatisfied. Absent when there were none.
-   *
-   * Only ever reported by the node that RAN the pass — the one saying `self` —
-   * because it is that node's account of what it just did, not a fact in the
-   * registry. This is where an environment whose selector no live node satisfies
-   * becomes visible: nothing else changes, precisely because the pass refuses to
-   * take a serving environment down over an unsatisfiable constraint.
-   */
+  /** Unplaced environments from this coordinator's last pass; absent otherwise. */
   unplaced?: AssignmentFailure[];
 }
 
@@ -151,32 +115,14 @@ export interface DaemonState {
   node: NodeRecord | null;
   /** Holder of the coordinator lease, whoever it is; null when nobody holds one. */
   lease: CoordinatorLease | null;
-  /**
-   * The lease read as an election: null while nobody coordinates, which includes
-   * a lease left behind by a node that is gone and whose TTL has run out.
-   * {@link DaemonState.lease} reports that record as it stands; this reports what
-   * it still means.
-   */
+  /** Effective coordinator election result; expired lease records produce null. */
   coordinator: CoordinatorView | null;
   processes: ProcessStatus[];
-  /**
-   * Which nodes serve each environment this node has read a decision for, and
-   * whether this node is one of them. Empty on a node that runs no reconcile
-   * loop. A missing environment is pending, not assigned everywhere: production
-   * daemons deliberately start nothing until placement is explicit.
-   */
+  /** Placement views. Missing placement is pending, never implicit assignment. */
   placements: PlacementView[];
   /** Last pass of the reconcile loop; absent on a node that runs no loop. */
   reconcile?: ReconcileStatus;
-  /**
-   * Present, and always `true`, when this document was FILTERED to the projects
-   * the caller reaches — set for any operator-tier caller, including one scoped
-   * to every project and therefore shown everything.
-   *
-   * Absent for the two callers the whole document belongs to: a machine of the
-   * fleet, and an admin. See `scopedState`, which is where both the filtering
-   * and the reason for that exact rule live.
-   */
+  /** `true` when operator scope filtered this document, even if scope grants all projects. */
   scoped?: true;
 }
 
@@ -197,10 +143,7 @@ export interface EnvironmentResult {
  * node, operator or workload token.
  */
 export function createNodeApp(daemon: DaemonContext): H3 {
-  /* One verifier of each kind for the whole app, never one per request: the node
-     verifier caches the public keys it reads from the registry and remembers the
-     id of every token already spent — single-use tokens only stay single-use
-     while that record is shared — and the OIDC one caches each issuer's key set. */
+  /* Reuse verifiers: node replay detection and OIDC key caches are app-wide. */
   const nodeVerifier = createNodeVerifier(daemon.registry);
   const authenticated = requireNodeToken(nodeVerifier);
   const verifiers: DeployVerifiers = {
@@ -209,32 +152,19 @@ export function createNodeApp(daemon: DaemonContext): H3 {
   };
 
   const app = new H3({
-    /* The problem renderer decides what is worth logging, so the framework's own
-       console output would only duplicate it. */
+    /* Problem rendering owns error logging. */
     silent: true,
     onError: renderProblem,
   });
 
-  /*
-   * Unauthenticated on purpose: an ingress or an init system has to be able to
-   * poll it without holding a key.
-   *
-   * TODO: a node on its way out records `drainingAt` in its registry record,
-   * which is what takes it out of placement, but says nothing here. An external
-   * load balancer polling this route still sends it traffic until the process is
-   * gone; reporting the state would let one drain connections first.
-   */
+  /* Public health endpoint for ingress and process supervision. */
   app.get("/.well-known/scafo/health", (): DaemonHealth => ({
     ok: true,
     version: daemon.version,
     node: daemon.nodeId,
   }));
 
-  /*
-   * Unauthenticated on purpose: this is what an ingress asks before it issues a
-   * certificate for a host, and it holds no key of ours. It answers nothing but
-   * yes or no, and only about hosts that are already public knowledge.
-   */
+  /* Public certificate-issuance check: answers only whether a public host is served. */
   app.get("/v1/ingress/ask", async (event): Promise<Response> => {
     const domain = event.url.searchParams.get("domain") ?? "";
     if (await servesHost(daemon, domain)) return new Response(null, { status: 200 });
@@ -244,26 +174,8 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     });
   });
 
-  /*
-   * What a pulled ingress reads its whole routing from — Traefik's `http`
-   * provider polls exactly this, every couple of seconds.
-   *
-   * Unauthenticated, on the same reading as the ask endpoint above: what it
-   * discloses is which hosts this node serves and on which loopback ports, both
-   * of which are already public — the hosts by being resolvable, the ports by
-   * being reachable only from the machine the ingress runs on. It holds no key
-   * and grants nothing. The stance is also forced: Traefik's http provider can
-   * be given static headers and nothing else, so any credential here would be a
-   * fixed secret sitting in the ingress's own configuration file, which buys no
-   * more than leaving it off. A node that needs the API closed closes it at the
-   * listener, where `node.listen` already puts it on loopback by default.
-   *
-   * 404 rather than an empty document when this node drives no pulled ingress:
-   * an empty document is a legitimate answer meaning "this node serves
-   * nothing", and an ingress polling the wrong node must be able to tell the
-   * two apart. Traefik keeps its last configuration when a poll fails, so the
-   * mistake costs the operator a log line rather than an outage.
-   */
+  /* Public pulled-ingress configuration. Return 404 when this node is not its
+     source; `{}` is the valid configuration that withdraws routes. */
   app.get("/v1/ingress/traefik", (): unknown => {
     const ingress = daemon.ingress;
     if (ingress === undefined || !isPullingIngress(ingress)) {
@@ -276,20 +188,8 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     return ingress.snapshot();
   });
 
-  /*
-   * WHAT THIS NODE BELIEVES, NARROWED TO WHAT THE CALLER MAY KNOW. Almost every
-   * section here names projects — placements, processes,
-   * the environments the last pass could not place — so on a multi-tenant fleet
-   * the unfiltered document is the tenant list, handed to anyone holding any
-   * trusted key. `scopedState` is where that is decided, beside the refusal an
-   * operator meets when it NAMES another tenant's project, because the two are
-   * halves of one boundary and splitting them across files is how they drift.
-   *
-   * The caller is resolved once and cached on the event, so this costs the same
-   * single record read a scoped route already makes. A node-signed PEER resolves
-   * to no operator record and is handed the document untouched — the deploy-await
-   * hop polls exactly this route for the process it is waiting on.
-   */
+  /* Operator tokens receive project-scoped state; peer and admin tokens receive
+     the whole document. */
   app.get(
     "/v1/state",
     async (event): Promise<DaemonState> => {
@@ -303,8 +203,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
         lease: lease?.value ?? null,
         coordinator: coordinatorView(daemon, lease?.value ?? null),
         processes: daemon.supervisor.list(),
-        /* From the reads the reconcile pass already made, rather than a second
-           trip to the bucket for state this node has just been told. */
+        /* Reuse reconciliation's placement snapshot. */
         placements: reconcile?.placements ?? [],
         ...(reconcile === undefined ? {} : { reconcile }),
       };
@@ -316,13 +215,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     { middleware: [authenticated] },
   );
 
-  /*
-   * Retiring is a plain CAS update on one record, so ANY node carries it out
-   * itself: unlike a deletion there is nothing here that two nodes doing it at
-   * once could corrupt, and no lease to wait for or forward to. The environment
-   * stops being served on every node's next pass, which is the same machinery a
-   * reassignment goes through.
-   */
+  /* Retirement is one CAS update, so it does not require coordinator authority. */
   app.post(
     "/v1/environments/:project/:env/retire",
     async (event): Promise<EnvironmentResult> => ({
@@ -331,8 +224,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     { middleware: [authenticated] },
   );
 
-  /* The way back, for as long as the grace runs: a retirement is a decision an
-     operator must be able to take back with one call rather than with a restore. */
+  /* Retirement remains reversible during its grace period. */
   app.post(
     "/v1/environments/:project/:env/unretire",
     async (event): Promise<EnvironmentResult> => ({
@@ -344,15 +236,8 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     { middleware: [authenticated] },
   );
 
-  /*
-   * Which nodes an environment may run on, set or cleared. A plain CAS update on
-   * one record, so ANY node carries it out itself, exactly as retirement does.
-   *
-   * It states an intent and nothing more: the coordinator decides which of the
-   * matching nodes actually get it, on its next assignment pass. A selector no
-   * live node satisfies is therefore accepted here and reported there — refusing
-   * it would mean an operator could not label a node they are about to add.
-   */
+  /* Selectors are CAS-updated intent. Unsatisfied selectors remain valid and
+     are reported by assignment rather than rejected here. */
   app.post(
     "/v1/environments/:project/:env/selector",
     async (event): Promise<EnvironmentResult> => {
@@ -365,21 +250,12 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     { middleware: [authenticated] },
   );
 
-  /*
-   * Deleting is lease-gated, so only the coordinator can carry it out — but any
-   * node accepts the request and forwards it there, because which node holds the
-   * lease is this installation's business rather than the operator's.
-   *
-   * `?force=1` skips both the ephemeral and the retirement-grace requirement;
-   * without it a long-lived environment is refused with the route that applies.
-   */
+  /* Deletion is coordinator-gated and transparently forwarded. `force=1` skips
+     ephemeral and retirement-grace checks. */
   app.delete(
     "/v1/environments/:project/:env",
     async (event): Promise<Response | EnvironmentDeleted> => {
-      /* Before the hop, never after it: the request that reaches the
-         coordinator is signed by THIS node rather than by the operator, so a
-         scope checked at the far end would be a scope checked against a
-         machine. The node the operator addressed is the only one that can. */
+      /* Check operator scope before forwarding under a node token. */
       await scopedTarget(daemon, event);
       return deleteEnvironmentRequest(daemon, event);
     },
@@ -389,8 +265,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
   app.post("/v1/projects/:project/deploys", async (event): Promise<Response> => {
     const project = event.context.params?.project ?? "";
     assertSlug(project);
-    /* Project is in the path: both token forms and operator scope are decided
-       before metadata or a single body chunk is read. */
+    /* Authenticate project access before reading deployment metadata or body. */
     const caller = await verifyCaller(verifiers, event, project);
     const meta = readDeployMetadata(event, project);
     if (caller.kind === "workload") meta.oidc = caller.identity.actor;
@@ -428,13 +303,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     const id = event.context.params?.id ?? "";
     const status = daemon.deploys?.get(id) ?? null;
 
-    /*
-     * A workload token is only ever checked against a project, and the only
-     * project an id names is the one of the deploy it belongs to. An id this
-     * node has never seen therefore has nothing to authenticate against, and is
-     * answered as an authentication failure rather than as a miss — which id
-     * exists is not something an unauthenticated caller gets to find out.
-     */
+    /* Unknown ids have no project to authenticate, so do not disclose existence. */
     await verifyCaller(verifiers, event, status?.project ?? null);
     if (status === null) {
       throw new ScafoError("not-found", "No such deploy", {
@@ -444,35 +313,15 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     return status;
   });
 
-  /*
-   * THE KEYS THIS FLEET TRUSTS, administered by the operators it already trusts.
-   * The only routes of the API a node's own token cannot reach: a node daemon
-   * that has been taken over must not be able to write its installation a new
-   * operator, so these ask WHO the verified id is as well as that it signed.
-   */
+  /* Trusted-key administration requires an operator token, never a node token. */
   const operatorGuard = requireOperatorToken(nodeVerifier, daemon.registry);
   registerOperatorRoutes(app, daemon, operatorGuard);
 
-  /*
-   * THE PROJECTS OF THIS FLEET, behind the same guard and for the same reason
-   * one step over: stopping a tenant is an act of the installation, so a machine
-   * of it cannot take one, and neither can the tenant.
-   */
+  /* Project administration uses the same operator-only boundary. */
   registerProjectRoutes(app, daemon, operatorGuard);
 
-  /*
-   * TLS STORAGE, AND IT MUST NEVER BE REACHABLE THROUGH A PUBLIC OR
-   * INGRESS-EXPOSED SURFACE. These routes carry PRIVATE KEYS in both directions
-   * — an ingress's certificates, the account key it issues them with, and the
-   * locks that serialize issuance — guarded by one shared token rather than by
-   * the keys the rest of the API is verified against. They are for a caller on
-   * this machine or inside the installation's own tunnel and for nobody else: no
-   * ingress may proxy a public host to them, and no listener serving them may
-   * reach past loopback or that tunnel.
-   *
-   * A node holding no storage token serves nothing here at all, rather than
-   * refusing each request in turn.
-   */
+  /* TLS storage carries private keys: serve it only when configured, and never
+     expose it through a public ingress. */
   if (daemon.storage !== undefined) registerStorageRoutes(app, daemon, daemon.storage);
 
   return app;
@@ -483,12 +332,7 @@ export function deployLocation(id: string): string {
   return `/v1/deploys/${id}`;
 }
 
-/**
- * The lease as an election. `self` takes the coordinator loop's own word for it
- * rather than comparing ids alone: the loop holds the ETag that fences its
- * writes, and a node whose renewal was refused has already stopped coordinating
- * while the record it was refused over still names it.
- */
+/** Interprets the lease as an election; `self` requires the loop's current fence. */
 function coordinatorView(
   daemon: DaemonContext,
   lease: CoordinatorLease | null,
@@ -497,8 +341,7 @@ function coordinatorView(
 
   const status = daemon.coordinator?.status();
   const self = status?.holding === true && lease.node === daemon.nodeId;
-  /* Only from the node that made them, and only while there are any: a settled
-     installation says nothing here rather than saying "nothing went wrong". */
+  /* Only the current coordinator can report its non-empty assignment failures. */
   const assignment = self ? (status?.lastAssignment ?? undefined) : undefined;
   const unplaced = assignment?.unplaced ?? [];
 
@@ -514,52 +357,16 @@ function coordinatorView(
   };
 }
 
-/**
- * Whether this installation answers for `host`: a label under one of its
- * platform domains, or a custom domain some environment has claimed and is still
- * being served under.
- *
- * The platform domains are checked first, so the common case costs no bucket
- * read. A host that is not a host at all is simply not served, rather than an
- * error — the caller is an ingress asking about whatever arrived on the wire.
- *
- * A claim is followed by ONE more read, of the environment holding it, and the
- * reason is what this endpoint is for: the answer decides whether a certificate
- * is issued. A retired environment is being decommissioned and its routes are
- * already gone, so a certificate minted for it now would be a fresh public
- * record of a name that answers nothing — with a lifetime outlasting the
- * environment itself. An environment that is gone entirely reads the same way,
- * which also covers the claim a half-finished deletion left behind.
- *
- * A BLOCKED PROJECT IS REFUSED ON BOTH ROUTES IN, and for the same reason one
- * step up: it answers nothing anywhere in the fleet, so a certificate for one of
- * its names would outlive the block. The check is made as soon as the host has
- * been resolved to a PROJECT — before the running processes are consulted,
- * because a pass may not have stopped them yet.
- */
+/** Returns whether a host is currently certificate-eligible. Retired, missing,
+ * and blocked project environments are refused. */
 async function servesHost(daemon: DaemonContext, host: string): Promise<boolean> {
   if (!isHost(host)) return false;
 
-  /*
-   * THE BARE APEX OF A PLATFORM DOMAIN IS THE FLEET'S API, and the wildcard
-   * certificate does not cover it — `*.<domain>` is one label and never the
-   * domain itself — so this ask is the only way it is ever issued one. Approved
-   * without a bucket read: the name is this node's own configuration, and what
-   * answers there is the daemon rather than anything that could be missing.
-   *
-   * REFUSED WHILE `api.public` IS OFF, which is what it was before the apex
-   * served anything: no route points there, so a certificate for it would name
-   * something that answers nothing.
-   */
+  /* Wildcard certificates exclude the bare platform apex, which serves the API
+     only while explicitly public. */
   if (daemon.config.api.public && daemon.config.platformDomains.includes(host)) return true;
 
-  /*
-   * A platform-domain host is approved only when the name resolves to a
-   * deployed, unretired environment. A parseable label alone is NOT enough — the ask gates
-   * CERTIFICATE ISSUANCE, and approving every well-formed name would let
-   * anyone mint issuance attempts for junk labels until the CA's rate limit
-   * starves the names that matter.
-   */
+  /* Require a deployed, unretired environment before certificate issuance. */
   for (const domain of daemon.config.platformDomains) {
     const suffix = `.${domain}`;
     if (!host.endsWith(suffix)) continue;
@@ -601,17 +408,7 @@ function target(event: H3Event): [project: string, env: string] {
   return [event.context.params?.project ?? "", event.context.params?.env ?? ""];
 }
 
-/**
- * The same, with the caller's PROJECT SCOPE checked against the `:project`
- * before anything is read or written.
- *
- * Every route whose path names a project goes through this rather than through
- * {@link target}, which is what makes the check hard to leave off one of them:
- * the pair a handler needs and the refusal it owes come from the same call. A
- * caller holding no node token — a workload, or nobody — has no operator record
- * to be scoped by and passes through; the routes that admit one authenticate it
- * against the project separately.
- */
+/** Returns the target after applying operator project scope before I/O. */
 async function scopedTarget(
   daemon: DaemonContext,
   event: H3Event,

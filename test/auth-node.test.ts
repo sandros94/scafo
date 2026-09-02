@@ -1,6 +1,6 @@
 /*
- * Every rejected node token fails identically, whatever was wrong with it, and
- * a deregistered node keeps verifying for at most the key-cache TTL.
+ * Every rejected node token fails identically, whatever was wrong with it, and a deregistered
+ * node keeps verifying for at most the key-cache TTL.
  */
 
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";

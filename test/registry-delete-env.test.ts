@@ -1,6 +1,6 @@
 /*
- * Deleting an environment because an operator said so: what it refuses, the
- * order it takes things apart in, and what a lease taken away mid-run leaves.
+ * Deleting an environment because an operator said so: what it refuses, the order it takes things
+ * apart in, and what a lease taken away mid-run leaves.
  */
 
 import { beforeEach, describe, expect, it } from "vitest";

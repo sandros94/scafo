@@ -1,10 +1,7 @@
 /*
- * The child-process supervisor against real OS processes: what a status says
- * while a process runs and once it is gone, which exits reach an `onExit`
- * listener, and when a supervised id becomes free again.
- *
- * Fixture processes are inline scripts run by the same node binary this suite
- * runs under, so nothing has to be installed for them to work.
+ * The child-process supervisor against real OS processes: what a status says while a process runs
+ * and once it is gone, which exits reach an `onExit` listener, and when a supervised id becomes
+ * free again.
  */
 
 import { mkdtemp, readFile, rm } from "node:fs/promises";

@@ -1,15 +1,4 @@
-/*
- * A stand-in for a CI provider's OIDC issuer, for the end-to-end suites.
- *
- * It is a container so that the node daemon reaches it the way it reaches the real
- * thing: over the network, by the URL the token names in `iss`, through its own
- * discovery document and key set. Nothing about the verification path is stubbed
- * — only the provider is.
- *
- * The keypair is generated in the test process. The container is given the
- * PUBLIC half alone, so the signing key never leaves the process that mints the
- * tokens, exactly as it never leaves a real provider.
- */
+/* Networked OIDC issuer fixture; the test process alone retains the signing key. */
 
 import type { JWK_RSA_Private, JWK_RSA_Public, JWKSet } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
@@ -106,9 +95,8 @@ export async function startStubIssuer(opts: StartStubIssuerOptions): Promise<Stu
 }
 
 /**
- * The issuer itself: the two documents an OIDC verifier asks for, and 404 for
- * everything else. `issuer` in the discovery document is built from the `Host`
- * header, so it matches whichever address the caller reached it by.
+ * The issuer serves discovery and JWKS; other paths are 404. `issuer` derives
+ * from `Host`, matching the address used by the caller.
  */
 const SERVER_JS = `import { createServer } from "node:http";
 

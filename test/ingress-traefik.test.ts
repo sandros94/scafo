@@ -1,16 +1,4 @@
-/*
- * The Traefik ingress driver, and the node API route that publishes what it renders.
- *
- * There is no stand-in for Traefik here and there could not be one: this driver
- * makes no call at all. What it does is render a document and hold it, so the
- * assertions are about the document — and about the one route Traefik reads it
- * from, which is exercised through the real app.
- *
- * The empty-routing case is the one to read first. Its expected value looks
- * wrong and is not; the driver's own comment explains what Traefik does with the
- * obvious rendering, and `test/integration/e2e-traefik.test.ts` proves it
- * against the container.
- */
+/* The Traefik ingress driver, and the node API route that publishes what it renders. */
 
 import type { H3 } from "h3";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -323,7 +311,7 @@ function daemonConfig(): DaemonConfig {
   };
 }
 
-/** Nothing here runs a process; the route under test never asks it anything. */
+/** No route under test starts a process. */
 function fakeSupervisor(): Supervisor {
   return {
     start: (spec) => Promise.reject(new Error(`unexpected start of "${spec.id}"`)),

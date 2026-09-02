@@ -1,9 +1,4 @@
-/*
- * The operator's own home: where it is, what it is made of, and who may read it.
- *
- * Every case runs against a temporary home of its own, named by SCAFO_HOME, so
- * nothing here touches the home of whoever is running the suite.
- */
+/* The operator's own home: where it is, what it is made of, and who may read it. */
 
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -113,8 +108,6 @@ describe("the key files a home keeps", () => {
     expect((await stat(join(home, KEYS_DIR))).mode & 0o777).toBe(0o700);
   });
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 async function scratch(): Promise<string> {
   const home = await mkdtemp(join(tmpdir(), "scafo-home-"));

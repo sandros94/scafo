@@ -1,13 +1,4 @@
-/*
- * The store driver against a real S3-compatible bucket: the conformance probe
- * must pass, and a thousand write-then-read round trips must never disagree.
- *
- * Skipped unless S3_ENDPOINT is set. Every run works under its own random
- * prefix, so concurrent runs against the same bucket cannot collide:
- *
- *   S3_ENDPOINT=http://127.0.0.1:9000 S3_ACCESS_KEY=... S3_SECRET_KEY=... \
- *   S3_BUCKET=scafo-test pnpm test
- */
+/* Store-driver conformance against a real S3-compatible endpoint. */
 
 import { S3Client } from "uns3";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";

@@ -1,29 +1,6 @@
 /*
- * Two nodes of one installation against real infrastructure: one SeaweedFS
- * bucket holding the registry, and two Caddy+daemon pairs that have never been
- * told about each other. Everything they agree on, they agree on through the
- * bucket.
- *
- * The topology mirrors two real VPSes. Each Caddy and its daemon SHARE a network
- * namespace, exactly as in the single-node suite, so a node's runtime processes
- * are reached by its own ingress over loopback. What is new here is that the two
- * PAIRS are separate containers with separate addresses on the docker bridge:
- * anything the nodes do to each other has to cross a network, which is the whole
- * point of running two of them.
- *
- * Skipped unless SCAFO_E2E=1, because it is minutes rather than seconds:
- *
- *   SCAFO_E2E=1 pnpm vitest run test/integration/e2e-multinode.test.ts
- *
- * Every assertion polls until a deadline, and any timeout dumps BOTH daemons'
- * container logs — with two nodes, the account of what went wrong is as often on
- * the other one.
- *
- * NOTE on `SCAFO_BIND_HOST`: runtime processes bind loopback by default, which
- * no peer on another host can reach. Cross-node cell traffic therefore needs
- * them bound wider, and because that exposes an unauthenticated peer listener it
- * only happens where the operator has classified the network — `SCAFO_TRANSPORT`
- * below is that statement.
+ * End-to-end two-node path. Caddy and daemon share a namespace locally; peer traffic needs
+ * explicit non-loopback transport.
  */
 
 import { spawn } from "node:child_process";
@@ -98,7 +75,7 @@ const PREVIEW = "preview";
  */
 const SOLO = "single";
 /**
- * Deployed under a node selector only ONE node satisfies, then let loose again.
+ * Deployed under a node selector only one node satisfies, then let loose again.
  *
  * Which node that is, is not rendezvous hashing's decision here but the
  * operator's: node-b boots carrying {@link FAST_LABEL} and node-a carries no
@@ -110,12 +87,7 @@ const TARGETED = "targeted";
 /** The label node-b boots with, and the one {@link TARGETED} selects on. */
 const FAST_LABEL = "tier=fast";
 
-/**
- * Deployed THROUGH the node that cannot run it, under the same selector.
- *
- * The point is deploy intake rather than placement: celld publishes the build
- * through one node even though another node is the only one allowed to run it.
- */
+/** Deployed through a node excluded from its placement selector. */
 const AWAITED = "awaited";
 
 /** Deployed to both nodes, retired out of service, then force-deleted. */
@@ -126,9 +98,6 @@ const SUNSET_DOMAIN = "sunset.example.test";
 const NODE_A = "node-a";
 const NODE_B = "node-b";
 
-/* See the single-node suite: a user-defined network would make published ports
-   answer from the wrong address, and the default bridge gives both what is
-   needed — the containers reach each other, and the host reaches the ports. */
 const BRIDGE_NETWORK = "bridge";
 
 const SETUP_TIMEOUT_MS = 420_000;
@@ -138,44 +107,26 @@ const DEADLINE_MS = 120_000;
 const BOOT_DEADLINE_MS = 60_000;
 const STORE_DEADLINE_MS = 120_000;
 const POLL_MS = 500;
-/**
- * Ceiling for a reassignment that follows a node DYING.
- *
- * Longer than the others on purpose, and the arithmetic is the design: a killed
- * node keeps its last heartbeat, and stays live for three heartbeat intervals
- * (90s) after it. Only then may the coordinator hand its environments to anyone
- * — counting a node out sooner would move work off nodes that are merely slow.
- * So this covers that window, the coordinator tick that follows it, and the
- * reconcile pass and process start after that.
- */
+/** Covers liveness expiry, reassignment, reconcile, and process start after a node dies. */
 const REASSIGN_DEADLINE_MS = 240_000;
 const REASSIGN_STEP_TIMEOUT_MS = 300_000;
-/**
- * Ceiling for a reassignment that follows a node being asked to STOP.
- *
- * The arithmetic is the whole claim draining makes: the node writes `drainingAt`
- * before it stops anything, so the coordinator counts it out on its next
- * assignment tick (a third of the 15s lease TTL) rather than after the 90s
- * liveness window. What is left is the shutdown itself, that tick, the
- * survivor's next reconcile pass (5s) and a process start. Generous for all of
- * that, and still comfortably inside the window a crash cannot beat.
- */
+/** Draining reassignment must finish before the liveness-expiry bound. */
 const GRACEFUL_DRAIN_BUDGET_MS = 60_000;
 
 /** The lease TTL the daemon runs with; failover is bounded by a few of these. */
 const LEASE_TTL_MS = 15_000;
 
-/** One node: its ingress, its daemon, and everything the host needs to reach both. */
+/** One node's ingress, daemon, and host-facing ports. */
 interface Node {
   id: string;
   caddy: StartedTestContainer;
   daemon: StartedTestContainer;
-  /** Address the OTHER containers reach this pair at. */
+  /** Address the other containers reach this pair at. */
   bridgeAddress: string;
   httpPort: number;
   adminPort: number;
   apiPort: number;
-  /** Everything the daemon container has written, kept for failure messages. */
+  /** Daemon output retained for failure context. */
   log: string[];
   /** False once this suite has deliberately stopped the daemon. */
   running: boolean;
@@ -202,8 +153,6 @@ const observed: Record<string, unknown> = {};
 
 describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   beforeAll(async () => {
-    /* Built first: the daemon containers run `dist/` off the bind-mounted
-       worktree, so a stale build would test the previous commit. */
     const built = await run("pnpm", ["build"], REPO_ROOT, env as Record<string, string>);
     if (built.code !== 0) throw new Error(`"pnpm build" failed:\n${built.output}`);
 
@@ -218,12 +167,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
     storeFromContainers = `http://${store.getIpAddress(BRIDGE_NETWORK)}:${String(STORE_PORT)}`;
     await createBucket(storeFromHost, BUCKET);
 
-    /* Started one after the other rather than together: the first node to
-       arrive bootstraps the registry, and a second one racing that bootstrap is
-       a different test than this one.
-
-       Only node-b is labelled, so the two are genuinely different KINDS of node
-       — which is what a heterogeneous fleet is, and what a selector is for. */
     nodes = [await startNode(NODE_A), await startNode(NODE_B, FAST_LABEL)];
 
     registry = {
@@ -250,7 +193,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
 
   afterAll(async () => {
     for (const node of nodes) {
-      /* Stopped before its Caddy: the daemon lives in Caddy's namespace. */
       await node.daemon.stop().catch(() => {});
       await node.caddy.stop().catch(() => {});
     }
@@ -275,24 +217,15 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         expect(JSON.parse(health.body)).toMatchObject({ ok: true, node: node.id });
       }
 
-      /* Two records, not one: the nodes share a bucket and nothing else, so a
-         second node overwriting the first's entry would be invisible until
-         something tried to reach it. */
       expect(await listNodes(registry)).toEqual(expect.arrayContaining([NODE_A, NODE_B]));
 
       for (const node of nodes) {
         const record = await readJson<NodeRecord>(registry, nodeKey(node.id));
-        /* What makes one node reachable from the other, and therefore what the
-           coordinator hop is addressed to. */
         expect(record?.value.addresses, node.id).toEqual({
           internal: node.bridgeAddress,
           apiPort: NODE_PORT,
         });
       }
-      /* What the operator said each node IS, written from its own configuration
-         on every registration. Only node-b was told anything, and a node told
-         nothing carries no labels rather than an empty set — which is what makes
-         it satisfy no selector at all. */
       const labelled = await readJson<NodeRecord>(registry, nodeKey(NODE_B));
       const unlabelled = await readJson<NodeRecord>(registry, nodeKey(NODE_A));
       expect(labelled?.value.labels).toEqual({ tier: "fast" });
@@ -320,11 +253,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       buildV1 = buildIdOf(result.output);
       observed.buildV1 = buildV1;
 
-      /*
-       * The deploy was accepted by node-a alone. Node-b learns what to serve
-       * from the registry and starts its own process for it, so both ingresses
-       * answer for the same host — which is what a second node is for.
-       */
       const servedAt: Record<string, number> = {};
       for (const node of nodes) {
         const at = Date.now();
@@ -339,8 +267,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   it(
     "counts up through one durable object however many nodes are asked",
     async () => {
-      /* Both processes have to be up and peered before the counter means
-         anything; the first answer from each node is what says they are. */
       for (const node of nodes) {
         await until(`${node.id} to answer /count`, DEADLINE_MS, async () => {
           const answer = await httpGet(node.httpPort, "/count", { host: envHost() });
@@ -348,12 +274,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         });
       }
 
-      /*
-       * The assertion this whole topology exists for. One cell owns the counter;
-       * a request that lands on the node that does not own it is routed to the
-       * one that does, over the peer listeners. Two independent counters — the
-       * failure this catches — would repeat numbers instead of climbing.
-       */
       const counts: Array<{ node: string; n: number }> = [];
       for (let round = 0; round < 3; round++) {
         for (const node of nodes) {
@@ -369,8 +289,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
           counts[i - 1].n,
         );
       }
-      /* Consecutive, in fact: nothing else is calling it, so a gap would mean a
-         request went somewhere this test cannot see. */
       expect(counts.at(-1)?.n).toBe((counts[0].n as number) + counts.length - 1);
     },
     STEP_TIMEOUT_MS,
@@ -391,8 +309,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
 
       const holders = nodes.filter((_, index) => states[index].coordinator?.self === true);
       expect(holders).toHaveLength(1);
-      /* Both nodes read the same lease, so they agree on who it names — the one
-         answering is simply the only one that says `self`. */
       const named = new Set(states.map((state) => state.coordinator?.node));
       expect(named.size).toBe(1);
       expect([...named][0]).toBe(holders[0].id);
@@ -408,29 +324,16 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   it(
     "deletes an ephemeral environment asked of the node that is NOT the coordinator",
     async () => {
-      /* Created from the host so it is ephemeral from the start: `ephemeral` is
-         part of an environment's identity and a deploy would have made a
-         long-lived one. The idle window is long, so nothing but this test's own
-         request ever deletes it. */
       await createEnvironment(registry, PROJECT, {
         name: PREVIEW,
         ephemeral: true,
       });
-      /*
-       * `--replicas all` because an ephemeral environment otherwise defaults to
-       * ONE node, and this step is about the proxied delete rather than about
-       * placement: the node the deletion is asked of has to be one that actually
-       * runs a process for it. It also puts the flag itself through the CLI
-       * against an environment that already exists.
-       */
       expectCleanExit(
         await runCli(deployArgs(await stageApp("v1"), PREVIEW, ["--replicas", "all"]), {}),
       );
 
       const coordinator = await coordinatorNode();
       const asked = nodes.find((node) => node.id !== coordinator.id) as Node;
-      /* A process for it must exist somewhere before the deletion is worth
-         anything: it is what the reap has to take away afterwards. */
       await untilServes(asked, previewHost(), "v1");
 
       const started = Date.now();
@@ -447,15 +350,10 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         body: answer.body,
       };
 
-      /* The node the operator asked does not hold the lease and cannot delete
-         anything; it forwarded the request and handed back what came out. */
       expectStatus(answer, 200);
       expect(JSON.parse(answer.body).deleted).toContain(environmentKey(PROJECT, PREVIEW));
-      /* Gone from the bucket, which is the only place it ever existed. */
       expect(await readJson(registry, environmentKey(PROJECT, PREVIEW))).toBeNull();
 
-      /* And the nodes converge on it: an environment that is gone from the
-         registry is one nothing should still be running a process for. */
       const reapedAt = Date.now();
       for (const node of nodes) {
         await until(`${node.id} to stop running ${PREVIEW}`, DEADLINE_MS, async () => {
@@ -474,20 +372,9 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   it(
     "runs a labelled environment only on the node carrying the label, then spreads it when the selector is lifted",
     async () => {
-      /*
-       * The multi-cloud story, at two nodes. node-b booted carrying
-       * `tier=fast`; node-a carries nothing. So which node runs this is the
-       * OPERATOR's decision here rather than rendezvous hashing's, and
-       * `--replicas all` means every MATCHING node rather than every node —
-       * the selector narrows the candidates before the replica count is read.
-       */
       const labelled = nodes.find((node) => node.id === NODE_B) as Node;
       const plain = nodes.find((node) => node.id === NODE_A) as Node;
 
-      /* Deployed through the labelled node, which is the shortest path to a
-         running build and no longer the constraint it once was: a deploy
-         now watches the node its placement named, wherever the upload landed.
-         The case below is about exactly that; this one is about the selector. */
       const deployedAt = Date.now();
       const result = await runCli(
         deployArgs(
@@ -500,8 +387,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       );
       expectCleanExit(result);
 
-      /* Both nodes read the same decision out of the same bucket, and it names
-         the labelled node alone. */
       await until(
         `both nodes to place ${TARGETED} on ${labelled.id} alone`,
         DEADLINE_MS,
@@ -513,14 +398,9 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       );
       const placedMs = Date.now() - deployedAt;
 
-      /* The labelled node's own ingress serves it. */
       const served = await untilServes(labelled, targetedHost(), "v1");
       expect(JSON.parse(served.body).version).toBe("v1");
 
-      /* And the unlabelled one runs no process for it — and still answers for
-         it: the host lands on its daemon, which forwards the held request to the
-         labelled node. A selector decides where a process may run, never which
-         door reaches it. */
       await until(`${plain.id} to run nothing for ${TARGETED}`, DEADLINE_MS, async () => {
         const state = await stateOf(plain);
         return state.processes.some(runsTargeted) ? null : state;
@@ -536,18 +416,11 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expect(JSON.parse(forwarded.body).version).toBe("v1");
       expect((await stateOf(plain)).processes.some(runsTargeted)).toBe(false);
 
-      /* The constraint is reported beside the decision, so an operator looking at
-         a one-node placement can see that one node is what was asked for. */
       const view = (await stateOf(plain)).placements.find(
         (entry) => entry.project === PROJECT && entry.env === TARGETED,
       );
       expect(view?.selector).toEqual({ tier: "fast" });
 
-      /*
-       * Lifting the constraint, asked of the node that is NOT running it: a
-       * selector change is a plain record update any node carries out, and it
-       * takes effect on the coordinator's next assignment pass rather than here.
-       */
       const clearedAt = Date.now();
       const cleared = await runCli(envArgs("selector", TARGETED, plain, ["--clear"]), {});
       expectCleanExit(cleared);
@@ -557,8 +430,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         const states = await Promise.all(nodes.map(async (node) => stateOf(node)));
         return states.every((state) => placedNodes(state, TARGETED)?.length === 2) ? states : null;
       });
-      /* And the node that was excluded starts serving it, which is the whole
-         claim: the constraint was what kept it off, and nothing else. */
       const spread = await untilServes(plain, targetedHost(), "v1");
       const spreadMs = Date.now() - clearedAt;
 
@@ -584,17 +455,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   it(
     "completes a deploy through a node that was never going to run it",
     async () => {
-      /*
-       * THE ASYMMETRY THIS IS FOR. Intake is independent of placement — any node
-       * accepts an upload — but placement is the coordinator's decision, taken
-       * after the deploy has landed. Deployment completion therefore means celld
-       * published the build and Scafo recorded it; it does not wait for the intake
-       * node to serve placement that belongs elsewhere.
-       *
-       * The selector is what makes the placement certain rather than a hash's
-       * decision: only node-b carries the label, so node-a can never be the one
-       * running this, and it is node-a the deploy is sent to.
-       */
       const plain = nodes.find((node) => node.id === NODE_A) as Node;
       const labelled = nodes.find((node) => node.id === NODE_B) as Node;
 
@@ -614,7 +474,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expect(result.output, daemonLogTail()).toContain("deployed");
       expect(deployedMs).toBeLessThan(90_000);
 
-      /* And the claim rests on the placement really being elsewhere. */
       await until(`${AWAITED} to be placed on ${labelled.id} alone`, DEADLINE_MS, async () => {
         const named = placedNodes(await stateOf(plain), AWAITED);
         return named?.length === 1 && named[0] === labelled.id ? named : null;
@@ -635,21 +494,12 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   it(
     "runs an environment scaled to one replica on exactly one node, and takes it off the other",
     async () => {
-      /* Deployed to every node first — a long-lived environment defaults to
-         "all" — so what follows is a scale DOWN of something already running,
-         which is the case that has to take a process away from a node. */
       expectCleanExit(await runCli(deployArgs(await stageApp("v1"), SOLO), {}));
       for (const node of nodes) await untilServes(node, soloHost(), "v1");
 
       const scaledAt = Date.now();
       await setReplicas(registry, PROJECT, SOLO, 1);
 
-      /*
-       * Which node keeps it is rendezvous hashing's decision and not this
-       * test's, so both branches are written for. What IS asserted is that the
-       * two nodes agree: one placement, naming one node, and that node is the
-       * only one with a process.
-       */
       const holder = await until(
         `exactly one node to be left running ${SOLO}`,
         DEADLINE_MS,
@@ -666,14 +516,9 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       );
       const unassigned = nodes.find((node) => node.id !== holder.id) as Node;
 
-      /* The node it was placed on serves it through its own ingress. */
       const served = await untilServes(holder, soloHost(), "v1");
       expect(JSON.parse(served.body).version).toBe("v1");
 
-      /* And the other one stops RUNNING it without stopping ANSWERING for it:
-         the host lands on its daemon, which forwards the held request to the
-         node the placement names. Scaling down decides where a process runs,
-         never which door reaches it. */
       await until(`${unassigned.id} to run nothing for ${SOLO}`, DEADLINE_MS, async () => {
         const state = await stateOf(unassigned);
         return state.processes.some(runsSolo) ? null : state;
@@ -705,24 +550,13 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   it(
     "moves a single-replica environment off a node that was asked to stop, FAST",
     async () => {
-      /*
-       * The counterpart to the kill test below, and the whole point of draining.
-       * A node that is KILLED keeps its last heartbeat and stays a placement
-       * candidate for the liveness window — 90s in which its environments are
-       * assigned to a process that is already gone. A node asked to stop writes
-       * `drainingAt` before it stops anything else, and the coordinator counts it
-       * out on its very next assignment pass instead.
-       *
-       * `docker stop` rather than `docker kill`: the difference IS the test.
-       */
       const leaving = soloHolder;
       const survivor = nodes.find((node) => node.id !== leaving.id) as Node;
 
       const stoppedAt = Date.now();
       const stopped = await run(
         "docker",
-        /* Ample grace, so a slow shutdown is never SIGKILLed halfway through the
-           drain write this test is about. */
+        /* Preserve enough grace for shutdown to write the draining state. */
         ["stop", "-t", "50", leaving.daemon.getId()],
         REPO_ROOT,
         { PATH: env.PATH ?? "" },
@@ -730,8 +564,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expect(stopped.code, stopped.output).toBe(0);
       leaving.running = false;
 
-      /* Measured from the moment the operator asked, which is what an operator
-         actually waits through: the shutdown itself is part of the window. */
       await until(
         `${survivor.id} to take ${SOLO} over and serve it`,
         REASSIGN_DEADLINE_MS,
@@ -746,21 +578,13 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       );
       const drainedMs = Date.now() - stoppedAt;
 
-      /* The bound that says draining did something: a crash CANNOT be noticed
-         before the liveness window has run out, so anything under it is time
-         the graceful path bought back. */
       expect(drainedMs).toBeLessThan(NODE_LIVENESS_WINDOW_MS);
-      /* And the useful bound: about one assignment tick, one reconcile pass and
-         one process start, rather than "somewhat better than a crash". */
       expect(drainedMs).toBeLessThan(GRACEFUL_DRAIN_BUDGET_MS);
 
-      /* The node said so itself, rather than being counted out. */
       const record = await readJson<NodeRecord>(registry, nodeKey(leaving.id));
       expect(record?.value.drainingAt, "the stopped node never recorded its drain").toBeDefined();
       expect(record?.value.heartbeatAt).toBeDefined();
 
-      /* Held by reference and filled in as the step goes on; the report is
-         printed from `observed` once every test has run. */
       const drain: Record<string, unknown> = {
         stopped: leaving.id,
         tookOver: survivor.id,
@@ -772,10 +596,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       };
       observed.gracefulDrain = drain;
 
-      /* Brought back for the tests that follow, which need two nodes again. The
-         boot rewrites the record wholesale, so the drain flag goes with it and
-         placement gives the node work once more — which is the other half of the
-         feature, and is asserted here rather than assumed. */
       const restartedAt = Date.now();
       const started = await run("docker", ["start", leaving.daemon.getId()], REPO_ROOT, {
         PATH: env.PATH ?? "",
@@ -796,9 +616,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expect(back.drainingAt).toBeUndefined();
       drain.restoredMs = Date.now() - restartedAt;
 
-      /* Rendezvous hashing is deterministic, so the fleet settles back to the
-         same decision it made before — and the tests after this one can go on
-         reading `soloHolder` and `soloProcess` as they did. */
       soloHolder = await until(`${SOLO} to settle on one node again`, DEADLINE_MS, async () => {
         const states = await Promise.all(nodes.map(async (node) => stateOf(node)));
         const running = nodes.filter((_, index) => states[index].processes.some(runsSolo));
@@ -818,19 +635,13 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
     async () => {
       expectCleanExit(await runCli(deployArgs(await stageApp("v1"), SUNSET), {}));
       for (const node of nodes) await untilServes(node, sunsetHost(), "v1");
-      /* A custom domain, so the deletion has a claim to release as well as a
-         record to remove. */
       await claimDomain(registry, SUNSET_DOMAIN, PROJECT, SUNSET);
 
-      /* Retirement is a plain record update, so it is asked of whichever node
-         the operator happens to have a URL for. */
       const retiredAt = Date.now();
       const retired = await runCli(envArgs("retire", SUNSET, nodes[0]), {});
       expectCleanExit(retired);
       expect(retired.output).toContain("retired");
 
-      /* It leaves by the same door a reassignment uses: no process and no route.
-         With no matching Caddy route, the host receives Caddy's empty response. */
       for (const node of nodes) {
         await until(`${node.id} to stop serving ${SUNSET}`, DEADLINE_MS, async () => {
           const state = await stateOf(node);
@@ -841,24 +652,15 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       }
       const stoppedMs = Date.now() - retiredAt;
 
-      /* And the coordinator takes the placement with it: an environment nothing
-         serves is one no decision should still name nodes for. */
       await until(`the placement of ${SUNSET} to be removed`, DEADLINE_MS, async () =>
         (await readJson(registry, placementKey(PROJECT, SUNSET))) === null ? true : null,
       );
 
-      /*
-       * Asked of the node that is NOT the coordinator, on purpose: the refusal
-       * and the forced deletion both have to survive the hop to whoever holds
-       * the lease — including the `force` in the query, which a forward that
-       * carried only the path would silently drop.
-       */
       const coordinator = await coordinatorNode();
       const asked = nodes.find((node) => node.id !== coordinator.id) as Node;
 
       const refused = await runCli(envArgs("delete", SUNSET, asked), {});
       expect(refused.code, refused.output).toBe(1);
-      /* The refusal has to name the way forward, not just the rule it enforced. */
       expect(refused.output).toContain("grace");
       expect(refused.output).toContain("force");
       expect(await readJson(registry, environmentKey(PROJECT, SUNSET))).not.toBeNull();
@@ -867,8 +669,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expectCleanExit(forced);
       expect(forced.output).toContain(environmentKey(PROJECT, SUNSET));
 
-      /* Gone from the bucket, which is the only place it ever existed — record,
-         placement and the claim that named it. */
       expect(await readJson(registry, environmentKey(PROJECT, SUNSET))).toBeNull();
       expect(await readJson(registry, placementKey(PROJECT, SUNSET))).toBeNull();
       expect(await readJson(registry, domainKey(SUNSET_DOMAIN))).toBeNull();
@@ -893,13 +693,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       const survivor = nodes.find((node) => node.id !== coordinator.id) as Node;
       const fenceBefore = (await stateOf(survivor)).coordinator?.fence ?? 0;
 
-      /*
-       * SIGKILL rather than a graceful stop, and the difference is the whole
-       * test: a node that is asked to stop gives the lease up on its way out,
-       * and the handover that follows proves nothing about a node that DIES.
-       * Killed outright, it releases nothing, so the survivor can only take over
-       * by outwaiting the lease — which is the guarantee being measured.
-       */
       const killedAt = Date.now();
       const killed = await run("docker", ["kill", coordinator.daemon.getId()], REPO_ROOT, {
         PATH: env.PATH ?? "",
@@ -907,8 +700,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expect(killed.code, killed.output).toBe(0);
       coordinator.running = false;
 
-      /* Bounded by the lease: the survivor cannot take it until the dead
-         holder's TTL has run out, and takes it on one of the ticks after that. */
       const state = await until(
         `${survivor.id} to take the coordinator lease over`,
         DEADLINE_MS,
@@ -922,8 +713,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       const failoverMs = Date.now() - killedAt;
 
       expect(state.coordinator?.node).toBe(survivor.id);
-      /* The fence only ever moves forward, and a takeover is what moves it: the
-         node that died can no longer act on the fence it held. */
       expect(state.coordinator?.fence).toBeGreaterThan(fenceBefore);
       observed.failover = {
         died: coordinator.id,
@@ -934,20 +723,9 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         ms: failoverMs,
         leaseTtlMs: LEASE_TTL_MS,
       };
-      /*
-       * Bounded at both ends, and the arithmetic is the design:
-       *
-       * The dead node renewed every TTL/3, so at the moment it was killed its
-       * lease had between TTL - TTL/3 and TTL left to run. A survivor that took
-       * over sooner than that would have overwritten a lease its holder still
-       * had time on — which is the one thing the fence exists to prevent. Taking
-       * much longer than a TTL plus a tick would mean nothing was watching.
-       */
       expect(failoverMs).toBeGreaterThanOrEqual(LEASE_TTL_MS - LEASE_TTL_MS / 3);
       expect(failoverMs).toBeLessThanOrEqual(3 * LEASE_TTL_MS);
 
-      /* Availability, which is the other half of what a second node is for: the
-         application never stopped being served while all this happened. */
       const answer = await untilServes(survivor, envHost(), "v1");
       expect(JSON.parse(answer.body).version).toBe("v1");
     },
@@ -958,21 +736,9 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
     "carries the single-replica environment through the death of whichever node held it",
     async () => {
       const survivor = nodes.find((node) => node.running) as Node;
-      /* Which node rendezvous hashing gave it to is not this suite's to choose,
-         so both outcomes are waited for by the same probe and told apart by one
-         fact at the end. */
       const killedHeldIt = soloHolder.id !== survivor.id;
       const startedAt = Date.now();
 
-      /*
-       * Nothing about a takeover is instant, and that is the design: a killed
-       * node keeps its last heartbeat and stays live for three heartbeat
-       * intervals, because counting a node out is what moves work away from it
-       * and a node that is merely slow must survive that. Once it does fall out,
-       * the survivor — the coordinator by then — decides again over the fleet it
-       * can actually see. When the survivor already held it, the same probe
-       * passes immediately and nothing moved at all.
-       */
       const settled = await until(
         `${survivor.id} to be the placed node for ${SOLO} and to be serving it`,
         REASSIGN_DEADLINE_MS,
@@ -993,13 +759,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expect(JSON.parse(settled.answer.body).version).toBe("v1");
       expect(process.id).toBe(soloProcess.id);
       expect(process.state).toBe("running");
-      /*
-       * The one fact the two branches disagree on, asserted as one. If the dead
-       * node held it, this process is a new one the survivor started after the
-       * reassignment. If the survivor held it all along, it is the SAME process
-       * it started before the kill — never stopped, never restarted, which is
-       * what "kept serving uninterrupted" has to mean.
-       */
       expect(restarted).toBe(killedHeldIt);
 
       observed.soloAfterKill = {
@@ -1018,8 +777,6 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
     REASSIGN_STEP_TIMEOUT_MS,
   );
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 /**
  * Starts one Caddy and the daemon that shares its network namespace.
@@ -1055,22 +812,11 @@ async function startNode(id: string, labels?: string): Promise<Node> {
       SCAFO_S3_SECRET_KEY: SECRET_KEY,
       SCAFO_S3_REGION: REGION,
       SCAFO_NODE_ID: id,
-      /* Both the daemon listener and the runtime processes bind every interface
-         here, and the peer listener authenticates nobody: on a private docker
-         network that is the trusted-network case, stated rather than assumed. */
       SCAFO_TRANSPORT: "none",
-      /* Distinct per node, and container-local: the working directory is this
-         repository bind-mounted at /work, and an identity must never be written
-         into a checkout — let alone one two nodes would then share. */
       SCAFO_STATE_DIR: `/var/lib/scafo-${id}`,
       SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
       SCAFO_CADDY_ADMIN: `http://127.0.0.1:${String(CADDY_ADMIN_PORT)}`,
-      /* The address on the bridge, which is what the other node dials — both for
-         the node API and, with the internal port, for cell traffic. */
       SCAFO_ADVERTISE: `${bridgeAddress}:${String(NODE_PORT)}`,
-      /* THE multi-node setting. Runtime processes bind loopback by default,
-         which nothing on the other node can reach; the advertised address above
-         is only useful if something is listening on it. */
       SCAFO_BIND_HOST: "0.0.0.0",
       CELLD_ESBUILD: "/usr/local/bin/esbuild",
       ...(labels === undefined ? {} : { SCAFO_NODE_LABELS: labels }),
@@ -1300,7 +1046,7 @@ function describeFailure(error: unknown): string {
   return error instanceof Error ? error.message : JSON.stringify(error);
 }
 
-/** The tail of BOTH daemons' output: with two nodes, either may hold the reason. */
+/** The tail of both daemons' output: with two nodes, either may hold the reason. */
 function daemonLogTail(limit: number = 8000): string {
   return nodes
     .map((node) => {

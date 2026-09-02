@@ -1,12 +1,7 @@
 /*
- * Labels and the selectors that match them: the charset both ends share, the
- * `k=v,k2=v2` text a flag carries them in, and the AND-matching that decides
- * which nodes an environment may run on at all.
- *
- * Everything here is pure, so no store, clock or daemon is involved. How the
- * eligible set then composes with the replica count is asserted in
- * `rendezvous.test.ts`, where the properties it has to keep are already written
- * down.
+ * Labels and the selectors that match them: the charset both ends share, the `k=v,k2=v2` text a
+ * flag carries them in, and the and-matching that decides which nodes an environment may run on
+ * at all.
  */
 
 import { describe, expect, it } from "vitest";
@@ -188,7 +183,7 @@ describe("matching a selector against a node's labels", () => {
 
   it("does NOT match when an entry is absent", () => {
     expect(matchesSelector(labels, { gpu: "a100" })).toBe(false);
-    /* AND, not OR: one satisfied entry beside one absent one is a miss. */
+    /* and, not OR: one satisfied entry beside one absent one is a miss. */
     expect(matchesSelector(labels, { tier: "fast", gpu: "a100" })).toBe(false);
   });
 
@@ -280,8 +275,6 @@ describe("assertSelector", () => {
     );
   });
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 function node(id: string, labels?: Record<string, string>): NodeRecord {
   return {

@@ -1,33 +1,5 @@
-/*
- * What a node saw itself do: the seam every observable moment of the daemon is
- * reported through, and the bounded ring those reports land in.
- *
- * EMISSION AND A RING, AND NOTHING HERE REACHES THE BUCKET. What this settles is
- * the SHAPE of an event and the cost of a node that is not observing; the
- * flusher beside it (`src/daemon/observe-flush.ts`) is what takes the events off
- * the ring and writes them.
- *
- * TWO READERS, AND ONLY ONE OF THEM CONSUMES. {@link Observability.snapshot} is a
- * WINDOW on the recent past: it reads without consuming, so any number of
- * callers see the same events. {@link Observability.drain} is the FLUSHER'S, and
- * there may only be one — it takes everything since the last drain and moves a
- * high-water mark past it, so a second drainer would silently halve what each of
- * them wrote. What it reports as dropped is what fell out of the ring BEFORE it
- * could be read, which is the flusher's own loss rather than the ring's total.
- *
- * THE SEAM IS THREADED, NEVER IMPORTED AS A GLOBAL. It reaches the code that
- * emits through {@link DaemonContext} and the executor's deps, exactly as the
- * clock does, so a test states what a pass observed rather
- * than reaching into module state to find out.
- *
- * AN ABSENT SEAM COSTS NOTHING, AND THAT IS THE POINT OF IT BEING OPTIONAL.
- * Every emission site is written `observe?.emit({ ... })`: optional chaining
- * short-circuits the whole call, so the event object is NEVER BUILT on a node
- * that is not observing. A site that needs a local first guards with
- * `if (observe !== undefined)` for the same reason. A disabled instance exists
- * too — it drops what it is handed — but the daemon is only ever given one while
- * observability is on, so the allocations behind the guard are never paid for.
- */
+/* Bounded in-memory observation seam. Snapshot is non-consuming; drain has one
+   flusher owner. Persistence is handled separately. */
 
 import type { OperatorRole } from "../core/types/registry.ts";
 
@@ -126,45 +98,21 @@ export interface ObservedSnapshot {
 export interface ObservedDrain {
   /** Events emitted since the last drain, oldest first. */
   events: ObservedEvent[];
-  /**
-   * Events that fell out of the ring since the last drain, before this one could
-   * read them. Nonzero means the drainer is slower than the node emits, or the
-   * ring is too small for the interval between drains — never that the events
-   * were uninteresting.
-   */
+  /** Events overwritten since the prior drain. */
   dropped: number;
 }
 
 /** Where the daemon reports what it did, and what the flusher reads it back from. */
 export interface Observability {
-  /**
-   * Whether anything is recorded at all. False makes every call below a no-op —
-   * but see the file header: the daemon is handed no seam at all when it is off,
-   * so a disabled instance is what a caller who always builds one gets.
-   */
+  /** False makes all operations no-ops. */
   readonly enabled: boolean;
   /** Records one event, stamped with this seam's clock. */
   emit(event: ObservedEventInput): void;
-  /**
-   * This seam's clock in epoch milliseconds. What a caller measures a span
-   * against, so a `durationMs` and the `at` beside it can never come from two
-   * different clocks.
-   */
+  /** Epoch clock shared by event timestamps and local duration measurement. */
   nowMs(): number;
-  /**
-   * The ring as it stands, oldest first. Reading does NOT consume: the ring is
-   * a window on the recent past, and two readers see the same events.
-   */
+  /** Non-consuming oldest-first ring snapshot. */
   snapshot(): ObservedSnapshot;
-  /**
-   * Everything emitted since the last drain, CONSUMED — a second call answers
-   * only what arrived in between.
-   *
-   * FOR THE FLUSHER AND FOR NOTHING ELSE. It moves a high-water mark rather than
-   * clearing the ring, so {@link Observability.snapshot} still shows the window
-   * it always did; but two drainers would each take half the events and neither
-   * would know it, which is why the daemon only ever builds one.
-   */
+  /** Consuming read for the sole flusher; concurrent drainers would split events. */
   drain(): ObservedDrain;
 }
 
@@ -177,14 +125,7 @@ export interface ObservabilityOptions {
   ringSize?: number;
 }
 
-/**
- * Builds the seam the daemon reports through.
- *
- * The ring is BOUNDED and never grows: a node nobody is reading events off must
- * not accumulate them, so the oldest are dropped and counted rather than kept.
- * {@link ObservedSnapshot.dropped} is what says a reader is too slow or the ring
- * too small — it is never silent about what it forgot.
- */
+/** Builds a bounded observation ring that drops and counts oldest events. */
 export function createObservability(opts: ObservabilityOptions): Observability {
   const now = opts.now ?? ((): Date => new Date());
   const nowMs = (): number => now().getTime();
@@ -201,10 +142,9 @@ export function createObservability(opts: ObservabilityOptions): Observability {
 
   const size = Math.max(1, opts.ringSize ?? OBSERVED_RING_SIZE);
   const ring: (ObservedEvent | undefined)[] = Array.from({ length: size });
-  /* Every event ever emitted, which is what says how many fell out of the ring. */
+  /* Total writes reveal snapshots overwritten by the ring. */
   let written = 0;
-  /* How far the drainer has read. Counted in the same units as `written`, so the
-     arithmetic below never has to look at the ring to know what it missed. */
+  /* Drain high-water mark uses the same sequence as writes. */
   let drained = 0;
 
   /** Events from `position` up to what has been written, oldest first. */
@@ -232,8 +172,7 @@ export function createObservability(opts: ObservabilityOptions): Observability {
     },
 
     drain(): ObservedDrain {
-      /* The oldest position the ring can still answer for. Anything the drainer
-         had not reached by the time it was overwritten is gone, and counted. */
+      /* Events before `oldest` were overwritten before this drain. */
       const oldest = Math.max(0, written - size);
       const dropped = Math.max(0, oldest - drained);
       const events = read(Math.max(drained, oldest));

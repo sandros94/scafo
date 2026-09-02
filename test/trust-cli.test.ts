@@ -1,9 +1,6 @@
 /*
- * `scafo trust`: the operator's half of the workload-deploy path — which CI
- * issuers a project admits, which of their subjects, and what an edit does to
- * the grants already in the policy.
- *
- * The registry is a memory store throughout, so nothing here needs a bucket.
+ * `scafo trust`: the operator's half of the workload-deploy path — which CI issuers a project
+ * admits, which of their subjects, and what an edit does to the grants already in the policy.
  */
 
 import { describe, expect, it } from "vitest";
@@ -48,8 +45,6 @@ describe("trusting an issuer", () => {
   });
 
   it("admits exactly the subjects it was given, as the verifier reads them", async () => {
-    /* The whole point of the command: what is written here is what
-       `matchTrust` — and therefore a deploy — answers with. */
     const registry = emptyRegistry();
     const policy = await setTrustIssuer(registry, {
       project: PROJECT,
@@ -88,7 +83,6 @@ describe("trusting an issuer", () => {
     const policy = await trust(registry, GITLAB, [TAGS]);
 
     expect(policy.issuers.map((issuer) => issuer.iss)).toEqual([GITHUB, GITLAB]);
-    /* Setting up a second CI provider must never quietly revoke the first. */
     expect(policy.issuers[0].subjects).toEqual([BRANCHES]);
   });
 
@@ -144,9 +138,6 @@ describe("trusting an issuer", () => {
 
 describe("reading the subjects off the flag", () => {
   it("takes them comma-separated, and repeated for good measure", () => {
-    /* The argument parser keeps only the last value of a flag given twice, so a
-       repeated --subject that dropped all but one would trust one branch of the
-       several an operator listed. */
     expect(parseSubjects(`${BRANCHES}, ${TAGS}`)).toEqual([BRANCHES, TAGS]);
     expect(parseSubjects([`${BRANCHES},${TAGS}`, MAIN])).toEqual([BRANCHES, TAGS, MAIN]);
     expect(parseSubjects(undefined)).toEqual([]);
@@ -162,8 +153,6 @@ describe("no longer trusting an issuer", () => {
 
     const policy = await removeTrustIssuer(registry, PROJECT, GITHUB);
 
-    /* Kept rather than deleted: an empty policy and a missing one deny the same
-       tokens, and one that is there says somebody has looked at it. */
     expect(policy).toEqual({ v: 1, issuers: [] });
     expect(await readTrustPolicy(registry, PROJECT)).toEqual({ v: 1, issuers: [] });
   });
@@ -185,8 +174,6 @@ describe("no longer trusting an issuer", () => {
   });
 
   it("refuses an issuer the project never trusted, naming the ones it does", async () => {
-    /* A mistyped URL that reported success would leave the issuer it was meant
-       to revoke trusted, which is the failure this command exists to prevent. */
     const registry = emptyRegistry();
     await trust(registry, GITHUB, [BRANCHES]);
 
@@ -213,8 +200,6 @@ describe("no longer trusting an issuer", () => {
 
 describe("what `scafo trust show` puts on the terminal", () => {
   it("prints every subject verbatim, globs and all", async () => {
-    /* An operator checking a policy is checking the pattern: a `*` rendered as
-       anything else would hide exactly the mistake they are looking for. */
     const registry = emptyRegistry();
     await trust(registry, GITHUB, [BRANCHES, TAGS]);
 
@@ -246,8 +231,6 @@ describe("what `scafo trust show` puts on the terminal", () => {
     expect(printed).toContain("no workload token can deploy");
   });
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 function emptyRegistry(): RegistryContext {
   return ctxWith(new MemoryCasStore()).ctx;

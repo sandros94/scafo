@@ -1,15 +1,5 @@
-/*
- * Internal: the tunnel a node runs on — the settings that describe it, and the
- * X25519 keypair that speaks for it.
- *
- * scafo NEVER computes a WireGuard key. The private half comes from a file the
- * operator put in the state directory, or from `wg genkey` run once as a child
- * process; the public half comes from a file beside it, or from `wg pubkey`.
- * With neither the file nor the binary, this refuses and says which command to
- * run. The setup is assisted, not magical: an amateur curve25519 implementation
- * in the middle of an operator's private network is a worse outcome than an
- * error message.
- */
+/* WireGuard node settings and keys. Reuses state files or the `wg` binary; never
+   implements key generation itself. */
 
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";

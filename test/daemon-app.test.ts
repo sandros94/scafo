@@ -1,10 +1,6 @@
 /*
- * The node API: which routes need a token, what a rejected caller is told about
- * why, and how the state route reports the node it runs on.
- *
- * The app is invoked through its fetch interface, so nothing binds a socket. The
- * registry is a memory store and the supervisor is a stand-in with a fixed
- * inventory — no process is started here.
+ * The node API: which routes need a token, what a rejected caller is told about why, and how the
+ * state route reports the node it runs on.
  */
 
 import { H3, HTTPError } from "h3";
@@ -104,12 +100,9 @@ describe("GET /v1/state", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
       node: record,
-      /* Nobody has taken the lease yet, and that is not an error to report. */
       lease: null,
-      /* The same fact read as an election: no lease, so nobody coordinates. */
       coordinator: null,
       processes: PROCESSES,
-      /* No reconcile loop has read any explicit coordinator decision. */
       placements: [],
     });
   });
@@ -133,7 +126,6 @@ describe("GET /v1/state", () => {
     expect(response.status).toBe(401);
     expect(response.headers.get("content-type")).toBe("application/problem+json");
     expect(problem).toEqual(AUTH_INVALID_PROBLEM);
-    /* A detail would separate "no header" from "bad signature" for an attacker. */
     expect(Object.hasOwn(problem, "detail")).toBe(false);
   });
 
@@ -176,11 +168,6 @@ describe("GET /v1/state", () => {
   });
 
   it("bounds single use to the app that spent the token", async () => {
-    /*
-     * The verifier, and with it the record of spent tokens, belongs to one app
-     * instance: a second daemon has never seen this token and accepts it. Single
-     * use is a per-node guarantee, not a registry-wide one.
-     */
     const token = await mint();
     const other = createNodeApp({
       config: daemonConfig(),
@@ -210,12 +197,6 @@ describe("POST /v1/environments/:project/:env/retire", () => {
     });
     const body = (await response.json()) as EnvironmentResult;
 
-    /*
-     * No coordinator runs on this app and none is needed. Retiring is a single
-     * conditional update on one record — nothing two nodes doing it at once
-     * could corrupt — so any node carries it out itself rather than forwarding
-     * it to whoever holds the lease.
-     */
     expect(response.status).toBe(200);
     expect(body.environment.retiredAt).toBe(new Date(clock.nowMs()).toISOString());
     expect(await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).toEqual(body.environment);
@@ -256,7 +237,6 @@ describe("POST /v1/environments/:project/:env/retire", () => {
       expect(response.status, suffix).toBe(401);
       await expect(response.json(), suffix).resolves.toEqual(AUTH_INVALID_PROBLEM);
     }
-    /* And nothing happened to the environment on the way to being refused. */
     expect((await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).retiredAt).toBeUndefined();
   });
 });
@@ -267,9 +247,6 @@ describe("POST /v1/environments/:project/:env/selector", () => {
 
     const body = await selectorBody({ selector: { tier: "fast" } });
 
-    /* A plain conditional update on one record, like retirement: no coordinator
-       runs on this app and none is needed. What it states is an intent — which
-       nodes actually get it stays the coordinator's to decide. */
     expect(body.environment.nodeSelector).toEqual({ tier: "fast" });
     expect(await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).toEqual(body.environment);
   });
@@ -284,8 +261,6 @@ describe("POST /v1/environments/:project/:env/selector", () => {
   });
 
   it("accepts a selector no node satisfies, because that is the coordinator's to report", async () => {
-    /* Refusing it here would mean an operator could not label an environment for
-       a node they are about to add. */
     await deployable();
 
     const body = await selectorBody({ selector: { gpu: "a100" } });
@@ -296,8 +271,6 @@ describe("POST /v1/environments/:project/:env/selector", () => {
   it("refuses a body that says nothing about the selector", async () => {
     await deployable();
 
-    /* Clearing a constraint is far too consequential to be what an omission
-       defaults to, so a missing field is neither "set" nor "clear". */
     const response = await selectorRequest({});
 
     expect(response.status).toBe(400);
@@ -343,12 +316,6 @@ describe("GET /v1/state, on the node that is coordinating", () => {
       await coordinating.request("/v1/state", { headers: await bearer() })
     ).json()) as DaemonState;
 
-    /*
-     * The one place an unsatisfiable selector becomes visible. Nothing else
-     * changed — that is the point of the rule — so without this the operator
-     * would see an environment placed on nodes it no longer matches and have
-     * nothing anywhere telling them why.
-     */
     expect(state.coordinator?.self).toBe(true);
     expect(state.coordinator?.unplaced).toEqual([UNPLACED]);
     state.coordinator!.unplaced![0]!.detail = "mutated";
@@ -362,16 +329,11 @@ describe("GET /v1/state, on the node that is coordinating", () => {
       await coordinating.request("/v1/state", { headers: await bearer() })
     ).json()) as DaemonState;
 
-    /* A settled installation reports no failures rather than reporting that
-       there were none. */
     expect(state.coordinator?.self).toBe(true);
     expect("unplaced" in (state.coordinator as object)).toBe(false);
   });
 
   it("never reports another node's account of its own pass", async () => {
-    /* The lease is a registry fact and the failures are not: they are this
-       node's account of work it did, and a node that is not coordinating did
-       none of it. */
     await acquireLease(clock.ctx, "node-elsewhere");
     const foreign = createNodeApp({
       config: daemonConfig(),
@@ -414,13 +376,6 @@ describe("GET /v1/state, on the node that is coordinating", () => {
 
 describe("GET /v1/ingress/ask", () => {
   it("answers for a platform label only when something real is behind it", async () => {
-    /*
-     * The ask gates CERTIFICATE ISSUANCE, so a well-formed label is not
-     * enough: approving every parseable name would let anyone mint issuance
-     * attempts for junk until the CA's rate limit starves the names that
-     * matter. An environment that exists approves; the same label with
-     * nothing behind it refuses.
-     */
     await deployable();
     await createBuild(clock.ctx, PROJECT, { id: BUILD });
     await recordDeployment(clock.ctx, PROJECT, ENVIRONMENT, BUILD);
@@ -430,9 +385,6 @@ describe("GET /v1/ingress/ask", () => {
     const directBuild = await app.request(`/v1/ingress/ask?domain=${PROJECT}--${BUILD}.apps.test`);
     expect(directBuild.status).toBe(404);
 
-    /* An environment that EXISTS but never had a deployment is the same refusal as
-       one that never existed: nothing serves it, and a
-       name that answers nothing has no business holding a certificate. */
     await createEnvironment(clock.ctx, PROJECT, { name: "undeployed" });
     const undeployed = await app.request(`/v1/ingress/ask?domain=${PROJECT}--undeployed.apps.test`);
     expect(undeployed.status).toBe(404);
@@ -457,12 +409,6 @@ describe("GET /v1/ingress/ask", () => {
 
     const response = await app.request(`/v1/ingress/ask?domain=${CUSTOM_DOMAIN}`);
 
-    /*
-     * What this endpoint answers decides whether a certificate is issued. A
-     * retired environment is being decommissioned and its routes are already
-     * gone, so a certificate minted for it now would be a fresh public record of
-     * a name that answers nothing — outliving the environment itself.
-     */
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:not-found" });
   });
@@ -483,8 +429,6 @@ describe("GET /v1/ingress/ask", () => {
     await claimDomain(clock.ctx, CUSTOM_DOMAIN, PROJECT, ENVIRONMENT);
     await deleteKey(clock.ctx, environmentKey(PROJECT, ENVIRONMENT));
 
-    /* The half-finished deletion state, and the same answer for the same
-       reason: there is nothing left to serve the certificate for. */
     const response = await app.request(`/v1/ingress/ask?domain=${CUSTOM_DOMAIN}`);
 
     expect(response.status).toBe(404);
@@ -499,21 +443,12 @@ describe("GET /v1/ingress/ask", () => {
   });
 
   it("APPROVES the bare platform apex, which the wildcard does not cover", async () => {
-    /*
-     * `*.apps.test` is one label and never `apps.test` itself, so the apex has
-     * no certificate unless this ask mints it one — and it is the fleet's API
-     * while `api.public` is on, so it needs one. No environment, no claim and
-     * no process is behind it: what answers there is this very daemon.
-     */
     const response = await app.request(`/v1/ingress/ask?domain=${PLATFORM_DOMAIN}`);
 
     expect(response.status).toBe(200);
   });
 
   it("REFUSES it while the API is not published there", async () => {
-    /* Nothing routes the apex then, so a certificate for it would be a public
-       record of a name that answers nothing — exactly what this endpoint
-       refuses for a retired environment's claim. */
     const closed = appWith({ api: { public: false, jsonBytes: 65_536 } });
 
     const response = await closed.request(`/v1/ingress/ask?domain=${PLATFORM_DOMAIN}`);
@@ -523,9 +458,6 @@ describe("GET /v1/ingress/ask", () => {
   });
 
   it("still refuses a label under the apex that names nothing, either way", async () => {
-    /* The approval is the apex and nothing else: a junk label under it is as
-       unmintable as it ever was, which is what keeps a crawler from spending a
-       CA's rate limit on names that do not exist. */
     for (const app_ of [app, appWith({ api: { public: false, jsonBytes: 65_536 } })]) {
       const response = await app_.request(`/v1/ingress/ask?domain=nothing.${PLATFORM_DOMAIN}`);
 
@@ -553,8 +485,6 @@ describe("the fleet's API at the platform apex", () => {
   });
 
   it("keeps every route's own token gating, opening nothing", async () => {
-    /* The apex is a way IN, never a way AROUND: an authenticated route asked at
-       the apex is the same refusal it is anywhere else. */
     const state = await app.request("/v1/state", { headers: { host: PLATFORM_DOMAIN } });
 
     expect(state.status).toBe(401);
@@ -603,8 +533,6 @@ describe("renderProblem", () => {
   });
 
   it("keeps the status and the reason of a failure raised by the HTTP layer itself", async () => {
-    /* How a request for a path with no route arrives: a status and a message,
-       no cause of its own, and nothing flagging it as unexpected. */
     const response = renderProblem(
       new HTTPError({ status: 404, message: "Cannot find any route matching [GET] /v1/nope" }),
     );
@@ -633,7 +561,6 @@ describe("renderProblem", () => {
     const response = renderProblem(asHandlerThrew(secret));
 
     expect(response.status).toBe(500);
-    /* Nothing else: not the message, not a detail, not the address it leaked. */
     await expect(response.json()).resolves.toEqual({
       type: "urn:scafo:internal",
       title: "Internal Server Error",

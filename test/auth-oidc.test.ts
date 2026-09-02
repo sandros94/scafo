@@ -1,8 +1,4 @@
-/*
- * The deploy-intake scope matrix. Trust is authorization and says so
- * (`trust-mismatch`); everything about the token itself is one `auth-invalid`.
- * The issuer is never contacted before the project's policy has named it.
- */
+/* Trust failures are `trust-mismatch`; token failures are `auth-invalid`. */
 
 import type { JWK_RSA_Private, JWK_RSA_Public, JWKSet } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";

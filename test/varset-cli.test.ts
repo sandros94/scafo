@@ -1,10 +1,6 @@
 /*
- * `scafo varset`: reading a variable file, deciding what is secret, reading the
- * key that seals it, and the round trip through the registry that an
- * environment's variables make.
- *
- * The registry is a memory store and the key files are temporary, so nothing
- * here needs a bucket or touches the machine's own configuration.
+ * `scafo varset`: reading a variable file, deciding what is secret, reading the key that seals
+ * it, and the round trip through the registry that an environment's variables make.
  */
 
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";

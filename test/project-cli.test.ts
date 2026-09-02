@@ -1,18 +1,4 @@
-/*
- * `scafo project list|show|block|unblock|label`, over the wire an operator's
- * command really takes.
- *
- * The node route runs the REAL node app over an injected `fetch`, so what these
- * cases exercise is token, route, tier check and registry rather than a stand-in
- * for any of them — which matters more here than usual, because the thing under
- * test IS the authorization: a tier rule that held in the route and not on the
- * path the CLI takes would be no rule at all.
- *
- * There is no bucket path to compare against, unlike `scafo env`. That is the
- * design and `src/cli/_projects.ts` says why: bucket credentials are root, so a
- * bucket-side block would answer yes to everyone and quietly undo the one thing
- * the verb is for.
- */
+/* `scafo project` commands through the node API. */
 
 import { generateJWK } from "unjwt/jwk";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
@@ -159,7 +145,7 @@ describe("scafo project label", () => {
   });
 
   it("keeps a value that carries its own separators", async () => {
-    /* Split on the FIRST "=" alone: a value is free text as far as scafo is
+    /* Split on the first "=" alone: a value is free text as far as scafo is
        concerned, and a downstream billing id is exactly the kind of thing that
        carries one. */
     expect(readLabelArgs(["url=https://x.test/a=b"])).toEqual({ url: "https://x.test/a=b" });
@@ -168,7 +154,7 @@ describe("scafo project label", () => {
   it("refuses anything that is not a pair, before any call is made", async () => {
     for (const bad of ["justakey", "=novalue"]) {
       const error = await rejectsWith(() => Promise.resolve(readLabelArgs([bad])), "invalid-input");
-      /* Names the pair that was wrong AND the shape it should have had: an
+      /* Names the pair that was wrong and the shape it should have had: an
          operator who mistyped one label of five needs to know which. */
       expect(error.detail).toContain(bad);
       expect(error.detail).toContain("key=value");
@@ -206,7 +192,7 @@ describe("how one project prints", () => {
     expect(shown).toContain(`project "${MINE}"`);
     expect(shown).toContain("blocked by an admin of this fleet");
     expect(shown).toContain("tenant=acme");
-    /* The way back is printed WITH the bad news, because somebody reading this
+    /* The way back is printed with the bad news, because somebody reading this
        is usually about to ask how to undo it. */
     expect(shown).toContain(`scafo project unblock ${MINE}`);
   });
@@ -218,8 +204,6 @@ describe("how one project prints", () => {
     expect(shown).toContain("serving");
   });
 });
-
-/* ---------------------------------------------------------------- fixtures */
 
 function buildApp(): ReturnType<typeof createNodeApp> {
   return createNodeApp({

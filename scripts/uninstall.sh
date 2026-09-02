@@ -1,114 +1,34 @@
 #!/bin/sh
-#
-# scafo — the inverse of scripts/install.sh.
-#
-#   sh uninstall.sh              # stop it, remove it, KEEP this node's identity
-#   sh uninstall.sh --purge      # the identity, the certificates and the users too
-#   sh uninstall.sh --dry-run    # print what either of those would do, change nothing
-#
-# It takes the host apart in the order it was put together, backwards: the
-# ingress is stopped before the node — nothing must be routed to processes that
-# are about to stop — the node is then given the whole 40s its unit allows it to
-# drain in, and only once both are down are the units, the executables and the
-# configuration removed.
-#
-# WHAT IT KEEPS, AND WHY THAT IS THE DEFAULT
-#
-#   /var/lib/scafo is this node's IDENTITY: the Ed25519 pair its registry record
-#   names, the storage token the ingress presents to /v1/storage, and the
-#   WireGuard keys if it is on a tunnel. NOTHING CAN REISSUE THEM — a node that
-#   lost them comes back as a different node and leaves its old public key behind
-#   in the registry. So a plain run leaves the directory exactly where it is,
-#   says so at the end, and names the flag that removes it. Same for the
-#   ingress's certificates and its ACME account under /var/lib/caddy, which are
-#   rate-limited to reissue, and for whatever Caddy logged.
-#
-#   WHICH CADDY THIS WAS MATTERS TO WHAT THAT MEANS. install.sh installs the
-#   ingress as `caddy` whatever flavour it is — which is why nothing in this
-#   script has to branch on it — but it records the flavour in the manifest, and
-#   the report says it. With plain Caddy the certificates were in /var/lib/caddy
-#   and --purge takes them. With scafo-caddy they were never on this host at
-#   all: they are in the BUCKET, and no flag here reaches them, because other
-#   nodes are serving them right now. The copy of the storage token systemd made
-#   for the ingress needs no removal either — it lives in a tmpfs under
-#   /run/credentials and goes when the unit stops, which is the first thing
-#   below.
-#
-# WHAT IT NEVER TOUCHES: THE BUCKET
-#
-#   The registry belongs to the FLEET and not to this host, and an uninstall is
-#   in no position to edit it: it holds no coordinator lease, deletion in that
-#   registry is lease-gated for exactly that reason, and another node may be
-#   serving these very environments right now. A departed node needs no cleanup
-#   anyway — stopping the daemon makes it mark itself draining, which counts it
-#   out of placement on the coordinator's next pass, and a node that never got to
-#   say so is counted out once the liveness window runs out. Its record is inert
-#   either way. Removing a project, an environment or a build is `scafo env` and
-#   the reaper, deliberately, and never a script that is taking one host apart.
-#
-# WHAT IT CANNOT UNDO, and says so at the end rather than pretending otherwise:
-# the bin directory itself (it may have been created for this install, and it
-# holds everything else on the host too), a PATH line an operator added to their
-# own shell profile, the wireguard-tools their package manager installed, a
-# tunnel interface that is still up, and an /etc/systemd/system/caddy.service
-# that was SHADOWING a distribution's own Caddy unit — removing it hands that
-# host back its packaged Caddy, which is right, and is worth knowing.
-#
-# WHAT IT READS FROM THE ENVIRONMENT
-#
-#   SCAFO_INSTALL_BIN_DIR  where the executables were installed. The same name
-#                          install.sh reads, so a non-default install is undone
-#                          by repeating it. Also --bin-dir.
-#
-# HOW IT KNOWS WHAT TO REMOVE: /var/lib/scafo/install.manifest, written by
-# install.sh, which carries the two things that cannot be derived from anywhere
-# else — which directory the executables went into, and which of the two system
-# accounts that run CREATED rather than found. Without it (a host installed
-# before it existed, or a state directory already gone) everything below is
-# derived instead: the installer's own defaults, the ExecStart of the unit it
-# wrote, and finally whatever `scafo` is on PATH. The manifest makes it exact;
-# its absence makes it careful.
+# Remove units, binaries, and configuration after stopping ingress before the node.
+# A normal run preserves node state, ingress state, logs, and created accounts;
+# `--purge` removes them. Neither mode changes the bucket or its registry.
+# `SCAFO_INSTALL_BIN_DIR` or `--bin-dir` identifies a non-default binary directory.
+# The optional install manifest records exact paths and created accounts; safe
+# fallbacks support hosts without one.
 
 set -eu
 
-# ---------------------------------------------------------------------------
-# WHAT INSTALL.SH MADE.
-#
-# THIS LIST AND scripts/install.sh's CONSTANTS ARE ONE LIST IN TWO FILES AND
-# MUST CHANGE TOGETHER. A unit, a directory, a system user or a binary added
-# there and not here is one this script silently leaves on every host it is run
-# on — and the failure is invisible, because an uninstall that removes four of
-# five things still ends by reporting success. The manifest carries the parts
-# that cannot be derived; these constants are what a host without one is held
-# to, so both have to stay true.
+# Keep these defaults aligned with `scripts/install.sh`; they are used without a manifest.
 
 STATE_DIR='/var/lib/scafo'
 CONFIG_DIR='/etc/scafo'
 INGRESS_LOG_DIR='/var/log/scafo-ingress'
-# Caddy's own state: `StateDirectory=caddy` in the unit creates it, useradd names
-# it as the home of the account, and XDG_DATA_HOME/XDG_CONFIG_HOME point the
-# certificates and the ACME account at it.
+# Matches the ingress unit's `StateDirectory` and XDG paths.
 CADDY_STATE_DIR='/var/lib/caddy'
 SERVICE_USER='scafo'
 CADDY_USER='caddy'
 
 UNIT_DIR='/etc/systemd/system'
 NODE_UNIT='scafo-node.service'
-# install.sh names the ingress unit after the account it runs as.
+# The ingress unit uses its service-account name.
 INGRESS_UNIT='caddy.service'
 
-# The four executables one scafo node is made of, in install.sh's order. `caddy`
-# is one name for two possible binaries — scafo-caddy by default, upstream Caddy
-# under SCAFO_INSTALL_CADDY=plain — and install.sh puts BOTH there under that one
-# name precisely so this list, the unit and everything below stay one thing. The
-# manifest's `caddy_flavor=` says which it was, and it is used for the report
-# only: the file to remove is the same either way.
+# Both ingress variants install as `caddy`; the manifest flavor is report-only.
 BINARIES='scafo celld caddy esbuild'
 
 MANIFEST_NAME='install.manifest'
 
-# Directories that are never a removal target whatever a manifest says, because
-# every one of them belongs to the host rather than to this install.
+# Never accept host-owned directories as removal targets.
 NEVER_REMOVE='/ /bin /boot /dev /etc /home /lib /opt /proc /root /run /sbin /srv
 /sys /tmp /usr /usr/bin /usr/local /usr/local/bin /usr/sbin /var /var/lib /var/log'
 
@@ -191,12 +111,7 @@ parse_args() {
   done
 }
 
-# ---------------------------------------------------------------------------
-# Privilege
-#
-# The same model install.sh uses, for the same reason: root, or PASSWORDLESS
-# sudo — the only kind worth testing for in a script meant to be readable from a
-# pipe, which has no terminal to prompt on — or neither.
+# Use only already available non-interactive privilege.
 
 resolve_privilege() {
   SUDO=''
@@ -215,22 +130,13 @@ as_root() {
   fi
 }
 
-# Where install.sh could fall back to ~/.local/bin and still install something
-# whole, this cannot: HALF AN UNINSTALL IS WORSE THAN NONE. A run that removed
-# the binaries and could not stop the units leaves a host whose systemd keeps
-# restarting an ExecStart that no longer exists, and reports a clean removal
-# while doing it. So the moment the survey found anything root-owned, an
-# unprivileged run stops here and names all of it. A user-local install — the one
-# install.sh makes in ~/.local/bin without root — has none of that, and is undone
-# by the same command without any privilege at all.
+# Refuse a real partial uninstall when root-owned targets were found.
 require_privilege() {
   [ -n "$ROOT_WORK" ] || return 0
   [ "$(id -u)" -ne 0 ] || return 0
   [ -z "$SUDO" ] || return 0
 
-  # A dry run removes nothing, so there is nothing to be unprivileged FOR. It is
-  # allowed through — reading a plan is exactly what an operator does before
-  # deciding to sudo — and told that the real run will need root.
+  # Dry runs are read-only and may inspect root-owned installs without privilege.
   if [ "$DRY_RUN" = 'yes' ]; then
     warn 'this install belongs to root; a real run needs "sudo sh uninstall.sh"'
     return 0
@@ -248,12 +154,7 @@ note_root_work() {
 "
 }
 
-# ---------------------------------------------------------------------------
-# What is on this host
-
-# The record install.sh leaves under the state directory. Every field is
-# optional: this reads what is there and derives the rest, so a host installed
-# before the manifest existed uninstalls exactly as one installed after it.
+# Manifest fields are optional; absent values fall back to safe defaults.
 read_manifest() {
   MANIFEST_BIN_DIR=''
   MANIFEST_BINARIES=''
@@ -271,8 +172,7 @@ read_manifest() {
     return 0
   }
 
-  # The `|| [ -n "$line" ]` is for a manifest whose last line lost its newline to
-  # an editor: without it that line is read and then dropped.
+  # Keep a final non-newline-terminated manifest line.
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       '#'* | '') ;;
@@ -283,8 +183,7 @@ read_manifest() {
       config_dir=*) MANIFEST_CONFIG_DIR="${line#config_dir=}" ;;
       ingress_log_dir=*) MANIFEST_INGRESS_LOG_DIR="${line#ingress_log_dir=}" ;;
       caddy_state_dir=*) MANIFEST_CADDY_STATE_DIR="${line#caddy_state_dir=}" ;;
-      # Report only — see BINARIES above. A host installed before this line
-      # existed leaves it empty, and the report simply says less.
+      # Flavor affects reporting only.
       caddy_flavor=*) MANIFEST_CADDY_FLAVOR="${line#caddy_flavor=}" ;;
       *) ;;
     esac
@@ -293,18 +192,14 @@ read_manifest() {
   MANIFEST_READ='yes'
   say "read ${manifest}"
 
-  # What the installer SAYS it made outranks what this script assumes it did, so
-  # that an edit to install.sh's constants is followed here without a second
-  # edit. No `state_dir=`: this file was found inside it, and a manifest naming
-  # a directory other than the one it is in is describing a different install.
+  # Adopt only removable manifest paths; the containing state directory is fixed.
   adopt "$MANIFEST_CONFIG_DIR" && CONFIG_DIR="$MANIFEST_CONFIG_DIR"
   adopt "$MANIFEST_INGRESS_LOG_DIR" && INGRESS_LOG_DIR="$MANIFEST_INGRESS_LOG_DIR"
   adopt "$MANIFEST_CADDY_STATE_DIR" && CADDY_STATE_DIR="$MANIFEST_CADDY_STATE_DIR"
   return 0
 }
 
-# Whether a path out of the manifest may replace a constant: present, and one
-# this script would be allowed to remove in the first place.
+# Accept only non-empty paths this script may remove.
 adopt() {
   [ -n "$1" ] || return 1
   safe_path "$1" || {
@@ -313,11 +208,7 @@ adopt() {
   }
 }
 
-# Four answers, best first. The manifest is exact; the unit's ExecStart is the
-# next best thing and is what a host installed before the manifest existed still
-# has written down; SCAFO_INSTALL_BIN_DIR repeats what the operator told the
-# installer; and `scafo` on PATH is the last resort. Failing all of it, the same
-# default install.sh would have picked for this user.
+# Resolve the binary directory from explicit input, manifest, unit, environment, PATH, or installer default.
 resolve_bin_dir() {
   if [ -n "$BIN_DIR_OPT" ]; then
     BIN_DIR="$BIN_DIR_OPT"
@@ -360,9 +251,7 @@ bin_dir_from_path() {
   [ -n "$PATH_BIN_DIR" ] || return 1
 }
 
-# Read-only. Everything this script will and will not remove is decided here,
-# BEFORE anything is stopped or deleted, so that an unprivileged run can be
-# refused while the host is still whole.
+# Survey targets before stopping or deleting anything.
 survey() {
   FOUND_UNITS=''
   FOUND_BINARIES=''
@@ -417,16 +306,8 @@ binaries_to_remove() {
   done
 }
 
-# Which system accounts --purge may delete, and the asymmetry is deliberate.
-#
-# With a manifest, exactly the ones THIS install created: an account it merely
-# found stays, because a "caddy" a distribution's package made owns a Caddy this
-# script knows nothing about. Without one, the same rule is enforced by evidence
-# instead — "scafo" is deleted only when its home is the state directory
-# install.sh gave it, which nothing else on a host does, and "caddy" is never
-# deleted at all, because there is no way to tell one apart from a packaged one
-# and leaving an unused account behind is the cheaper mistake. The final report
-# prints the command for it.
+# With a manifest, remove only accounts it recorded as created. Without one,
+# remove only the service account whose home matches the state directory.
 users_to_remove() {
   if [ "$MANIFEST_READ" = 'yes' ]; then
     for user in $MANIFEST_CREATED_USERS; do
@@ -456,20 +337,8 @@ have_systemd() {
   command -v systemctl >/dev/null 2>&1 || return 1
 }
 
-# ---------------------------------------------------------------------------
-# Taking it down
-
-# INGRESS FIRST, NODE SECOND — the reverse of the order install.sh writes them
-# in. Stopping Caddy first means nothing is routed to runtime processes that are
-# about to stop; stopping the node first would leave an ingress answering for
-# addresses that are draining out from under it.
-#
-# And the node is given its time. Its unit allows 40s between SIGTERM and
-# SIGKILL because the daemon marks itself draining, releases the coordinator
-# lease, stops reconciling, closes its listener and only THEN drains each
-# runtime process for 25s. `systemctl stop` waits for all of it, which is the
-# point: a node that gets to finish tells the fleet it is leaving, and one that
-# is killed has to be timed out over the liveness window instead.
+# Stop ingress before the node to avoid routing to draining runtimes. `systemctl stop`
+# waits for the node's configured drain time.
 stop_units() {
   have_systemd || return 0
 
@@ -487,8 +356,7 @@ stop_units() {
       run_step "disabled ${unit}" "disable ${unit}" systemctl disable "$unit" || true
     fi
 
-    # Clears a unit left in the failed state, so a host that keeps its systemd
-    # around does not carry the ghost of a service that no longer exists.
+    # Clear a failed-unit record before removing its unit file.
     if [ "$DRY_RUN" = 'no' ]; then
       as_root systemctl reset-failed "$unit" >/dev/null 2>&1 || true
     fi
@@ -501,15 +369,12 @@ remove_units() {
   for unit in $FOUND_UNITS; do
     note='systemd unit'
     if [ "$unit" = "$INGRESS_UNIT" ]; then
-      # Removing this file unshadows a distribution's own caddy.service, if the
-      # host has one. That is correct — it was never ours to keep hidden.
+      # Removing this override may restore a distribution-provided Caddy unit.
       note='systemd unit (a packaged caddy.service, if any, applies again)'
     fi
     remove_path "${UNIT_DIR}/${unit}" "$note" && removed_any='yes'
 
-    # What `systemctl enable` created. Removed explicitly because a host whose
-    # systemd is not running never got the `disable` above, and a dangling
-    # symlink into a unit file that is gone is a boot-time warning forever.
+    # Remove the enablement symlink even when systemd was not running.
     remove_quietly "${UNIT_DIR}/multi-user.target.wants/${unit}"
   done
 
@@ -526,20 +391,14 @@ remove_units() {
   fi
 }
 
-# The four executables, and only from the directory this install used. They are
-# removed by NAME — `caddy`, `celld` and `esbuild` are names an operator may also
-# have had there, and install.sh overwrote whatever it found, which is a thing
-# neither script can undo. The manifest is what makes this exact on hosts that
-# have one.
+# Remove only recorded executable names from the resolved installation directory.
 remove_binaries() {
   for name in $FOUND_BINARIES; do
     remove_path "${BIN_DIR}/${name}" "$(binary_note "$name")" || true
   done
 }
 
-# What the report calls one executable. Only `caddy` has anything to add: which
-# of the two Caddys it was is the one thing about this install that the file
-# name cannot say, and the manifest is the only place it is written down.
+# The manifest flavor adds the Caddy TLS-storage detail to the report.
 binary_note() {
   [ "$1" = 'caddy' ] || {
     printf 'executable\n'
@@ -552,9 +411,7 @@ binary_note() {
   esac
 }
 
-# The same question about /var/lib/caddy: with scafo-caddy there is nothing
-# irreplaceable in it, because the certificates and the ACME account were never
-# written there.
+# Plain Caddy stores certificates and its ACME account in this directory.
 caddy_state_note() {
   case "$MANIFEST_CADDY_FLAVOR" in
     scafo) printf 'scafo-caddy kept its certificates in the bucket, not here\n' ;;
@@ -564,20 +421,14 @@ caddy_state_note() {
 
 remove_config() {
   [ -d "$CONFIG_DIR" ] || return 0
-  # node.env holds the bucket credentials an operator wrote into it. It goes:
-  # they are the operator's to keep elsewhere, and they say nothing this host
-  # cannot be told again — unlike the state directory, which holds the one thing
-  # that cannot be reissued.
+  # Configuration includes operator-provided bucket credentials.
   remove_path "$CONFIG_DIR" 'node.env (bucket credentials) and caddy.json' || true
 }
 
-# The identity, the certificates, the logs and the accounts. All of it is kept
-# unless --purge says otherwise, and every line of it is named in the report
-# either way.
+# Preserve state unless `--purge` was requested.
 remove_state() {
   if [ "$PURGE" != 'yes' ]; then
-    # The manifest is kept with it ON PURPOSE: a --purge run days later still has
-    # to know which system accounts THIS install created.
+    # Keep the manifest so a later `--purge` identifies created accounts.
     [ ! -d "$STATE_DIR" ] || record_kept "$STATE_DIR" 'node identity, storage token, manifest'
     [ ! -d "$CADDY_STATE_DIR" ] || record_kept "$CADDY_STATE_DIR" "$(caddy_state_note)"
     [ ! -d "$INGRESS_LOG_DIR" ] || record_kept "$INGRESS_LOG_DIR" 'what the ingress logged'
@@ -591,9 +442,7 @@ remove_state() {
   remove_path "$CADDY_STATE_DIR" "$(caddy_state_note)" || true
   remove_path "$INGRESS_LOG_DIR" 'what the ingress logged' || true
 
-  # After the directories, so that userdel never has to reason about a home it
-  # still owns. A user's private group goes with it on every distribution that
-  # made one; the groupdel is for the ones that did not.
+  # Remove homes before accounts; remove a remaining private group if present.
   for user in $(users_to_remove); do
     if run_step "removed the \"${user}\" system user" "remove the \"${user}\" system user" \
       userdel "$user"; then
@@ -620,15 +469,10 @@ group_exists() {
   fi
 }
 
-# ---------------------------------------------------------------------------
-# What happened
-
 report() {
   printf '\n'
 
-  # A host that carried none of this is told so and left alone: every section
-  # below is about an install, and there was not one here. Says where it looked,
-  # because a wrong --bin-dir looks exactly like this.
+  # A wrong `--bin-dir` can otherwise look like an absent installation.
   if [ -z "${REMOVED_LINES}${KEPT_LINES}" ]; then
     printf 'Nothing of scafo'\''s is on this host — no unit, no executable in %s,\n' "$BIN_DIR"
     printf 'no %s, no %s. Nothing was changed.\n\n' "$CONFIG_DIR" "$STATE_DIR"
@@ -692,12 +536,7 @@ report() {
   printf '\n'
 }
 
-# ---------------------------------------------------------------------------
-# Removing things, or saying what would be removed
-#
-# EVERY MUTATION IN THIS SCRIPT GOES THROUGH run_step OR remove_path, WHICH IS
-# WHAT MAKES --dry-run TOTAL rather than a best effort: nothing else here
-# removes, signals or writes anything.
+# All mutations pass through these helpers so `--dry-run` remains read-only.
 
 run_step() {
   # run_step <past tense> <infinitive> <command...>
@@ -716,9 +555,7 @@ run_step() {
   return 1
 }
 
-# Removes one path and records it, or records why it stayed. A path that is not
-# there is not an error — this script has to survive a host where install.sh
-# half-ran, never ran, or where it has already run once.
+# Missing paths are valid after partial or repeated uninstalls.
 remove_path() {
   # remove_path <path> <note for the report>
   rp_path="$1"
@@ -737,8 +574,7 @@ remove_path() {
   return 1
 }
 
-# For the leftovers nobody needs told about — a wants symlink, and anything else
-# whose absence is the normal case.
+# Remove optional leftovers without reporting absent paths.
 remove_quietly() {
   [ -e "$1" ] || [ -L "$1" ] || return 0
   safe_path "$1" || return 0
@@ -749,9 +585,7 @@ remove_quietly() {
   as_root rm -f -- "$1" 2>/dev/null || true
 }
 
-# The whole of what stands between a hand-edited manifest and `rm -rf /`: an
-# absolute path, of at least two components, that is not one of the host's own
-# directories.
+# Reject unsafe manifest paths before recursive removal.
 safe_path() {
   case "$1" in
     /*) ;;
@@ -781,7 +615,7 @@ record_kept() {
 "
 }
 
-# Whether a space-separated list holds an exact word.
+# Match exact words in a space-separated list.
 contains() {
   for c_item in $1; do
     [ "$c_item" != "$2" ] || return 0

@@ -1,11 +1,4 @@
-/*
- * Internal: the steps a node takes between reading its configuration and serving
- * — the bucket it talks to, the network it is allowed on, the identity it keeps,
- * and the key that opens its environments' variables.
- *
- * Each is its own function so that a node can be brought up piece by piece, and
- * so nothing here needs a socket to be exercised.
- */
+/* Node bootstrap dependencies: registry, network, persisted identity, and keys. */
 
 import { S3Client } from "uns3";
 import type { DaemonConfig } from "../daemon/config.ts";
@@ -52,29 +45,8 @@ export function createRegistry(config: DaemonConfig): RegistryContext {
   };
 }
 
-/**
- * Refuses to boot a node that would put node-to-node or operator traffic on a
- * network nobody has classified.
- *
- * Every address a node exposes — the node API, the internal listener, the
- * address it tells its peers to use, the address its runtime processes bind —
- * carries traffic that commands this node. As soon as one of them reaches past
- * loopback, that traffic crosses a network, and only the operator knows what
- * kind of network it is. `--transport wireguard` puts it in a tunnel;
- * `--transport none` states that the network is already private and trusted, a
- * cloud vRack or a VLAN. There is no default, because the safe-looking one —
- * assume it needs no tunnel — is the one that silently exposes a node, and the
- * other refuses to run perfectly good setups. A node that stays on loopback
- * crosses nothing and needs neither.
- *
- * `runtime.bindHost` counts for the same reason the others do, and more sharply:
- * what it exposes is the runtime's peer listener, which authenticates nobody. It
- * is what a multi-node fleet has to widen for cross-node cell traffic, and that
- * is exactly when the operator must have said what the network is.
- *
- * Throws `ScafoError("invalid-input")` naming the addresses that made it
- * necessary.
- */
+/** Requires explicit transport whenever API, peer, advertised, or runtime binds
+ * extend beyond loopback. Runtime peer listeners have no authentication. */
 export function assertTransportConfigured(config: DaemonConfig): void {
   if (config.transport !== undefined) return;
 

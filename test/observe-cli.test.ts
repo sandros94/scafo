@@ -1,10 +1,6 @@
 /*
- * `scafo metrics` and `scafo traces`: what they read out of a bucket, what they
- * make of it, and what they say when there is nothing there.
- *
- * Driven against a memory store seeded with the very files a flusher writes —
- * same keys, same codec — so what these cases exercise is the whole read path an
- * operator's command takes rather than a stand-in for it.
+ * `scafo metrics` and `scafo traces`: what they read out of a bucket, what they make of it, and
+ * what they say when there is nothing there.
  */
 
 import { createWriter } from "tavolato";
@@ -512,7 +508,7 @@ describe("whose traffic a counted host actually was", () => {
   };
 
   it("reads a build's own host as the project it belongs to, never as an environment of it", () => {
-    /* A node counts an UNROUTED `<project>--<ref>` host by the platform grammar,
+    /* A node counts an unrouted `<project>--<ref>` host by the platform grammar,
        which cannot tell a build id from an environment name — so a build's hash
        host arrives here labelled as an environment called `<build id>`, which is
        an environment nobody ever made. */

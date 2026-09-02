@@ -1,10 +1,4 @@
-/*
- * The reconcile loop: read what the registry wants served, look at what runs on
- * this node, and close the gap one action at a time.
- *
- * Planning is pure and lives in `src/core/placement`; everything effectful — the
- * registry reads, the supervisor, the runtime driver — is wired in here.
- */
+/* Reconciles this node's registry placement with its supervised processes. */
 
 import { createPortAllocator } from "../core/placement/ports.ts";
 import { planReconcile, type ReconcileAction } from "../core/placement/reconcile.ts";
@@ -36,11 +30,7 @@ export interface ReconcileStatus {
   failures: ReconcileFailure[];
   /** Runtime processes this node believes it is running. */
   processes: RuntimeProcess[];
-  /**
-   * Placement decisions the last pass read, including the environments this node
-   * is NOT one of the nodes for. An environment missing from this list has none,
-   * and is therefore served here.
-   */
+  /** Placement views read by the last pass. Missing placement means unassigned. */
   placements: PlacementView[];
 }
 
@@ -48,14 +38,7 @@ export interface ReconcileStatus {
 export interface Reconciler {
   /** Runs one pass and resolves with the actions it planned. */
   runOnce(): Promise<ReconcileAction[]>;
-  /**
-   * Asks for a pass now rather than at the next tick.
-   *
-   * Single-flight, like every other way in: a kick that arrives while a pass is
-   * running is remembered and honoured exactly once when that pass finishes, and
-   * two passes never overlap. It returns immediately and reports nothing —
-   * whatever the pass achieves is read back from {@link Reconciler.status}.
-   */
+  /** Queues one immediate follow-up pass while preserving single-flight execution. */
   kick(): void;
   start(): void;
   /** Closes the loop permanently, cancels its pass and waits for it to quiesce. */
@@ -67,14 +50,7 @@ export interface Reconciler {
 export interface ReconcilerOptions {
   /** Time between passes. Defaults to {@link DEFAULT_RECONCILE_INTERVAL_MS}. */
   intervalMs?: number;
-  /**
-   * Environment every runtime process starts from.
-   *
-   * A spec's environment REPLACES the child's rather than extending it, so
-   * without at least a `PATH` here a runtime named without a directory cannot be
-   * found and no process starts at all. Defaults to the useful parts of the
-   * daemon's own environment.
-   */
+  /** Base child environment. Include PATH when the runtime executable is not absolute. */
   baseEnv?: Record<string, string>;
 }
 
@@ -93,19 +69,11 @@ export function createReconciler(
 
   const observe = daemon.observability;
 
-  /*
-   * WHAT THE PASS COSTS THE BUCKET, counted only while this node is observing.
-   * The wrapper is the loop's OWN — the executor is handed it too, so a pass's
-   * locks and varset reads are in the same numbers as its listings — and nothing
-   * else on the node writes through it, which is what makes a delta taken across
-   * one pass exactly that pass's. Off, the daemon's registry is used unwrapped
-   * and nothing here allocates.
-   */
+  /* Count every registry operation from this pass when observation is enabled. */
   const counted = observe === undefined ? undefined : countingRegistry(daemon.registry);
   const registry = counted?.registry ?? daemon.registry;
 
-  /* Soft state: what this node started. Lost on restart, and rebuilt from the
-     supervisor's process ids the next time a pass runs. */
+  /* Process state is rebuilt from supervisor ids after daemon restart. */
   const known = new Map<string, RuntimeProcess>();
   const executor = createExecutor({
     daemon,
@@ -132,9 +100,7 @@ export function createReconciler(
    * One pass. `fromKick` says whether an immediate rerun requested this pass.
    */
   async function runPass(fromKick: boolean): Promise<ReconcileAction[]> {
-    /* Passes must not overlap: two of them would plan against the same gap and
-       start the same environment twice. Every way in — the timer, a kick, a
-       caller awaiting one pass — goes through this one gate. */
+    /* Timer, kicks, and callers share one gate to prevent duplicate starts. */
     if (inFlight) return [];
     inFlight = true;
     const abort = new AbortController();
@@ -148,17 +114,14 @@ export function createReconciler(
     let plan: ReconcileAction[] = [];
     let placements: PlacementView[] = [];
     try {
-      /* Filtered to this node: an environment placed on other nodes is not
-         desired here, and what still runs for it is planned for a stop. */
+      /* Other nodes' placements are not desired locally and are stopped if present. */
       const state = await readDesired(registry, {
         nodeId: daemon.nodeId,
         mode: "required",
       });
       const desired = state.environments;
       placements = state.placements;
-      /* Gaps in what could be resolved, reported beside the actions rather than
-         instead of them: the environments they concern are still planned for,
-         minus whatever went missing. */
+      /* Preserve read failures beside actions for the resolvable environments. */
       for (const failure of state.failures) {
         pending.push({ at: new Date().toISOString(), ...failure });
       }
@@ -177,41 +140,29 @@ export function createReconciler(
 
       if (!abort.signal.aborted) {
         try {
-          /* Routing is published from what the pass ended with, not from what it planned. */
+          /* Publish routes from the actual post-execution process state. */
           await applyIngress(daemon, {
             desired,
             processes: executor.currentProcesses(),
           });
         } catch (error) {
-          /*
-           * An ingress that cannot be reached is recorded and nothing more. The
-           * processes this pass started are running either way, the next pass
-           * states the same routing again, and a pass that gave up here would stop
-           * reconciling the node over a failure outside it.
-           */
+          /* Ingress failures are retried next pass without stopping runtime reconciliation. */
           pending.push(failureOf(error, { subject: INGRESS_SUBJECT }));
         }
       }
     } catch (error) {
-      /*
-       * Only reading the registry and planning throw out this far; a failed
-       * action is recorded and the rest of the plan still runs. A registry that
-       * cannot be read looks exactly like "every environment was undeployed", so
-       * a pass that fails here plans nothing rather than stopping live processes.
-       */
+      /* A registry read failure must not be interpreted as every environment removed. */
       pending.push(failureOf(error, {}));
     } finally {
       lastActions = plan;
       failures = pending;
-      /* What THIS pass read, so a registry it could not read reports nothing
-         rather than a decision that may since have moved. */
+      /* Report only placements this pass successfully read. */
       lastPlacements = placements;
       lastRunAt = new Date().toISOString();
       inFlight = false;
       if (activeAbort === abort) activeAbort = undefined;
 
-      /* The three are made together and are undefined together; a pass reports
-         what it cost against the baseline it took at its own start. */
+      /* Emit operation deltas against this pass's starting baseline. */
       if (observe !== undefined && counted !== undefined && before !== undefined) {
         const spent = counted.counts();
         observe.emit({
@@ -224,9 +175,7 @@ export function createReconciler(
         });
       }
 
-      /* Exactly one more pass for however many kicks arrived while this one was
-         running: they all asked for the same thing, which is a pass that starts
-         after the state they stamped was written. */
+      /* Coalesce concurrent kicks into one pass after this one. */
       if (!terminal && kicked) {
         kicked = false;
         void startPass(true);
@@ -276,8 +225,7 @@ export function createReconciler(
 
     shutdown(): Promise<void> {
       if (shutdown !== undefined) return shutdown;
-      /* Synchronous closure matters: Sail awaits bucket and lease work before
-         this call, and no timer may start runtime work in that gap or after it. */
+      /* Close synchronously so no timer starts work during shutdown. */
       terminal = true;
       kicked = false;
       if (timer !== null) {

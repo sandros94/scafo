@@ -1,8 +1,5 @@
-/*
- * Internal: what `scafo varset` does once its flags have been read — parsing a
- * dotenv file, sealing it into the registry, and describing what an environment
- * carries without ever printing a secret.
- */
+/* Parses dotenv input, seals varsets, and describes names without exposing
+   secret values. */
 
 import { ScafoError } from "../core/error.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
@@ -85,12 +82,7 @@ export async function showVarset(
   return { id, described: describeVarset(await openVarset(envelope, opts.key)) };
 }
 
-/**
- * Renders a described varset, one variable per line.
- *
- * Secret values are not in the description and are not reconstructed here: a
- * caller holding the key can still print nothing but the names it protects.
- */
+/** Renders varset names only; secret values are never reconstructed. */
 export function formatVarset(described: Record<string, VarsetDescription>): string {
   const names = Object.keys(described).sort();
   return names
@@ -101,15 +93,7 @@ export function formatVarset(described: Record<string, VarsetDescription>): stri
     .join("\n");
 }
 
-/**
- * The variable names a `--public` flag carries: comma-separated, and repeated
- * for good measure.
- *
- * Comma-separated because that is how every list-valued setting is written here
- * (`--platform-domains`), and because the argument parser keeps only the last
- * value of a flag given twice — a repeated flag that silently dropped all but
- * one name would publish nothing and say nothing.
- */
+/** Parses comma-separated public names; parser repetition retains only last flag. */
 export function parsePublicNames(value: unknown): string[] {
   const given = Array.isArray(value) ? value : [value];
   return given
@@ -119,15 +103,7 @@ export function parsePublicNames(value: unknown): string[] {
     .filter((entry) => entry !== "");
 }
 
-/**
- * Turns parsed variables into a varset, marking every one of them secret unless
- * it is named in `publicNames`.
- *
- * Secret is the default because a variable set is where credentials end up, and
- * the cost of the two mistakes is not symmetric: a public value marked secret is
- * merely not shown, a secret value marked public is printed by anything that
- * describes the environment.
- */
+/** Builds a varset; variables are secret unless explicitly public. */
 export function toPlainVarset(
   vars: Record<string, string>,
   publicNames: readonly string[] = [],
@@ -147,13 +123,7 @@ export function toPlainVarset(
   return plain;
 }
 
-/**
- * Parses a dotenv file: see {@link DOTENV_SYNTAX}.
- *
- * Throws `ScafoError("invalid-input")` naming the line for anything that is not
- * a variable — a line without `=`, an unusable name, a name given twice.
- * Guessing at those is how a deployment ends up with a variable nobody wrote.
- */
+/** Parses dotenv syntax, refusing malformed names and duplicates by line. */
 export function parseDotenv(text: string, source: string): Record<string, string> {
   const vars: Record<string, string> = {};
 

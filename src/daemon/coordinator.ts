@@ -1,12 +1,4 @@
-/*
- * The coordinator loop: the one node that runs the work the registry can only
- * have one writer for — assigning environments to nodes, and reaping.
- *
- * There is no consensus protocol behind this — the lease in the bucket is the
- * whole election. A node takes it when it is free, renews it while it holds it,
- * and the moment a renewal is refused it stops being the coordinator, before it
- * finds out who replaced it.
- */
+/* Lease-elected coordinator for assignment and reaping. */
 
 import { isScafoError } from "../core/error.ts";
 import { nowDate } from "../core/registry/context.ts";
@@ -46,11 +38,7 @@ export interface CoordinatorStatus {
 /** The loop, and the handle to run it once or on a timer. */
 export interface Coordinator {
   start(): void;
-  /**
-   * Stops the loop and gives the lease up, so the next node takes it at once
-   * rather than waiting out the TTL. Best effort: a release that fails changes
-   * nothing, because the TTL expires the lease anyway.
-   */
+  /** Stops and best-effort releases the lease; TTL handles a failed release. */
   stop(): Promise<void>;
   /**
    * Runs one iteration: take or renew the lease, assign every environment to
@@ -58,11 +46,7 @@ export interface Coordinator {
    */
   runOnce(): Promise<void>;
   status(): CoordinatorStatus;
-  /**
-   * The fenced handle that lease-gated registry calls take, or null when this
-   * node is not the coordinator. Callers must pass it rather than re-reading the
-   * lease: it carries the ETag that separates this holder from its successor.
-   */
+  /** Current fenced lease handle; callers must not replace it with a fresh read. */
   handle(): LeaseHandle | null;
 }
 
@@ -71,27 +55,16 @@ export interface CoordinatorOptions {
   ttlMs?: number;
   /** Time between reaps while holding. Defaults to {@link DEFAULT_REAP_INTERVAL_MS}. */
   reapIntervalMs?: number;
-  /**
-   * Age past which an unreferenced build may be reaped. Absent reaps no build at
-   * all: an installation that has never said how long it keeps builds is not one
-   * whose builds should start disappearing.
-   */
+  /** Unreferenced build retention. Omitted disables build reaping. */
   buildRetentionMs?: number;
   /** How long a node counts as live for placement; defaults to three heartbeats. */
   livenessWindowMs?: number;
 }
 
-/**
- * Builds the coordinator loop for this node.
- *
- * Nothing runs until {@link Coordinator.start} is called, or
- * {@link Coordinator.runOnce} is awaited. Every node may run one: they compete
- * for the same lease, and all but one of them stay candidates.
- */
+/** Builds a candidate coordinator; work starts only on start or runOnce. */
 export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptions): Coordinator {
   const ttlMs = opts?.ttlMs ?? DEFAULT_LEASE_TTL_MS;
-  /* Three attempts inside one lifetime: two renewals may be lost to a slow
-     bucket before the lease this node holds is allowed to go stale under it. */
+  /* Renew three times per TTL to tolerate slow bucket operations. */
   const tickMs = Math.max(1, Math.floor(ttlMs / 3));
   const reapIntervalMs = opts?.reapIntervalMs ?? DEFAULT_REAP_INTERVAL_MS;
   const assignOptions =
@@ -104,8 +77,7 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
   let held: LeaseHandle | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
   let inFlight = false;
-  /* Epoch milliseconds of the last reap, on the registry's clock; null until one
-     has run, so the node that has just become coordinator reaps straight away. */
+  /* Null permits an immediate reap after taking the lease. */
   let lastReapMs: number | null = null;
   let lastReapAt: string | null = null;
   let lastReapFailure: string | null = null;
@@ -135,27 +107,12 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
     try {
       held = await renewLease(daemon.registry, current);
     } catch {
-      /*
-       * FENCING RULE: a renewal this node did not complete means it is not the
-       * coordinator any more, whether the lease was taken from it or the bucket
-       * merely could not be reached. Either way it stops here, on this tick,
-       * BEFORE any coordinator-only work — the node that replaced it is already
-       * acting, and two reapers deleting against one registry is exactly what
-       * the lease exists to prevent. Re-acquiring on a later tick is allowed;
-       * carrying on with a lease that was refused is not.
-       */
+      /* Failed renewal loses authority until a later acquisition succeeds. */
       drop(current);
     }
   }
 
-  /**
-   * Decides which nodes serve what, every tick this node holds the lease.
-   *
-   * Not on the reap's interval: a reap is housekeeping that can wait a minute,
-   * while an assignment is what puts an environment back on a node after the one
-   * running it went away. A failure is recorded and the lease kept — the last
-   * decision stands, and the nodes keep serving what it gave them.
-   */
+  /** Runs assignment every held tick; failed assignments preserve the last decision. */
   async function assign(lease: LeaseHandle): Promise<void> {
     try {
       lastAssignment = await runAssignment(daemon.registry, lease, assignOptions);
@@ -198,9 +155,7 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
       await executeReap(daemon.registry, plan, lease, reapOptions);
       lastReapFailure = null;
     } catch (error) {
-      /* A reap that failed is recorded and nothing more: the lease is kept and
-         the next tick plans again from fresh state. The exception is a lost
-         lease, which says this node is no longer the one doing this work. */
+      /* Retry failed reaps from fresh state; a lost lease also drops authority. */
       if (isScafoError(error) && error.code === "lease-lost") drop(lease);
       lastReapFailure = describe(error);
     } finally {
@@ -210,8 +165,7 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
   }
 
   async function runOnce(): Promise<void> {
-    /* Ticks must not overlap: a renewal racing its own predecessor would write
-       the lease twice from one holder, and the second write loses to the first. */
+    /* Prevent concurrent renewals from racing their own conditional writes. */
     if (inFlight) return;
     inFlight = true;
 
@@ -222,9 +176,7 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
       if (lease === null) return;
 
       await assign(lease);
-      /* The same fencing rule the renewal obeys: an assignment that found the
-         lease gone has already dropped this node to candidate, and nothing
-         lease-gated may follow it on this tick. */
+      /* Assignment may lose the lease; skip remaining lease-gated work. */
       if (held === null) return;
 
       if (lastReapMs !== null && nowDate(daemon.registry).getTime() - lastReapMs < reapIntervalMs) {

@@ -1,30 +1,4 @@
-/*
- * The node image, in the topology it was packaged for.
- *
- * THIS SUITE IS ABOUT PACKAGING, NOT ABOUT THE PRODUCT. The single-node loop is
- * already proven twice over — once through Caddy, once through Traefik — and
- * both run the daemon off a bind-mounted worktree, which is exactly what an
- * operator never does. What is unproven until here is the artifact: that the
- * repository's Dockerfile builds, that the image carries celld and its builder,
- * that its entrypoint takes `sail` and its arguments,
- * that a node works with no write access outside its state directory because it
- * does not run as root, and that a container stopped inside the grace the image
- * documents exits cleanly.
- *
- * So the loop here is the shortest one that could only pass if all of that is
- * true — health, a key, one deploy, one request served, one clean stop — and
- * nothing else. Anything asserting product behaviour belongs in the suites that
- * already assert it.
- *
- * The topology is the validated one, unchanged: Caddy and the node SHARE a
- * network namespace, the celld processes bind loopback, and the store is a
- * separate container reached by address on the docker bridge.
- *
- * Skipped unless SCAFO_E2E=1, and slower than the others by however long the
- * image takes to build:
- *
- *   SCAFO_E2E=1 pnpm vitest run test/integration/e2e-image.test.ts
- */
+/* Image packaging path: non-root runtime, bundled Celld and esbuild, deploy, health, and graceful shutdown. */
 
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -114,15 +88,13 @@ let keyPath: string;
 let build: string;
 
 const tmpDirs: string[] = [];
-/** Everything the node container has written, kept for failure messages. */
+/** Node output retained for failure context. */
 const nodeLog: string[] = [];
 /** Raw observations the report is written from; printed once at the end. */
 const observed: Record<string, unknown> = {};
 
 describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () => {
   beforeAll(async () => {
-    /* The HOST's dist, which the CLI below runs from. The image builds its own
-       from source and shares nothing with it — that separation is the point. */
     await buildRepo();
 
     const started = Date.now();
@@ -149,11 +121,6 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
 
     node = await image
       .withNetworkMode(`container:${caddy.getId()}`)
-      /*
-       * NO BIND MOUNT AND NO WORKING DIRECTORY. The other suites hand the
-       * container a worktree to run `dist/` out of; this one hands it nothing,
-       * so everything it runs has to have been packaged into it.
-       */
       .withEnvironment({
         ...storeEnv(store.fromContainers, BUCKET),
         SCAFO_NODE_ID: NODE_ID,
@@ -161,12 +128,7 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
         SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
         SCAFO_CADDY_ADMIN: `http://127.0.0.1:${String(CADDY_ADMIN_PORT)}`,
         SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
-        /* Deliberately NOT set here, unlike every other suite: the image pins
-           CELLD_ESBUILD and names its own state directory, and a node that
-           needed either of them from outside would be a packaging failure. */
       })
-      /* The image's ENTRYPOINT supplies `node /app/dist/cli/index.mjs`; this is
-         the CMD an operator overrides, which is what makes it worth passing. */
       .withCommand(["sail", "--listen", `0.0.0.0:${String(NODE_PORT)}`])
       .withLogConsumer((stream: Readable) => {
         stream.on("data", (chunk) => nodeLog.push(String(chunk)));
@@ -180,8 +142,6 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
   }, SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
-    /* Stopped before Caddy: the node lives in Caddy's network namespace. The
-       last step already stopped it, and stopping a stopped container is fine. */
     await node?.stop().catch(() => {});
     await caddy?.stop().catch(() => {});
     await store?.container.stop().catch(() => {});
@@ -310,9 +270,6 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
       build = buildIdOf(deploy.output);
       expect(await listBuilds(registry, PROJECT)).toContain(build);
 
-      /* The whole packaging claim in one request: an artifact the host packed,
-         unpacked and built by the IMAGE's esbuild, run by the IMAGE's celld as a
-         non-root user, and reached through the ingress sharing its namespace. */
       const host = `${PROJECT}--${ENVIRONMENT}.${PLATFORM_DOMAIN}`;
       const answer = await until(`${host} to serve "v1"`, DEADLINE_MS, async () => {
         const served = await httpGet(caddyHttpPort, "/", { host });
@@ -331,14 +288,6 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
   it(
     "stops cleanly within the grace the image documents",
     async () => {
-      /*
-       * `docker stop -t 50`, the way an operator's init system does it, rather
-       * than through the test framework — the number is the point. On SIGTERM
-       * the node marks itself draining, releases the coordinator lease, stops
-       * reconciling, closes its listener and only then stops its celld
-       * processes. Celld 0.4 reserves up to 40s for that shutdown, so the
-       * container leaves headroom beyond the runtime's own deadline.
-       */
       const started = Date.now();
       const stopped = await docker(["stop", "-t", String(STOP_GRACE_S), node.getId()]);
       const elapsedMs = Date.now() - started;
@@ -347,9 +296,6 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
       const inspected = await docker(["inspect", "--format", "{{.State.ExitCode}}", node.getId()]);
       const exitCode = Number(inspected.output.trim());
 
-      /* Zero, not 137: 137 is SIGKILL, which is what a grace that ran out looks
-         like from the outside and the one outcome this whole rule exists to
-         prevent. */
       expect(exitCode, nodeLogTail()).toBe(0);
       expect(elapsedMs, "the stop must fit inside the grace it was given").toBeLessThan(
         STOP_GRACE_S * 1000,
@@ -367,11 +313,7 @@ function docker(args: string[]): Promise<CommandResult> {
   return run("docker", args, REPO_ROOT, process.env as Record<string, string>);
 }
 
-/**
- * Fails with everything the command printed, and with what the node was doing
- * while it ran: a CLI that exits non-zero has already reported why, and the
- * reason is almost always on the other side of the request it made.
- */
+/** Fails with command output and node logs. */
 function expectCleanExit(result: CommandResult): void {
   expect(result.code, `${result.output}\n${nodeLogTail()}`).toBe(0);
 }

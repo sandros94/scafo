@@ -19,7 +19,7 @@ const BUILD: BuildInput = {
   },
 };
 
-/** Every field two records of one build may NOT disagree about. */
+/** Every field two records of one build may not disagree about. */
 const DIFFERENT_IN: Array<{ field: string; patch: Partial<BuildInput> }> = [
   { field: "celldVersionId", patch: { celldVersionId: "version-1" } },
   {

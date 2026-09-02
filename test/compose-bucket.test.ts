@@ -1,17 +1,4 @@
-/*
- * The bucket-creation service every compose stack in this repository ships with.
- *
- * It is the ONE piece of a compose file that can be checked without docker — a
- * few lines of `sh` against a stub `curl` — and it is where the trap is.
- * SeaweedFS answers `409 BucketAlreadyOwnedByYou` to a PUT of a bucket that is
- * already there, so a loop that only accepts 2xx spins forever on every run
- * after the first, with the node stuck behind `service_completed_successfully`
- * and nothing at all in its logs to say why.
- *
- * Every stack is held to the same three answers, because an example that
- * disagrees with the playground beside it is worse than either: a bucket that
- * exists is the outcome the service wants, whichever status said so.
- */
+/* The bucket-creation service every compose stack in this repository ships with. */
 
 import { execFile } from "node:child_process";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -34,7 +21,7 @@ const STACKS: string[] = [
 /** Long enough for a loop that is going to exit to have exited. */
 const RUN_TIMEOUT_MS = 3_000;
 
-/** Short, because the assertion it serves is that the loop is STILL going. */
+/** Short, because the assertion it serves is that the loop is still going. */
 const SPIN_TIMEOUT_MS = 1_500;
 
 const run = promisify(execFile);
@@ -69,8 +56,6 @@ describe.each(STACKS)("the bucket service of %s", (stack) => {
     expect(result.code).toBeNull();
   });
 });
-
-/* ------------------------------------------------------------------ internal */
 
 interface Attempt {
   /** Exit status, or null when the loop was still going when time ran out. */

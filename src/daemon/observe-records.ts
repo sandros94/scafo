@@ -1,37 +1,5 @@
-/*
- * What a node writes about itself, and the ONE seam its bytes are produced and
- * read back through.
- *
- * ONE FILE PER FLUSH, THREE RECORD KINDS IN IT. A flush is one object in the
- * bucket carrying a `flush` header, one `event` per thing the daemon observed,
- * and one `counters` per {project, environment} the ingress served. They share a
- * file rather than sitting at sibling keys because a flush is one decision and
- * has to land as one write: a bucket charges per request, and two objects per
- * flush can land half of themselves — leaving a window in which a node's events
- * exist and its counters do not, which is exactly the disagreement a reader
- * cannot recover from. Every record therefore carries a `record` discriminant,
- * and a reader filters on it. It is not called `type` because an EVENT already
- * carries its own `type`, and a discriminant that collided with it would be a
- * record shape that cannot be written down.
- *
- * COUNTER RECORDS ARE MONOTONIC TOTALS, NOT WINDOWS. They are the counters as
- * they stood at the flush, counted since {@link ObserveCountersRecord.since} —
- * the moment that node's adapter was made, which is that node's boot. A window
- * is DERIVED AT READ TIME by subtracting two snapshots of the same node, the
- * same {project, env} and the same `since`; a `since` that changed means the
- * node restarted and its totals went back to zero, so the later run's snapshot
- * is taken whole rather than subtracted from anything.
- *
- * THE CODEC IS THE SEAM AND IT IS THE ONLY ONE. Nothing outside this seam knows
- * how a record becomes bytes: the flusher hands records to
- * {@link ObserveCodec.encode} and puts what comes back at the key its
- * `extension` names, and a reader picks a codec by the extension it read off the
- * key. Swapping the encoding is therefore one object plus its extension, and
- * nothing else moves. The INTERFACE and the registry that names the
- * implementations live here; the one implementation is dense enough to need its
- * own header comment and lives next door (`src/daemon/observe-parquet.ts`), named
- * from {@link observeCodecFor}.
- */
+/* Flush files contain a header, events, and monotonic counter snapshots. The
+   codec extension selects the only encode/decode seam. */
 
 import { PARQUET_CODEC } from "./observe-parquet.ts";
 import type { StatusClassCounts } from "./access-counters.ts";

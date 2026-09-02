@@ -1,17 +1,4 @@
-/*
- * Following the file an ingress writes its access log to: where it starts, what
- * a half-written line costs, and what happens when the file is rolled out from
- * under it.
- *
- * REAL FILES IN A REAL TEMPORARY DIRECTORY, because the whole of what this
- * driver does is filesystem behaviour — an inode changing under a path, a file
- * cut back to zero, a write landing between two polls. A fake would only be
- * asserting the fake.
- *
- * NO TIMER RUNS HERE. Every case steps the tailer with `poll()`, so nothing
- * waits and nothing is flaky; `start()` is only ever used for the one thing that
- * is its own — opening the file at its current end.
- */
+/* Access-log tailing across partial lines, truncation, and rotation. */
 
 import { appendFile, mkdtemp, rename, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -266,8 +253,6 @@ describe("what it refuses to do", () => {
     tailer = undefined;
   });
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 /** The tailer this case is stepping, made on first use with the given options. */
 function tail(opts: { maxLineBytes?: number } = {}): AccessLogTailer {

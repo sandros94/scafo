@@ -1,13 +1,4 @@
-/*
- * `scafo fleet nodes`: the machines of one installation, read straight out of
- * the bucket.
- *
- * THE FAILURE CASE IS THE CASE. An operator runs this when a node has stopped
- * answering, so the reading must not depend on a node answering — and the
- * liveness it reports has to be the SAME judgement placement makes, or it
- * becomes a second opinion an operator has to reconcile against the behaviour
- * they are actually seeing.
- */
+/* `scafo fleet nodes`: the machines of one installation, read straight out of the bucket. */
 
 import { describe, expect, it } from "vitest";
 import { formatNodeTable, listFleetNodes } from "../src/cli/_nodes.ts";
@@ -106,8 +97,6 @@ describe("what the listing prints", () => {
     expect(formatNodeTable(await listFleetNodes(clock.ctx))).toContain("scafo sail");
   });
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 function register(clock: ManualClock, id: string, extra: Partial<NodeRecord>): Promise<NodeRecord> {
   return registerNode(clock.ctx, {

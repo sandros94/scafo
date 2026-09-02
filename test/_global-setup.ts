@@ -1,13 +1,7 @@
 import { GenericContainer, Wait, type StartedTestContainer } from "testcontainers";
 import { signRequest } from "uns3/core";
 
-/*
- * Starts a disposable S3-compatible store for the integration suite, unless
- * S3_ENDPOINT already points at one (CI override, real provider, local
- * playground). Pick the store with SCAFO_TEST_STORE (seaweedfs | rustfs;
- * default seaweedfs). Without docker the container fails to start and the
- * integration suite simply stays skipped.
- */
+/* Starts a disposable S3-compatible store unless S3_ENDPOINT is supplied. */
 
 interface StoreSpec {
   image: string;
@@ -83,10 +77,7 @@ export default async function setup(): Promise<() => Promise<void>> {
   };
 }
 
-/*
- * The retry loop doubles as the readiness gate: the S3 gateway inside the
- * container may come up after its port is already listening.
- */
+/* Listening can precede S3 readiness. */
 async function createBucket(endpoint: string, bucket: string, spec: StoreSpec): Promise<void> {
   const url = new URL(`${endpoint}/${bucket}`);
 

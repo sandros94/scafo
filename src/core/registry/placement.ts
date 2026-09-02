@@ -1,14 +1,5 @@
-/*
- * Placement, as the registry holds it: what an environment asks for — how many
- * nodes (`setReplicas`) and which nodes it may use at all (`setNodeSelector`) —
- * and which nodes the coordinator gave it (the placement records).
- *
- * A placement record is written by the coordinator alone and read by every node.
- * Its ABSENCE is a meaningful pending state and never an error: production
- * daemons require a decision and start nothing until one exists. Only an
- * explicitly selected legacy rolling-upgrade reader retains the old
- * unconstrained fallback.
- */
+/* Placement intent and coordinator decisions. Missing placement is pending;
+   production readers start nothing until one exists. */
 
 import { ScafoError } from "../error.ts";
 import type {
@@ -26,18 +17,8 @@ import { nowIso, type RegistryContext } from "./context.ts";
 import { type LeaseHandle, verifyLease } from "./lease.ts";
 import { environmentKey, placementKey, placementPrefix } from "./paths.ts";
 
-/**
- * What one {@link writePlacement} did. Three of the four outcomes write nothing,
- * and each says something different about why:
- *
- * - `written` — the decision changed and now stands.
- * - `unchanged` — the decision was already this one. Rewriting it would churn
- *   the object, its ETag and every reader's view for no change at all.
- * - `cas-conflict` — another writer got there first. The next pass re-reads.
- * - `stale` — the stored decision carries a HIGHER fence than the lease this
- *   write was made under, so it belongs to a coordinator that superseded this
- *   one. Overwriting it would undo the decision of the node now in charge.
- */
+/** Placement write result. `stale` preserves a higher-fence coordinator decision;
+    `cas-conflict` requires a re-read. */
 export type PlacementOutcome = "written" | "unchanged" | "cas-conflict" | "stale";
 
 export interface PlacementWrite {
@@ -57,25 +38,11 @@ export async function readPlacement(
 }
 
 export interface ListPlacementsOptions {
-  /**
-   * How many of the reads run at a time, or a gate shared with whatever else
-   * the caller is reading in parallel. Defaults to {@link DEFAULT_CONCURRENCY}.
-   */
+  /** Read concurrency or shared gate. Defaults to {@link DEFAULT_CONCURRENCY}. */
   concurrency?: number | ConcurrencyGate;
 }
 
-/**
- * Every placement decision of one project, keyed by environment name.
- *
- * One listing plus a read per DECIDED environment, rather than a read per
- * environment that exists: the environments nobody has decided about — which is
- * all of them until a coordinator runs — cost nothing here.
- *
- * The reads are independent of each other and run in parallel under a bound. The
- * map is keyed in LISTING order all the same, so what a caller iterates does not
- * depend on which read came back first, and a read that throws surfaces the same
- * failure it would have if they had run one after another.
- */
+/** Placement decisions keyed by environment. Reads are bounded and retain listing order. */
 export async function listPlacements(
   ctx: RegistryContext,
   project: string,
@@ -96,16 +63,8 @@ export async function listPlacements(
   return placements;
 }
 
-/**
- * Records which nodes serve `env`, under the coordinator's own fence.
- *
- * Conditional on what was read: a create when nothing was there, an `If-Match`
- * when something was. A losing write is NOT retried — the winner is another
- * coordinator, and the loser re-reads on its next tick rather than arguing.
- *
- * Never called with an empty `nodes` by a caller that simply found no live node:
- * "nobody serves this" is a decision no fleet-wide outage is entitled to make.
- */
+/** Writes a coordinator-fenced placement with CAS. Callers do not use empty
+    nodes to turn a fleet-wide outage into a no-service decision. */
 export async function writePlacement(
   ctx: RegistryContext,
   project: string,
@@ -115,9 +74,7 @@ export async function writePlacement(
 ): Promise<PlacementWrite> {
   const key = placementKey(project, env);
   const current = await readJson<PlacementRecord>(ctx, key);
-  /* Sorted here rather than trusted from the caller: the order carries no
-     meaning, and two callers naming the same nodes differently must not read as
-     two different decisions and rewrite the record at each other forever. */
+  /* Canonical ordering prevents equivalent decisions from churning. */
   const decided = [...nodes].sort();
 
   if (current !== null) {

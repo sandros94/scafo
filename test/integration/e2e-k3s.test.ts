@@ -1,7 +1,7 @@
 /*
- * The Kubernetes contract: the operator manifest, K3s's default Traefik, and
- * a locally built node image meet in one disposable cluster. Product-specific
- * TLS behaviour stays in its focused Docker suite.
+ * The Kubernetes contract: the operator manifest, K3s's default Traefik, and a locally built node
+ * image meet in one disposable cluster. Product-specific TLS behaviour stays in its focused
+ * Docker suite.
  */
 
 import { mkdtemp, readFile, rm } from "node:fs/promises";

@@ -1,9 +1,6 @@
 /*
- * Daemon configuration: which source wins for a setting, what a malformed value
- * costs, and what the loader supplies when nothing configures it.
- *
- * Every input is injected — the file reader, the environment and the flags — so
- * the suite reads no file, no environment variable and no command line.
+ * Daemon configuration: which source wins for a setting, what a malformed value costs, and what
+ * the loader supplies when nothing configures it.
  */
 
 import { describe, expect, it } from "vitest";
@@ -205,7 +202,6 @@ describe("reading the config file", () => {
         loadDaemonConfig({
           configPath: CONFIG_PATH,
           readFile: fileAt(CONFIG_PATH, "{ this is not json at all"),
-          /* Complete on their own: a tolerated syntax error would load silently. */
           env: REQUIRED_ENV,
         }),
       "invalid-input",
@@ -327,7 +323,6 @@ describe("addresses", () => {
       "STORE.test:7400",
       "::1:7400",
     ];
-    /* Every address setting is checked, and each names itself in the failure. */
     const settings: [string, string][] = [
       ["SCAFO_LISTEN", "node.listen"],
       ["SCAFO_INTERNAL_LISTEN", "node.internalListen"],
@@ -401,7 +396,6 @@ describe("platform domains", () => {
       }),
     );
 
-    /* A malformed host is reported as the invalid name it is, not as generic input. */
     expect(error.code).toBe("invalid-slug");
     expect(error.detail).toContain("NOT A HOST");
   });
@@ -457,8 +451,6 @@ describe("the labels a node carries", () => {
       flags: { "node-labels": "tier=fast" },
     });
 
-    /* Labels describe one machine: a set half-stated in two places is one
-       nobody can read off either of them. */
     expect(config.node.labels).toEqual({ tier: "fast" });
   });
 
@@ -502,8 +494,6 @@ describe("the address runtime processes bind", () => {
   it("keeps runtime processes on loopback until something says otherwise", async () => {
     const config = await loadDaemonConfig({ env: REQUIRED_ENV });
 
-    /* The safe half of the setting: a process nothing outside this machine can
-       reach is what a single node wants, and is never the wrong answer. */
     expect(config.runtime.bindHost).toBe(DEFAULT_BIND_HOST);
     expect(config.runtime.bindHost).toBe("127.0.0.1");
   });
@@ -524,16 +514,9 @@ describe("the address runtime processes bind", () => {
       "invalid-input",
     );
 
-    /* A bare host: the ports come from the allocator, and a pair written here
-       would be two sources of truth for what a process listens on. */
     expect(error.detail).toContain("runtime.bindHost");
   });
 
-  /*
-   * Where this node DIALS its own processes, derived from where they bind and
-   * from nothing else. The ingress takes it from HERE rather than mapping the
-   * bind address itself.
-   */
   it("dials a wildcard bind on loopback, and every other bind exactly as configured", async () => {
     const dialled = async (bindHost?: string): Promise<string> => {
       const config = await loadDaemonConfig({
@@ -542,15 +525,9 @@ describe("the address runtime processes bind", () => {
       return runtimeDialHost(config.runtime);
     };
 
-    /* Loopback is among what a wildcard answers on, so a wildcard needs no
-       address of its own — and a node that configured nothing binds loopback. */
     await expect(dialled("0.0.0.0")).resolves.toBe("127.0.0.1");
     await expect(dialled("::")).resolves.toBe("127.0.0.1");
     await expect(dialled()).resolves.toBe(DEFAULT_BIND_HOST);
-    /* Anything else is taken EXACTLY — a process bound to a tunnel address alone
-       answers nothing on loopback, however local the caller is — and `::` is the
-       only address here that is not a DNS name or an IPv4 one, so what a dialer
-       is handed always writes as a plain authority. */
     await expect(dialled("10.83.0.1")).resolves.toBe("10.83.0.1");
     await expect(dialled("node-a.internal")).resolves.toBe("node-a.internal");
   });
@@ -799,8 +776,6 @@ describe("the variables an operator hands every runtime process", () => {
       env: REQUIRED_ENV,
     });
 
-    /* The file is where a value carrying a comma goes: the inline form has no
-       way to write one, because the separator wins. */
     expect(config.runtime.celldEnv).toEqual({ CELLD_OTEL: "1", OTEL_HEADERS: "a=1,b=2" });
   });
 
@@ -824,8 +799,6 @@ describe("the variables an operator hands every runtime process", () => {
       flags: { "celld-env": "CELLD_OTEL=1,RUST_LOG=debug" },
     });
 
-    /* One process's environment is read off one place, and a flag beats the
-       variable beats the file exactly as every other setting does. */
     expect(config.runtime.celldEnv).toEqual({ CELLD_OTEL: "1", RUST_LOG: "debug" });
   });
 
@@ -842,9 +815,6 @@ describe("the variables an operator hands every runtime process", () => {
         "invalid-input",
       );
 
-      /* Refused where it is written rather than at the process that would
-         overwrite it: this is the last moment the operator is still looking at
-         the configuration they got wrong. */
       expect(error.detail, name).toContain(name);
       expect(error.detail, name).toContain("runtime.celldEnv");
     }
@@ -939,8 +909,6 @@ describe("whether the node reports on itself", () => {
   it("is OFF when nothing turns it on", async () => {
     const config = await loadDaemonConfig({ env: REQUIRED_ENV });
 
-    /* The default that costs nothing: no ring, no events, and no telemetry
-       variable reaching a runtime process. */
     expect(config.observability).toEqual({ enabled: false });
     expect(config.runtime.celldEnv).toBeUndefined();
   });
@@ -1009,9 +977,6 @@ describe("whether the node reports on itself", () => {
         "invalid-input",
       );
 
-      /* A switch silently off is the failure this whole surface exists to
-         avoid: `SCAFO_OBSERVABILITY=yes` is a node its operator believes is
-         reporting. The refusal names the setting and both spellings. */
       expect(error.detail, written).toContain("observability.enabled");
       expect(error.detail, written).toContain(`"1"`);
       expect(error.detail, written).toContain(`"0"`);
@@ -1035,9 +1000,6 @@ describe("whether the node reports on itself", () => {
 
 describe("whether the fleet's API answers at the platform apexes", () => {
   it("is ON when nothing says otherwise", async () => {
-    /* The apex answered nothing before this existed — no route, no certificate
-       — so there is no behaviour to preserve and every installation gains one
-       name its tooling can reach any node at. */
     const config = await loadDaemonConfig({ env: REQUIRED_ENV });
 
     expect(config.api).toEqual({ public: true, jsonBytes: DEFAULT_JSON_BYTES });
@@ -1046,7 +1008,6 @@ describe("whether the fleet's API answers at the platform apexes", () => {
   it("is turned off from a flag, the environment or the file alike", async () => {
     const fromFlag = await loadDaemonConfig({
       env: REQUIRED_ENV,
-      /* `--no-api-public`, as the parser hands it over. */
       flags: { "api-public": "false" },
     });
     const fromEnv = await loadDaemonConfig({
@@ -1108,9 +1069,6 @@ describe("whether the fleet's API answers at the platform apexes", () => {
         "invalid-input",
       );
 
-      /* The same refusal the observability switch makes, and for the same
-         reason: a value nobody parses read as a default is an operator who
-         believes their apex is closed — or open — and is wrong. */
       expect(error.detail, written).toContain("api.public");
       expect(error.detail, written).toContain(`"1"`);
       expect(error.detail, written).toContain(`"0"`);
@@ -1134,9 +1092,6 @@ describe("whether the fleet's API answers at the platform apexes", () => {
 
 describe("the ingress access log the node counts requests off", () => {
   it("is ABSENT unless an operator names one, and that is not a warning", async () => {
-    /* Application requests bypass the node API, so per-request numbers can only
-       come off the ingress's own log — and where that is, or whether there is
-       one at all, is the operator's to say. There is no default to guess. */
     const config = await loadDaemonConfig({
       env: { ...REQUIRED_ENV, SCAFO_OBSERVABILITY: "1" },
     });
@@ -1191,9 +1146,6 @@ describe("the ingress access log the node counts requests off", () => {
   });
 
   it("REFUSES one named while observability is off, in every source", async () => {
-    /* A file nothing would ever open is an operator who believes they are
-       counting requests and is not — the same silent-off failure the switch
-       above refuses, one layer out. */
     for (const opts of [
       { env: { ...REQUIRED_ENV, SCAFO_INGRESS_ACCESS_LOG: "/var/log/access.log" } },
       {
@@ -1211,8 +1163,6 @@ describe("the ingress access log the node counts requests off", () => {
     ]) {
       const error = await rejectsWith(() => loadDaemonConfig(opts), "invalid-input");
 
-      /* Names both settings and the way forward, because a refusal that only
-         restates its rule sends an operator looking for documentation. */
       expect(error.detail).toContain("observability.ingressAccessLog");
       expect(error.detail).toContain("observability.enabled");
       expect(error.detail).toContain("--ingress-access-log");
@@ -1221,8 +1171,6 @@ describe("the ingress access log the node counts requests off", () => {
   });
 
   it("is accepted the moment observability is turned on in ANY source", async () => {
-    /* The two need not come from the same place: a file that turns observability
-       on and an environment that names the log is a working node. */
     const config = await loadDaemonConfig({
       configPath: CONFIG_PATH,
       readFile: fileAt(CONFIG_PATH, JSON.stringify({ observability: { enabled: true } })),
@@ -1242,8 +1190,6 @@ describe("the runtime telemetry switch the node's own composes", () => {
       env: { ...REQUIRED_ENV, SCAFO_OBSERVABILITY: "1", SCAFO_CELLD_ENV: "RUST_LOG=debug" },
     });
 
-    /* A node observing itself runs a runtime that is: the variable is the only
-       way that switch reaches a process, and nothing else can carry it. */
     expect(config.runtime.celldEnv).toEqual({ RUST_LOG: "debug", CELLD_OTEL: "1" });
   });
 
@@ -1268,9 +1214,6 @@ describe("the runtime telemetry switch the node's own composes", () => {
       env: { ...REQUIRED_ENV, SCAFO_OBSERVABILITY: "1" },
     });
 
-    /* The escape hatch stays the escape hatch: the default only ever fills a
-       gap, and an operator who turned the runtime's telemetry off while the
-       daemon reports on itself has stated something the node does not overrule. */
     expect(turnedOff.runtime.celldEnv).toEqual({ CELLD_OTEL: "0" });
     expect(tuned.runtime.celldEnv).toEqual({ CELLD_OTEL: "2", CELLD_OTEL_SINK: "bucket" });
   });
@@ -1300,10 +1243,6 @@ describe("node identity and defaults", () => {
   });
 
   it("invents no node id, leaving the one the node persisted to stand", async () => {
-    /* An id is half of an identity, the key that speaks for it being the other:
-       inventing one here would hand a node a different identity on every boot,
-       so an unconfigured id is left unset and the node's state directory
-       supplies it. */
     const config = await loadDaemonConfig({ env: REQUIRED_ENV });
 
     expect(config.node.id).toBeUndefined();
@@ -1360,8 +1299,6 @@ describe("which ingress the node drives", () => {
   });
 
   it("reads a Caddy admin API on its own as asking for Caddy", async () => {
-    /* The setting predates there being a choice, and a configuration that
-       already worked must go on working without naming a driver. */
     const config = await loadDaemonConfig({
       env: { ...REQUIRED_ENV, SCAFO_CADDY_ADMIN: "http://127.0.0.1:2019" },
     });
@@ -1370,8 +1307,6 @@ describe("which ingress the node drives", () => {
   });
 
   it("takes Traefik by name, and needs nothing else to reach it", async () => {
-    /* Nothing else, because there is nothing to reach: Traefik polls the daemon
-       rather than being called by it. */
     const config = await loadDaemonConfig({
       env: { ...REQUIRED_ENV, SCAFO_INGRESS_DRIVER: "traefik" },
     });
@@ -1390,10 +1325,6 @@ describe("which ingress the node drives", () => {
         }),
       );
 
-      /* Refused rather than ignored: an operator who wrote both has misread
-         which of the two applies, and dropping half of it silently leaves a node
-         routing through an ingress they did not think they had selected. The
-         refusal names both sides of the mismatch. */
       expect(error.code, variable).toBe("invalid-input");
       expect(error.detail, variable).toContain("traefik");
       expect(error.detail, variable).toContain(value);
@@ -1464,9 +1395,6 @@ describe("the Traefik entryPoints the routers attach to", () => {
   });
 
   it("refuses a list that names nothing, because Traefik reads it as everything", async () => {
-    /* Routers with no entryPoints attach to EVERY entryPoint Traefik has —
-       including a TLS listener scafo holds no certificate for — so a mistyped
-       list must fail the boot rather than claim the whole surface. */
     const error = await rejectionOf(() =>
       loadDaemonConfig({
         env: { ...REQUIRED_ENV, SCAFO_INGRESS_DRIVER: "traefik", SCAFO_TRAEFIK_ENTRYPOINTS: " , " },
@@ -1478,9 +1406,6 @@ describe("the Traefik entryPoints the routers attach to", () => {
   });
 
   it("REFUSES them alongside Caddy, which has no entryPoints to attach to", async () => {
-    /* The mirror of the Caddy-setting refusal: an operator who wrote a Traefik
-       setting under Caddy has misread which ingress applies, and dropping it
-       silently leaves a node routing through one they did not select. */
     for (const env of [
       { SCAFO_TRAEFIK_ENTRYPOINTS: "websecure" },
       {
@@ -1504,8 +1429,6 @@ describe("the tokens guarding the storage surface", () => {
       env: { ...REQUIRED_ENV, SCAFO_STORAGE_TOKEN: " new-token , old-token " },
     });
 
-    /* Trimmed, and in the order they were written: the first is the one the node
-       materializes for every consumer that reads the file. */
     expect(config.storage).toEqual({ token: ["new-token", "old-token"] });
   });
 
@@ -1534,7 +1457,6 @@ describe("the tokens guarding the storage surface", () => {
     });
 
     expect(asString.storage).toEqual({ token: ["new", "old"] });
-    /* The escape hatch for a value the separator would otherwise split. */
     expect(asArray.storage).toEqual({ token: ["new", "with,comma"] });
   });
 
@@ -1545,9 +1467,6 @@ describe("the tokens guarding the storage surface", () => {
   });
 
   it("refuses a value that is there and holds nothing, rather than quietly minting", async () => {
-    /* An unset variable in a compose file expands to this. Read as "unset" it
-       would mint a token nothing else on the host knows, and every call the
-       operator's ingress makes would be refused for reasons neither says. */
     const written: Array<[string, LoadConfigOptions]> = [
       ["an empty variable", { env: { ...REQUIRED_ENV, SCAFO_STORAGE_TOKEN: "" } }],
       ["an empty flag", { env: REQUIRED_ENV, flags: { "storage-token": "" } }],

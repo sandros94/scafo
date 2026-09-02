@@ -1,17 +1,4 @@
-/*
- * `/v1/projects`: the projects of a fleet, read and administered through a node.
- *
- * The write verbs here are ADMIN-ONLY, and that is the whole posture of the
- * surface. Blocking a project is a full stop — it refuses serving, deploys and
- * stops service and deploys at once — so it is the fleet's decision about a tenant rather than the
- * tenant's about itself. An operator-tier key that reaches the project in every
- * other way is refused here, because the alternative is a tenant who can lift
- * the block that was put on them.
- *
- * The READ verb is scoped like every other listing on this API: an operator-tier
- * caller sees the projects its key reaches and nothing else, marked `scoped` so
- * a client cannot read a filtered answer as the whole fleet.
- */
+/* `/v1/projects` listing and administration through a node. */
 
 import type { H3 } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
@@ -89,7 +76,6 @@ describe("GET /v1/projects", () => {
     const body = await listing(await asKey(ADMIN_ID, admin));
 
     expect(body.projects.map((entry) => entry.slug)).toEqual([MINE, THEIRS]);
-    /* An admin is not a tenant: nothing was hidden, so nothing says it was. */
     expect(body.scoped).toBeUndefined();
   });
 
@@ -111,12 +97,6 @@ describe("GET /v1/projects", () => {
     expect(body.projects.map((entry) => entry.slug)).toEqual([MINE]);
     expect(body.scoped).toBe(true);
 
-    /*
-     * ASSERTED ON THE SERIALIZED BODY, not on the parsed shape. A tenant list is
-     * exactly what a multi-tenant fleet hands out by accident, and a foreign slug
-     * that survived anywhere in the document — in a record, in a count, in a
-     * field nobody thought about — is the leak this route exists to not be.
-     */
     expect(raw).not.toContain(THEIRS);
   });
 
@@ -130,20 +110,10 @@ describe("GET /v1/projects", () => {
     const response = await app.request("/v1/projects", { headers: await asKey(TENANT_ID, tenant) });
     const raw = await response.text();
 
-    /*
-     * THE READ SIDE HAS TO MATCH THE WRITE SIDE. Labels are admin-only to write
-     * precisely because they are the PLATFORM's notes about a tenant — a billing
-     * account, a client's real name, and on the dunning path that this whole
-     * verb exists for, quite possibly a note about why this tenant is about to
-     * be blocked. Handing them back on the read would publish every one of those
-     * to the tenant they are about.
-     */
     const body = JSON.parse(raw) as ProjectsResult;
     expect(body.projects.map((entry) => entry.slug)).toEqual([MINE]);
     expect(body.projects[0]).not.toHaveProperty("labels");
 
-    /* Asserted on the SERIALIZED body too, in the enumeration-regression style:
-       a value that survived anywhere in the document is the leak. */
     expect(raw).not.toContain("acct-4417");
     expect(raw).not.toContain("Northwind");
   });
@@ -157,9 +127,6 @@ describe("GET /v1/projects", () => {
 
     const body = await listing(await asKey(TENANT_ID, tenant));
 
-    /* An empty map would be a second way of writing "no labels", and a client
-       that learned to read one would misread the other. A labelled project and
-       an unlabelled one are byte-identical here. */
     expect(body.projects[0]).not.toHaveProperty("labels");
     expect(JSON.stringify(body.projects[0])).toBe(
       JSON.stringify({ v: 1, slug: MINE, placement: "auto", createdAt: createdAtOf(MINE) }),
@@ -185,9 +152,6 @@ describe("GET /v1/projects", () => {
 
     const body = await listing(await asKey(TENANT_ID, tenant));
 
-    /* Not redacted, and it must not be: it is their project, they are already
-       living the refusals it causes, and hiding it would leave them debugging a
-       deploy that fails for no visible reason. */
     expect(body.projects[0]?.blocked).toBe(true);
   });
 
@@ -222,12 +186,6 @@ describe("POST /v1/projects/:project/block", () => {
   it("REFUSES an operator-tier key, even for a project it reaches", async () => {
     const response = await block(MINE, await asKey(TENANT_ID, tenant));
 
-    /*
-     * The key reaches this project for every other verb — it deploys to it, it
-     * retires its environments — and it may not stop it. A block is the fleet's
-     * decision about a tenant, so a tenant able to lift their own would be no
-     * block at all.
-     */
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
     await expect(getProject(clock.ctx, MINE)).resolves.not.toHaveProperty("blocked");
@@ -237,22 +195,10 @@ describe("POST /v1/projects/:project/block", () => {
     const foreign = await block(THEIRS, await asKey(TENANT_ID, tenant));
     const absent = await block("no-such-project", await asKey(TENANT_ID, tenant));
 
-    /*
-     * THE SCOPE REFUSAL COMES FIRST, and this is what that buys. A caller
-     * outside the project's scope meets the ordinary out-of-scope boundary and
-     * learns only that its key does not reach the name IT named — not that the
-     * project exists, not that it is blocked, not that blocking is a thing an
-     * admin does here. A project that is really there and one that never was
-     * are the same answer, word for word.
-     */
     expect([foreign.status, absent.status]).toEqual([403, 403]);
     const [named, unnamed] = [await problemText(foreign), await problemText(absent)];
     expect(named.replace(THEIRS, "X")).toBe(unnamed.replace("no-such-project", "X"));
 
-    /* And it is the SCOPE refusal rather than the tier one, which is what a
-       caller inside the project's scope meets instead — telling the two apart
-       is telling "there is a project here you may not stop" from "there is no
-       project of yours by that name". */
     await expect(
       block(THEIRS, await asKey(TENANT_ID, tenant)).then((r) => r.json()),
     ).resolves.toMatchObject({ title: "Beyond this key's projects" });
@@ -321,8 +267,6 @@ describe("what the fleet records about it", () => {
     expect(auditEvents()).toEqual([]);
   });
 });
-
-/* ---------------------------------------------------------------- fixtures */
 
 async function block(project: string, headers: Record<string, string>): Promise<Response> {
   return app.request(`/v1/projects/${project}/block`, { method: "POST", headers });

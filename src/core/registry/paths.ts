@@ -31,20 +31,7 @@ export function assertNodeId(id: string): void {
   }
 }
 
-/**
- * The same charset as a node id, said separately because it is a different
- * NAME for the same rule.
- *
- * ONE ID SPACE, TWO NAMESPACES, and the shared regular expression is what makes
- * that true rather than nearly true: a machine and an operator key are refused
- * each other's ids ({@link nodeKey}, {@link operatorKey} and the guards in
- * `registry/nodes.ts` and `registry/operators.ts`), and a check like that is
- * only sound while both sides accept exactly the same strings. Were the two
- * charsets to drift apart, an id one namespace could hold and the other could
- * not would slip past the guard on the side that refuses it early.
- *
- * Throws `ScafoError("invalid-slug")`.
- */
+/** Validates an operator id with the node-id charset to preserve shared identity space. */
 export function assertOperatorId(id: string): void {
   if (!NODE_ID_RE.test(id)) {
     throw new ScafoError("invalid-slug", "Invalid operator id", {
@@ -67,7 +54,7 @@ export function probeKey(token: string): string {
   return `${ROOT}/probe/${token}.json`;
 }
 
-/** Prefix the MACHINES of the fleet live under, and nothing else. */
+/** Prefix for node records. */
 export function nodesPrefix(): string {
   return `${ROOT}/nodes/`;
 }
@@ -77,24 +64,7 @@ export function nodeKey(id: string): string {
   return `${nodesPrefix()}${id}.json`;
 }
 
-/**
- * Prefix the OPERATOR KEYS the fleet trusts live under.
- *
- * A NAMESPACE OF ITS OWN, and it is the structural half of a boundary the code
- * used to keep by convention. Operator records once lived among the machines
- * under {@link nodesPrefix}, told apart by an address a machine would never
- * publish — which made one keyspace do two jobs. Every listing of the machines
- * had to know what an operator looked like or show one as a node that never
- * answers; a node id and an operator id could collide; and the refusal that kept
- * them apart had to say what was in the way, which meant naming a MACHINE's
- * internal address to whoever asked for the id.
- *
- * Split, a prefix listing IS the filtered view, and neither surface reads the
- * other's keys. What the split does not change is what a VERIFIER does with
- * them: a token is resolved against whichever namespace holds its `kid`, because
- * a node calling a peer and an operator calling a node are the same kind of
- * caller on every route but key administration.
- */
+/** Prefix for trusted operator records, isolated from node records. */
 export function operatorsPrefix(): string {
   return `${ROOT}/operators/`;
 }
@@ -114,11 +84,7 @@ export function identityKey(id: string): string {
   return `${identitiesPrefix()}${id}.json`;
 }
 
-/**
- * Prefix the placement decisions of one project live under. Listed once per
- * project rather than fetched per environment: an environment with no decision
- * yet has no object at all, and a listing says so without a read each.
- */
+/** Prefix for one project's placement decisions. */
 export function placementPrefix(project: string): string {
   assertSlug(project);
   return `${ROOT}/placement/${project}/`;
@@ -129,16 +95,7 @@ export function placementKey(project: string, env: string): string {
   return `${placementPrefix(project)}${env}.json`;
 }
 
-/**
- * Prefix everything the nodes have flushed about themselves lives under.
- *
- * NODE-SCOPED ONE LEVEL DOWN, and that is the whole of the write rule: a node
- * writes only under its own segment and sweeps only its own segment, so no node
- * can delete another's history and a listing of one node costs only that node's
- * keys. Below it the path is the UTC calendar — `<YYYY>/<MM>/<DD>/<HH>/` — so a
- * reader asking for a window lists a node once and skips whole hours by name,
- * and the keys sort lexicographically in the order they were written.
- */
+/** Prefix for node-scoped observation records, partitioned by UTC hour. */
 export function observePrefix(): string {
   return `${ROOT}/observe/`;
 }
@@ -166,12 +123,7 @@ export function observeHourPrefix(nodeId: string, at: Date): string {
 /** Digits a flush's sequence number is padded to, so a listing sorts by write order. */
 const OBSERVE_SEQ_DIGITS = 6;
 
-/**
- * Where one flush lands. `at` is the moment the flush was written and `seq` its
- * number since this node booted, which is what keeps two flushes of the same
- * millisecond apart; `extension` is the one the encoder that produced the bytes
- * declared, and is what tells a reader which decoder the file needs.
- */
+/** Key for one flush; sequence prevents same-millisecond collisions. */
 export function observeKey(nodeId: string, at: Date, seq: number, extension: string): string {
   if (!/^[a-z\d]{1,16}$/.test(extension)) {
     throw new ScafoError("invalid-input", "Invalid observation extension", {
@@ -194,13 +146,7 @@ export interface ObserveKeyParts {
   extension: string;
 }
 
-/**
- * Inverse of {@link observeKey}; returns null for anything that is not one.
- *
- * The calendar segments are checked against the timestamp rather than read out
- * of it, so a key whose path and stamp disagree is not one of ours and is left
- * alone — which is what keeps a sweep from deleting a key it cannot account for.
- */
+/** Parses an observation key; calendar/timestamp mismatch is rejected to protect sweeps. */
 export function parseObserveKey(key: string): ObserveKeyParts | null {
   const root = observePrefix();
   if (!key.startsWith(root)) return null;

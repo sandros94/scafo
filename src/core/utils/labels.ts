@@ -1,11 +1,4 @@
-/*
- * Labels: the `key=value` pairs an operator sets on a node, and that an
- * environment's selector is written in.
- *
- * One charset and one parser for both ends, because a label an operator can set
- * but never select for — or select for but never set — is a fleet that silently
- * places nothing.
- */
+/* Shared node-label and selector `key=value` validation. */
 
 import { ScafoError } from "../error.ts";
 

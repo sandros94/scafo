@@ -1,21 +1,4 @@
-/*
- * PROJECT-SCOPED OPERATORS: the multi-tenancy layer, on the wire.
- *
- * A `TrustedOperator` may carry a list of project slugs. Absent means every
- * project, which is what every key of every installation older than this wave
- * carries — so a fleet nobody has scoped behaves exactly as it did. Present
- * means those projects and no others, and the node API is where that is
- * enforced: at the point an operator-authed request NAMES a project.
- *
- * The scenario the whole thing exists for is the first describe below: a
- * platform hands a tenant an operator key, the tenant deploys and administers
- * their own project through it, and every route that names somebody else's is a
- * 403 that does not even tell them which other projects exist.
- *
- * The app is invoked through its fetch interface, so nothing binds a socket, and
- * the deploy intake is a stand-in — what is under test is authorization, not
- * what an artifact turns into.
- */
+/* Project-scoped operator authorization and disclosure. */
 
 import type { H3 } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
@@ -118,8 +101,6 @@ describe("an operator scoped to one project cannot touch another", () => {
     expect(mine.status).toBe(202);
     expect(theirs.status).toBe(403);
     await expect(theirs.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
-    /* And the refusal happened BEFORE anything was published, which is the only
-       version of this that is worth anything. */
     expect(deploys.started.map((meta) => meta.project)).toEqual([MINE]);
   });
 
@@ -203,8 +184,6 @@ describe("an operator scoped to one project cannot touch another", () => {
 
     const response = await call(`/v1/deploys/${started.id}`, TENANT_ID, tenant, { method: "GET" });
 
-    /* An id is only ever authenticated against the project of the deploy it
-       belongs to, so a scoped key is refused there exactly as it is at intake. */
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
   });
@@ -222,9 +201,6 @@ describe("what a scoped operator is told about the refusal", () => {
   });
 
   it("NEVER names the other projects the key may reach, because those are tenants", async () => {
-    /* The whole point of handing a tenant an operator key rather than a bucket
-       credential is that the tenant learns nothing about the fleet it is on.
-       A refusal that enumerated the key's own list would be the leak. */
     await fileKey(TENANT_ID, tenant, { role: "operator", projects: [MINE, "initech"] });
 
     const response = await call(pathIn(THEIRS, "/retire"), TENANT_ID, tenant, { method: "POST" });
@@ -290,9 +266,6 @@ describe("a key that names no projects notices nothing", () => {
   });
 
   it("lets a role-LESS key from before this wave reach every project", async () => {
-    /* Absent scope is every project, exactly as an absent role is admin: an
-       upgrade must never silently take an installation's operators away from
-       the projects they were already deploying to. */
     for (const project of [MINE, THEIRS]) {
       expect((await upload(LEGACY_ID, legacy, project)).status, project).toBe(202);
     }
@@ -347,9 +320,6 @@ describe("granting a scope through POST /v1/operators", () => {
       projects: [MINE, THEIRS],
     });
 
-    /* The escalation this closes: rotation is the one registration an
-       operator-tier key may make for itself, so a rotation that could widen a
-       scope would make every scope advisory. */
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
     await expect(getOperator(clock.ctx, "op-wider111")).resolves.toBeNull();
@@ -358,9 +328,6 @@ describe("granting a scope through POST /v1/operators", () => {
   it("a scoped operator cannot enrol an UNSCOPED key beside itself", async () => {
     const minted = await generateJWK("EdDSA", { kid: "op-beside11" });
 
-    /* No `projects` in the body at all, which for an unscoped caller means
-       every project. A scoped caller's registration inherits the caller's own
-       scope instead, so the omission is not a way out of one. */
     const response = await enroll(TENANT_ID, tenant, publicHalf("op-beside11", minted));
 
     expect(response.status).toBe(200);
@@ -395,7 +362,6 @@ describe("granting a scope through POST /v1/operators", () => {
       supersedes: TENANT_ID,
       projects: [MINE],
     });
-    /* And the new key is scoped on the WIRE, not only in the record. */
     const refused = await call(pathIn(THEIRS, "/retire"), "op-rotated1", minted, {
       method: "POST",
     });
@@ -435,8 +401,6 @@ describe("granting a scope through POST /v1/operators", () => {
     expect(response.status).toBe(400);
   });
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 /** One call as the cases below state it: a method and, where there is one, a body. */
 interface Call {
@@ -521,9 +485,6 @@ function environmentCalls(): Array<[string, string, Call]> {
     ["retire", "/retire", { method: "POST" }],
     ["unretire", "/unretire", { method: "POST" }],
     ["selector", "/selector", { method: "POST", body: { selector: { tier: "fast" } } }],
-    /* The deletion is lease-gated and this app coordinates nothing, so what an
-       allowed caller gets here is the coordinator's absence — which is exactly
-       the point: it is not a 403, and it was decided AFTER the scope check. */
     ["delete", "", { method: "DELETE" }],
   ];
 }
@@ -574,10 +535,7 @@ function publicHalf(id: string, keys: Keypair): Record<string, unknown> {
   return { id, publicKey: { kty: "OKP", crv: "Ed25519", x: keys.publicKey.x } };
 }
 
-/**
- * Files a key as an operator's, straight into the registry. With no `operator`
- * block at all it is the record every installation older than this wave holds.
- */
+/** Files an operator key directly; omitting `operator` models a legacy record. */
 async function fileKey(
   id: string,
   keys: Keypair,

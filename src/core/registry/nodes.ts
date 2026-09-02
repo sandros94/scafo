@@ -10,34 +10,11 @@ import { nodeKey, nodesPrefix, operatorKey } from "./paths.ts";
 /** How often a running daemon refreshes its own record's `heartbeatAt`. */
 export const NODE_HEARTBEAT_INTERVAL_MS: number = 30_000;
 
-/**
- * How long a node counts as live after the last heartbeat it managed to write.
- *
- * Three intervals rather than one: two refreshes may be lost to a slow bucket
- * before a perfectly healthy node is counted out, and counting one out is what
- * moves its environments to another node.
- */
+/** Liveness window; allows two missed heartbeats before reassignment. */
 export const NODE_LIVENESS_WINDOW_MS: number = 3 * NODE_HEARTBEAT_INTERVAL_MS;
 
-/**
- * Registers or refreshes a node: nodes re-register on every start, so the record
- * is replaced wholesale. The id addresses the record and cannot change.
- *
- * Replacing it wholesale is also what un-drains a node: a record left behind by
- * a graceful shutdown carries `drainingAt`, and the boot that overwrites it puts
- * the node back in service. A node that has started is a node that serves.
- *
- * ONE ID IS ONE IDENTITY, and this is the second of the two sides it is enforced
- * from ({@link trustOperator} is the other). The durable reservation claims the
- * id before this mutable record is written, so a machine cannot replace an
- * operator or re-key a registered node. Refused with `ScafoError("reference-held")`.
- *
- * THE WORDING IS FREE HERE and the check costs one read on a path taken once per
- * boot. This is the BUCKET PLANE: whoever reaches it holds the bucket's own
- * credentials, and could write either record by hand — so there is nothing to
- * withhold from them, unlike the operator-facing side of the same invariant,
- * which says only that the id is taken.
- */
+/** Registers or refreshes a node wholesale. Durable identity reservation prevents
+    node/operator id collisions and node re-keying. */
 export async function registerNode(ctx: RegistryContext, record: NodeRecord): Promise<NodeRecord> {
   const key = nodeKey(record.id);
   const existing = await registerNodeIfAbsent(ctx, record);
@@ -54,11 +31,7 @@ export async function registerNode(ctx: RegistryContext, record: NodeRecord): Pr
   return updated.value;
 }
 
-/**
- * Claims and creates a node only when it is absent. An existing compatible
- * record is returned unchanged, so a narrow caller can update only its field
- * without racing a daemon's wholesale registration.
- */
+/** Claims and creates a node only when absent; compatible existing records stay unchanged. */
 export async function registerNodeIfAbsent(
   ctx: RegistryContext,
   record: NodeRecord,
@@ -114,13 +87,7 @@ export async function listNodes(ctx: RegistryContext): Promise<string[]> {
   return namesFromKeys(await ctx.store.list(prefix), prefix);
 }
 
-/**
- * Every registered node's record, in id order.
- *
- * A record that vanished between the listing and the read is left out rather
- * than raised: a node deregistering mid-pass is ordinary, and the next pass sees
- * the fleet as it then is.
- */
+/** Node records in id order; records deleted after listing are omitted. */
 export async function listNodeRecords(ctx: RegistryContext): Promise<NodeRecord[]> {
   const records: NodeRecord[] = [];
   for (const id of await listNodes(ctx)) {
@@ -130,15 +97,7 @@ export async function listNodeRecords(ctx: RegistryContext): Promise<NodeRecord[
   return records;
 }
 
-/**
- * Stamps this node as still there, touching `heartbeatAt` and NOTHING else.
- *
- * Narrow on purpose: a node re-registering rewrites its record wholesale from
- * its own configuration, and a heartbeat is not the moment to restate an
- * address or its labels. Throws `ScafoError("not-found")` when the node has no
- * record — a heartbeat cannot bring one into being, because the record says what
- * this node IS and only registration knows that.
- */
+/** Updates only `heartbeatAt`; a heartbeat cannot create a node record. */
 export async function heartbeatNode(ctx: RegistryContext, id: string): Promise<string> {
   const at = nowIso(ctx);
   await updateJson<NodeRecord>(ctx, nodeKey(id), (current) => ({ ...current, heartbeatAt: at }));

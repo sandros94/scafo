@@ -1,22 +1,4 @@
-/*
- * WHAT A BLOCKED PROJECT STOPS DOING.
- *
- * Blocking is a FULL STOP and its whole value is that it needs no bookkeeping to
- * undo: the environment records, the builds, the deployments, the domains and the
- * placement decisions are all left exactly as they stand, and one flag on the
- * project record takes the project out of service. Unblocking is one call and
- * everything comes back on the next pass.
- *
- * A blocked project contributes NOTHING to what a node reads as
- * its desired state, so its processes are stopped by the same leftover sweep
- * that stops a reassigned environment's, its hosts disappear from the routing
- * because the routing is rendered from what the node serves.
- *
- * The two refusals a caller can see directly — deploy and certificate — are
- * asserted here; that a process is really stopped and that the ingress really
- * loses the routes are asserted where the loop runs, in
- * `test/daemon-reconcile.test.ts`.
- */
+/* Effects of blocking and unblocking a project. */
 
 import type { H3 } from "h3";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -112,7 +94,6 @@ describe("what a node reads as its work", () => {
       mode: "legacy-fallback",
     });
 
-    /* Nothing was deleted, so the pass simply wants the environment again. */
     expect(state.environments.map((entry) => entry.project).sort()).toEqual([NEIGHBOUR, PROJECT]);
     expect(state.environments.find((entry) => entry.project === PROJECT)?.env.name).toBe(
       ENVIRONMENT,
@@ -127,11 +108,6 @@ describe("GET /v1/ingress/ask", () => {
 
     await blockProject(registry, PROJECT);
 
-    /*
-     * This gates CERTIFICATE ISSUANCE. A blocked project answers nothing, so a
-     * certificate minted for it now would be a fresh public record of a name
-     * that serves nobody — and it would outlive the block.
-     */
     expect((await ask(`${PROJECT}--${ENVIRONMENT}.${PLATFORM_DOMAIN}`)).status).toBe(404);
   });
 
@@ -157,8 +133,6 @@ describe("GET /v1/ingress/ask", () => {
     expect((await ask(PLATFORM_DOMAIN)).status).toBe(200);
   });
 });
-
-/* ---------------------------------------------------------------- fixtures */
 
 async function ask(domain: string): Promise<Response> {
   return app.request(`/v1/ingress/ask?domain=${domain}`);

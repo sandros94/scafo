@@ -1,33 +1,5 @@
-/*
- * Following the file an operator's ingress writes its access log to.
- *
- * A DRIVER BECAUSE IT TOUCHES A FILESYSTEM, and that is the whole of what it is
- * for. It knows nothing about what a line means — reading one is
- * `src/core/utils/access-log.ts`, which is pure — and nothing about what a line
- * is counted as. It hands out complete lines and stops there.
- *
- * IT STARTS AT THE FILE'S CURRENT END. Whatever the ingress logged before this
- * node came up was already served, by this node or another, and re-counting it
- * on every restart would invent traffic. A file that appears LATER is read from
- * its beginning, because a file created after we started has no history that
- * predates us.
- *
- * AND IT FOLLOWS ROTATION, WHICH IS THE TRAP. Both ingresses roll their own
- * logs: Caddy's file writer rolls at 100 MiB by default, and every logrotate
- * setup an operator already has does the same. Rolling is a RENAME plus a fresh
- * file at the same path — the open handle still points at the old inode — or, in
- * the `copytruncate` shape, the same inode cut back to zero. Both are watched
- * for, and in the rename case the file that was rotated away is DRAINED TO ITS
- * END before the new one is opened, so the lines written between the last poll
- * and the roll are not lost.
- *
- * POLLED RATHER THAN WATCHED. `fs.watch` reports a rename as one event on a path
- * it is no longer watching, misses changes entirely on several of the
- * filesystems a log lands on (bind mounts, network volumes, some container
- * overlays), and is not the same on every platform. A stat per second answers
- * every question this needs — size and identity — for a cost nothing can
- * measure, and it is the same answer everywhere.
- */
+/* Polls an ingress access log. Existing files start at EOF; new files start at
+   zero. Drains renamed files before switching and resets after copytruncate. */
 
 import { open, stat } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
@@ -36,12 +8,7 @@ import type { Stats } from "node:fs";
 /** How often the file is looked at for growth and for replacement. */
 export const DEFAULT_TAIL_INTERVAL_MS: number = 1_000;
 
-/**
- * Longest partial line held while waiting for its newline. A line past this is
- * handed on as it stands and the rest of it read as another — bounded memory is
- * worth more than a single absurd line, and both halves are unreadable anyway,
- * so they land in the caller's malformed count rather than anywhere subtle.
- */
+/** Maximum buffered partial-line bytes; larger lines are emitted in fragments. */
 export const DEFAULT_MAX_LINE_BYTES: number = 64 * 1024;
 
 /** Bytes read from the file at a time. */
@@ -49,22 +16,11 @@ const READ_CHUNK_BYTES = 64 * 1024;
 
 /** Follows one file, handing out the complete lines appended to it. */
 export interface AccessLogTailer {
-  /**
-   * Opens the file at its current end and begins polling. A path that is not
-   * there yet is not an error: it is picked up by the first poll that finds it.
-   */
+  /** Opens at EOF. A missing path is picked up by a later poll. */
   start(): Promise<void>;
-  /**
-   * One pass over the file — what the timer does on its own. Exposed so a caller
-   * can step it, and so a test needs no clock. Passes never overlap and never
-   * reject; a caller awaiting one is awaiting a pass queued after any in flight.
-   */
+  /** Queues one non-overlapping, non-rejecting pass. */
   poll(): Promise<void>;
-  /**
-   * Reads whatever is left, then closes the file. Idempotent, and TERMINAL: a
-   * stopped tailer stays stopped, so a second stop — or a poll that arrives
-   * after one — reads nothing and cannot re-open the file at its beginning.
-   */
+  /** Drains and closes the file. Stopping is terminal and idempotent. */
   stop(): Promise<void>;
 }
 
@@ -77,13 +33,7 @@ export interface AccessLogTailOptions {
   intervalMs?: number;
   /** Longest partial line held; {@link DEFAULT_MAX_LINE_BYTES} by default. */
   maxLineBytes?: number;
-  /**
-   * What went wrong reading the file — an unreadable path, a permission the node
-   * does not have. REPORTED ONCE PER DISTINCT FAILURE rather than once per poll:
-   * a log the node may not read would otherwise print every second forever, and
-   * the same message repeated is not more information. The next successful pass
-   * arms it again.
-   */
+  /** Called once per distinct read failure; a successful pass resets it. */
   onError?: (error: unknown) => void;
 }
 
@@ -97,8 +47,7 @@ export function createAccessLogTailer(opts: AccessLogTailOptions): AccessLogTail
   const chunk = new Uint8Array(READ_CHUNK_BYTES);
 
   let handle: FileHandle | null = null;
-  /* Which file the open handle IS, as the kernel names it. What says a path now
-     holds a different file than the one being read. */
+  /* Device and inode identify the open file across path replacement. */
   let identity: string | null = null;
   let offset = 0;
   let partial = "";
@@ -149,8 +98,7 @@ export function createAccessLogTailer(opts: AccessLogTailOptions): AccessLogTail
       const { bytesRead } = await handle.read(chunk, 0, chunk.length, offset);
       if (bytesRead === 0) return;
       offset += bytesRead;
-      /* Streaming, because a read can land in the middle of a multi-byte
-         character and the two halves must decode as one. */
+      /* Preserve multi-byte characters across read boundaries. */
       feed(decoder.decode(chunk.subarray(0, bytesRead), { stream: true }));
     }
   };
@@ -164,8 +112,7 @@ export function createAccessLogTailer(opts: AccessLogTailOptions): AccessLogTail
 
   const attach = async (atEnd: boolean): Promise<void> => {
     const opened = await open(opts.path, "r");
-    /* Stat through the HANDLE rather than the path: a roll between the two would
-       otherwise record the identity of a file this is not the one reading. */
+    /* Stat the handle: the path may rotate between open and stat. */
     const stats = await opened.stat();
     handle = opened;
     identity = identify(stats);
@@ -180,9 +127,7 @@ export function createAccessLogTailer(opts: AccessLogTailOptions): AccessLogTail
     try {
       const present = await peek(opts.path);
       if (present === null) {
-        /* The path is gone — rolled away, or removed. Whatever is still open is
-           the file it named, so it is read to its end rather than dropped, and
-           the next pass picks up whatever takes the name. */
+        /* Drain the unlinked/renamed file before reopening its path. */
         await drain();
         return;
       }
@@ -193,8 +138,7 @@ export function createAccessLogTailer(opts: AccessLogTailOptions): AccessLogTail
         await close();
         await attach(false);
       } else if (present.size < offset) {
-        /* Truncated in place: the same file, cut back under us. Everything past
-           the cut is new, and the partial line held from before it is gone. */
+        /* copytruncate: discard the old partial line and reread from zero. */
         offset = 0;
         partial = "";
         decoder = new TextDecoder();
@@ -219,9 +163,7 @@ export function createAccessLogTailer(opts: AccessLogTailOptions): AccessLogTail
       if (stopped || timer !== null) return;
 
       try {
-        /* THE ONE PLACE THE END IS THE STARTING POINT. Everything after this
-           attaches at zero, because it is a file that did not exist when the
-           node did. */
+        /* Ignore pre-start history; files created later start at zero. */
         if ((await peek(opts.path)) !== null) await attach(true);
       } catch (error) {
         report(error);
@@ -230,8 +172,7 @@ export function createAccessLogTailer(opts: AccessLogTailOptions): AccessLogTail
       timer = setInterval(() => {
         if (!running) void poll();
       }, intervalMs);
-      /* Never what keeps the process alive: the node runs until it is signalled,
-         and a shutdown must not wait out a poll interval. */
+      /* Polling must not keep the process alive. */
       const ticker = timer as { unref?: () => void };
       ticker.unref?.();
     },
@@ -244,9 +185,7 @@ export function createAccessLogTailer(opts: AccessLogTailOptions): AccessLogTail
         clearInterval(timer);
         timer = null;
       }
-      /* Read to the end before closing, so the lines written while the node was
-         shutting down are counted. A partial line with no newline is left where
-         it is: it is not a record yet. */
+      /* Count complete lines written before shutdown; retain no partial line. */
       await poll();
       stopped = true;
       await close().catch(report);

@@ -1,15 +1,6 @@
 /*
- * The columnar encoding of a flush: the wide schema it declares, the row every
- * record kind becomes, the file that comes out, and the records that come back.
- *
- * THREE LAYERS, AND THE LAST IS THE DECISIVE ONE. The mapping is checked through
- * `observeParquetRow` and against the schema `tavolato` validates every row
- * against — so a column renamed, retyped or made required fails here rather than
- * in a query months later. Then the codec is read back through itself, which is
- * what says the two directions describe one table. Then, WHERE A DuckDB IS
- * INSTALLED, one case writes a real encode to a file and reads it with the DuckDB
- * CLI: that is the only check that says the bytes are Parquet rather than that
- * the library that wrote them agrees with itself.
+ * The columnar encoding of a flush: the wide schema it declares, the row every record kind
+ * becomes, the file that comes out, and the records that come back.
  */
 
 import { execFileSync } from "node:child_process";
@@ -152,13 +143,11 @@ function columns(): Record<string, string> {
 describe("the wide schema a flush declares", () => {
   it("is one flat column per field of every record kind, and no others", () => {
     expect(columns()).toEqual({
-      /* Every record carries these, so they are the only REQUIRED ones. */
       v: "i64",
       record: "string",
       node: "string",
       at: "timestamp",
 
-      /* The flush header. */
       events: "i64?",
       counters: "i64?",
       ringDropped: "i64?",
@@ -167,7 +156,6 @@ describe("the wide schema a flush declares", () => {
       malformed: "i64?",
       unattributed: "i64?",
 
-      /* The event union, flattened. */
       type: "string?",
       project: "string?",
       env: "string?",
@@ -183,7 +171,6 @@ describe("the wide schema a flush declares", () => {
       subject: "string?",
       role: "string?",
 
-      /* The counter snapshot, its two nested fields flattened. */
       since: "timestamp?",
       requests: "i64?",
       bytes: "i64?",
@@ -211,8 +198,6 @@ describe("the wide schema a flush declares", () => {
       "durations_le_1000ms",
       "durations_le_3000ms",
     ]);
-    /* Anything past the last boundary lands in a band of its own, exactly as the
-       record's own `durations` array's extra entry does. */
     expect(durationBandColumn(DURATION_BANDS_MS.length)).toBe("durations_gt_3000ms");
   });
 
@@ -280,8 +265,6 @@ describe("what one record becomes", () => {
   });
 
   it("leaves a column the record says nothing about ABSENT, which is a real null", () => {
-    /* Absent is not zero: a record that counts no requests and one that counted
-       zero are different answers, and a reader must be able to tell them apart. */
     const row = observeParquetRow(event({ type: "runtime.started", processId: "shop--prod" }));
 
     expect(row).toEqual({
@@ -298,7 +281,6 @@ describe("what one record becomes", () => {
   it("maps every event variant, each carrying only its own fields", () => {
     const rows = EVERY_EVENT.map((record) => observeParquetRow(record));
 
-    /* Every one of them is an event of a known type, on the shared four columns. */
     expect(rows.every((row) => row.record === "event" && row.at === CLOCK_START_MS)).toBe(true);
     expect(new Set(rows.map((row) => row.type))).toEqual(
       new Set([
@@ -347,9 +329,6 @@ describe("the file a flush encodes to", () => {
     const records: ObserveRecord[] = [flush(), ...EVERY_EVENT, counters()];
     const { bytes } = PARQUET_CODEC.encode(records);
 
-    /* A footer for the wide schema is the floor whatever the rows say, and ten rows of
-       mostly-null columns cannot reach 64 KiB. Loose on purpose: this is a sanity
-       bound on the encoder, not a golden size to be updated on every change. */
     expect(bytes.length).toBeGreaterThan(1000);
     expect(bytes.length).toBeLessThan(65_536);
     expect(records).toHaveLength(10);
@@ -358,9 +337,6 @@ describe("the file a flush encodes to", () => {
   it("compresses every data page, and says in the file which codec it used", () => {
     const bytes = PARQUET_CODEC.encode([flush(), ...EVERY_EVENT, counters()]).bytes;
 
-    /* Named in the column chunks rather than agreed out of band: a reader that
-       registers no decompressor refuses BY NAME, which is exactly how a reader
-       that DOES register one knows it has to. */
     expect(() => readParquet(bytes)).toThrow(new RegExp(OBSERVE_PARQUET_COMPRESSION));
     expect(OBSERVE_PARQUET_WRITER_CODEC.name).toBe(OBSERVE_PARQUET_COMPRESSION);
   });
@@ -373,8 +349,6 @@ describe("the file a flush encodes to", () => {
   });
 
   it("is validated row by row by the writer's own schema", () => {
-    /* `tavolato` rejects a value of the wrong type for a column, so an encode
-       that returns at all is a mapping every column agreed with. */
     expect(() =>
       PARQUET_CODEC.encode([{ ...counters(), requests: "many" } as unknown as ObserveRecord]),
     ).toThrow(/requests/);
@@ -385,10 +359,6 @@ describe("reading it back", () => {
   it("round-trips every record kind, field for field", () => {
     const records: ObserveRecord[] = [flush(), ...EVERY_EVENT, counters()];
 
-    /* The whole contract of the seam: encode then decode is the identity over
-       records. It covers the three conversions a columnar file forces — an `i64`
-       that reads back a bigint, a `timestamp` that reads back a Date, and the two
-       fields that were flattened into many columns on the way in. */
     expect(PARQUET_CODEC.decode(PARQUET_CODEC.encode(records).bytes)).toEqual({
       records,
       malformed: 0,
@@ -400,9 +370,6 @@ describe("reading it back", () => {
 
     const [read] = PARQUET_CODEC.decode(PARQUET_CODEC.encode([kicked]).bytes).records;
 
-    /* Every column but six is null in this row, and none of them may reappear:
-       an environment that counted no requests and one that counted zero are
-       different answers. */
     expect(Object.keys(read).sort()).toEqual(["at", "node", "processId", "record", "type", "v"]);
   });
 
@@ -417,8 +384,6 @@ describe("reading it back", () => {
   });
 
   it("skips and counts a row that is not a record, keeping the file's good ones", () => {
-    /* Written through the same schema, which is the only way such a row can
-       exist: a kind this build does not know, and a node id that is not one. */
     const bytes = writeRows([
       observeParquetRow(event({ type: "runtime.started", processId: "shop--kept" })),
       { v: 1, record: "invented", node: NODE, at: CLOCK_START_MS },
@@ -432,9 +397,6 @@ describe("reading it back", () => {
   });
 
   it("skips a column a newer daemon added rather than refusing the row", () => {
-    /* The mirror of the write side dropping a field it has no column for: a
-       reader that rejected rows a later daemon widened would be the one failure a
-       telemetry format cannot have. */
     const schema = defineSchema({
       v: { type: "i64" },
       record: { type: "string" },
@@ -456,9 +418,6 @@ describe("reading it back", () => {
   });
 
   it("refuses bytes that are not a Parquet file at all", () => {
-    /* Thrown rather than counted: a row that is not a record is data, and a file
-       that is not a file is not. The caller — `readObservations` — is what turns
-       it back into one unreadable key. */
     expect(() => PARQUET_CODEC.decode(new Uint8Array([0]))).toThrow(/Parquet file/);
   });
 
@@ -469,13 +428,6 @@ describe("reading it back", () => {
   });
 });
 
-/*
- * THE DECISIVE CHECK, AND IT ONLY RUNS WHERE A DuckDB IS. Everything above says
- * the encoder did what this repository asked of it; only a real Parquet reader
- * says the bytes are a Parquet file. Gated on the binary being present, the same
- * way the end-to-end suites are gated on being asked for, so a machine without
- * one runs a green suite rather than a red herring.
- */
 const DUCKDB = [
   join(process.env.HOME ?? "", ".local/bin/duckdb"),
   "/usr/local/bin/duckdb",
@@ -501,9 +453,6 @@ describe.skipIf(DUCKDB === undefined)("what DuckDB makes of a flush", () => {
     const file = join(workspace, "flush.parquet");
     writeFileSync(file, PARQUET_CODEC.encode([flush(), ...EVERY_EVENT, counters()]).bytes);
 
-    /* The columns as the FORMAT declares them, read out of the footer rather than
-       inferred from the rows: physical type, real Parquet repetition, and the
-       logical annotation that makes an INT64 an instant. */
     const declared = query(
       file,
       "SELECT name || ' ' || type || ' ' || repetition_type || ' ' || " +
@@ -511,8 +460,6 @@ describe.skipIf(DUCKDB === undefined)("what DuckDB makes of a flush", () => {
         "WHERE repetition_type IS NOT NULL",
     ).split("\n");
 
-    /* The four every record carries are REQUIRED; every other column is OPTIONAL,
-       which is what lets three record kinds share one table. */
     expect(declared).toContain("v INT64 REQUIRED -");
     expect(declared).toContain("record BYTE_ARRAY REQUIRED UTF8");
     expect(declared).toContain("node BYTE_ARRAY REQUIRED UTF8");
@@ -525,7 +472,6 @@ describe.skipIf(DUCKDB === undefined)("what DuckDB makes of a flush", () => {
     expect(declared.filter((line) => line.includes(" REQUIRED "))).toHaveLength(4);
     expect(declared).toHaveLength(OBSERVE_PARQUET_SCHEMA.columns.length);
 
-    /* And what a querying human sees: the two instants are instants. */
     const described = query(
       file,
       "SELECT column_name || ' ' || column_type FROM (DESCRIBE SELECT * FROM read_parquet('$FILE'))",
@@ -537,11 +483,6 @@ describe.skipIf(DUCKDB === undefined)("what DuckDB makes of a flush", () => {
     expect(described).toContain("kicked BOOLEAN");
     expect(described).toContain("durations_le_10ms BIGINT");
 
-    /* The rows, filtered on the discriminant exactly as `scafo metrics` filters
-       on it after decoding. `at` and `type` are SQL keywords, so a
-       query names them quoted — the column is the record's own field name and
-       stays that, because a schema that renamed fields to please one reader would
-       stop matching the records it encodes. */
     expect(query(file, "SELECT count(*) FROM read_parquet('$FILE')")).toBe("10");
     expect(
       query(
@@ -550,8 +491,6 @@ describe.skipIf(DUCKDB === undefined)("what DuckDB makes of a flush", () => {
       ),
     ).toBe(["counters,1", "event,8", "flush,1"].join("\n"));
 
-    /* A counter snapshot reads as the numbers it was written from, timestamp
-       included — which is what makes these files answerable without scafo. */
     expect(
       query(
         file,
@@ -559,14 +498,10 @@ describe.skipIf(DUCKDB === undefined)("what DuckDB makes of a flush", () => {
           `"durations_gt_3000ms", epoch_ms("at"), epoch_ms("since") ` +
           `FROM read_parquet('$FILE') WHERE "record" = 'counters'`,
       ),
-      /* Compared as epochs rather than as rendered instants: a `timestamp` is
-         UTC-normalised in the file, and `strftime` would render it in whatever
-         zone the machine running the suite happens to be in. */
     ).toBe(
       ["shop", "production", 41, 90_210, 35, 10, 1, CLOCK_START_MS, Date.parse(SINCE)].join(","),
     );
 
-    /* A column no record of a kind carries is a real null rather than a zero. */
     expect(
       query(
         file,
@@ -578,9 +513,6 @@ describe.skipIf(DUCKDB === undefined)("what DuckDB makes of a flush", () => {
       query(file, `SELECT count(*) FROM read_parquet('$FILE') WHERE "type" = 'runtime.started'`),
     ).toBe("1");
 
-    /* And the file says who wrote it, and how the pages are packed — which is the
-       only claim about the compression that comes from a reader rather than from
-       the writer that made it. */
     expect(query(file, "SELECT created_by FROM parquet_file_metadata('$FILE')")).toBe(
       OBSERVE_PARQUET_CREATED_BY,
     );

@@ -1,7 +1,7 @@
 /*
- * Placement as the registry holds it: the heartbeat a node keeps, the window
- * that reads it as alive, the conditional write the coordinator records a
- * decision with, and what an environment's deletion takes with it.
+ * Placement as the registry holds it: the heartbeat a node keeps, the window that reads it as
+ * alive, the conditional write the coordinator records a decision with, and what an environment's
+ * deletion takes with it.
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
@@ -217,14 +217,14 @@ describe("listPlacements", () => {
     await writePlacement(clock.ctx, PROJECT, ENV, [NODE_A], lease);
     const placements = await listPlacements(clock.ctx, PROJECT);
 
-    /* One listing, and a read only for the environments that HAVE a decision. */
+    /* One listing, and a read only for the environments that have a decision. */
     expect([...placements.keys()]).toEqual([ENV]);
     expect(placements.get(ENV)).toMatchObject({ nodes: [NODE_A] });
   });
 
   it("reads the decisions it found at once, and keys them in listing order all the same", async () => {
     const { ctx, observing, names } = await decidedProject();
-    /* The first one answers LAST, so a map assembled as the reads came back
+    /* The first one answers last, so a map assembled as the reads came back
        would not be in the order below. */
     observing.delays.set(placementKey(PROJECT, names[0]), 20);
     observing.reset();

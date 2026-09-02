@@ -1,18 +1,6 @@
 /*
- * `scafo operator show` and `scafo operator enroll`: how somebody who has a key
- * gets that key admitted by somebody who can admit it.
- *
- * TWO HALVES OF ONE CEREMONY, and they are tested together because the artifact
- * is the contract between them: `show` prints a document, `enroll` reads that
- * exact document back, and neither of them ever handles a private half.
- *
- * The enrollment itself has TWO PATHS that must never be chosen for the
- * operator. Over the WIRE a node admits the key on the authority of the caller's
- * own admin-tier key, which is the ordinary way. Through the BUCKET nothing is
- * authorized by any key at all, which is how an installation is seeded and how
- * one that has locked every operator out is recovered — a path that bypasses
- * every tier rule and must therefore always be asked for out loud. So `enroll`
- * refuses both and refuses neither, and the refusal has to teach the difference.
+ * `scafo operator show` and `scafo operator enroll`: how somebody who has a key gets that key
+ * admitted by somebody who can admit it.
  */
 
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -390,8 +378,6 @@ describe("the document an enrollment accepts", () => {
     expect(error.detail).toContain("99");
   });
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 async function registeredRemote(
   role: "admin" | "operator" = "admin",

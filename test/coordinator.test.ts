@@ -1,11 +1,4 @@
-/*
- * The coordinator loop: taking the lease, keeping it, and — the rule the whole
- * design rests on — stopping the moment a renewal is refused.
- *
- * The loop is driven a tick at a time rather than on its timer, and the clock is
- * the injected one, so every assertion is about what the loop decided and not
- * about how long a test was willing to wait.
- */
+/* Coordinator lease acquisition, renewal, and immediate authority loss. */
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { recordDeployment } from "../src/core/registry/_deployment.ts";
@@ -58,7 +51,6 @@ describe("createCoordinator", () => {
     const status = coordinator.status();
     expect(status.holding).toBe(true);
     expect(status.lease).toMatchObject({ node: "node-a", fence: 1 });
-    /* The fenced handle is what lease-gated calls take; a candidate has none. */
     expect(coordinator.handle()).not.toBeNull();
   });
 
@@ -73,7 +65,6 @@ describe("createCoordinator", () => {
 
     expect(coordinator.status().holding).toBe(true);
     expect(second.fence).toBe(first.fence);
-    /* Renewal is what moves the deadline; the fence only moves on a takeover. */
     expect(Date.parse(second.acquiredAt)).toBeGreaterThan(Date.parse(first.acquiredAt));
   });
 
@@ -95,8 +86,6 @@ describe("createCoordinator", () => {
     const coordinator = coordinatorFor("node-a");
     await coordinator.runOnce();
 
-    /* Long enough that this node's lease has gone stale, so another node takes
-       it over between two renewals. */
     clock.tick(HOUR_MS);
     const stolen = await acquireLease(clock.ctx, "node-b", { ttlMs: TTL_MS });
     expect(stolen).not.toBeNull();
@@ -104,10 +93,6 @@ describe("createCoordinator", () => {
 
     await coordinator.runOnce();
 
-    /*
-     * The fencing rule. The loop found out it is no longer the coordinator and
-     * stopped before doing any coordinator-only work.
-     */
     expect(coordinator.status().holding).toBe(false);
     expect(coordinator.handle()).toBeNull();
     expect(store.dels).toBe(deletesBefore);
@@ -123,7 +108,6 @@ describe("createCoordinator", () => {
     const stolen = await acquireLease(clock.ctx, "node-b", { ttlMs: TTL_MS });
     if (stolen === null) throw new Error("the takeover did not happen");
 
-    /* The refused renewal, then two more ticks against a live foreign lease. */
     await coordinator.runOnce();
     for (let tick = 0; tick < 2; tick++) {
       clock.tick(TTL_MS / 3);
@@ -140,8 +124,6 @@ describe("createCoordinator", () => {
     await retireEnvironment(clock.ctx, PROJECT, "preview");
     clock.tick(DEFAULT_RETIREMENT_GRACE_MS + 1);
 
-    /* The renewal goes through and the delete after it does not, so the reap is
-       what fails rather than the lease. */
     store.failAfter(1);
     await coordinator.runOnce();
 
@@ -164,10 +146,6 @@ describe("createCoordinator", () => {
     await coordinator.runOnce();
     clock.tick(TTL_MS / 3);
 
-    /* Not a takeover — the store simply refused the write. The loop cannot tell
-       the two apart from here, and the safe reading of both is the same: a
-       renewal that did not land means this node is not the coordinator, and the
-       TTL will hand the lease to whoever asks next. */
     store.failAfter(0);
     const deletesBefore = store.dels;
     await coordinator.runOnce();
@@ -178,8 +156,6 @@ describe("createCoordinator", () => {
       name: "preview",
     });
 
-    /* And it comes back: the lease record still names this node, so the next
-       tick takes it again — at a new fence, because a re-acquisition is one. */
     store.clearFaults();
     await coordinator.runOnce();
     expect(coordinator.status().holding).toBe(true);
@@ -213,15 +189,12 @@ describe("createCoordinator", () => {
     await first.stop();
 
     expect(first.status().holding).toBe(false);
-    /* The clock has not moved, so only the release itself can let node-b in. */
     await second.runOnce();
     expect(second.status().holding).toBe(true);
     expect((await storedLease()).node).toBe("node-b");
   });
 
   it("reaps nothing at all when no build retention is configured", async () => {
-    /* An installation that has never said how long it keeps builds is not one
-       whose builds should start disappearing; a retired environment still goes. */
     const coordinator = coordinatorFor("node-a", { buildRetentionMs: undefined });
     await coordinator.runOnce();
     await retireEnvironment(clock.ctx, PROJECT, "preview");
@@ -229,7 +202,6 @@ describe("createCoordinator", () => {
     await coordinator.runOnce();
 
     await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, "preview"), "not-found");
-    /* The build the deleted environment used to point at outlives it. */
     await expect(store.get(buildKey(PROJECT, BUILD))).resolves.not.toBeNull();
   });
 });
@@ -238,7 +210,6 @@ describe("createCoordinator", () => {
 function coordinatorFor(nodeId: string, opts?: { buildRetentionMs?: number }): Coordinator {
   return createCoordinator(daemonFor(nodeId), {
     ttlMs: TTL_MS,
-    /* Every tick reaps, so nothing a test observes depends on an interval. */
     reapIntervalMs: 0,
     ...(opts?.buildRetentionMs === undefined ? {} : { buildRetentionMs: opts.buildRetentionMs }),
   });

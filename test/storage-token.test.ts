@@ -1,14 +1,4 @@
-/*
- * The token guarding this node's storage surface: where it comes from, and what
- * the boot says about it.
- *
- * The two are one subject, because the line is the operator's whole handoff.
- * WHICH HANDOFF IT IS DEPENDS ON WHERE THE TOKEN CAME FROM. A minted token
- * exists nowhere but the file, so the file IS the channel and mounting it is the
- * instruction. A token the operator supplied reached this node through their own
- * configuration, and telling them to mount a file scafo wrote from what they
- * already hold describes a step nobody has to take.
- */
+/* The token guarding this node's storage surface: where it comes from, and what the boot says about it. */
 
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -77,8 +67,6 @@ describe("the file the notice names", () => {
     expect(await stored(dir)).toBe("primary-token");
   });
 });
-
-/* ------------------------------------------------------------------ internal */
 
 async function stateDir(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "scafo-storage-token-"));

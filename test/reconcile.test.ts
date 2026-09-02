@@ -1,4 +1,4 @@
-/* The pure environment-owned runtime reconcile contract. */
+/* Runtime reconcile contract. */
 
 import { describe, expect, it } from "vitest";
 import { formatProcessId, parseProcessId } from "../src/core/placement/ids.ts";

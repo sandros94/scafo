@@ -1,92 +1,24 @@
-/*
- * Ingress driver for an operator-run Traefik, which is told what to route by
- * being READ rather than by being written to.
- *
- * This is the one structural difference from the Caddy driver, and it decides
- * everything else here. Caddy is pushed: the driver calls its admin API and owns
- * the routes it created inside a server the operator also writes into. Traefik
- * pulls: its `http` provider polls a URL every few seconds and takes whatever it
- * finds there as the WHOLE of that provider's dynamic configuration. So `apply`
- * makes no network call at all — it renders the configuration and caches it, and
- * the daemon's `GET /v1/ingress/traefik` hands that cache to Traefik when it asks.
- *
- * Two consequences worth stating, because they are not symmetric with Caddy:
- *
- * 1. There is no coexistence question. What this driver renders is everything
- *    Traefik's http provider knows; the operator's own routers come from their
- *    other providers (file, docker, kubernetes) and are never in this document,
- *    so nothing here can clobber them and nothing here needs to be careful about
- *    reading them first.
- * 2. A change is visible one poll later rather than at once. The reconcile loop
- *    still calls `apply` after every pass; what that pass publishes reaches
- *    traffic when Traefik next asks for it.
- *
- * The operator runs Traefik, defines the entryPoint these routers attach to, and
- * points its http provider at the node API. Setting that up is documented with the
- * deployment instructions.
- */
+/* Traefik pulls this driver's cached dynamic configuration from the node API.
+   Operator routers remain in other providers; updates apply on Traefik's poll. */
 
 import type { IngressBackend, IngressDesired, IngressDriver } from "../../core/types/ingress.ts";
 import { assertHost } from "../../core/utils/host.ts";
 
-/**
- * EntryPoint the rendered routers attach to when the operator names none.
- *
- * Named rather than omitted, even though Traefik reads an absent `entryPoints`
- * as "every entryPoint there is". Every entryPoint includes the ones scafo has
- * no business on — a TLS listener it holds no certificate for, the port the
- * dashboard is served on — and a router that attaches itself to all of them
- * claims surface the operator did not offer it.
- */
+/** Default entry point; omission would attach routes to every entry point. */
 export const DEFAULT_ENTRY_POINT: string = "web";
 
-/**
- * Namespace of every router and service this driver renders, mirroring the
- * decision the Caddy driver's `@id` prefix records.
- *
- * The separator is an underscore for the same reason it is one there: it cannot
- * occur in a DNS name, so the boundary between the namespace and the host stays
- * unambiguous. Traefik places one further constraint on these names — `@`
- * separates a name from the provider that supplied it (`scafo_shop.test@http`),
- * and a name containing one resolves to nothing — which a host cannot contain
- * either.
- */
+/** Router/service namespace. Its underscore separator cannot occur in a host. */
 export const TRAEFIK_KEY_PREFIX: string = "scafo_";
 
-/**
- * Namespace of the router serving the fleet's API at one platform apex, and of
- * the one denying the excluded prefixes there. Both follow
- * {@link TRAEFIK_KEY_PREFIX}'s reading: an underscore occurs in neither a
- * host nor a build id, so neither can ever be the key of a router for a host,
- * and neither is a prefix of the other.
- */
+/** Namespaces for the platform API route and its denial route. */
 export const TRAEFIK_API_PREFIX: string = `${TRAEFIK_KEY_PREFIX}api_`;
 export const TRAEFIK_API_DENY_PREFIX: string = `${TRAEFIK_KEY_PREFIX}apideny_`;
 
-/**
- * Rank of the API apex routers, and both are stated rather than left to
- * Traefik's default.
- *
- * THE DENIAL MUST OUTRANK THE APEX and rule length cannot be trusted to say so:
- * the two rules name the same host and differ only in how they speak about the
- * same paths, so which one is longer is an accident of punctuation. Both sit
- * below the length-ranked default of an ordinary host router,
- * which is harmless because no ordinary router matches a bare apex — a renderer
- * that finds one already answering there emits no API entry for it at all.
- */
+/** Explicit priorities keep denied API paths ahead of the API route. */
 export const API_PRIORITY: number = 2;
 export const API_DENY_PRIORITY: number = 3;
 
-/**
- * Traefik's own service for a router that must reach no backend, supplied by its
- * always-on `internal` provider and therefore qualified with `@internal`.
- *
- * A DENIAL WITH NOTHING BEHIND IT, which is what this surface needs: naming a
- * service that does not resolve would put the router in error and DISABLE it,
- * and a disabled denial is a request falling through to whatever ranks next.
- * Pinned against `traefik:v3` (v3.7.11), where it answered `418` with an empty
- * body and never dialled anything.
- */
+/** Traefik's internal no-op backend makes denial routes active without dialing. */
 export const NOOP_SERVICE: string = "noop@internal";
 
 /** One router: which requests it matches, and what serves them. */
@@ -96,11 +28,7 @@ export interface TraefikRouter {
   /** Name of the service in the same document, unqualified by a provider. */
   service: string;
   entryPoints: string[];
-  /**
-   * Rank among routers whose rules both match. Omitted by every router matching
-   * one host, where Traefik's default — the rule's length — cannot pick wrong,
-   * while the API pair sets it explicitly to preserve denial precedence.
-   */
+  /** Explicit only for API routes, whose denial must take precedence. */
   priority?: number;
 }
 
@@ -112,12 +40,7 @@ export interface TraefikLoadBalancerService {
 /** One service: where the requests its router matched are sent. */
 export type TraefikService = TraefikLoadBalancerService;
 
-/**
- * A Traefik dynamic configuration as this driver renders it.
- *
- * `http` is optional, and its absence is the whole of how "route nothing" is
- * said — see {@link renderTraefikConfig}.
- */
+/** `http` is omitted to withdraw every route from this provider. */
 export interface TraefikDynamicConfig {
   http?: {
     routers: Record<string, TraefikRouter>;
@@ -128,12 +51,7 @@ export interface TraefikDynamicConfig {
 export interface TraefikDriverOptions {
   /** EntryPoints the routers attach to. Defaults to {@link DEFAULT_ENTRY_POINT}. */
   entryPoints?: string[];
-  /**
-   * Address the runtime processes bound, which is what every process service
-   * dials. Loopback by default; a node whose processes bind a tunnel address
-   * (`runtime.bindHost`) must hand it in, or the services name an address
-   * nothing listens on.
-   */
+  /** Runtime bind address; must match the address process services dial. */
   upstreamHost?: string;
 }
 
@@ -143,32 +61,17 @@ export interface TraefikDriver extends IngressDriver {
   snapshot(): TraefikDynamicConfig;
 }
 
-/**
- * Builds the driver that routes traffic through Traefik.
- *
- * `apply` never fails: rendering is pure and there is nothing to reach. What can
- * fail is Traefik's own poll, which Traefik reports on its own side — a provider
- * that cannot read its endpoint keeps the configuration it last read and retries,
- * so a node whose daemon is briefly down keeps serving what it was serving.
- */
+/** Builds an in-memory Traefik configuration driver. */
 export function createTraefikDriver(opts?: TraefikDriverOptions): TraefikDriver {
   const upstreamHost = opts?.upstreamHost ?? "127.0.0.1";
   const entryPoints = opts?.entryPoints ?? [DEFAULT_ENTRY_POINT];
 
-  /*
-   * Empty until the first reconcile pass, and deliberately not "nothing to say".
-   * A node that has just started is running none of its processes yet — the
-   * supervisor's children went with the daemon — so the honest answer to "what
-   * does this node serve" is "nothing", and routing that follows supervision must
-   * say so. Serving the previous configuration instead would point Traefik at
-   * ports nothing listens on, which is a 502 per request where this is a 404.
-   */
+  /* Start empty: daemon restart must not retain routes to stopped processes. */
   let current: TraefikDynamicConfig = renderTraefikConfig({ routes: [] });
 
   return {
     apply(desired: IngressDesired): Promise<void> {
-      /* Synchronous inside; the async signature is the seam's, and keeping it
-         means the reconcile loop treats both ingresses identically. */
+      /* The shared ingress seam is async; rendering is synchronous. */
       current = renderTraefikConfig(desired, entryPoints, upstreamHost);
       return Promise.resolve();
     },
@@ -178,36 +81,9 @@ export function createTraefikDriver(opts?: TraefikDriverOptions): TraefikDriver 
   };
 }
 
-/**
- * Renders the routing as Traefik's dynamic configuration.
- *
- * Deterministic: hosts are emitted in sorted order, so two renders of the same
- * routing are the same document byte for byte — which matters more here than it
- * would for a pushed ingress, because Traefik hashes the body it polls and does
- * no work at all when the bytes have not changed.
- *
- * THE FLEET'S API AT A PLATFORM APEX IS TWO ROUTERS, and the pair is the whole
- * of how `/v1/storage` is kept off a public name. The apex router dials the
- * daemon for every path EXCEPT the denied prefixes, which its rule negates
- * outright; the denial above it matches exactly those prefixes and is sent to
- * {@link NOOP_SERVICE}, so nothing is dialled and no answer comes from behind
- * the ingress. Both ranks are stated — see {@link API_PRIORITY}.
- *
- * EMPTY ROUTING IS THE INTERESTING CASE, and it is not what it looks like. The
- * obvious rendering — `{"http":{"routers":{},"services":{}}}` — does NOT clear
- * Traefik's routing. Its http provider decodes the body through the same parser
- * the file provider uses, which rejects a map with no entries: it answers
- * `cannot decode configuration data: routers cannot be a standalone element`,
- * treats the poll as failed, and KEEPS THE CONFIGURATION IT LAST READ. A node
- * that stopped serving an environment would go on serving it for as long as the
- * daemon stayed up. `{"http":{}}` fails the same way one level up. Omitting the
- * key entirely — an empty document — is what Traefik reads as "this provider
- * routes nothing", and it withdraws the routers within one poll.
- *
- * Verified against Traefik 3.7.10; see the driver's suite for the pinned
- * behaviour and `test/integration/e2e-traefik.test.ts` for it against the real
- * container.
- */
+/** Renders deterministic dynamic configuration. API apexes use a higher-ranked
+ * no-op denial route for excluded paths. Return `{}` rather than empty router
+ * maps: Traefik otherwise retains its previous provider configuration. */
 export function renderTraefikConfig(
   desired: IngressDesired,
   entryPoints: string[] = [DEFAULT_ENTRY_POINT],
@@ -217,17 +93,7 @@ export function renderTraefikConfig(
   const services: Record<string, TraefikService> = {};
 
   for (const { host, backend } of [...desired.routes].sort((a, b) => compare(a.host, b.host))) {
-    /*
-     * Checked here even though every host arrives having passed `assertHost`
-     * upstream — a label built from validated slugs under a configured platform
-     * domain, or a custom domain validated when it was claimed. The reason is
-     * particular to this format: a Traefik rule is a small language carried in a
-     * string, so a host holding a backtick or a parenthesis would not be a
-     * malformed name, it would be a different rule. Caddy's route matches on a
-     * JSON string and has nothing to escape into, which is why its driver checks
-     * nothing. A host that fails here is recorded as an ingress failure of the
-     * pass, the way an unreachable admin API is.
-     */
+    /* Hosts are embedded in rule syntax, so validate again at this boundary. */
     assertHost(host);
 
     const key = traefikKey(host);
@@ -245,13 +111,7 @@ export function renderTraefikConfig(
     for (const host of [...api.hosts].sort(compare)) {
       assertHost(host);
 
-      /*
-       * TWO ROUTERS, AND EACH CLOSES THE SURFACE ON ITS OWN. The apex router's
-       * rule NEGATES every denied prefix, so it cannot carry one whatever else
-       * is configured — and a rule Traefik refuses disables that router, which
-       * fails closed. The denial above it is what turns the resulting
-       * fall-through into an answer, and it reaches no backend at all.
-       */
+      /* The API rule excludes denied paths; the higher-priority denial handles them. */
       const denied = api.denied.flatMap(deniedRules);
 
       routers[traefikApiDenyKey(host)] = {
@@ -272,9 +132,7 @@ export function renderTraefikConfig(
     }
   }
 
-  /* NEVER AN EMPTY MAP — see above. A node serving nothing
-     publishes an empty document, which is the only thing Traefik reads as "this
-     provider routes nothing". */
+  /* Empty maps make Traefik retain stale provider configuration. */
   if (Object.keys(routers).length === 0) return {};
 
   return { http: { routers, services } };
@@ -295,21 +153,12 @@ export function traefikApiDenyKey(domain: string): string {
   return `${TRAEFIK_API_DENY_PREFIX}${domain}`;
 }
 
-/**
- * The Traefik matchers one denied prefix is written as: the path exactly, and
- * the whole subtree beneath it.
- *
- * A SEGMENT BOUNDARY rather than a string prefix, so that this means precisely
- * what the Caddy driver's `["<prefix>", "<prefix>/*"]` means — `PathPrefix` on
- * its own is a raw string prefix in Traefik v3 and would also deny
- * `/v1/storagex`, which the other driver does not. Pinned against v3.7.11.
- */
+/** Matches a denied path and its subtree, not a similarly prefixed path. */
 function deniedRules(prefix: string): string[] {
   return [`Path(\`${prefix}\`)`, `PathPrefix(\`${prefix}/\`)`];
 }
 
-/* Dialled at the address the processes actually bound: loopback on a single
-   node, the tunnel address on a fleet. The ingress is on this node either way. */
+/* Dial the configured runtime bind address. */
 function upstreamUrl(backend: IngressBackend, upstreamHost: string): string {
   return `http://${upstreamHost}:${String(backend.port)}`;
 }

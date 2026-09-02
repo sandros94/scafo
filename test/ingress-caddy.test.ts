@@ -1,9 +1,6 @@
 /*
- * The Caddy ingress driver against a stand-in admin API: which calls it makes to
- * converge, what it refuses to touch, and what it does when Caddy says no.
- *
- * The fake keeps a routes array and answers the same four calls Caddy does, so
- * every assertion is about the driver's own conversation with it.
+ * The Caddy ingress driver against a stand-in admin API: which calls it makes to converge, what
+ * it refuses to touch, and what it does when Caddy says no.
  */
 
 import { beforeEach, describe, expect, it } from "vitest";

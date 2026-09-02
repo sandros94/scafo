@@ -1,14 +1,4 @@
-/*
- * Internal: picking events out of what a fleet flushed, and printing them.
- *
- * ONE LINE PER EVENT, AND THE LINE IS DERIVED. Every event carries its moment,
- * its node and its type; everything else is that variant's own fields, and they
- * are rendered as they were written rather than through a per-type formatter.
- * That is deliberate — the event union grows, and a renderer that had to be
- * taught each new variant would silently print the OLD fields of a new event,
- * which is the one failure a trace reader cannot recover from.
- *
- */
+/* Selects persisted events and renders each variant's recorded fields. */
 
 import {
   eventRecords,
@@ -20,19 +10,7 @@ import { parseProcessId } from "../core/placement/ids.ts";
 /** Events a listing shows when the caller states no limit. */
 export const DEFAULT_TRACE_LIMIT: number = 200;
 
-/**
- * What a node emits on its own timer rather than because something happened.
- *
- * The reconcile loop runs every 5s whether or not the fleet is doing anything,
- * so these two arrive at a fixed rate forever — hundreds of them in the window a
- * default listing shows, and the LAST hundreds, which is what pushes out the
- * deployment and operator events a reader opened `scafo traces` for.
- * Nothing else in the catalog is periodic: everything else is a thing a person
- * or a request asked for.
- *
- * Hidden by default and never dropped — `--all` shows them, and how many were
- * held back is reported either way.
- */
+/** Timer-generated events, hidden by default but included by `--all`. */
 export const PERIODIC_EVENTS: readonly ObserveEventRecord["type"][] = [
   "reconcile.pass.start",
   "reconcile.pass.end",
@@ -65,22 +43,8 @@ export interface TraceFilter {
   all?: boolean;
 }
 
-/**
- * The events a filter selects, oldest first.
- *
- * The limit keeps the NEWEST, because a reader looking at a window is looking at
- * what just happened; how many were left out is reported rather than implied.
- *
- * THE PERIODIC EVENTS ARE TAKEN OUT BEFORE THE LIMIT IS, and that order is the
- * point: they arrive at a fixed rate forever, so counting them against the limit
- * spends the whole window on the loop's own housekeeping and leaves a reader
- * looking at the last two minutes of a node doing nothing. `--all` puts them
- * back, and {@link TraceSelection.hidden} says how many there were either way.
- *
- * `--project` reaches a directly named project and a runtime event through the
- * process id, which encodes the project by convention. Events about the node
- * itself — a reconcile pass — belong to no project and are left out.
- */
+/** Selects oldest-first events. Periodic events are removed before the newest-
+    preserving limit unless `--all` is requested. */
 export function selectTraces(
   records: readonly ObserveRecord[],
   filter: TraceFilter = {},

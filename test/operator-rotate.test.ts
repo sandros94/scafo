@@ -1,23 +1,4 @@
-/*
- * Rotating the key a remote signs with, expand-contract, against the real node
- * app over an injected `fetch`.
- *
- * THE ORDER IS THE DESIGN, and it is what these cases are about. The new key is
- * registered with the fleet and then PROVED — an authenticated call made with it
- * — before the home is repointed, and the old key is deregistered only after the
- * home has been repointed and only under the new key's signature. Every one of
- * the three writes can therefore be the last thing that happens, and none of
- * them leaves a fleet nobody holds a key for:
- *
- *   - died before the flip: both keys trusted, home still on the old one, and
- *     the pending key waiting in the home for the rerun to pick up
- *   - died after the flip: home on the new key, old one still trusted, which is
- *     a key too many rather than a key too few
- *
- * The crashes are injected through the `fetch` seam alone, so what is being
- * tested is the production path stopping where a real interruption would stop
- * it, rather than a test-only hook.
- */
+/* Remote-key rotation through the node API, using expand-contract ordering. */
 
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -74,7 +55,6 @@ describe("the whole rotation", () => {
     expect(rotated.contracted).toBe(true);
     expect(rotated.resumed).toBe(false);
 
-    /* One key trusted, and it is the new one: expand, then contract. */
     expect(await trustedIds()).toEqual([rotated.newKeyId]);
     expect((await entryOf(home, REMOTE)).key.path).toBe(refOf(home, rotated.newKeyPath));
   });
@@ -85,12 +65,6 @@ describe("the whole rotation", () => {
     const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
     const rotatedKey = await keyFileAt(rotated.newKeyPath);
 
-    /*
-     * Asked of a FRESH app, because a verifier caches the keys it has read for
-     * the length of its revocation bound: the app that carried the rotation out
-     * would go on accepting the old key for up to a minute, which is the
-     * documented cost of revocation rather than a fact about this rotation.
-     */
     const later = nodeApp();
     const withNew = await later.request(`${NODE_URL}/v1/operators`, {
       headers: {
@@ -110,9 +84,6 @@ describe("the whole rotation", () => {
 
     const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
 
-    /* A private key is not scafo's to destroy on its own initiative: whatever
-       else that file signed for, and whatever an operator archived it against,
-       is not knowable from here. */
     expect(rotated.purged).toBe(false);
     await expect(keyFileAt(rotated.oldKeyPath)).resolves.toMatchObject({ id: key.id });
 
@@ -131,8 +102,6 @@ describe("rotating across the two tiers", () => {
 
     expect(rotated.role).toBe("admin");
     expect(rotated.contracted).toBe(true);
-    /* An admin passes the admin check anyway; the lineage is recorded all the
-       same, because it is what says which key replaced which. */
     await expect(getOperator(clock.ctx, rotated.newKeyId)).resolves.toMatchObject({
       role: "admin",
       supersedes: key.id,
@@ -144,11 +113,6 @@ describe("rotating across the two tiers", () => {
 
     const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
 
-    /*
-     * The wrinkle the whole design turns on: DELETE is no longer open to every
-     * trusted key, so an operator-tier rotation would have nothing authorizing
-     * its contract step. The new key superseding the old is what does.
-     */
     expect(rotated.role).toBe("operator");
     expect(rotated.contracted).toBe(true);
     expect(await trustedIds()).toEqual([ADMIN_ID, rotated.newKeyId].sort());
@@ -163,7 +127,6 @@ describe("rotating across the two tiers", () => {
 
     const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
 
-    /* A rotation replaces a key; it is not a way to acquire a better one. */
     expect(rotated.role).not.toBe("admin");
     await expect(getOperator(clock.ctx, ADMIN_ID)).resolves.toMatchObject({ role: "admin" });
   });
@@ -186,8 +149,6 @@ describe("a rotation that was interrupted", () => {
       "draining",
     );
 
-    /* Nothing has been taken away: the fleet answers to the key the home still
-       points at, so every other command goes on working. */
     expect(await trustedIds()).toHaveLength(2);
     expect(await trustedIds()).toContain(key.id);
     expect((await entryOf(home, REMOTE)).key.path).toBe("keys/prod.json");
@@ -205,8 +166,6 @@ describe("a rotation that was interrupted", () => {
 
     expect(rotated.resumed).toBe(true);
     expect(rotated.newKeyId).toBe(pending);
-    /* Exactly one key trusted afterwards: the interrupted run left nothing
-       behind for an operator to go and find later. */
     expect(await trustedIds()).toEqual([pending]);
   });
 
@@ -221,8 +180,6 @@ describe("a rotation that was interrupted", () => {
     const entry = await entryOf(home, REMOTE);
     const flipped = await keyFileAt(resolveHomePath(home, entry.key.path));
     expect(flipped.id).not.toBe(key.id);
-    /* A key too many, never a key too few — and the home holds the one that
-       still works. */
     expect(await trustedIds()).toContain(key.id);
     expect(await trustedIds()).toContain(flipped.id);
   });
@@ -249,9 +206,6 @@ describe("a rotation that was interrupted", () => {
 
     const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
 
-    /* A rerun rotates again rather than finishing the previous run's contract —
-       it can only deregister the key the home was pointing at — so the one the
-       interrupted run left behind is REPORTED instead of silently kept. */
     expect(rotated.alsoTrusted).toEqual([key.id]);
     expect(await trustedIds()).toContain(rotated.newKeyId);
   });
@@ -271,9 +225,6 @@ describe("--keep-old", () => {
   it("is refused together with --purge-old, which asks for the opposite thing", async () => {
     const { home } = await registeredRemote();
 
-    /* Keeping a key trusted while destroying the only copy of its private half
-       leaves a way in that nobody holds — refused rather than resolved in
-       either direction. */
     const error = await rejectsWith(
       () => rotateRemoteKey(home, REMOTE, { fetchFn: through(app), keepOld: true, purgeOld: true }),
       "invalid-input",
@@ -314,7 +265,6 @@ describe("the other remotes in the home", () => {
 
     const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
 
-    /* Repointing them would rotate installations the operator never named. */
     expect(await entryOf(home, "mirror")).toEqual(before);
     expect((await entryOf(home, "mirror")).key.path).toBe("keys/prod.json");
     expect(rotated.sharedWith).toEqual(["mirror"]);
@@ -326,7 +276,6 @@ describe("the other remotes in the home", () => {
 
     const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
 
-    /* The old file and the new one, and nothing else: a rotation writes one key. */
     const files = (await readdir(homeKeysDir(home))).sort();
     expect(files).toHaveLength(2);
     expect(files).toContain(rotated.newKeyPath.split("/").pop());
@@ -339,8 +288,6 @@ describe("rotating a key that is scoped to projects", () => {
 
     const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
 
-    /* A rotation replaces a key. It is never a promotion, and it is never a
-       widening either — the node settles both from the caller's own record. */
     expect(rotated.role).toBe("operator");
     expect(rotated.projects).toEqual(["acme"]);
     expect(rotated.newKeyId).not.toBe(key.id);
@@ -393,9 +340,6 @@ describe("reading what a fleet trusts", () => {
 
     expect(printed).toContain("2 operator keys");
     expect(printed).toMatch(new RegExp(`${key.id}.*this home signs with it`));
-    /* `none` rather than `all`: an operator-tier record naming no projects
-       reaches nothing, and a column reading `all` there would say the opposite
-       of what the key does. */
     expect(printed).toMatch(/op-cccc3333\s+operator\s+none\s*$/m);
   });
 
@@ -410,8 +354,6 @@ describe("reading what a fleet trusts", () => {
 
     const printed = formatRemoteKeys(await listRemoteKeys(home, REMOTE, { fetchFn: through(app) }));
 
-    /* The admin reaches everything, which is what an unscoped key is; the
-       tenant's key says which two projects it is for. */
     expect(printed).toMatch(new RegExp(`${key.id}\\s+admin\\s+all`));
     expect(printed).toMatch(/op-cccc3333\s+operator\s+acme,globex/);
   });
@@ -441,12 +383,6 @@ describe("reading what a fleet trusts", () => {
   });
 
   it("SAYS SO when the node showed only this key's own lineage", async () => {
-    /*
-     * A node answers an operator-tier caller with its own lineage rather than
-     * with every key the fleet trusts. An incomplete listing that did not say it
-     * was incomplete would be worse than none: the operator would read it as the
-     * whole trusted set — "this fleet has one operator on it" — and act on that.
-     */
     const printed = formatRemoteKeys({
       remote: REMOTE,
       own: "op-tenant11",
@@ -461,9 +397,6 @@ describe("reading what a fleet trusts", () => {
       scoped: true,
     });
 
-    /* The HEADING is what a reader takes the count from, so that is the line
-       that must not claim to be the fleet's — the footer says the word "trusts"
-       precisely to contrast the two. */
     expect(printed.split("\n")[0]).toBe(`scafo: "${REMOTE}" shows "op-tenant11" 1 operator key`);
     expect(printed).toContain("own lineage");
   });
@@ -485,9 +418,6 @@ describe("what a rotation says it did", () => {
 
     const said = describeRotation(await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) }));
 
-    /* Silence here is the failure mode worth guarding: a fleet reaching this
-       same installation with the key just revoked stops working, and nothing
-       else would tell the operator that. */
     expect(said).toContain("mirror");
     expect(said).toContain("NOT");
     expect(said).toContain("rotate them too");
@@ -575,9 +505,6 @@ describe("revoking another operator's key", () => {
   it("cannot leave the fleet trusting nothing, the last key being the caller's own", async () => {
     const { home, key } = await registeredRemote();
 
-    /* The same refusal as above, and it is the one that matters: the caller is
-       always one of the trusted keys, so the key it is refused is exactly the
-       key whose removal would leave nobody able to put one back. */
     await rejectsWith(
       () => revokeRemoteKey(home, REMOTE, key.id, { fetchFn: through(app) }),
       "invalid-input",
@@ -585,8 +512,6 @@ describe("revoking another operator's key", () => {
     expect(await trustedIds()).toEqual([key.id]);
   });
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 /**
  * A home holding one remote whose key the installation already trusts, at the
@@ -630,7 +555,7 @@ async function entryOf(home: string, name: string): Promise<RemoteEntry> {
   return (await readRemotes(home)).remotes[name] as RemoteEntry;
 }
 
-/** How the home REFERS to a key file it holds. */
+/** How the home refers to a key file it holds. */
 function refOf(home: string, path: string): string {
   return path.slice(home.length + 1).replaceAll("\\", "/");
 }

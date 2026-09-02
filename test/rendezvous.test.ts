@@ -1,11 +1,4 @@
-/*
- * Choosing which nodes serve an environment, and how many.
- *
- * The two properties the whole design rests on are asserted rather than
- * described: the same inputs always give the same answer, and a node leaving
- * only disturbs the environments that node was serving. Everything here is pure,
- * so no store, clock or daemon is involved.
- */
+/* Choosing which nodes serve an environment, and how many. */
 
 import { describe, expect, it } from "vitest";
 import {
@@ -55,7 +48,6 @@ describe("rendezvousOrder", () => {
 
     expect(backward).toEqual(forward);
     expect(shuffled).toEqual(forward);
-    /* Every candidate is ranked, none is dropped or duplicated. */
     expect([...forward].sort()).toEqual([...nodes].sort());
   });
 
@@ -65,8 +57,6 @@ describe("rendezvousOrder", () => {
     const first = await rendezvousOrder(PROJECT, "prod", nodes);
     const second = await rendezvousOrder(PROJECT, "staging", nodes);
 
-    /* Not a guarantee for any one pair, but these two differ — which is what
-       keeps every environment of a project off the same single node. */
     expect(second).not.toEqual(first);
   });
 
@@ -105,8 +95,6 @@ describe("assignNodes", () => {
   });
 
   it("answers an empty fleet with an empty assignment rather than inventing a node", async () => {
-    /* The caller is what must never write this down as a decision; the function
-       itself has nothing to choose from and says so. */
     expect(await assignNodes({ project: PROJECT, env: "prod", nodes: [], replicas: 1 })).toEqual(
       [],
     );
@@ -124,13 +112,6 @@ describe("the stability property", () => {
     "moves only the environments a removed node was serving (seed %i)",
     async (seed) => {
       const rng = seededRng(seed);
-      /*
-       * Half the fleet carries `tier=fast` and half the environments select it,
-       * so one run covers the unconstrained case and the constrained one at
-       * once. The property has to hold WITHIN THE ELIGIBLE SET exactly as it
-       * holds over the whole fleet — selecting is only a way of deciding what
-       * the candidates are, and everything below is stated over candidates.
-       */
       const fleet = Array.from({ length: 5 }, (_, i) =>
         node(`node-${String(i)}-${randomSlug(rng, 6)}`, { tier: i < 3 ? FAST : "slow" }),
       );
@@ -141,7 +122,6 @@ describe("the stability property", () => {
       }));
       const replicas: ReplicaCount = 2;
 
-      /* Candidates first, rendezvous second — the order the coordinator uses. */
       const place = async (candidates: NodeRecord[], target: Target): Promise<string[]> =>
         assignNodes({
           project: target.project,
@@ -155,9 +135,6 @@ describe("the stability property", () => {
         before.set(`${target.project}/${target.env}`, await place(fleet, target));
       }
 
-      /* One node leaves — a crash, a drain, a machine taken out of the fleet.
-         A `tier=fast` one, so the environments that select are disturbed too
-         rather than sitting the run out. */
       const leaving = fleet[2].id;
       const remaining = fleet.filter((record) => record.id !== leaving);
 
@@ -182,18 +159,11 @@ describe("the stability property", () => {
         });
       }
 
-      /*
-       * THE PROPERTY: an environment the leaving node never served does not move
-       * a single replica. Anything else would restart applications that had
-       * nothing to do with the node that went away.
-       */
       const untouched = seen.filter((entry) => !entry.held);
       expect(untouched.map((entry) => ({ env: entry.key, nodes: entry.now }))).toEqual(
         untouched.map((entry) => ({ env: entry.key, nodes: entry.was })),
       );
 
-      /* The ones it did serve keep every OTHER node they had, and replace just
-         the one that is missing — out of what they are eligible for. */
       const disturbed = seen.filter((entry) => entry.held);
       expect(
         disturbed.map((entry) => ({
@@ -213,9 +183,6 @@ describe("the stability property", () => {
         })),
       );
 
-      /* And the constraint held the whole way through, which is what makes the
-         above a property OF the eligible set: a selecting environment never
-         landed on a node without the label, before the change or after it. */
       const fast = new Set(
         fleet.filter((record) => record.labels?.tier === FAST).map((record) => record.id),
       );
@@ -226,8 +193,6 @@ describe("the stability property", () => {
         ).toBe(true);
       }
 
-      /* The run is only evidence if the node actually held something, on both
-         sides of the constraint. */
       expect(disturbed.filter((entry) => entry.selector === undefined).length).toBeGreaterThan(0);
       expect(disturbed.filter((entry) => entry.selector !== undefined).length).toBeGreaterThan(0);
     },
@@ -248,8 +213,6 @@ describe("the stability property", () => {
       held.set(chosen, (held.get(chosen) ?? 0) + 1);
     }
 
-    /* A digest is not a scheduler, so this is a sanity bound and not a promise:
-       every node takes a real share, and none of them takes nearly all of it. */
     for (const [id, count] of held) {
       expect(count, `${id} was given ${String(count)} of 250`).toBeGreaterThan(20);
       expect(count, `${id} was given ${String(count)} of 250`).toBeLessThan(110);
@@ -258,8 +221,6 @@ describe("the stability property", () => {
 });
 
 describe("a selector and a replica count together", () => {
-  /* Two of five carry the label, so "every matching node" and "every node" are
-     never the same answer by accident. */
   const fleet = [
     node("node-a", { tier: FAST }),
     node("node-b", { tier: "slow" }),
@@ -293,13 +254,6 @@ describe("a selector and a replica count together", () => {
   });
 
   it("narrows BEFORE it ranks, so the best ineligible node costs nothing", async () => {
-    /*
-     * The composition order, asserted on the case that tells the two apart.
-     * Here the node rendezvous ranks FIRST over the whole fleet is the only one
-     * the selector excludes: narrowing first gives the best node that is
-     * allowed, while ranking first and filtering after would give nothing at
-     * all — an environment refused a placement by a node it never wanted.
-     */
     const ranked = await rendezvousOrder(
       PROJECT,
       "prod",
@@ -324,8 +278,6 @@ describe("a selector and a replica count together", () => {
   });
 
   it("answers nothing at all when no node matches, rather than falling back", async () => {
-    /* The empty answer the coordinator must never write down: see
-       `coordinator-assign.test.ts` for what it does with it instead. */
     const candidates = eligibleNodes(fleet, { gpu: "a100" }).map((record) => record.id);
 
     expect(candidates).toEqual([]);
@@ -372,8 +324,6 @@ describe("assertReplicas", () => {
   );
 
   it("refuses zero rather than reading it as run nowhere", async () => {
-    /* An environment nothing runs is expressed by deleting it. Zero is far more
-       likely a typo, and one that would take an application off every node. */
     const error = await rejectsWith(() => Promise.resolve(assertReplicas(0)), "invalid-input");
 
     expect(error.detail).toContain("0 must be");

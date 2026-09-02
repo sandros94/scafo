@@ -1,11 +1,6 @@
 /*
- * Named locks in the bucket: taking one, waiting for one, keeping one alive
- * while the work runs, and finding out that it is gone.
- *
- * The clock is the test's own, so staleness is decided by hand rather than
- * waited out; the refresh and poll intervals are real timers over a space whose
- * durations are the shipped ones divided by two hundred, so what a case proves
- * is the mechanism rather than the numbers.
+ * Named locks in the bucket: taking one, waiting for one, keeping one alive while the work runs,
+ * and finding out that it is gone.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -411,8 +406,6 @@ describe("reading a record's staleness", () => {
     expect(isLockStale(lock, new Date(CLOCK_START_MS), LOCK_STALE_MS)).toBe(true);
   });
 });
-
-/* ---- fixtures ---- */
 
 function world(): { store: MemoryCasStore; clock: ManualClock } {
   const store = new MemoryCasStore();

@@ -1,13 +1,5 @@
-/*
- * Internal: which remote a command acts on, and which key it signs with.
- *
- * ONE CHAIN, in one place, so that every operator-facing command answers "which
- * installation is this?" the same way: what the command said, then what the
- * shell said, then what the project pinned, then the only remote there is — and,
- * where none of those decide it, the operator is ASKED rather than guessed at.
- * Off a terminal there is nobody to ask, so it is refused with everything needed
- * to answer next time.
- */
+/* Resolves an operator remote and signing key. Ambiguity prompts interactively
+   and is refused otherwise. */
 
 import { type JSONCParseError, parseJSONC } from "confbox";
 import { DEFAULT_CONFIG_PATHS } from "../daemon/config.ts";

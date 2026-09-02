@@ -1,11 +1,4 @@
-/*
- * Ingress driver for an operator-run Caddy, converged through its admin API.
- *
- * Caddy itself is not managed here: the operator runs it, defines the HTTP
- * server this driver writes into, and points it at the daemon's on-demand-TLS ask
- * endpoint. Setting that up is documented with the deployment instructions. This
- * driver only owns the routes inside that server, and only its own.
- */
+/* Converges Scafo-owned routes in an operator-managed Caddy server. */
 
 import { ScafoError } from "../../core/error.ts";
 import type { IngressBackend, IngressDesired, IngressDriver } from "../../core/types/ingress.ts";
@@ -17,40 +10,16 @@ export const DEFAULT_ADMIN_URL: string = "http://127.0.0.1:2019";
 /** Name of the HTTP server inside Caddy's config this driver writes routes into. */
 export const DEFAULT_SERVER_NAME: string = "scafo";
 
-/**
- * Namespace of every route this driver owns. Routes without it are the
- * operator's and are never read, rewritten or removed.
- *
- * The separator is an underscore rather than a slash because Caddy addresses a
- * route by `@id` at `/id/<id>/<path...>`, taking the id from exactly one path
- * segment: an id containing a slash names a different object than it looks like,
- * and cannot be reached at all. An underscore cannot occur in a DNS name, so the
- * boundary between the namespace and the host stays unambiguous.
- */
+/** Scafo-owned route namespace; all other Caddy routes are preserved. */
 export const ROUTE_ID_PREFIX: string = "scafo_";
 
-/**
- * Namespace of the route serving the fleet's API at one platform apex, on the
- * same reading as {@link ROUTE_ID_PREFIX}: an underscore cannot occur in a
- * DNS name, so `scafo_api_<domain>` can never be the id of a route for a host.
- */
+/** Namespace for platform API routes. */
 export const API_ID_PREFIX: string = `${ROUTE_ID_PREFIX}api_`;
 
-/**
- * Namespace of the route that DENIES the excluded prefixes at one platform
- * apex. Distinct from {@link API_ID_PREFIX} rather than a suffix of it, so
- * neither is a prefix of the other and a converge can tell them apart by name.
- */
+/** Namespace for API denial routes. */
 export const API_DENY_ID_PREFIX: string = `${ROUTE_ID_PREFIX}apideny_`;
 
-/**
- * What a denied request on the API apex is answered with, by Caddy itself and
- * never by the daemon behind it.
- *
- * A miss rather than a refusal: an unauthenticated caller learns that the name
- * serves nothing there, which is all it is owed. A `403` would confirm the
- * surface exists and is merely closed to them.
- */
+/** Caddy returns this for denied API paths without contacting the daemon. */
 export const API_DENY_STATUS: number = 404;
 
 export interface CaddyDriverOptions {
@@ -60,24 +29,11 @@ export interface CaddyDriverOptions {
   serverName?: string;
   /** Injected `fetch`; defaults to the global one. */
   fetchFn?: typeof fetch;
-  /**
-   * Address the runtime processes bound, which is what every process upstream
-   * dials. Loopback by default; a node whose processes bind a tunnel address
-   * (`runtime.bindHost`) must hand it in, or the routes dial an address
-   * nothing listens on.
-   */
+  /** Runtime bind address; must match the address proxy upstreams dial. */
   upstreamHost?: string;
 }
 
-/**
- * One matcher set: every matcher in it must agree for the route to match.
- *
- * `not` holds matcher sets the request must match NONE of, which is Caddy's own
- * spelling of a negation and the shape it stores a route in — verified against
- * `caddy:2` (v2.11.4) by writing it through the admin API and reading it back
- * verbatim. `path` is a list of patterns, case-insensitive, where a trailing
- * `/*` matches the whole subtree beneath a prefix and the bare prefix does not.
- */
+/** Caddy route matchers. Every matcher agrees; `not` excludes matching sets. */
 export interface CaddyMatch {
   host: string[];
   path?: string[];
@@ -107,15 +63,7 @@ export interface CaddyRoute {
   "terminal": true;
 }
 
-/**
- * Builds the driver that routes traffic through Caddy.
- *
- * Every admin call that fails is `ScafoError("capability-missing")` with status
- * 502: no code names "the thing this node drives refused a command", and of the
- * ones there are, a capability the node needs and does not have is the closest —
- * the status is what says the failure came from behind the node rather than from
- * the caller.
- */
+/** Builds a Caddy ingress driver. Admin failures are capability-missing (502). */
 export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
   const upstreamHost = opts?.upstreamHost ?? "127.0.0.1";
   const admin = (opts?.adminUrl ?? DEFAULT_ADMIN_URL).replace(/\/$/, "");
@@ -132,19 +80,7 @@ export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
       response = await fetchFn(url, {
         method,
         headers: {
-          /*
-           * Caddy's admin API refuses a call it takes for a browser's, and
-           * `fetch` announces every request as one: it attaches
-           * `Sec-Fetch-Mode: cors`, which is a forbidden header name a caller
-           * cannot unset. Caddy then applies its cross-origin check and answers
-           * 403 unless the call also carries an `Origin` it allows. Naming this
-           * driver's own admin origin is what satisfies it — an admin API on
-           * loopback, where Caddy puts it by default, allows exactly that.
-           *
-           * An operator who moves the admin listener off loopback must list the
-           * origin in Caddy's `admin.origins`, which Caddy requires of any
-           * client reaching it there.
-           */
+          /* Node fetch sends Sec-Fetch-Mode; Caddy requires an allowed Origin. */
           origin,
           ...(body === undefined ? {} : { "content-type": "application/json" }),
         },
@@ -153,16 +89,12 @@ export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
     } catch (error) {
       throw adminFailed(method, url, "could not be reached", error);
     }
-    /* Nothing reads an admin response body, and an unread one holds the connection. */
+    /* Release unused response bodies. */
     if (method !== "GET") await response.body?.cancel();
     return response;
   }
 
-  /**
-   * Routes the server currently has. A server the operator has not given a
-   * `routes` key answers 404, and one whose key is there but empty answers a
-   * JSON `null`; both mean "nothing is routed yet" rather than a failure.
-   */
+  /** A missing routes key or null document means no routes. */
   async function readRoutes(): Promise<Array<Record<string, unknown>>> {
     const response = await call("GET", routesUrl);
     if (response.status === 404) {
@@ -186,21 +118,8 @@ export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
 
   return {
     async apply(desired: IngressDesired): Promise<void> {
-      /*
-       * THE INVARIANT THIS CONVERGE KEEPS: the TRAILING routes this driver owns
-       * — the API apexes and their denials —
-       * sit AFTER every host route it owns and in exactly the rendered order, on
-       * every pass. Caddy matches routes in ARRAY ORDER and each of these is
-       * terminal, so an API route reached before its denial would proxy
-       * `/v1/storage`.
-       *
-       * `POST` appends, so any route added on this pass would land behind the
-       * trailing ones that are already there. Rather than compute an insertion
-       * point, they are DELETED AND RE-APPENDED AS A BLOCK whenever they are not
-       * already exactly right — same ids, same order, same contents, nothing
-       * this driver owns after them, and nothing appended after them on this
-       * pass. A settled node re-appends none of them.
-       */
+      /* Terminal API routes remain last, with denial before proxy. Reappend the
+         block when its exact order or contents differ because POST appends. */
       const owned = new Map<string, Record<string, unknown>>();
       const order: string[] = [];
       for (const route of await readRoutes()) {
@@ -216,16 +135,14 @@ export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
       for (const route of rendered) wanted.set(route["@id"], route);
       const trailing = rendered.filter((route) => isTrailing(route["@id"]));
 
-      /* Routes are put in place before stale ones are taken away, so a host that
-         moves between backends is never briefly served by neither. */
+      /* Add/rewrite hosts before removing stale routes to avoid a routing gap. */
       let appended = false;
       for (const [id, route] of wanted) {
         if (isTrailing(id)) continue;
 
         const current = owned.get(id);
         if (current === undefined) {
-          /* POST to an array appends to it; the routes the operator wrote keep
-             their position and their contents. */
+          /* Append without changing operator-owned routes. */
           const response = await call("POST", routesUrl, route);
           if (!response.ok) {
             throw adminFailed("POST", routesUrl, `answered ${String(response.status)}`);
@@ -241,9 +158,7 @@ export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
       }
 
       for (const id of [...owned.keys()].sort()) {
-        /* Stale trailing routes are left to the re-append below, which is the
-           only thing that ever writes them, so they are never removed and then
-           not put back. */
+        /* Trailing routes are replaced as one ordered block below. */
         if (wanted.has(id) || isTrailing(id)) continue;
 
         const url = idUrl(id);
@@ -253,10 +168,8 @@ export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
 
       if (!appended && trailingSettled(order, owned, trailing)) return;
 
-      /* The one place this driver removes before it adds. An API apex that is
-         briefly absent cannot leak, because its denial and proxy go together;
-         adding first is not available because appending a second copy would put
-         the stale one first. */
+      /* Replace the terminal block atomically in order; duplicate append would
+         leave an older terminal route first. */
       for (const id of order.filter(isTrailing)) {
         const url = idUrl(id);
         const response = await call("DELETE", url);
@@ -272,13 +185,7 @@ export function createCaddyDriver(opts?: CaddyDriverOptions): IngressDriver {
   };
 }
 
-/**
- * Origin of the admin API, which every call to it presents as its own.
- *
- * Throws `ScafoError("invalid-input")` when the configured admin URL is not a
- * URL: an ingress that cannot be addressed must fail the node's boot, not the
- * first reconcile pass that tries to publish a route through it.
- */
+/** Returns the admin origin or refuses an invalid configured URL at startup. */
 function originOf(adminUrl: string): string {
   try {
     return new URL(adminUrl).origin;
@@ -305,30 +212,8 @@ export function apiDenyId(domain: string): string {
   return `${API_DENY_ID_PREFIX}${domain}`;
 }
 
-/**
- * The routes this driver wants Caddy to hold for `desired`, IN THE ORDER CADDY
- * MUST HOLD THEM: everything explicit first — the process-backed hosts in the
- * order the routing states them, then the API apexes.
- *
- * The API apexes sit below the hosts above, so an application deliberately put
- * at a platform apex keeps it.
- *
- * Each apex is TWO routes and the DENIAL COMES FIRST. The second matches the
- * apex and NOT the excluded prefixes and proxies everything else to the daemon;
- * the first matches those very prefixes and answers {@link API_DENY_STATUS} flat,
- * from Caddy, without ever dialling anything. Either alone would close the
- * surface — the negation makes the proxy unable to carry those paths at all —
- * and the pair is what also gives the caller an answer instead of Caddy's
- * fall-through.
- *
- * The order is part of what is rendered rather than something `apply` sorts out,
- * because Caddy matches top-down and every route here is terminal. See `apply`
- * for how that order is kept across incremental converges.
- *
- * Pure, and separated from the conversation with the admin API so that what this
- * driver MEANS by a routing can be compared against what another ingress driver
- * means by the same one — which is what `test/ingress-parity.test.ts` does.
- */
+/** Renders terminal Caddy routes in match order. API apexes follow application
+ * hosts; each uses denial before proxy to exclude protected paths. */
 export function renderCaddyRoutes(
   desired: IngressDesired,
   upstreamHost = "127.0.0.1",
@@ -344,8 +229,7 @@ export function renderCaddyRoutes(
       routes.push({
         "@id": apiDenyId(host),
         "match": [{ host: [host], path: denied }],
-        /* Answered BY CADDY. Nothing on this path reaches the daemon, so no
-           misreading of a header, a token or a route behind it can open it. */
+        /* Deny at ingress, without dialing the daemon. */
         "handle": [{ handler: "static_response", status_code: API_DENY_STATUS }],
         "terminal": true,
       });
@@ -369,9 +253,7 @@ function routeFor(host: string, backend: IngressBackend, upstreamHost: string): 
     "handle": [
       {
         handler: "reverse_proxy",
-        /* Dialled at the address the processes actually bound: loopback on a
-           single node, the tunnel address on a fleet. The ingress is on this
-           node either way; which interface it dials is the node's decision. */
+        /* Dial the configured runtime bind address. */
         upstreams: [{ dial: `${upstreamHost}:${String(backend.port)}` }],
       },
     ],
@@ -387,13 +269,7 @@ function isTrailing(id: string): boolean {
   return id.startsWith(API_ID_PREFIX) || id.startsWith(API_DENY_ID_PREFIX);
 }
 
-/**
- * Whether Caddy already holds exactly this trailing block, in this order, with
- * nothing this driver owns after it — the invariant `apply` states.
- *
- * `order` is the ids this driver owns as Caddy listed them, so position is read
- * off the array rather than assumed from the map.
- */
+/** Whether the owned trailing block has the requested order and contents. */
 function trailingSettled(
   order: string[],
   owned: Map<string, Record<string, unknown>>,
@@ -411,13 +287,7 @@ function trailingSettled(
   });
 }
 
-/**
- * Whether the route Caddy holds already says what this driver wants it to.
- *
- * Only the fields this driver writes are compared. Caddy normalizes what it
- * stores and may carry more than it was given, and a route that differs only in
- * something nobody here set would otherwise be rewritten on every single pass.
- */
+/** Compares only fields this driver owns; Caddy may normalize or add others. */
 function sameRoute(current: Record<string, unknown>, wanted: CaddyRoute): boolean {
   const projection = (route: Record<string, unknown>): string =>
     stableStringify({ match: route.match, handle: route.handle, terminal: route.terminal });
@@ -425,16 +295,7 @@ function sameRoute(current: Record<string, unknown>, wanted: CaddyRoute): boolea
   return projection(current) === projection(wanted as unknown as Record<string, unknown>);
 }
 
-/**
- * The Caddy path patterns one denied prefix is written as: the prefix exactly,
- * and the whole subtree beneath it.
- *
- * A SEGMENT BOUNDARY rather than a string prefix, because that is what a route
- * prefix means and because the Traefik driver's rules say the same thing —
- * `/v1/storagex` is a different path and neither driver denies it. Caddy's path
- * matcher does not treat a bare pattern as a prefix, so both forms are written
- * out; pinned against v2.11.4, where `/v1/storage/*` matched `/v1/storage/a/b`.
- */
+/** Matches a denied path and its subtree, not a similarly prefixed path. */
 function deniedPatterns(prefix: string): string[] {
   return [prefix, `${prefix}/*`];
 }

@@ -1,32 +1,4 @@
-/*
- * DEFAULT-DENY TENANCY: what an operator-tier key reaches, and what it is
- * allowed to LEARN about the fleet it shares.
- *
- * The wave before this one made a scope opt-in: a key naming no projects reached
- * every one of them, which is the shape every installation older than it holds.
- * That default is the wrong way round for a multi-tenant platform — a key
- * enrolled with the scope flag left off was a key with the run of the fleet, and
- * nothing said so. So an operator-tier key must now NAME what it reaches:
- *
- *   - absent `projects` on an operator-tier record is refused at every grant,
- *     and reads as NOTHING rather than as everything;
- *   - `["*"]` is how "every project" is said out loud, and granting a fresh one
- *     takes an admin;
- *   - absent stays every project for an ADMIN, and for a machine of the fleet,
- *     because neither is a tenant.
- *
- * And the second half, which is the disclosure rather than the access: a tenant
- * holding a scoped key must not be able to ENUMERATE the fleet it is on. Before
- * this wave `GET /v1/operators` handed every key of every tenant to any operator
- * that asked, and `GET /v1/state` handed over every project's placements. Both
- * are now filtered to what the caller can reach — and a node-signed peer, which
- * is not a tenant and which the deploy-await hop depends on, still sees
- * everything.
- *
- * The app is invoked through its fetch interface, so nothing binds a socket, and
- * the deploy intake is a stand-in: what is under test is authorization and
- * disclosure, not what an artifact turns into.
- */
+/* Default-deny operator tenancy and scoped fleet disclosure. */
 
 import type { H3 } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
@@ -74,7 +46,7 @@ const TENANT_ID = "op-tenant11";
 /** An operator-tier key that says "every project" out loud. */
 const WILD_ID = "op-wild1111";
 /**
- * An operator-tier record carrying NO projects, written straight into the bucket
+ * An operator-tier record carrying no projects, written straight into the bucket
  * by hand — the only way one can exist once every grant refuses to make one.
  */
 const ORPHAN_ID = "op-orphan11";
@@ -135,8 +107,6 @@ beforeEach(async () => {
   });
 });
 
-/* ------------------------------------------------- 1. absent means nothing */
-
 describe("an operator-tier key naming no projects reaches nothing at all", () => {
   it("is refused an environment route on EVERY project, its own included", async () => {
     for (const project of [MINE, THEIRS]) {
@@ -165,9 +135,6 @@ describe("an operator-tier key naming no projects reaches nothing at all", () =>
   });
 
   it("STILL AUTHENTICATES, because repair has to stay possible", async () => {
-    /* A key that answered 401 would be a key nobody could rotate and nothing
-       could tell apart from a forgery — so the record stays trusted and is
-       simply worth nothing on the workload surface. */
     const response = await call("/v1/operators", ORPHAN_ID, orphan, { method: "GET" });
 
     expect(response.status).toBe(200);
@@ -182,7 +149,6 @@ describe("an operator-tier key naming no projects reaches nothing at all", () =>
     });
 
     expect(response.status, await response.clone().text()).toBe(200);
-    /* And the successor is worth exactly what it replaced: nothing. */
     const heir = await getOperator(clock.ctx, "op-heir1111");
     expect(heir?.projects).toBeUndefined();
     expect((await upload("op-heir1111", minted, MINE)).status).toBe(403);
@@ -207,12 +173,8 @@ describe("an operator-tier key naming no projects reaches nothing at all", () =>
   });
 });
 
-/* ------------------------------------------------------ 2. what a grant may say */
-
 describe("enrolling an operator-tier key must NAME what it reaches", () => {
   it("refuses an admin enrolling an operator with no scope at all", async () => {
-    /* This is the one that bites the ordinary case: an admin has no scope to
-       inherit, so an omitted `projects` used to mean every project. */
     const response = await enroll(ADMIN_ID, admin, {
       ...publicHalf("op-joiner11", await minted()),
       role: "operator",
@@ -250,9 +212,6 @@ describe("enrolling an operator-tier key must NAME what it reaches", () => {
   });
 
   it("REFUSES THE SAME THING THROUGH THE BUCKET CEREMONY, which bypasses no rule here", async () => {
-    /* The ceremony is authorized by the bucket credential and skips the tier
-       rules on purpose. It does NOT skip what a record may be: a scope-less
-       operator-tier key is not a shape this installation writes either way. */
     await expect(
       registerOperatorKey(
         clock.ctx,
@@ -267,8 +226,6 @@ describe("enrolling an operator-tier key must NAME what it reaches", () => {
   });
 
   it("lets the ceremony seed an ADMIN, which names no projects and never could", async () => {
-    /* Bootstrap is untouched: the first key of an installation is an admin, and
-       an admin is never scoped. */
     const fresh = ctxWith(new MemoryCasStore());
     const role = await registerOperatorKey(fresh.ctx, {
       id: "op-first111",
@@ -278,8 +235,6 @@ describe("enrolling an operator-tier key must NAME what it reaches", () => {
     expect(role).toBe("admin");
   });
 });
-
-/* ---------------------------------------------------------- 3. the wildcard */
 
 describe('["*"] is how a key says "every project" out loud', () => {
   it("reaches every project of the fleet", async () => {
@@ -298,8 +253,6 @@ describe('["*"] is how a key says "every project" out loud', () => {
       projects: ["*"],
     });
 
-    /* Scope is not tier: a key that reaches every project still administers no
-       key above its own, and handing out the run of the fleet is an admin's. */
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
     await expect(getOperator(clock.ctx, "op-joiner11")).resolves.toBeNull();
@@ -346,8 +299,6 @@ describe('["*"] is how a key says "every project" out loud', () => {
     await expect(getOperator(clock.ctx, "op-heir1111")).resolves.toBeNull();
   });
 });
-
-/* ------------------------------------------------------- 4. strict listings */
 
 describe("GET /v1/operators shows an operator its OWN LINEAGE and nothing else", () => {
   it("answers the caller's record, the one it supersedes, and its pending successor", async () => {
@@ -413,16 +364,11 @@ describe("GET /v1/operators shows an operator its OWN LINEAGE and nothing else",
       supersedes: TENANT_ID,
     });
 
-    /* Read WITH THE NEW KEY, which is what proves the fleet accepts what it
-       signs — and the old key it supersedes must be visible for the contract
-       step that follows. */
     const body = await listing("op-heir1111", heir);
 
     expect(body.operators.map((entry) => entry.id).sort()).toEqual(["op-heir1111", TENANT_ID]);
   });
 });
-
-/* ---------------------------------------------------------- 5. filtered state */
 
 describe("GET /v1/state is filtered to what the caller reaches", () => {
   it("hides another tenant's placements and processes", async () => {
@@ -446,9 +392,6 @@ describe("GET /v1/state is filtered to what the caller reaches", () => {
   });
 
   it("marks the answer as filtered whenever the caller is a non-admin operator", async () => {
-    /* The rule, and it is about the CALLER rather than about what was hidden: a
-       wildcard key has nothing hidden from it and the answer is still
-       scope-dependent, so it is still marked. */
     expect((await stateFor(TENANT_ID, tenant)).scoped).toBe(true);
     expect((await stateFor(WILD_ID, wild)).scoped).toBe(true);
     expect((await stateFor(ORPHAN_ID, orphan)).scoped).toBe(true);
@@ -487,8 +430,6 @@ describe("GET /v1/state is filtered to what the caller reaches", () => {
   });
 });
 
-/* ------------------------------------------- 6. the enumeration this closes */
-
 describe("a scoped operator can learn no foreign project name from this API", () => {
   it("finds none in the operator listing", async () => {
     const response = await call("/v1/operators", TENANT_ID, tenant, { method: "GET" });
@@ -509,15 +450,11 @@ describe("a scoped operator can learn no foreign project name from this API", ()
     const response = await call(pathIn(THEIRS, "/retire"), TENANT_ID, tenant, { method: "POST" });
     const body = await response.text();
 
-    /* The project the caller NAMED is echoed, because the caller named it; the
-       key's own list and the fleet's are not. */
     expect(response.status).toBe(403);
     expect(body).toContain(THEIRS);
     expect(body).not.toContain(FOREIGN_ID);
   });
 });
-
-/* ------------------------------------------------------------------ helpers */
 
 /** One call as the cases above state it: a method and, where there is one, a body. */
 interface Call {
@@ -751,8 +688,6 @@ function daemonConfig(): DaemonConfig {
   };
 }
 
-/* The lease is taken in the suite's own setup so that `coordinator.unplaced` is
-   reported at all: the view only carries it for the node that RAN the pass. */
 beforeEach(async () => {
   await acquireLease(clock.ctx, NODE_ID);
 });

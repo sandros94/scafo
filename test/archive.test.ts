@@ -1,7 +1,7 @@
 /*
- * The artifact format, packed and unpacked by the same code the client and the
- * daemon use. A round trip is the whole contract: what a client packs is what the
- * node that unpacks it must see, byte for byte.
+ * The artifact format, packed and unpacked by the same code the client and the daemon use. A
+ * round trip is the whole contract: what a client packs is what the node that unpacks it must
+ * see, byte for byte.
  */
 
 import { gzipSync } from "node:zlib";

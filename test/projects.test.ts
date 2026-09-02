@@ -1,17 +1,4 @@
-/*
- * The project record: what a project IS in the registry, beyond a slug that
- * happens to have builds under it.
- *
- * It has always existed — `_scafo/projects/<slug>/project.json`, created on the
- * first deploy that names the slug — and it has always carried placement and
- * preview defaults. What it carries now is the three things a platform BUILT ON
- * scafo needs and core will not invent for itself: when the project came into
- * being, whether an admin has stopped it, and a free-form label map core never
- * interprets.
- *
- * The identity is still the slug alone: `v` and `slug` are immutable, creation
- * is idempotent, and settings apply on first creation only.
- */
+/* The project record: what a project IS in the registry, beyond a slug that happens to have builds under it. */
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { putJson, readJson } from "../src/core/registry/cas.ts";

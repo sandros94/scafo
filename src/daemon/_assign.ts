@@ -1,12 +1,5 @@
-/*
- * Internal: the coordinator's assignment duty — deciding which nodes serve which
- * environment, and writing that decision down.
- *
- * Runs on the coordinator alone, on every tick it holds the lease. Everything it
- * decides is a pure function of the environments and the live nodes, so a
- * coordinator that has just taken over reaches the same answers its predecessor
- * did without inheriting any state from it.
- */
+/* Lease-holding coordinator derives and writes assignments from environments and
+   live nodes. */
 
 import { ScafoError } from "../core/error.ts";
 import { assignNodes } from "../core/placement/rendezvous.ts";

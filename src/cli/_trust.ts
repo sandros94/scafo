@@ -1,12 +1,4 @@
-/*
- * Internal: what `scafo trust` does once its flags have been read — editing the
- * set of CI issuers a project admits, and printing it.
- *
- * The policy is one document per project, so every edit here is a read, a merge
- * and a write of the whole thing. Two operators editing one project's policy in
- * the same second is not a case this command is shaped for, and the later write
- * wins exactly as `setTrustPolicy` promises.
- */
+/* Project OIDC trust-policy editing and output. */
 
 import { OIDC_AUDIENCE } from "../core/auth/oidc.ts";
 import { ScafoError } from "../core/error.ts";

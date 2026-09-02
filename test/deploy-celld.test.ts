@@ -1,7 +1,7 @@
 /*
- * The celld deploy task is a real child process here. Lost authority must end
- * that child and wait for its exit before the runner returns: otherwise the
- * stale builder can publish after a successor has won.
+ * The celld deploy task is a real child process here. Lost authority must end that child and wait
+ * for its exit before the runner returns: otherwise the stale builder can publish after a
+ * successor has won.
  */
 
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
