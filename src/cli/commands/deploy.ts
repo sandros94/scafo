@@ -24,7 +24,12 @@ export const DEFAULT_POLL_MS: number = 1000;
 const SETTLED: string[] = ["deployed", "failed"];
 
 const deployArgs: ArgsDef = {
-  "dir": { type: "positional", description: "Directory holding the built project" },
+  "dir": {
+    type: "positional",
+    required: false,
+    default: ".",
+    description: "Directory holding the built project",
+  },
   "node": {
     type: "string",
     description: "Base URL of the node daemon; without it the chosen remote says where",
@@ -33,9 +38,11 @@ const deployArgs: ArgsDef = {
   "project": { type: "string", description: "Project slug to deploy into", required: true },
   "env": { type: "string", description: "Environment to deploy into (production)" },
   "script": { type: "string", description: "Name the runtime files the app under" },
-  "no-bundle": {
+  "bundle": {
     type: "boolean",
-    description: "Use a pre-bundled, self-contained Worker entry",
+    default: true,
+    description: "Build the Worker entry on the node",
+    negativeDescription: "Use a pre-bundled, self-contained Worker entry",
   },
   "replicas": {
     type: "string",
@@ -73,7 +80,6 @@ export const deploy: CommandDef = defineCommand({
 async function runDeploy(flags: Record<string, unknown>): Promise<void> {
   const dir = text(flags.dir) ?? ".";
   const project = text(flags.project) as string;
-  const environment = text(flags.env) ?? "production";
   const fixed = text(flags.token);
 
   /*
@@ -95,24 +101,9 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
   const authorize = async (): Promise<string> => fixed ?? (await (signer as Authorize)());
 
   /* Read before the directory is packed, so a malformed flag costs nothing. */
-  const wantedReplicas = text(flags.replicas);
-  const replicas = wantedReplicas === undefined ? undefined : parseReplicas(wantedReplicas);
-  const wantedSelector = text(flags["node-selector"]);
-  const nodeSelector =
-    wantedSelector === undefined ? undefined : parseLabels(wantedSelector, "--node-selector");
+  const meta = deployMetadataFrom(flags, project);
   console.log(`scafo: packing ${dir}`);
   const artifact = await packDirectory(dir);
-
-  const meta = {
-    environment,
-    script: text(flags.script) ?? project,
-    ...(flags["no-bundle"] === true ? { noBundle: true as const } : {}),
-    /* Only when they were asked for: a deploy that names no replica count and no
-       selector must leave whatever the environment already carries exactly as it
-       is. Neither flag can lift a constraint — that is `scafo env selector`. */
-    ...(replicas === undefined ? {} : { replicas }),
-    ...(nodeSelector === undefined ? {} : { nodeSelector }),
-  };
 
   let accepted: Response;
   try {
@@ -131,6 +122,31 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
 
   console.log(`scafo: deploy ${status.id} ${status.state}`);
   await watch(new URL(location, `${nodeUrl}/`).href, authorize, status);
+}
+
+/** What the flags say about the deploy, in the shape the node's intake reads. */
+export function deployMetadataFrom(
+  flags: Record<string, unknown>,
+  project: string,
+): DeployMetadata {
+  const wantedReplicas = text(flags.replicas);
+  const replicas = wantedReplicas === undefined ? undefined : parseReplicas(wantedReplicas);
+  const wantedSelector = text(flags["node-selector"]);
+  const nodeSelector =
+    wantedSelector === undefined ? undefined : parseLabels(wantedSelector, "--node-selector");
+
+  return {
+    environment: text(flags.env) ?? "production",
+    script: text(flags.script) ?? project,
+    /* citty turns `--no-bundle` into `bundle: false`; the negated name itself
+       never reaches the parsed flags. */
+    ...(flags.bundle === false ? { noBundle: true as const } : {}),
+    /* Only when they were asked for: a deploy that names no replica count and no
+       selector must leave whatever the environment already carries exactly as it
+       is. Neither flag can lift a constraint — that is `scafo env selector`. */
+    ...(replicas === undefined ? {} : { replicas }),
+    ...(nodeSelector === undefined ? {} : { nodeSelector }),
+  };
 }
 
 export interface DeployUploadOptions {
