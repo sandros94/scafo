@@ -250,7 +250,7 @@ export interface UntilOptions {
    * every suite. A timeout says only that something did not happen; this is the
    * account of what the node was doing instead.
    */
-  context?: () => string;
+  context?: () => string | Promise<string>;
 }
 
 /** Polls until `probe` returns a value, or the deadline runs out. */
@@ -273,7 +273,7 @@ export async function until<T>(
     }
     if (Date.now() >= giveUp) {
       const reason = last === null ? "" : `\nlast failure: ${describeFailure(last)}`;
-      const context = opts?.context === undefined ? "" : `\n${opts.context()}`;
+      const context = opts?.context === undefined ? "" : `\n${await opts.context()}`;
       throw new Error(
         `timed out after ${String(deadlineMs)}ms waiting for ${what}${reason}${context}`,
       );

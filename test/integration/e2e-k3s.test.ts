@@ -43,6 +43,8 @@ const K3S_IMAGE = "rancher/k3s:v1.36.3-k3s1";
 const IMAGE_TAG = "scafo-e2e-k3s";
 const NAMESPACE = "scafo-e2e";
 const PLATFORM_DOMAIN = "scafo.k3s.test";
+/** What the Traefik sidecar presents to its node; the manifest reads it from a Secret. */
+const INGRESS_TOKEN = "e2e-k3s-ingress-token";
 const PROJECT = "app";
 const BUCKET: BucketSettings = {
   bucket: "scafo-k3s-e2e",
@@ -173,6 +175,12 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
         SCAFO_S3_ACCESS_KEY: BUCKET.accessKey,
         SCAFO_S3_SECRET_KEY: BUCKET.secretKey,
       },
+    });
+    await apply({
+      apiVersion: "v1",
+      kind: "Secret",
+      metadata: { name: "scafo-ingress", namespace: NAMESPACE },
+      stringData: { SCAFO_INGRESS_TOKEN: INGRESS_TOKEN },
     });
     await applyManifest();
 
@@ -381,16 +389,8 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
       expect(placed.placement.nodes).toHaveLength(1);
       const { owner, nonOwner } = placed;
       await assignedServes("single", "v1");
-      const owned = await podGet(owner.pod, 8000, "/", {
-        host: `${PROJECT}--single.${PLATFORM_DOMAIN}`,
-      });
-      expect(owned.exitCode, owned.output).toBe(0);
-      expect(owned.output).toContain('"v1"');
-      const unmatched = await podGet(nonOwner.pod, 8000, "/", {
-        host: `${PROJECT}--single.${PLATFORM_DOMAIN}`,
-      });
-      expect(unmatched.exitCode, unmatched.output).not.toBe(0);
-      expect(unmatched.output).toContain("404");
+      /* The other node holds nothing for this host, but its sidecar forwards to the holder. */
+      await sidecarServes(nonOwner.pod, "single", "v1");
       const leaving = owner.pod;
       const leavingState = await stateOf(leaving);
       const leavingId = leavingState.node?.id;
@@ -567,20 +567,72 @@ async function stateOf(pod: k8s.V1Pod): Promise<DaemonState> {
 }
 
 async function serves(host: string, version: string): Promise<void> {
-  await until(`${host} through K3s Traefik`, DEADLINE_MS, async () => {
-    const answer = await httpGet(ingressPort, "/", { host });
-    return answer.status === 200 && answer.body.includes(`"${version}"`) ? answer : null;
-  });
+  let last = "nothing answered yet";
+  await until(
+    `${host} through K3s Traefik`,
+    DEADLINE_MS,
+    async () => {
+      const answer = await httpGet(ingressPort, "/", { host });
+      last = `last answer: ${String(answer.status)} ${answer.body.slice(0, 200)}`;
+      return answer.status === 200 && answer.body.includes(`"${version}"`) ? answer : null;
+    },
+    /* Which side went quiet: the edge, or the sidecars it balances across. */
+    {
+      context: async () => `${last}
+${await sidecarLogs()}`,
+    },
+  );
+}
+
+/**
+ * What each pod's containers logged last and what its sidecar answers, so a
+ * host that never answers says which side went quiet.
+ */
+async function sidecarLogs(): Promise<string> {
+  const logs = [await containerLogs(["node", "traefik"])];
+  for (const pod of await nodes()) {
+    const doc = await podGet(pod, 7400, "/v1/ingress/routes/traefik?prefer=self", {
+      authorization: `Bearer ${INGRESS_TOKEN}`,
+    });
+    const edge = await podGet(pod, 8000, "/", { host: `app.${PLATFORM_DOMAIN}` });
+    logs.push(
+      `--- ${pod.metadata?.name ?? "pod"} ---\nrouting: ${doc.output.slice(0, 1500)}\nsidecar: ${edge.output.slice(0, 300)}`,
+    );
+  }
+  return logs.join("\n");
+}
+
+/** The last lines every container by these names logged, live or exited. */
+async function containerLogs(names: string[]): Promise<string> {
+  const logs: string[] = [];
+  for (const name of names) {
+    const listed = await cluster.exec(["crictl", "ps", "-a", "--name", name, "--quiet"]);
+    for (const id of listed.output.trim().split(/\s+/).filter(Boolean)) {
+      const log = await cluster.exec(["crictl", "logs", "--tail", "60", id]);
+      logs.push(`--- ${name} ${id.slice(0, 12)} ---\n${log.output}`);
+    }
+  }
+  return logs.join("\n");
 }
 
 async function assignedServes(env: string, version: string): Promise<void> {
   const { owner } = await settledSinglePlacement(env);
-  await until(`${env}'s assigned node to serve through its sidecar`, DEADLINE_MS, async () => {
-    const answer = await podGet(owner.pod, 8000, "/", {
-      host: `${PROJECT}--${env}.${PLATFORM_DOMAIN}`,
-    });
-    return answer.exitCode === 0 && answer.output.includes(`"${version}"`) ? answer : null;
-  });
+  await sidecarServes(owner.pod, env, version);
+}
+
+/** Until this pod's sidecar answers the host with this version, from wherever it is held. */
+async function sidecarServes(pod: k8s.V1Pod, env: string, version: string): Promise<void> {
+  await until(
+    `${pod.metadata?.name ?? "pod"}'s sidecar to serve ${env} ${version}`,
+    DEADLINE_MS,
+    async () => {
+      const answer = await podGet(pod, 8000, "/", {
+        host: `${PROJECT}--${env}.${PLATFORM_DOMAIN}`,
+      });
+      return answer.exitCode === 0 && answer.output.includes(`"${version}"`) ? answer : null;
+    },
+    { context: sidecarLogs },
+  );
 }
 
 async function settledSinglePlacement(env: string): Promise<{
@@ -632,7 +684,7 @@ async function settledSinglePlacement(env: string): Promise<{
         return null;
       return { placement: { nodes: assignedNodeIds }, owner, nonOwner };
     },
-    { context: () => seen },
+    { context: async () => `${seen}\n${await containerLogs(["node"])}` },
   );
 }
 
