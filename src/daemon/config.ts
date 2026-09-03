@@ -209,6 +209,15 @@ export const DEFAULT_BIND_HOST: string = "127.0.0.1";
 /** Bind addresses that answer on every address of the host, loopback included. */
 const WILDCARD_BIND_HOSTS: string[] = ["0.0.0.0", "::"];
 
+/**
+ * What runtime processes bind on a node whose transport is the network itself.
+ * The operator has said that network is private; a process reachable only on
+ * loopback there would be one the fleet advertises and nobody can reach. The
+ * IPv4 wildcard, not `::`: a host with IPv6 turned off cannot bind the latter,
+ * and an IPv6-only fleet is one the operator names its bind for.
+ */
+const OPEN_BIND_HOST: string = "0.0.0.0";
+
 /** UDP port a WireGuard interface listens on when none is configured. */
 export const DEFAULT_WIREGUARD_PORT: number = 51_820;
 
@@ -301,7 +310,7 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
     runtime: {
       binPath: resolve("celldBin", sources) ?? DEFAULT_RUNTIME_BIN,
       portRangeStart: resolvePort("portRangeStart", sources, DEFAULT_PORT_RANGE_START),
-      bindHost: resolveBindHost(sources) ?? tunnelHost ?? DEFAULT_BIND_HOST,
+      bindHost: resolveBindHost(sources) ?? defaultBindHost(transport, tunnelHost),
       ...(celldEnv === undefined ? {} : { celldEnv }),
     },
     deploy: resolveDeploy(sources),
@@ -319,6 +328,20 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
     ...(transport === undefined ? {} : { transport }),
     ...(wireguard === undefined ? {} : { wireguard }),
   };
+}
+
+/**
+ * Where runtime processes bind when the operator did not say: on the tunnel
+ * when there is one, on every interface when the transport is the network
+ * itself, and on loopback when no transport decision was made at all — a node
+ * that has not said what network it trusts exposes its processes to none.
+ */
+function defaultBindHost(
+  transport: TransportConfig | undefined,
+  tunnelHost: string | undefined,
+): string {
+  if (tunnelHost !== undefined) return tunnelHost;
+  return transport?.driver === "none" ? OPEN_BIND_HOST : DEFAULT_BIND_HOST;
 }
 
 /** Writes `host:port`, bracketing an IPv6 literal the way a URL authority does. */

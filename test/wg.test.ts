@@ -343,13 +343,23 @@ describe("the addresses a tunnelled node uses", () => {
     expect(config.node.advertise).toBe("node-a.internal:7400");
   });
 
-  it("changes nothing for a node that runs no tunnel", async () => {
+  it("opens the runtime bind on a node whose transport is the network itself", async () => {
     const config = await loadDaemonConfig({
       env: { ...REQUIRED_ENV, SCAFO_TRANSPORT: "none", SCAFO_LISTEN: "0.0.0.0:7400" },
     });
 
-    expect(config.runtime.bindHost).toBe("127.0.0.1");
+    /* The operator said the network is private; what the fleet advertises for
+       this node must be answered on it, and loopback answers no peer. */
+    expect(config.runtime.bindHost).toBe("0.0.0.0");
     expect(config.node.advertise).toBeUndefined();
+  });
+
+  it("still keeps the runtime on loopback until a transport decision is made", async () => {
+    const config = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_LISTEN: "0.0.0.0:7400" },
+    });
+
+    expect(config.runtime.bindHost).toBe("127.0.0.1");
   });
 });
 
