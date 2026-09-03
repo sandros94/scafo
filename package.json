@@ -89,8 +89,7 @@
     "prepack": "pnpm build",
     "test": "vitest run --slowTestThreshold=1000",
     "test:coverage": "vitest run --coverage --slowTestThreshold=1000",
-    "typecheck": "tsc --noEmit",
-    "bench": "vitest bench --run"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "citty": "^0.2.2",
