@@ -65,12 +65,20 @@ const PLATFORM_DOMAIN = "scafo.test";
 const PROJECT = "app";
 const ENVIRONMENT = "production";
 const NODE_ID = "node-e2e-traefik";
+/**
+ * Supplied rather than minted: Traefik starts before the node and has to
+ * present the token from its first poll, so both sides are told the same one.
+ */
+const INGRESS_TOKEN = "e2e-traefik-ingress-token";
 
 /**
  * The routers this node publishes whatever it is serving: the pair that answers
  * the fleet's API at the domain's own apex — the second of which
  * is what keeps `/v1/storage` off that public name.
  */
+/** What the suite presents where Traefik would. */
+const INGRESS_HEADERS = { authorization: `Bearer ${INGRESS_TOKEN}` };
+
 const STANDING_ROUTERS = [`scafo_api_${PLATFORM_DOMAIN}`, `scafo_apideny_${PLATFORM_DOMAIN}`];
 
 let store: StartedStore;
@@ -98,10 +106,12 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
     await buildRepo();
     store = await startStore(BUCKET);
 
+    const staticConfig = (await readFile(join(FIXTURES, "traefik.yml"), "utf8")).replace(
+      "${SCAFO_INGRESS_TOKEN}",
+      INGRESS_TOKEN,
+    );
     traefik = await new GenericContainer(TRAEFIK_IMAGE)
-      .withCopyFilesToContainer([
-        { source: join(FIXTURES, "traefik.yml"), target: "/etc/traefik/traefik.yml" },
-      ])
+      .withCopyContentToContainer([{ content: staticConfig, target: "/etc/traefik/traefik.yml" }])
       .withExposedPorts(TRAEFIK_HTTP_PORT, TRAEFIK_API_PORT, NODE_PORT)
       .withWaitStrategy(Wait.forHttp("/ping", TRAEFIK_API_PORT).forStatusCode(200))
       .withStartupTimeout(BOOT_DEADLINE_MS)
@@ -122,6 +132,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
         SCAFO_STATE_DIR: "/var/lib/scafo",
         SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
         SCAFO_INGRESS_DRIVER: "traefik",
+        SCAFO_INGRESS_TOKEN: INGRESS_TOKEN,
         SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
         CELLD_ESBUILD: "/usr/local/bin/esbuild",
       })
@@ -178,7 +189,10 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   it(
     "publishes an empty configuration before it has anything to serve",
     async () => {
-      const answer = await httpGet(apiPort, "/v1/ingress/routes/traefik", {});
+      const unauthenticated = await httpGet(apiPort, "/v1/ingress/routes/traefik", {});
+      expect(unauthenticated.status).toBe(401);
+
+      const answer = await httpGet(apiPort, "/v1/ingress/routes/traefik", INGRESS_HEADERS);
 
       expect(answer.status).toBe(200);
       expect(JSON.parse(answer.body)).toEqual({});
@@ -303,7 +317,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       }
       observed.apexDeniedStatus = 418;
 
-      const local = await httpGet(apiPort, "/v1/ingress/routes/traefik", {});
+      const local = await httpGet(apiPort, "/v1/ingress/routes/traefik", INGRESS_HEADERS);
       expect(local.status).toBe(200);
     },
     STEP_TIMEOUT_MS,
@@ -451,7 +465,7 @@ function operatorToken(): Promise<string> {
 
 /** The configuration the node is publishing for Traefik right now. */
 async function snapshotNow(): Promise<TraefikDynamicConfig> {
-  const answer = await httpGet(apiPort, "/v1/ingress/routes/traefik", {});
+  const answer = await httpGet(apiPort, "/v1/ingress/routes/traefik", INGRESS_HEADERS);
   expect(answer.status, answer.body).toBe(200);
   return JSON.parse(answer.body) as TraefikDynamicConfig;
 }

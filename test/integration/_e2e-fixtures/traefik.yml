@@ -20,7 +20,13 @@ entryPoints:
 
 providers:
   http:
-    endpoint: "http://127.0.0.1:7400/v1/ingress/routes/traefik"
+    # `prefer=self`: this Traefik sits on the node it asks, so that node's own
+    # processes come first and its peers are the failover. The token is filled
+    # in by the suite before the file is copied in: Traefik reads ONE source of
+    # static configuration, so a file cannot be topped up from the environment.
+    endpoint: "http://127.0.0.1:7400/v1/ingress/routes/traefik?prefer=self"
+    headers:
+      Authorization: "Bearer ${SCAFO_INGRESS_TOKEN}"
     pollInterval: "2s"
 
 api:
