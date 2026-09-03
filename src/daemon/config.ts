@@ -8,7 +8,7 @@ import { DEFAULT_PORT_RANGE_START } from "../core/placement/ports.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
 import type { TransportConfig, TransportMode } from "../core/types/transport.ts";
 import { assertEnvVars, parseEnvVars } from "../core/utils/env.ts";
-import { assertHost, isHost, parseInterfaceAddress } from "../core/utils/host.ts";
+import { assertHost, formatHostPort, isHost, parseInterfaceAddress } from "../core/utils/host.ts";
 import { assertLabels, parseLabels } from "../core/utils/labels.ts";
 /* Import the driver's reserved names instead of duplicating that contract. */
 import { OPERATOR_RESERVED_ENV, TELEMETRY_ENV } from "../drivers/runtime/celld.ts";
@@ -342,12 +342,6 @@ function defaultBindHost(
 ): string {
   if (tunnelHost !== undefined) return tunnelHost;
   return transport?.driver === "none" ? OPEN_BIND_HOST : DEFAULT_BIND_HOST;
-}
-
-/** Writes `host:port`, bracketing an IPv6 literal the way a URL authority does. */
-export function formatHostPort(host: string, port: number): string {
-  const literal = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
-  return `${literal}:${String(port)}`;
 }
 
 /**

@@ -18,6 +18,12 @@ export function isHost(s: string): boolean {
   return s.split(".").every((label) => HOST_LABEL_RE.test(label));
 }
 
+/** Writes `host:port`, bracketing an IPv6 literal the way a URL authority does. */
+export function formatHostPort(host: string, port: number): string {
+  const literal = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  return `${literal}:${String(port)}`;
+}
+
 /**
  * Whether a listener bound to `host`, or an address advertised as `host`, stays
  * on the machine itself: `localhost`, anything in `127.0.0.0/8`, or the IPv6

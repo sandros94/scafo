@@ -89,3 +89,52 @@ export interface PullingIngressDriver extends IngressDriver {
   /** The configuration as of the last {@link IngressDriver.apply}. */
   snapshot(): unknown;
 }
+
+/**
+ * Where one host is answered across the fleet: a running process on a node,
+ * named by the node and by the address a peer or an ingress dials it at.
+ */
+export interface FleetUpstream {
+  node: string;
+  /** `host:port` — the node's advertised address and the process's public port. */
+  address: string;
+}
+
+/**
+ * One host and everyone who answers on it. `upstreams` is ORDERED, and the order
+ * is a priority: an ingress tries the first and falls through to the next only
+ * when the first is unhealthy. It is never a weighting — nothing here asks for
+ * traffic to be split. A renderer sorts by node id and a consumer may ask for
+ * one node to be put first, which is how a colocated ingress stays local.
+ */
+export interface FleetRoute {
+  host: string;
+  project: string;
+  env: string;
+  upstreams: FleetUpstream[];
+}
+
+/**
+ * The fleet's API at the platform apexes, answered by every live node's daemon.
+ * {@link ApiRouting.denied} applies here unchanged: an ingress answers those
+ * prefixes itself and never proxies them.
+ */
+export interface FleetApiRouting {
+  hosts: string[];
+  upstreams: FleetUpstream[];
+  denied: string[];
+}
+
+/**
+ * The routing of the whole fleet, as any ingress in front of it reads it: every
+ * host any environment answers on, and every node currently answering. Rendered
+ * by every node from the same registry, so every node's copy says the same
+ * thing, give or take a heartbeat.
+ */
+export interface FleetRouting {
+  v: 1;
+  /** Sorted by host. */
+  routes: FleetRoute[];
+  /** Absent when the rendering node does not publish the API. */
+  api?: FleetApiRouting;
+}

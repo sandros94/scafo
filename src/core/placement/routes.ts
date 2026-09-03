@@ -124,7 +124,7 @@ function currentBackend(
 }
 
 /** Builds a platform host, skipping labels too long for DNS rather than failing all routes. */
-function hostUnder(domain: string, project: string, ref?: string): string | null {
+export function hostUnder(domain: string, project: string, ref?: string): string | null {
   try {
     return `${formatHostLabel(project, ref)}.${domain}`;
   } catch (error) {
