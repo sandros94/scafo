@@ -93,16 +93,6 @@ export function formatVarset(described: Record<string, VarsetDescription>): stri
     .join("\n");
 }
 
-/** Parses comma-separated public names; parser repetition retains only last flag. */
-export function parsePublicNames(value: unknown): string[] {
-  const given = Array.isArray(value) ? value : [value];
-  return given
-    .filter((entry): entry is string => typeof entry === "string")
-    .flatMap((entry) => entry.split(","))
-    .map((entry) => entry.trim())
-    .filter((entry) => entry !== "");
-}
-
 /** Builds a varset; variables are secret unless explicitly public. */
 export function toPlainVarset(
   vars: Record<string, string>,

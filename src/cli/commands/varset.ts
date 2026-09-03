@@ -5,13 +5,13 @@ import { loadDaemonConfig } from "../../daemon/config.ts";
 import { ScafoError } from "../../core/error.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
 import { createRegistry } from "../_bootstrap.ts";
+import { flagList } from "../_flags.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
 import { readVarsetKeyFile, VARSET_KEY_FORMS } from "../_varset-key.ts";
 import {
   DOTENV_SYNTAX,
   formatVarset,
   parseDotenv,
-  parsePublicNames,
   setVarset,
   showVarset,
   toPlainVarset,
@@ -45,9 +45,13 @@ const setArgs: ArgsDef = {
     description: `Variable file to seal: ${DOTENV_SYNTAX}`,
     required: true,
   },
+  /* Comma-separated rather than repeated: the parser keeps only the last
+     occurrence of a repeated flag, and a `--public` that read one would seal the
+     variables an operator asked to publish and never say it had. */
   public: {
     type: "string",
-    description: "Variable to store in the clear; repeat for each one. Everything else is secret",
+    description:
+      "Variable to store in the clear; comma-separated for several. Everything else is secret",
   },
 };
 
@@ -93,7 +97,7 @@ async function runSet(flags: Record<string, unknown>): Promise<void> {
     });
   }
 
-  const plain = toPlainVarset(parseDotenv(contents, path), parsePublicNames(flags.public));
+  const plain = toPlainVarset(parseDotenv(contents, path), flagList(flags.public));
   const result = await setVarset(target.registry, {
     project: target.project,
     env: target.env,

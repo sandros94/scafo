@@ -6,14 +6,16 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type CommandDef, parseArgs } from "citty";
 import { afterAll, describe, expect, it } from "vitest";
 import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import { loadDaemonConfig } from "../src/daemon/config.ts";
+import { flagList } from "../src/cli/_flags.ts";
+import { varset } from "../src/cli/commands/varset.ts";
 import { decodeVarsetKey, readVarsetKeyFile, VARSET_KEY_BYTES } from "../src/cli/_varset-key.ts";
 import {
   formatVarset,
   parseDotenv,
-  parsePublicNames,
   setVarset,
   showVarset,
   toPlainVarset,
@@ -114,15 +116,6 @@ describe("deciding what is secret", () => {
     });
   });
 
-  it("reads the public names off the flag, comma-separated or repeated", () => {
-    /* The argument parser keeps only the last value of a flag given twice, so a
-       list is written the way every other list-valued setting here is. */
-    expect(parsePublicNames("FEATURE_FLAGS, PUBLIC_URL")).toEqual(["FEATURE_FLAGS", "PUBLIC_URL"]);
-    expect(parsePublicNames(["A,B", "C"])).toEqual(["A", "B", "C"]);
-    expect(parsePublicNames(undefined)).toEqual([]);
-    expect(parsePublicNames("")).toEqual([]);
-  });
-
   it("defaults to secret when nothing is named public at all", () => {
     const plain = toPlainVarset({ A: "1", B: "2" });
 
@@ -138,6 +131,50 @@ describe("deciding what is secret", () => {
     );
 
     expect(error.detail).toContain("FEATURE_FLAG");
+  });
+});
+
+describe("the names one --public flag carries", () => {
+  /** The flags of `scafo varset set` exactly as citty hands them to its run. */
+  function setFlags(argv: string[]): Record<string, unknown> {
+    const subCommands = varset.subCommands as Record<string, CommandDef>;
+    /* The required flags stand in for what an operator always types; only what
+       comes after them is what these tests are about. */
+    const required = ["--project", PROJECT, "--env", ENVIRONMENT, "--file", "app.env"];
+    return parseArgs([...required, ...argv], subCommands.set?.args as never) as Record<
+      string,
+      unknown
+    >;
+  }
+
+  it("names every variable in one comma-separated flag", () => {
+    const flags = setFlags(["--public", "FEATURE_FLAGS, PUBLIC_URL,BUILD_SHA"]);
+
+    expect(flagList(flags.public)).toEqual(["FEATURE_FLAGS", "PUBLIC_URL", "BUILD_SHA"]);
+  });
+
+  it("says comma-separated in its own help, because a repeat cannot be honoured", () => {
+    /* citty keeps only the LAST occurrence of a repeated string flag: everything
+       an operator listed before it never reaches the command. A description that
+       invited the repeat would publish one variable and silently seal the rest,
+       so it asks for the one shape the parser can carry. */
+    expect(setFlags(["--public", "A", "--public", "B"]).public).toBe("B");
+
+    const args = (varset.subCommands as Record<string, CommandDef>).set?.args as Record<
+      string,
+      { description?: string }
+    >;
+    expect(args.public?.description).toContain("comma-separated");
+  });
+
+  it("honours an array, for a parser that one day hands the repeats over", () => {
+    expect(flagList(["A,B", "C"])).toEqual(["A", "B", "C"]);
+  });
+
+  it("names nothing when the flag is absent or blank", () => {
+    expect(flagList(setFlags([]).public)).toEqual([]);
+    expect(flagList(setFlags(["--public", ""]).public)).toEqual([]);
+    expect(flagList(" , ")).toEqual([]);
   });
 });
 

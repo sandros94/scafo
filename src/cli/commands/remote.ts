@@ -17,6 +17,7 @@ import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import { loadDaemonConfig } from "../../daemon/config.ts";
 import { ScafoError } from "../../core/error.ts";
 import { createRegistry } from "../_bootstrap.ts";
+import { flagList } from "../_flags.ts";
 import { resolveOperatorHome } from "../_home.ts";
 import { INLINE_PREFIX, registerOperatorKey } from "../_operator-key.ts";
 import { operatorRole } from "../_operators.ts";
@@ -131,7 +132,8 @@ async function runAdd(flags: Record<string, unknown>): Promise<void> {
   const home = resolveOperatorHome();
   const added = await addRemote(home, {
     ...(text(flags.name) === undefined ? {} : { name: text(flags.name) as string }),
-    endpoints: urls(flags.endpoint),
+    /* A URL cannot contain a comma, so splitting one flag on them is unambiguous. */
+    endpoints: flagList(flags.endpoint),
     ...(text(flags.key) === undefined ? {} : { keyName: text(flags.key) as string }),
     ...(text(flags.from) === undefined ? {} : { from: text(flags.from) as string }),
   });
@@ -188,23 +190,6 @@ async function runExport(flags: Record<string, unknown>): Promise<void> {
     ...(text(flags.out) === undefined ? {} : { out: text(flags.out) as string }),
     isTTY: process.stdout.isTTY === true,
   });
-}
-
-/*
- * The list a `--endpoint` value carries, COMMA-SEPARATED in one flag. A
- * repeated flag would read more naturally, but the argument parser keeps only
- * the last occurrence — repeats were silently dropping every endpoint but one.
- * A URL cannot contain a comma, so the split is unambiguous; the same shape the
- * storage token list uses.
- *
- * @internal exported for its tests.
- */
-export function urls(value: unknown): string[] {
-  const values = Array.isArray(value) ? value : [value];
-  return values
-    .flatMap((entry) => (typeof entry === "string" ? entry.split(",") : [entry]))
-    .map(text)
-    .filter((entry): entry is string => entry !== undefined);
 }
 
 function required(flags: Record<string, unknown>, name: string): string {

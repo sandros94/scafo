@@ -5,10 +5,10 @@
 
 import { describe, expect, it } from "vitest";
 import { OIDC_AUDIENCE } from "../src/core/auth/index.ts";
+import { flagList } from "../src/cli/_flags.ts";
 import {
   DEFAULT_TRUST_AUDIENCE,
   formatTrustPolicy,
-  parseSubjects,
   readTrustPolicy,
   removeTrustIssuer,
   setTrustIssuer,
@@ -138,11 +138,11 @@ describe("trusting an issuer", () => {
 
 describe("reading the subjects off the flag", () => {
   it("takes them comma-separated, and repeated for good measure", () => {
-    expect(parseSubjects(`${BRANCHES}, ${TAGS}`)).toEqual([BRANCHES, TAGS]);
-    expect(parseSubjects([`${BRANCHES},${TAGS}`, MAIN])).toEqual([BRANCHES, TAGS, MAIN]);
-    expect(parseSubjects(undefined)).toEqual([]);
-    expect(parseSubjects("")).toEqual([]);
-    expect(parseSubjects(" , ")).toEqual([]);
+    expect(flagList(`${BRANCHES}, ${TAGS}`)).toEqual([BRANCHES, TAGS]);
+    expect(flagList([`${BRANCHES},${TAGS}`, MAIN])).toEqual([BRANCHES, TAGS, MAIN]);
+    expect(flagList(undefined)).toEqual([]);
+    expect(flagList("")).toEqual([]);
+    expect(flagList(" , ")).toEqual([]);
   });
 });
 

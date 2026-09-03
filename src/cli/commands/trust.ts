@@ -14,10 +14,10 @@ import { loadDaemonConfig } from "../../daemon/config.ts";
 import { ScafoError } from "../../core/error.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
 import { createRegistry } from "../_bootstrap.ts";
+import { flagList } from "../_flags.ts";
 import {
   DEFAULT_TRUST_AUDIENCE,
   formatTrustPolicy,
-  parseSubjects,
   readTrustPolicy,
   removeTrustIssuer,
   setTrustIssuer,
@@ -108,7 +108,7 @@ export const trust: CommandDef = defineCommand({
 async function runSet(flags: Record<string, unknown>): Promise<void> {
   const project = required(flags, "project");
   const iss = required(flags, "issuer");
-  const subjects = parseSubjects(flags.subject);
+  const subjects = flagList(flags.subject);
 
   const policy = await setTrustIssuer(await registryFor(flags), {
     project,

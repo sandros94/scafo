@@ -125,23 +125,6 @@ export function formatTrustPolicy(policy: TrustPolicy): string {
     .join("\n");
 }
 
-/**
- * The subject patterns a `--subject` flag carries: comma-separated, and repeated
- * for good measure.
- *
- * Comma-separated because the argument parser keeps only the last value of a
- * flag given twice, and a repeated flag that silently dropped all but one
- * pattern would trust one branch of the several an operator listed.
- */
-export function parseSubjects(value: unknown): string[] {
-  const given = Array.isArray(value) ? value : [value];
-  return given
-    .filter((entry): entry is string => typeof entry === "string")
-    .flatMap((entry) => entry.split(","))
-    .map((entry) => entry.trim())
-    .filter((entry) => entry !== "");
-}
-
 /** Audience a workload requests its token for when the operator names none. */
 export const DEFAULT_TRUST_AUDIENCE: string = OIDC_AUDIENCE;
 
