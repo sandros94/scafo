@@ -15,6 +15,15 @@ export interface LeaseHandle {
 
 export const DEFAULT_LEASE_TTL_MS: number = 15_000;
 
+/**
+ * What long lease-gated work calls at its safe points — between two
+ * environments, before a deletion — to keep the lease from expiring under it.
+ * Answers the handle to fence and verify with from then on: the same one when
+ * no renewal was due, a renewed one otherwise. Throws `ScafoError("lease-lost")`
+ * when the renewal fails, at which point the work must stop writing.
+ */
+export type KeepAlive = () => Promise<LeaseHandle>;
+
 /** True once `acquiredAt + ttlMs` has passed. Unparseable timestamps count as expired. */
 export function isLeaseExpired(lease: CoordinatorLease, now: Date): boolean {
   const acquired = Date.parse(lease.acquiredAt);

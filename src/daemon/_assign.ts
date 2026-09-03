@@ -8,7 +8,7 @@ import { describeSelector, eligibleNodes } from "../core/placement/selector.ts";
 import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { listEnvironments } from "../core/registry/environments.ts";
-import type { LeaseHandle } from "../core/registry/lease.ts";
+import type { KeepAlive, LeaseHandle } from "../core/registry/lease.ts";
 import { isNodeLive, listNodeRecords } from "../core/registry/nodes.ts";
 import { environmentKey } from "../core/registry/paths.ts";
 import {
@@ -19,6 +19,7 @@ import {
 } from "../core/registry/placement.ts";
 import { isProjectBlocked, listProjects } from "../core/registry/projects.ts";
 import type { EnvironmentRecord, NodeRecord, NodeSelector } from "../core/types/registry.ts";
+import { DEFAULT_CONCURRENCY, mapConcurrent } from "../core/utils/concurrency.ts";
 
 /**
  * Why one environment could not be placed on a pass, as a stable code.
@@ -62,6 +63,8 @@ export interface AssignmentResult {
 export interface AssignmentOptions {
   /** How long a node counts as live after its last heartbeat; see `isNodeLive`. */
   livenessWindowMs?: number;
+  /** Called between environments, so a pass longer than the lease TTL keeps it. */
+  keepAlive?: KeepAlive;
 }
 
 /**
@@ -117,17 +120,20 @@ export async function runAssignment(
     unplaced: [],
   };
 
-  return runAssignmentOverFleet(ctx, lease, fleet, result);
+  return runAssignmentOverFleet(ctx, lease, fleet, result, opts?.keepAlive);
 }
 
 async function runAssignmentOverFleet(
   ctx: RegistryContext,
-  lease: LeaseHandle,
+  initial: LeaseHandle,
   fleet: NodeRecord[],
   result: AssignmentResult,
+  keepAlive?: KeepAlive,
 ): Promise<AssignmentResult> {
   const projects = await listProjects(ctx);
   const removals: Array<{ project: string; env: string }> = [];
+  /* The handle every write is fenced with, refreshed as the pass goes on. */
+  let lease = initial;
 
   for (const project of projects) {
     /* Blocking is the canonical reversible full stop. Runtime desired state
@@ -140,12 +146,16 @@ async function runAssignmentOverFleet(
       listEnvironments(ctx, project),
       listPlacements(ctx, project),
     ]);
+    const records = await mapConcurrent(names, DEFAULT_CONCURRENCY, async (env) =>
+      readJson<EnvironmentRecord>(ctx, environmentKey(project, env)),
+    );
     const served = new Set<string>();
-    for (const env of names) {
-      const found = await readJson<EnvironmentRecord>(ctx, environmentKey(project, env));
-      if (found === null) continue;
+    for (const [index, env] of names.entries()) {
+      const found = records[index];
+      if (found === undefined || found === null) continue;
       if (found.value.retiredAt !== undefined) continue;
       served.add(env);
+      if (keepAlive !== undefined) lease = await keepAlive();
       const target = `${project}/${env}`;
       const candidates = eligibleNodes(fleet, found.value.nodeSelector);
       if (candidates.length === 0) {
@@ -187,6 +197,7 @@ async function runAssignmentOverFleet(
   for (const entry of removals.sort((left, right) =>
     compare(`${left.project}/${left.env}`, `${right.project}/${right.env}`),
   )) {
+    if (keepAlive !== undefined) lease = await keepAlive();
     const removed = await deletePlacement(ctx, entry.project, entry.env, lease);
     if (removed !== null) result.removed.push(removed);
   }

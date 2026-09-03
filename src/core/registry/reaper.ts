@@ -13,7 +13,7 @@ import { nowDate, type RegistryContext } from "./context.ts";
 import { listBuilds } from "./builds.ts";
 import { releaseDomain } from "./domains.ts";
 import { listEnvironments } from "./environments.ts";
-import { type LeaseHandle, verifyLease } from "./lease.ts";
+import { type KeepAlive, type LeaseHandle, verifyLease } from "./lease.ts";
 import { buildKey, domainsPrefix, environmentKey, fleetPrefix, placementKey } from "./paths.ts";
 import { listProjects } from "./projects.ts";
 import {
@@ -26,6 +26,8 @@ import {
 export interface ReapOptions extends RetirementOptions {
   /** Without `maxAgeMs` no build is ever a candidate. */
   buildRetention?: { maxAgeMs?: number };
+  /** Called before each item, so a long reap keeps the lease it runs under. */
+  keepAlive?: KeepAlive;
 }
 
 export interface ReapPlan {
@@ -83,12 +85,16 @@ export async function planReap(ctx: RegistryContext, opts?: ReapOptions): Promis
 export async function executeReap(
   ctx: RegistryContext,
   plan: ReapPlan,
-  lease: LeaseHandle,
+  initial: LeaseHandle,
   opts?: ReapOptions,
 ): Promise<ReapResult> {
   const result: ReapResult = { deleted: [], skipped: [] };
+  /* The handle each deletion is verified against, refreshed as the reap goes on. */
+  let lease = initial;
+  const keepAlive = opts?.keepAlive;
 
   for (const target of plan.environments) {
+    if (keepAlive !== undefined) lease = await keepAlive();
     await assertLease(ctx, lease);
 
     const key = environmentKey(target.project, target.env);
@@ -119,6 +125,7 @@ export async function executeReap(
 
   const maxAgeMs = opts?.buildRetention?.maxAgeMs;
   for (const target of plan.builds) {
+    if (keepAlive !== undefined) lease = await keepAlive();
     await assertLease(ctx, lease);
 
     const key = buildKey(target.project, target.id);

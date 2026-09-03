@@ -1,6 +1,6 @@
 /* Lease-elected coordinator for assignment and reaping. */
 
-import { isScafoError } from "../core/error.ts";
+import { isScafoError, ScafoError } from "../core/error.ts";
 import { nowDate } from "../core/registry/context.ts";
 import {
   acquireLease,
@@ -64,17 +64,24 @@ export interface CoordinatorOptions {
 /** Builds a candidate coordinator; work starts only on start or runOnce. */
 export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptions): Coordinator {
   const ttlMs = opts?.ttlMs ?? DEFAULT_LEASE_TTL_MS;
-  /* Renew three times per TTL to tolerate slow bucket operations. */
+  /* Renew at a third of the TTL: one renewal may fail or run late and the lease
+     still holds; a second miss in the same TTL loses it. */
   const tickMs = Math.max(1, Math.floor(ttlMs / 3));
   const reapIntervalMs = opts?.reapIntervalMs ?? DEFAULT_REAP_INTERVAL_MS;
-  const assignOptions =
-    opts?.livenessWindowMs === undefined ? {} : { livenessWindowMs: opts.livenessWindowMs };
-  const reapOptions: ReapOptions =
-    opts?.buildRetentionMs === undefined
+  const assignOptions = {
+    keepAlive,
+    ...(opts?.livenessWindowMs === undefined ? {} : { livenessWindowMs: opts.livenessWindowMs }),
+  };
+  const reapOptions: ReapOptions = {
+    keepAlive,
+    ...(opts?.buildRetentionMs === undefined
       ? {}
-      : { buildRetention: { maxAgeMs: opts.buildRetentionMs } };
+      : { buildRetention: { maxAgeMs: opts.buildRetentionMs } }),
+  };
 
   let held: LeaseHandle | null = null;
+  /* When the lease was last written by this node, on the registry clock. */
+  let renewedMs = 0;
   let timer: ReturnType<typeof setInterval> | null = null;
   let inFlight = false;
   /* Null permits an immediate reap after taking the lease. */
@@ -88,28 +95,55 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
 
   /** Drops to candidate. Nothing lease-gated may run again until it is retaken. */
   function drop(lease: LeaseHandle): void {
+    if (held === null) return;
     held = null;
     console.log(
       `scafo: coordinator lease lost at fence ${String(lease.lease.fence)}, this node is no longer the coordinator`,
     );
   }
 
-  async function takeOrKeep(): Promise<void> {
-    const current = held;
-    if (current === null) {
-      const taken = await acquireLease(daemon.registry, daemon.nodeId, { ttlMs });
-      if (taken === null) return;
-      held = taken;
-      console.log(`scafo: coordinator lease taken at fence ${String(taken.lease.fence)}`);
-      return;
-    }
-
+  /** Renews the held lease; a failed renewal loses authority until it is retaken. */
+  async function renew(current: LeaseHandle): Promise<LeaseHandle | null> {
     try {
       held = await renewLease(daemon.registry, current);
     } catch {
-      /* Failed renewal loses authority until a later acquisition succeeds. */
       drop(current);
+      return null;
     }
+    renewedMs = nowDate(daemon.registry).getTime();
+    return held;
+  }
+
+  async function takeOrKeep(): Promise<void> {
+    const current = held;
+    if (current !== null) {
+      await renew(current);
+      return;
+    }
+    const taken = await acquireLease(daemon.registry, daemon.nodeId, { ttlMs });
+    if (taken === null) return;
+    held = taken;
+    renewedMs = nowDate(daemon.registry).getTime();
+    console.log(`scafo: coordinator lease taken at fence ${String(taken.lease.fence)}`);
+  }
+
+  /**
+   * What the assignment and the reap call between items. A pass over a large
+   * installation, or a slow bucket, can outlast the TTL; renewing only at the
+   * start of a tick would then hand the lease to another node mid-pass.
+   */
+  async function keepAlive(): Promise<LeaseHandle> {
+    const current = held;
+    if (current === null) throw new ScafoError("lease-lost", "Coordinator lease is no longer held");
+    if (nowDate(daemon.registry).getTime() - renewedMs < tickMs) return current;
+
+    const renewed = await renew(current);
+    if (renewed === null) {
+      throw new ScafoError("lease-lost", "Coordinator lease could not be renewed", {
+        detail: `fence ${String(current.lease.fence)} was not renewed in time`,
+      });
+    }
+    return renewed;
   }
 
   /** Runs assignment every held tick; failed assignments preserve the last decision. */
@@ -152,7 +186,9 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
   async function reap(lease: LeaseHandle): Promise<void> {
     try {
       const plan = await planReap(daemon.registry, reapOptions);
-      await executeReap(daemon.registry, plan, lease, reapOptions);
+      /* Planning reads the whole registry; the plan is executed under a lease
+         that is fresh from here, not from the start of the tick. */
+      await executeReap(daemon.registry, plan, await keepAlive(), reapOptions);
       lastReapFailure = null;
     } catch (error) {
       /* Retry failed reaps from fresh state; a lost lease also drops authority. */

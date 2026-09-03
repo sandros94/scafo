@@ -194,6 +194,35 @@ describe("createCoordinator", () => {
     expect((await storedLease()).node).toBe("node-b");
   });
 
+  it("renews mid-pass, so a pass longer than the TTL does not lose the lease", async () => {
+    for (const name of ["one", "two", "three", "four"]) {
+      await createEnvironment(clock.ctx, PROJECT, { name });
+      await recordDeployment(clock.ctx, PROJECT, name, BUILD);
+    }
+    const coordinator = coordinatorFor("node-a");
+    await coordinator.runOnce();
+
+    /* Every read now costs half a TTL, so the pass alone outlasts the lease. */
+    const inner = clock.ctx.store;
+    clock.ctx.store = {
+      get: (key) => {
+        clock.tick(TTL_MS / 2);
+        return inner.get(key);
+      },
+      getBytes: (key) => inner.getBytes(key),
+      put: (key, body, cas) => inner.put(key, body, cas),
+      del: (key) => inner.del(key),
+      list: (prefix) => inner.list(prefix),
+    };
+    const startedAt = clock.nowMs();
+    await coordinator.runOnce();
+
+    expect(clock.nowMs() - startedAt).toBeGreaterThan(TTL_MS);
+    expect(coordinator.status().holding).toBe(true);
+    const lease = await storedLease();
+    expect(clock.nowMs() - Date.parse(lease.acquiredAt)).toBeLessThan(TTL_MS);
+  });
+
   it("reaps nothing at all when no build retention is configured", async () => {
     const coordinator = coordinatorFor("node-a", { buildRetentionMs: undefined });
     await coordinator.runOnce();
