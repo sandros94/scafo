@@ -223,6 +223,49 @@ describe("createCoordinator", () => {
     expect(clock.nowMs() - Date.parse(lease.acquiredAt)).toBeLessThan(TTL_MS);
   });
 
+  it("joins the pass already running rather than quietly doing nothing", async () => {
+    const coordinator = coordinatorFor("node-a");
+    const held = Promise.withResolvers<void>();
+    const inner = clock.ctx.store;
+    let stalled = false;
+    /* The first write of the lease hangs, so a second caller arrives while the
+       pass that decides who coordinates is still in the middle of deciding. */
+    clock.ctx.store = {
+      get: (key) => inner.get(key),
+      getBytes: (key) => inner.getBytes(key),
+      put: async (key, body, cas) => {
+        if (key === coordinatorKey() && !stalled) {
+          stalled = true;
+          await held.promise;
+        }
+        return inner.put(key, body, cas);
+      },
+      del: (key) => inner.del(key),
+      list: (prefix) => inner.list(prefix),
+    };
+
+    const first = coordinator.runOnce();
+    await expect.poll(() => stalled, { interval: 1 }).toBe(true);
+    let joined = false;
+    const second = coordinator.runOnce().then(() => {
+      joined = true;
+    });
+
+    /* It waited: the old answer here was to return at once, telling a caller
+       that nobody coordinates while this very node was taking the lease. */
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(joined).toBe(false);
+    expect(coordinator.status().holding).toBe(false);
+
+    held.resolve();
+    await Promise.all([first, second]);
+
+    expect(joined).toBe(true);
+    expect(coordinator.status().holding).toBe(true);
+    /* And it joined rather than ran: one pass, one acquisition, one fence. */
+    expect((await storedLease()).fence).toBe(1);
+  });
+
   it("reaps nothing at all when no build retention is configured", async () => {
     const coordinator = coordinatorFor("node-a", { buildRetentionMs: undefined });
     await coordinator.runOnce();

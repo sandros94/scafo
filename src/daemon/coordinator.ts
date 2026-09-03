@@ -43,6 +43,11 @@ export interface Coordinator {
   /**
    * Runs one iteration: take or renew the lease, assign every environment to
    * the nodes that should serve it, then reap when a reap is due.
+   *
+   * Resolves once an iteration has finished. A caller arriving while one is
+   * already running joins THAT one rather than starting a second — see
+   * `runOnce` for why a second would be unsafe — so it never returns having done
+   * nothing while the lease question is still open.
    */
   runOnce(): Promise<void>;
   status(): CoordinatorStatus;
@@ -83,7 +88,8 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
   /* When the lease was last written by this node, on the registry clock. */
   let renewedMs = 0;
   let timer: ReturnType<typeof setInterval> | null = null;
-  let inFlight = false;
+  /* The iteration currently running, shared by everyone who asks for one. */
+  let inFlight: Promise<void> | null = null;
   /* Null permits an immediate reap after taking the lease. */
   let lastReapMs: number | null = null;
   let lastReapAt: string | null = null;
@@ -200,28 +206,36 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
     }
   }
 
-  async function runOnce(): Promise<void> {
-    /* Prevent concurrent renewals from racing their own conditional writes. */
-    if (inFlight) return;
-    inFlight = true;
+  async function pass(): Promise<void> {
+    await takeOrKeep();
 
-    try {
-      await takeOrKeep();
+    const lease = held;
+    if (lease === null) return;
 
-      const lease = held;
-      if (lease === null) return;
+    await assign(lease);
+    /* Assignment may lose the lease; skip remaining lease-gated work. */
+    if (held === null) return;
 
-      await assign(lease);
-      /* Assignment may lose the lease; skip remaining lease-gated work. */
-      if (held === null) return;
-
-      if (lastReapMs !== null && nowDate(daemon.registry).getTime() - lastReapMs < reapIntervalMs) {
-        return;
-      }
-      await reap(lease);
-    } finally {
-      inFlight = false;
+    if (lastReapMs !== null && nowDate(daemon.registry).getTime() - lastReapMs < reapIntervalMs) {
+      return;
     }
+    await reap(lease);
+  }
+
+  /**
+   * One iteration, and only ever one at a time: two passes would race their own
+   * conditional lease writes, and the loser would read its own renewal as a
+   * takeover and drop authority it never lost.
+   *
+   * A second caller therefore WAITS for the pass already running instead of
+   * being told, silently, that nothing happened. It asked for the lease question
+   * to be settled, and joining the running pass settles it.
+   */
+  function runOnce(): Promise<void> {
+    inFlight ??= pass().finally(() => {
+      inFlight = null;
+    });
+    return inFlight;
   }
 
   return {
