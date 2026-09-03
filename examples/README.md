@@ -2,6 +2,13 @@
 
 This Compose file runs one Scafo node and its Caddy ingress on one host. It does not create the registry bucket; provision an S3-compatible store that supports `If-Match` and `If-None-Match` writes before starting it.
 
+The other recipes here put a fleet behind an ingress that is already somebody else's:
+
+- [`k3s/`](k3s/) — a K3s or RKE2 cluster whose bundled Traefik reads the routing through its http provider, with cert-manager issuing the platform wildcard.
+- [`vps/`](vps/) — two or more plain VPSs on a WireGuard mesh, each running a node and its own colocated Caddy.
+- [`coolify/`](coolify/) — Coolify's Traefik proxy consumes the routing via the http provider.
+- [`dokploy/`](dokploy/) — Dokploy's Traefik, same, via `traefik.yml`.
+
 ## Configure
 
 ```sh
