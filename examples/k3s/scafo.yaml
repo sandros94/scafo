@@ -11,36 +11,13 @@ data:
   SCAFO_S3_PREFIX: "production"
   SCAFO_PLATFORM_DOMAINS: "apps.example.com"
   SCAFO_LISTEN: "0.0.0.0:7400"
-  # One production replica keeps runtime traffic on pod loopback.
-  SCAFO_BIND_HOST: "127.0.0.1"
+  # `none` declares the pod network private: runtime processes bind the pod
+  # address, so every sidecar can reach whichever node holds a host.
   SCAFO_TRANSPORT: "none"
   SCAFO_INGRESS_DRIVER: "traefik"
   SCAFO_TRAEFIK_ENTRYPOINTS: "web"
   SCAFO_OBSERVABILITY: "1"
   SCAFO_INGRESS_ACCESS_LOG: "/var/log/scafo-ingress/access.log"
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: scafo-traefik
-  namespace: scafo
-data:
-  traefik.yml: |
-    entryPoints:
-      web:
-        address: ":8000"
-      traefik:
-        address: ":8080"
-    providers:
-      http:
-        # The sidecar pulls routes from its colocated node over pod loopback.
-        endpoint: "http://127.0.0.1:7400/v1/ingress/routes/traefik"
-        pollInterval: "5s"
-    ping:
-      entryPoint: traefik
-    accessLog:
-      filePath: /var/log/scafo-ingress/access.log
-      format: json
 ---
 apiVersion: v1
 kind: Service
@@ -86,9 +63,6 @@ spec:
       securityContext:
         fsGroup: 10001
       volumes:
-        - name: traefik-config
-          configMap:
-            name: scafo-traefik
         - name: ingress-log
           emptyDir: {}
       containers:
@@ -103,9 +77,13 @@ spec:
             runAsGroup: 10001
             allowPrivilegeEscalation: false
           envFrom:
-            # Create this Secret outside the manifest; it holds bucket-root credentials.
+            # Create these Secrets outside the manifest: `scafo-bucket` holds the
+            # bucket-root credentials, `scafo-ingress` the SCAFO_INGRESS_TOKEN the
+            # sidecar presents to read the fleet's routing and to keep TLS state.
             - secretRef:
                 name: scafo-bucket
+            - secretRef:
+                name: scafo-ingress
             - configMapRef:
                 name: scafo-node
           env:
@@ -152,7 +130,25 @@ spec:
               memory: "2Gi"
         - name: traefik
           image: traefik:v3.7.11
-          args: ["--configFile=/etc/traefik/traefik.yml"]
+          env:
+            - name: SCAFO_INGRESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: scafo-ingress
+                  key: SCAFO_INGRESS_TOKEN
+          # Traefik reads one source of static configuration, and a file cannot
+          # carry a Secret: the whole of it is arguments, the token expanded in.
+          args:
+            - "--entryPoints.web.address=:8000"
+            - "--entryPoints.traefik.address=:8080"
+            # The sidecar pulls the fleet's routing from its colocated node over
+            # pod loopback; `prefer=self` puts that node's own processes first.
+            - "--providers.http.endpoint=http://127.0.0.1:7400/v1/ingress/routes/traefik?prefer=self"
+            - "--providers.http.headers.Authorization=Bearer $(SCAFO_INGRESS_TOKEN)"
+            - "--providers.http.pollInterval=5s"
+            - "--ping.entryPoint=traefik"
+            - "--accessLog.filePath=/var/log/scafo-ingress/access.log"
+            - "--accessLog.format=json"
           securityContext:
             runAsNonRoot: true
             runAsUser: 10001
@@ -162,9 +158,6 @@ spec:
             - name: web
               containerPort: 8000
           volumeMounts:
-            - name: traefik-config
-              mountPath: /etc/traefik
-              readOnly: true
             - name: ingress-log
               mountPath: /var/log/scafo-ingress
           readinessProbe:
