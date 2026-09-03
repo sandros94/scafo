@@ -1,0 +1,63 @@
+{
+	# ACME contact address. @DOMAIN@, @NODE@ and @LOGS@ are filled in per host by
+	# roll-node.sh; this line and the `dns` one below are yours to edit.
+	email you@example.com
+	storage scafo {
+		endpoint http://@NODE@
+		token {env.SCAFO_INGRESS_TOKEN}
+	}
+	# Whether a customer domain belongs to this fleet is the node's decision, so
+	# this is the one scafo path Caddy calls without a token.
+	on_demand_tls {
+		ask http://@NODE@/v1/ingress/ask
+	}
+}
+
+(scafo) {
+	log {
+		output file @LOGS@/access.log
+		format json
+	}
+	reverse_proxy {
+		dynamic scafo {
+			endpoint http://@NODE@
+			token {env.SCAFO_INGRESS_TOKEN}
+			prefer self
+		}
+		# The node returns upstreams in priority order, this node's own first, so
+		# `first` keeps a request on the machine it arrived at. `max_fails 1` is
+		# what lets a retry move on: `first` skips only upstreams already marked
+		# down, and a higher count would send every retry back to the dead one.
+		lb_policy first
+		lb_retries 2
+		fail_duration 30s
+		max_fails 1
+	}
+	handle_errors {
+		@missing vars scafo.route unknown denied
+		handle @missing {
+			respond "scafo: no deployment answers to {http.vars.scafo.host}" 404
+		}
+		respond "{err.status_code} {err.status_text}" {err.status_code}
+	}
+}
+
+# The platform domain and every deployment under it, on one DNS-01 wildcard.
+# The `-dns` image carries bunny, cloudflare, digitalocean, hetzner, ovh and
+# route53; name the zone's provider and the variable ingress.env holds its
+# credential in, which is `DNS_ENV` in the roll script's env file.
+*.@DOMAIN@, @DOMAIN@ {
+	tls {
+		dns bunny {env.BUNNY_API_KEY}
+	}
+	import scafo
+}
+
+# Customer domains pointed at this fleet, issued per name once the node's `ask`
+# endpoint has agreed to them.
+https:// {
+	tls {
+		on_demand
+	}
+	import scafo
+}

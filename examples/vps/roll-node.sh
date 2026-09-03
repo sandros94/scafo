@@ -3,7 +3,7 @@
 # up from freshly minted keys, starts the node and its colocated ingress.
 # Expects /etc/scafo/node.env (node settings and bucket credentials),
 # /etc/scafo/ingress.env (the ingress token and any DNS-01 credential) and
-# /etc/scafo/Caddyfile.tmpl in place, and WG_ADDRESS, IMAGE, CADDY_IMAGE and
+# /etc/scafo/Caddyfile.template in place, and WG_ADDRESS, IMAGE, CADDY_IMAGE and
 # DOMAIN in the environment. `roll.sh` puts all of that here.
 set -eu
 
@@ -56,7 +56,7 @@ echo "== start Caddy"
 # a file bind mount keeps pointing past, so `caddy reload` would reload the old.
 install -d -m 0755 /etc/scafo/caddy
 sed "s/@DOMAIN@/$DOMAIN/g; s/@NODE@/$WG_HOST:7400/g; s#@LOGS@#$LOGS#g" \
-  /etc/scafo/Caddyfile.tmpl >/etc/scafo/caddy/Caddyfile
+  /etc/scafo/Caddyfile.template >/etc/scafo/caddy/Caddyfile
 docker run -d --name scafo-caddy --restart unless-stopped --network host \
   --env-file /etc/scafo/ingress.env \
   -v /etc/scafo/caddy:/etc/caddy:ro \

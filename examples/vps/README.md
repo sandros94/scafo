@@ -51,7 +51,7 @@ BUNNY_API_KEY=
 
 The tunnel addresses share one `/24`; the id is the node id placement records and `scafo fleet nodes` show. Optional labels are node selectors, `key=value`.
 
-**[`Caddyfile.tmpl`](Caddyfile.tmpl)**: the ACME contact address and the `dns` line naming the zone's provider and the variable above. `@DOMAIN@`, `@NODE@` and `@LOGS@` are filled in per host during the roll; leave them.
+**[`Caddyfile.template`](Caddyfile.template)**: the ACME contact address and the `dns` line naming the zone's provider and the variable above. `@DOMAIN@`, `@NODE@` and `@LOGS@` are filled in per host during the roll; leave them.
 
 **Nothing else.** The ingress token is minted per host by `roll.sh` and lands in `/etc/scafo/node.env` and `/etc/scafo/ingress.env` on that host alone.
 

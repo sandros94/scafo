@@ -64,7 +64,7 @@ EOF
     ssh -o BatchMode=yes "$SSH_USER@$addr" "sudo tee /etc/scafo/ingress.env >/dev/null"
 
   ssh -o BatchMode=yes "$SSH_USER@$addr" \
-    "sudo tee /etc/scafo/Caddyfile.tmpl >/dev/null" <"$here/Caddyfile.tmpl"
+    "sudo tee /etc/scafo/Caddyfile.template >/dev/null" <"$here/Caddyfile.template"
   ssh -o BatchMode=yes "$SSH_USER@$addr" \
     "sudo tee /usr/local/bin/scafo-roll >/dev/null && sudo chmod +x /usr/local/bin/scafo-roll" \
     <"$here/roll-node.sh"
