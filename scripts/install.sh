@@ -12,6 +12,11 @@
 # `SCAFO_INSTALL_MIRROR` mirrors pinned third-party artifacts. `SCAFO_INSTALL_SKIP_UNITS=1`
 # skips systemd units. A sidecar `.sha256` verifies integrity; set the checksum
 # variable to authenticate a latest-release download.
+#
+# Only the stable channel is served here: GitHub releases, latest or pinned by
+# `SCAFO_VERSION`. The edge channel (every commit on main) ships as the
+# `ghcr.io/sandros94/scafo:edge` image, with its binaries kept only as run
+# artifacts; point `SCAFO_INSTALL_BASE` at a mirror of those to install one.
 
 set -eu
 
@@ -550,19 +555,19 @@ User=${SERVICE_USER}
 Group=${SERVICE_USER}
 EnvironmentFile=${CONFIG_DIR}/node.env
 Environment=SCAFO_STATE_DIR=${STATE_DIR}
-  # Default Celld source builds to the bundled esbuild binary.
+# Default Celld source builds to the bundled esbuild binary.
 Environment=CELLD_ESBUILD=${BIN_DIR}/esbuild
 Environment=SCAFO_CELLD_BIN=${BIN_DIR}/celld
 ExecStart=${BIN_DIR}/scafo sail
 Restart=on-failure
 RestartSec=5s
 
-  # Signal the daemon first so it drains runtimes; kill remaining cgroup processes on timeout.
+# Signal the daemon first so it drains runtimes; kill remaining cgroup processes on timeout.
 KillMode=mixed
 KillSignal=SIGTERM
 SendSIGKILL=yes
 TimeoutStopSec=${STOP_TIMEOUT}s
-  # Keep runtimes in this cgroup for timeout containment.
+# Keep runtimes in this cgroup for timeout containment.
 Delegate=no
 
 StateDirectory=scafo
@@ -754,8 +759,9 @@ next_steps() {
     printf '1. Give the node a bucket. It is the whole registry, and nothing starts\n'
     printf '   without one:\n\n'
     printf '     sudoedit %s/node.env\n\n' "$CONFIG_DIR"
-    printf '   SCAFO_S3_ENDPOINT, SCAFO_S3_BUCKET, SCAFO_S3_ACCESS_KEY,\n'
-    printf '   SCAFO_S3_SECRET_KEY and SCAFO_PLATFORM_DOMAINS are the required five.\n\n'
+    printf '   SCAFO_S3_ENDPOINT, SCAFO_S3_BUCKET, SCAFO_S3_ACCESS_KEY and\n'
+    printf '   SCAFO_S3_SECRET_KEY are the required four; SCAFO_PLATFORM_DOMAINS names\n'
+    printf '   the domains apps are served under, and apps get no host without it.\n\n'
     printf '2. Start it, and the ingress with it:\n\n'
     printf '     systemctl enable --now scafo-node.service\n'
     printf '     systemctl status scafo-node.service %s.service\n\n' "$CADDY_USER"

@@ -27,6 +27,7 @@ readonly PERMISSIONS=(
 main() {
   require_cmd deno
   require_cmd node
+  require_cmd pnpm
 
   local selected=("$@")
   if [ "${#selected[@]}" -eq 0 ]; then

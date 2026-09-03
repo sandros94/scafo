@@ -347,7 +347,7 @@ stop_units() {
 
     if systemctl is-active --quiet "$unit" 2>/dev/null; then
       if [ "$unit" = "$NODE_UNIT" ]; then
-        say 'the node drains its runtimes on the way out — this takes up to 40s'
+        say 'the node drains its runtimes on the way out — this takes up to 50s'
       fi
       run_step "stopped ${unit}" "stop ${unit}" systemctl stop "$unit" || true
     fi

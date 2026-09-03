@@ -76,7 +76,9 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
     processSpec(input: RuntimeSpecInput): ProcessSpec {
       const fleet = fleetPrefix(input.project, input.env.name);
       const objectPrefix = joinPrefix(input.node.keyPrefix, fleet);
-      /* Public and peer listeners bind the address advertised to their callers. */
+      /* Both listeners bind the node's bind host; peers are told the advertise
+         host below, and the two are only the same thing when nothing sits between
+         them — the tunnel case is what keeps them apart. */
       const bindHost = input.node.bindHost ?? DEFAULT_BIND_HOST;
       const listen = `${bindHost}:${String(input.ports.public)}`;
       const internalListen = `${bindHost}:${String(input.ports.internal)}`;
