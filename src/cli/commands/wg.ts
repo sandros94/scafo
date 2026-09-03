@@ -48,7 +48,6 @@ const tunnelArgs: ArgsDef = {
   "state-dir": { type: "string", description: "Directory this node keeps its identity in" },
   "transport": { type: "string", description: "What carries peer traffic (wireguard, none)" },
   "listen": { type: "string", description: "host:port the node API binds to" },
-  "internal-listen": { type: "string", description: "host:port for node-to-node traffic" },
   "advertise": { type: "string", description: "host:port other nodes reach this one at" },
   "wg-address": {
     type: "string",

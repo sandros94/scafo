@@ -323,11 +323,8 @@ describe("the addresses a tunnelled node uses", () => {
     }
   });
 
-  it("takes the port from the internal listener when there is one", async () => {
-    const config = await tunnelConfig({
-      SCAFO_LISTEN: "0.0.0.0:7400",
-      SCAFO_INTERNAL_LISTEN: "0.0.0.0:7401",
-    });
+  it("takes the port from the listener the operator configured, not the default", async () => {
+    const config = await tunnelConfig({ SCAFO_LISTEN: "0.0.0.0:7401" });
 
     expect(config.node.advertise).toBe("10.83.0.1:7401");
   });

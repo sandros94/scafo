@@ -43,8 +43,6 @@ export interface DaemonConfig {
     id?: string;
     /** `host:port` the node API binds to. */
     listen: string;
-    /** `host:port` reserved for node-to-node traffic, when it is separate. */
-    internalListen?: string;
     /** `host:port` other nodes should reach this one at, when it differs from the listener. */
     advertise?: string;
     /** Persistent node state directory; the CLI chooses its default. */
@@ -242,7 +240,6 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
   };
 
   const configuredListen = resolve("listen", sources);
-  const internalListen = resolve("internalListen", sources);
   const configuredAdvertise = resolve("advertise", sources);
   const id = resolve("nodeId", sources);
   const stateDir = resolve("stateDir", sources);
@@ -250,10 +247,6 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
 
   /* Reject malformed addresses before starting the daemon. */
   if (configuredListen !== undefined) parseHostPort(configuredListen, ORIGINS.listen.file);
-  const internalAddress =
-    internalListen === undefined
-      ? undefined
-      : parseHostPort(internalListen, ORIGINS.internalListen.file);
   if (configuredAdvertise !== undefined) {
     parseHostPort(configuredAdvertise, ORIGINS.advertise.file);
   }
@@ -282,9 +275,7 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
   const listenAddress = parseHostPort(listen, ORIGINS.listen.file);
   const advertise =
     configuredAdvertise ??
-    (tunnelHost === undefined
-      ? undefined
-      : formatHostPort(tunnelHost, (internalAddress ?? listenAddress).port));
+    (tunnelHost === undefined ? undefined : formatHostPort(tunnelHost, listenAddress.port));
 
   return {
     bucket: {
@@ -298,7 +289,6 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
     node: {
       id,
       listen,
-      internalListen,
       advertise,
       stateDir,
       ...(labels === undefined ? {} : { labels }),
@@ -341,14 +331,11 @@ function defaultBindHost(
 }
 
 /**
- * Where other nodes should reach this one: the advertised address wins, then the
- * internal listener, then the daemon's own.
+ * Where other nodes should reach this one: the advertised address wins, and the
+ * daemon's own listener stands in when nothing was advertised.
  */
 export function advertisedAddress(node: DaemonConfig["node"]): HostPort {
   if (node.advertise !== undefined) return parseHostPort(node.advertise, "node.advertise");
-  if (node.internalListen !== undefined) {
-    return parseHostPort(node.internalListen, "node.internalListen");
-  }
   return parseHostPort(node.listen, "node.listen");
 }
 
@@ -416,11 +403,6 @@ const ORIGINS = {
   },
   nodeId: { flag: "node-id", env: ["SCAFO_NODE_ID"], file: "node.id" },
   listen: { flag: "listen", env: ["SCAFO_LISTEN"], file: "node.listen" },
-  internalListen: {
-    flag: "internal-listen",
-    env: ["SCAFO_INTERNAL_LISTEN"],
-    file: "node.internalListen",
-  },
   advertise: { flag: "advertise", env: ["SCAFO_ADVERTISE"], file: "node.advertise" },
   stateDir: { flag: "state-dir", env: ["SCAFO_STATE_DIR"], file: "node.stateDir" },
   nodeLabels: { flag: "node-labels", env: ["SCAFO_NODE_LABELS"], file: "node.labels" },

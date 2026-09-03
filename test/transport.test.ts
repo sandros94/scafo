@@ -17,10 +17,6 @@ const REQUIRED_ENV: Record<string, string> = {
 const EXPOSED: Record<string, Record<string, string>> = {
   "a listener bound to every interface": { SCAFO_LISTEN: "0.0.0.0:7400" },
   "a listener bound to one real interface": { SCAFO_LISTEN: "10.0.0.4:7400" },
-  "an internal listener off loopback": {
-    SCAFO_LISTEN: "127.0.0.1:7400",
-    SCAFO_INTERNAL_LISTEN: "10.0.0.4:7401",
-  },
   "an advertised address off loopback": {
     SCAFO_LISTEN: "127.0.0.1:7400",
     SCAFO_ADVERTISE: "node-a.internal:7400",
@@ -53,15 +49,15 @@ describe("a node that would reach past loopback", () => {
       env: {
         ...REQUIRED_ENV,
         SCAFO_LISTEN: "127.0.0.1:7400",
-        SCAFO_INTERNAL_LISTEN: "10.0.0.4:7401",
         SCAFO_ADVERTISE: "10.0.0.4:7401",
+        SCAFO_BIND_HOST: "0.0.0.0",
       },
     });
 
     const error = await rejectionOf(() => Promise.resolve(assertTransportConfigured(config)));
 
-    expect(error.detail).toContain("node.internalListen");
     expect(error.detail).toContain("node.advertise");
+    expect(error.detail).toContain("runtime.bindHost");
     expect(error.detail).not.toContain("node.listen ");
   });
 
@@ -97,7 +93,6 @@ describe("a node that stays on this machine", () => {
       { SCAFO_LISTEN: "127.0.0.1:7400" },
       { SCAFO_LISTEN: "localhost:7400" },
       { SCAFO_LISTEN: "[::1]:7400" },
-      { SCAFO_LISTEN: "127.0.0.1:7400", SCAFO_INTERNAL_LISTEN: "127.0.0.1:7401" },
       { SCAFO_LISTEN: "127.0.0.1:7400", SCAFO_ADVERTISE: "127.0.0.53:7400" },
       /* The default, stated: a single node's processes need nothing wider. */
       { SCAFO_LISTEN: "127.0.0.1:7400", SCAFO_BIND_HOST: "127.0.0.1" },

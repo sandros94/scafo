@@ -66,7 +66,6 @@ export const sailArgs: ArgsDef = {
     description: "What this node is, for environments to select on (region=eu-west-1,tier=fast)",
   },
   "listen": { type: "string", description: "host:port the node API binds to" },
-  "internal-listen": { type: "string", description: "host:port for node-to-node traffic" },
   "advertise": { type: "string", description: "host:port other nodes reach this one at" },
   "transport": { type: "string", description: "What carries peer traffic (wireguard, none)" },
   "wg-address": {

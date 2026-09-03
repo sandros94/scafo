@@ -45,14 +45,13 @@ export function createRegistry(config: DaemonConfig): RegistryContext {
   };
 }
 
-/** Requires explicit transport whenever API, peer, advertised, or runtime binds
- * extend beyond loopback. Runtime peer listeners have no authentication. */
+/** Requires explicit transport whenever API, advertised, or runtime binds extend
+ * beyond loopback. Runtime peer listeners have no authentication. */
 export function assertTransportConfigured(config: DaemonConfig): void {
   if (config.transport !== undefined) return;
 
   const addresses: [string, string | undefined][] = [
     ["node.listen", config.node.listen],
-    ["node.internalListen", config.node.internalListen],
     ["node.advertise", config.node.advertise],
   ];
   const exposed = addresses.filter(

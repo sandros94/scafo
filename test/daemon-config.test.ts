@@ -300,14 +300,12 @@ describe("addresses", () => {
       env: {
         ...REQUIRED_ENV,
         SCAFO_LISTEN: "0.0.0.0:7400",
-        SCAFO_INTERNAL_LISTEN: "10.0.0.4:7401",
         SCAFO_ADVERTISE: "node4.internal:7401",
       },
     });
 
     expect(config.node).toMatchObject({
       listen: "0.0.0.0:7400",
-      internalListen: "10.0.0.4:7401",
       advertise: "node4.internal:7401",
     });
   });
@@ -325,7 +323,6 @@ describe("addresses", () => {
     ];
     const settings: [string, string][] = [
       ["SCAFO_LISTEN", "node.listen"],
-      ["SCAFO_INTERNAL_LISTEN", "node.internalListen"],
       ["SCAFO_ADVERTISE", "node.advertise"],
     ];
 
@@ -1237,7 +1234,6 @@ describe("node identity and defaults", () => {
     expect(config.bucket.region).toBe("us-east-1");
     expect(config.node.listen).toBe(DEFAULT_LISTEN);
     expect(config.node.listen).toBe("127.0.0.1:7400");
-    expect(config.node.internalListen).toBeUndefined();
     expect(config.node.advertise).toBeUndefined();
     expect(config.bucket.prefix).toBeUndefined();
   });
