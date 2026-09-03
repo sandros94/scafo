@@ -359,6 +359,7 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   /* What tells the coordinator this node is still there. Without it the node is
      counted out after three intervals and its environments go elsewhere. */
   const heartbeat = createHeartbeat(daemon);
+  daemon.heartbeat = heartbeat;
 
   const server = await startDaemon(daemon);
   console.log(`scafo ${version} listening on ${server.url} as node "${state.id}"`);

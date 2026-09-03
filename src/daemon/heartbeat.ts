@@ -1,5 +1,6 @@
-/* Periodically refreshes node liveness for coordinator placement. */
+/* Periodically refreshes node liveness, and what the node serves, for the fleet. */
 
+import { servingOf } from "../core/placement/serving.ts";
 import { heartbeatNode, NODE_HEARTBEAT_INTERVAL_MS } from "../core/registry/nodes.ts";
 import { isScafoError } from "../core/error.ts";
 import type { DaemonContext } from "./app.ts";
@@ -16,7 +17,13 @@ export interface Heartbeat {
   start(): void;
   /** Stops beating. A node on its way out must stop claiming to be available. */
   stop(): void;
-  /** One refresh, awaited. Never throws: a failed beat is recorded and retried. */
+  /**
+   * One refresh, awaited. Never throws: a failed beat is recorded and retried.
+   *
+   * A call arriving while a beat is in flight is not dropped: that beat read the
+   * node's state before the caller had something new to say, so one more runs
+   * after it. Any number of such calls collapse into that one.
+   */
   beat(): Promise<void>;
   status(): HeartbeatStatus;
 }
@@ -26,28 +33,54 @@ export interface HeartbeatOptions {
   intervalMs?: number;
 }
 
-/** Builds a heartbeat loop. Failures are recorded and retried within liveness tolerance. */
+/**
+ * Builds a heartbeat loop. Failures are recorded and retried within liveness
+ * tolerance.
+ *
+ * Each beat also publishes what the node serves, read off the reconcile loop —
+ * but only once that loop has run: before its first pass the node has not
+ * looked at its own processes, and a record saying "nothing" would pull every
+ * route to this node for the seconds until it does.
+ */
 export function createHeartbeat(daemon: DaemonContext, opts?: HeartbeatOptions): Heartbeat {
   const intervalMs = opts?.intervalMs ?? NODE_HEARTBEAT_INTERVAL_MS;
 
   let timer: ReturnType<typeof setInterval> | null = null;
-  let inFlight = false;
+  let inFlight: Promise<void> | null = null;
+  let again = false;
   let lastBeatAt: string | null = null;
   let lastFailure: string | null = null;
 
-  async function beat(): Promise<void> {
-    /* Prevent queued stale heartbeat writes. */
-    if (inFlight) return;
-    inFlight = true;
-
+  async function once(): Promise<void> {
     try {
-      lastBeatAt = await heartbeatNode(daemon.registry, daemon.nodeId);
+      const reconcile = daemon.reconciler?.status();
+      lastBeatAt = await heartbeatNode(
+        daemon.registry,
+        daemon.nodeId,
+        reconcile === undefined || reconcile.lastRunAt === null
+          ? undefined
+          : { serving: servingOf(reconcile.processes) },
+      );
       lastFailure = null;
     } catch (error) {
       lastFailure = describe(error);
-    } finally {
-      inFlight = false;
     }
+  }
+
+  function beat(): Promise<void> {
+    if (inFlight !== null) {
+      again = true;
+      return inFlight;
+    }
+    inFlight = (async () => {
+      do {
+        again = false;
+        await once();
+      } while (again);
+    })().finally(() => {
+      inFlight = null;
+    });
+    return inFlight;
   }
 
   return {

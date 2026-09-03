@@ -100,7 +100,18 @@ export interface NodeRecord {
   wireguard?: NodeWireguard;
   /** Selector labels, replaced from node boot configuration at registration. */
   labels?: Record<string, string>;
+  /**
+   * What this node is serving right now, refreshed with the heartbeat: every
+   * environment `project/env` it runs a process for, and the port that process
+   * takes public traffic on at `addresses.internal`. This is what the fleet's
+   * routing is rendered from. Absent means nothing — a node that has not said
+   * what it serves is not routed to.
+   */
+  serving?: NodeServing;
 }
+
+/** Environments a node serves, by `project/env`, and where each one listens. */
+export type NodeServing = Record<string, { port: number }>;
 
 /** A project namespace. Key: `_scafo/projects/<slug>/project.json`. */
 export interface ProjectRecord {

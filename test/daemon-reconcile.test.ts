@@ -3,6 +3,7 @@ import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import { createBuild } from "../src/core/registry/builds.ts";
 import { createEnvironment, setEnvironmentVarset } from "../src/core/registry/environments.ts";
 import { acquireLease } from "../src/core/registry/lease.ts";
+import { getNode, registerNode } from "../src/core/registry/nodes.ts";
 import { writePlacement } from "../src/core/registry/placement.ts";
 import { createProject } from "../src/core/registry/projects.ts";
 import { importVarsetKey, putVarset, sealVarset } from "../src/core/registry/varsets.ts";
@@ -11,6 +12,7 @@ import type { IngressDesired } from "../src/core/types/ingress.ts";
 import type { ProcessSpec, ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import type { DaemonContext } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
+import { createHeartbeat } from "../src/daemon/heartbeat.ts";
 import { createReconciler } from "../src/daemon/reconcile.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith } from "./_helpers.ts";
@@ -136,6 +138,89 @@ describe("environment-owned reconciliation", () => {
     expect(world.reconciler.status().processes).toEqual([]);
   });
 });
+
+describe("what a node tells the fleet it serves", () => {
+  it("says nothing until it has looked at its own processes", async () => {
+    const world = await seededWorld();
+    const heartbeat = await attachHeartbeat(world);
+
+    await heartbeat.beat();
+
+    const record = await getNode(world.daemon.registry, "node-a");
+    expect(record.heartbeatAt).toBeDefined();
+    expect(record.serving).toBeUndefined();
+  });
+
+  it("publishes a started process at once, and drops a stopped one at once", async () => {
+    const world = await seededWorld();
+    const heartbeat = await attachHeartbeat(world);
+
+    await world.reconciler.runOnce();
+    /* The pass beat the heartbeat out of turn; let that beat land. */
+    await heartbeat.beat();
+    expect((await getNode(world.daemon.registry, "node-a")).serving).toEqual({
+      "shop/production": { port: 42_000 },
+    });
+
+    const lease = await acquireLease(world.daemon.registry, "coordinator");
+    if (lease === null) throw new Error("lease unavailable");
+    await writePlacement(world.daemon.registry, PROJECT, ENV, ["node-b"], lease);
+    await world.reconciler.runOnce();
+    await heartbeat.beat();
+    expect((await getNode(world.daemon.registry, "node-a")).serving).toEqual({});
+  });
+
+  it("beats out of turn only when what it serves has changed", async () => {
+    const world = await seededWorld();
+    let beats = 0;
+    world.daemon.heartbeat = {
+      start() {},
+      stop() {},
+      beat: async () => {
+        beats++;
+      },
+      status: () => ({ lastBeatAt: null, lastFailure: null }),
+    };
+
+    await world.reconciler.runOnce();
+    expect(beats).toBe(1);
+    await world.reconciler.runOnce();
+    await world.reconciler.runOnce();
+    expect(beats).toBe(1);
+  });
+
+  it("runs one more beat for a call that arrived while a beat was in flight", async () => {
+    const world = await seededWorld();
+    const heartbeat = await attachHeartbeat(world);
+    const store = world.daemon.registry.store;
+    let writes = 0;
+    const put = store.put.bind(store);
+    store.put = async (...args) => {
+      writes++;
+      return put(...args);
+    };
+
+    const first = heartbeat.beat();
+    const second = heartbeat.beat();
+    const third = heartbeat.beat();
+    await Promise.all([first, second, third]);
+
+    /* Three calls, two beats: the second and third had the same thing to say. */
+    expect(writes).toBe(2);
+  });
+});
+
+async function attachHeartbeat(world: Awaited<ReturnType<typeof seededWorld>>) {
+  await registerNode(world.daemon.registry, {
+    v: 1,
+    id: "node-a",
+    publicKey: { kty: "OKP", crv: "Ed25519", x: "a" },
+    addresses: { internal: "127.0.0.1", apiPort: 7401 },
+  });
+  const heartbeat = createHeartbeat(world.daemon);
+  world.daemon.heartbeat = heartbeat;
+  return heartbeat;
+}
 
 async function seededWorld() {
   const registry = ctxWith(new MemoryCasStore());

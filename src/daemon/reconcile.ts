@@ -2,7 +2,9 @@
 
 import { createPortAllocator } from "../core/placement/ports.ts";
 import { planReconcile, type ReconcileAction } from "../core/placement/reconcile.ts";
+import { sameServing, servingOf } from "../core/placement/serving.ts";
 import { countingRegistry, storeOpsOf } from "../core/registry/counting.ts";
+import type { NodeServing } from "../core/types/registry.ts";
 import type { RuntimeDriver, RuntimeProcess } from "../core/types/runtime.ts";
 import { type PlacementView, readDesired } from "./_desired.ts";
 import { createExecutor, failureOf, type ReconcileFailure } from "./_execute.ts";
@@ -95,6 +97,22 @@ export function createReconciler(
   let lastActions: ReconcileAction[] = [];
   let failures: ReconcileFailure[] = [];
   let lastPlacements: PlacementView[] = [];
+  /* What the heartbeat was last asked to tell the fleet this node serves. */
+  let announced: NodeServing | undefined;
+
+  /**
+   * Tells the fleet, through the heartbeat, when what this node serves has
+   * changed. The heartbeat carries it on its own timer too, but a process that
+   * just started is reachable now, and thirty seconds is a long time for a route
+   * to wait; a process that just stopped is worse, because until the fleet
+   * hears, it keeps routing to a port nothing answers on.
+   */
+  function announce(): void {
+    const serving = servingOf(executor.currentProcesses());
+    if (sameServing(serving, announced)) return;
+    announced = serving;
+    void daemon.heartbeat?.beat();
+  }
 
   /**
    * One pass. `fromKick` says whether an immediate rerun requested this pass.
@@ -158,6 +176,8 @@ export function createReconciler(
       lastRunAt = new Date().toISOString();
       inFlight = false;
       if (activeAbort === abort) activeAbort = undefined;
+      /* After `lastRunAt`: the heartbeat reads what a finished pass left. */
+      if (!terminal) announce();
 
       /* Emit operation deltas against this pass's starting baseline. */
       if (observe !== undefined && counted !== undefined && before !== undefined) {

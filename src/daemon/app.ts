@@ -46,6 +46,7 @@ import {
 import { assertProjectScope, scopedState } from "./_scope.ts";
 import { registerOperatorRoutes } from "./_operator-routes.ts";
 import { registerProjectRoutes } from "./_project-routes.ts";
+import type { Heartbeat } from "./heartbeat.ts";
 import type { Observability } from "./observe.ts";
 import type { PlacementView, Reconciler, ReconcileStatus } from "./reconcile.ts";
 import { registerStorageRoutes } from "./_storage-routes.ts";
@@ -66,6 +67,11 @@ export interface DaemonContext {
   varsetKey?: CryptoKey;
   /** The reconcile loop, when this node runs one. */
   reconciler?: Reconciler;
+  /**
+   * The heartbeat, when this node runs one. The reconcile loop beats it out of
+   * turn when what the node serves changes, so the fleet hears at once.
+   */
+  heartbeat?: Heartbeat;
   /**
    * The coordinator loop, when this node runs one. A node without it never
    * carries out lease-gated work itself, and forwards it to whoever does.

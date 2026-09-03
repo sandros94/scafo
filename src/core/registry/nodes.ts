@@ -1,5 +1,5 @@
 import { ScafoError } from "../error.ts";
-import type { NodeRecord } from "../types/registry.ts";
+import type { NodeRecord, NodeServing } from "../types/registry.ts";
 import { deepEqual, isCasConflict, namesFromKeys } from "./_shared.ts";
 import { createJson, readJson, requireJson, updateJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
@@ -96,10 +96,31 @@ export async function listNodeRecords(ctx: RegistryContext): Promise<NodeRecord[
   return records;
 }
 
-/** Updates only `heartbeatAt`; a heartbeat cannot create a node record. */
-export async function heartbeatNode(ctx: RegistryContext, id: string): Promise<string> {
+export interface HeartbeatInput {
+  /**
+   * What the node serves as of this beat, replacing what the record said. Left
+   * out, the record keeps saying what it said: a beat that has not looked at the
+   * node's processes has no business changing where the fleet routes.
+   */
+  serving?: NodeServing;
+}
+
+/**
+ * Stamps `heartbeatAt`, and `serving` when the caller says what the node serves.
+ * Nothing else is touched, and a heartbeat cannot create a node record.
+ */
+export async function heartbeatNode(
+  ctx: RegistryContext,
+  id: string,
+  input?: HeartbeatInput,
+): Promise<string> {
   const at = nowIso(ctx);
-  await updateJson<NodeRecord>(ctx, nodeKey(id), (current) => ({ ...current, heartbeatAt: at }));
+  const serving = input?.serving;
+  await updateJson<NodeRecord>(ctx, nodeKey(id), (current) => ({
+    ...current,
+    heartbeatAt: at,
+    ...(serving === undefined ? {} : { serving }),
+  }));
   return at;
 }
 
