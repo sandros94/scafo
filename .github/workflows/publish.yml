@@ -1,0 +1,283 @@
+name: publish
+
+# The single publishing implementation. Every path that puts an artifact on the
+# internet -- a push to main and a tagged release -- calls this workflow, so
+# the image and the binaries are produced in exactly one place.
+#
+# It is a reusable workflow rather than event-triggered ones because the
+# release is cut with the default GITHUB_TOKEN, and events created with that
+# token start no workflow runs. Being called keeps the whole chain inside the
+# run that started it.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit SHA to build from. Always a SHA, never a moving ref.
+        required: true
+        type: string
+      image-tags:
+        description: >-
+          Whitespace-separated image references to put on the manifest list. Produced by .github/scripts/image-tags.sh.
+        required: true
+        type: string
+      release-tag:
+        description: >-
+          Release to attach the binaries to. Empty keeps them as run artifacts only, which is what a push to main earns.
+        required: false
+        default: ""
+        type: string
+
+# Jobs opt in to exactly the scopes they need. The calling job has to grant at
+# least this union, since permissions can only be reduced down a call chain.
+permissions: {}
+
+env:
+  IMAGE: ghcr.io/sandros94/scafo
+
+jobs:
+  # Runners are pinned to the newest STABLE image pair rather than riding
+  # ubuntu-latest: the amd64 and arm64 legs must move between OS versions
+  # together, and -latest migrates only one of them.
+  build:
+    # Each architecture is built on a runner of that architecture, so nothing is
+    # emulated and the two builds run in parallel. Images are pushed by digest
+    # only; the tags are attached later by the merge job, which is what keeps a
+    # tag from ever pointing at a half-published image.
+    name: build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Prepare
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          # Artifact names cannot contain "/", so linux/amd64 becomes linux-amd64.
+          echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          # No inline provenance: BuildKit would embed it as an extra manifest
+          # the registry UI lists as an "unknown/unknown" platform. Provenance
+          # is attested once, over the merged manifest list, in the merge job.
+          provenance: false
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # The digest is carried as a file *name*, not as file content: the
+          # merge job globs this directory to rebuild the source references.
+          mkdir -p "${{ runner.temp }}/digests"
+          touch "${{ runner.temp }}/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    # Collects the per-architecture digests into one multi-platform manifest
+    # list, puts the human-facing tags on it, and attests its provenance.
+    name: publish manifest
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest list and push
+        id: push
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          TAGS: ${{ inputs.image-tags }}
+        run: |
+          set -euo pipefail
+          # The caller decided which tags this build deserves; splitting on
+          # whitespace accepts both the one-per-line form the script prints and
+          # the flattened form a job output may arrive as.
+          tag_args=()
+          primary=""
+          # shellcheck disable=SC2086 # the word splitting is the parsing step
+          for tag in $TAGS; do
+            tag_args+=(-t "$tag")
+            [ -n "$primary" ] || primary="$tag"
+          done
+          if [ "${#tag_args[@]}" -eq 0 ]; then
+            echo "publish: image-tags input is empty" >&2
+            exit 1
+          fi
+          # Each file in this directory is named after one per-architecture
+          # digest, so the glob enumerates the manifest sources.
+          sources=()
+          for digest in *; do
+            sources+=("${IMAGE}@sha256:${digest}")
+          done
+          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
+          # One tag is enough to inspect the published manifest afterwards.
+          echo "primary=$primary" >> "$GITHUB_OUTPUT"
+
+      - name: Inspect image
+        id: inspect
+        env:
+          PRIMARY: ${{ steps.push.outputs.primary }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$PRIMARY"
+          digest="$(docker buildx imagetools inspect "$PRIMARY" \
+            --format '{{json .Manifest}}' | jq -r .digest)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # Provenance lives in GitHub's attestation store (Sigstore-backed) rather
+      # than inside the manifest list, and covers the multi-platform list the
+      # tags point at. Verify with:
+      #   gh attestation verify oci://ghcr.io/sandros94/scafo:edge -R sandros94/scafo
+      #
+      # The store refuses user-owned PRIVATE repositories ("make this repository
+      # public"), so the step arms itself on visibility rather than failing on
+      # every run until then.
+      - name: Attest provenance
+        if: github.event.repository.visibility == 'public'
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.inspect.outputs.digest }}
+
+  binaries:
+    # The standalone binaries the installer downloads. Deno cross-compiles both
+    # targets from one runner, out of the same `dist/` the image carries. Every
+    # publishing run keeps them as artifacts, so any commit on main can be
+    # pinned to; a release additionally attaches them below.
+    name: binaries
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.17.0
+          cache: "pnpm"
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Compile
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+          SHA: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          # A release binary reports the tag; an edge one reports the commit it
+          # was built from, so `scafo --version` identifies either exactly.
+          if [ -n "$RELEASE_TAG" ]; then
+            export SCAFO_VERSION="${RELEASE_TAG#v}"
+          else
+            export SCAFO_VERSION="0.0.0-edge.${SHA:0:7}"
+          fi
+          pnpm compile
+
+      - name: Verify binaries
+        run: |
+          set -euo pipefail
+          # Cheap proof that the amd64 asset runs on the architecture that
+          # built it; arm64 is only cross-compiled here.
+          ./build/scafo-linux-amd64 --version
+          (cd build && sha256sum -c ./*.sha256)
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: |
+            build/scafo-linux-*
+          if-no-files-found: error
+          retention-days: ${{ inputs.release-tag != '' && 1 || 30 }}
+
+  release-assets:
+    # Assets are attached from one job after everything has succeeded, so a
+    # release is never left holding half of its binaries.
+    name: attach release assets
+    # success() is spelled out because a custom if replaces the implicit one a
+    # "needs" would otherwise carry.
+    if: success() && inputs.release-tag != ''
+    runs-on: ubuntu-24.04
+    needs:
+      - binaries
+      - merge
+    permissions:
+      contents: write
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: assets
+
+      - name: Attach assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          set -euo pipefail
+          # --clobber so a re-run of a failed publish replaces its own leftovers
+          # instead of erroring on them.
+          gh release upload "$RELEASE_TAG" assets/* --clobber

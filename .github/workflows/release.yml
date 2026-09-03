@@ -10,6 +10,9 @@ on:
 
 permissions: {}
 
+env:
+  IMAGE: ghcr.io/sandros94/scafo
+
 jobs:
   # Open or update a draft release PR from commits since the last tag.
   pr:
@@ -74,3 +77,50 @@ jobs:
       - uses: danielroe/uppt/publish@775bb233d2c5671b2c12d48f822778aae8231376 # v0.6.7
         with:
           files: ${{ needs.pack.outputs.files }}
+
+  # The stable channel: the tagged commit ships as :<version> (and :latest
+  # unless the release is a prerelease), with its binaries attached to the
+  # GitHub release that uppt/release has already cut by the time this runs.
+  tags:
+    if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      image-tags: ${{ steps.compute.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Compute image tags
+        id: compute
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          args=(--image "$IMAGE" --version "$RELEASE_TAG")
+          # A prerelease must never move the "latest" pointer.
+          if [ "$(gh release view "$RELEASE_TAG" --json isPrerelease --jq .isPrerelease)" != "true" ]; then
+            args+=(--latest)
+          fi
+          {
+            echo "tags<<TAGS_EOF"
+            .github/scripts/image-tags.sh "${args[@]}"
+            echo "TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  # The permissions are the union of what publish.yml's jobs ask for, because
+  # a called workflow may only narrow the caller's grant.
+  images:
+    if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')
+    needs: tags
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/publish.yml
+    with:
+      ref: ${{ github.sha }}
+      image-tags: ${{ needs.tags.outputs.image-tags }}
+      release-tag: ${{ github.ref_name }}

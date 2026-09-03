@@ -8,12 +8,21 @@ on:
     branches:
       - main
 
-permissions:
-  contents: read
+# Jobs opt in to exactly the scopes they need.
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/sandros94/scafo
 
 jobs:
   lint:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout code
@@ -39,6 +48,8 @@ jobs:
 
   typecheck:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout code
@@ -64,6 +75,8 @@ jobs:
 
   test-pure:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 10
 
     steps:
@@ -94,6 +107,8 @@ jobs:
 
   test-store-integration:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 30
 
     strategy:
@@ -126,6 +141,8 @@ jobs:
 
   test-docker-e2e:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 30
 
     strategy:
@@ -165,12 +182,17 @@ jobs:
       - name: Build packages
         run: pnpm build
 
+      - name: Build the node host image
+        run: docker build --target probe -t scafo-probe .
+
       - name: Test Docker end to end
         run: >-
           pnpm vitest run --config vitest.no-store.config.ts --no-file-parallelism --slowTestThreshold=1000 ${{ matrix.files }}
 
   test-k3s-e2e:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 30
 
     env:
@@ -198,6 +220,8 @@ jobs:
 
   preview:
     # Publish previews only after the same commit passes every CI job.
+    permissions:
+      contents: read
     needs:
       - lint
       - typecheck
@@ -230,3 +254,58 @@ jobs:
 
       - name: Publish to pkg.pr.new
         run: pnpx pkg-pr-new publish --pnpm
+
+  tags:
+    # What this run has earned the right to tag. Kept out of publish.yml so the
+    # reusable workflow stays a publisher and not a policy; release.yml asks
+    # for its own tags through the same script.
+    name: compute tags
+    needs:
+      - lint
+      - typecheck
+      - test-pure
+      - test-store-integration
+      - test-docker-e2e
+      - test-k3s-e2e
+    # success() is spelled out because a custom if replaces the implicit one a
+    # "needs" would otherwise carry.
+    if: success() && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      image-tags: ${{ steps.compute.outputs.tags }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Compute image tags
+        id: compute
+        run: |
+          set -euo pipefail
+          {
+            echo "tags<<TAGS_EOF"
+            .github/scripts/image-tags.sh --image "$IMAGE" --sha "$GITHUB_SHA"
+            echo "TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  publish:
+    # The edge channel: every commit on main that passed every job above ships
+    # as :edge and :sha-<7>, with its binaries kept as run artifacts.
+    #
+    # The permissions are the union of what publish.yml's jobs ask for, because
+    # a called workflow may only narrow the caller's grant. This job runs no
+    # steps of its own; each job inside publish.yml declares the narrower set
+    # it actually uses.
+    name: publish
+    needs: tags
+    if: success() && github.event_name == 'push'
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/publish.yml
+    with:
+      ref: ${{ github.sha }}
+      image-tags: ${{ needs.tags.outputs.image-tags }}
