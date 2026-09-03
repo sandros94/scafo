@@ -5,22 +5,9 @@
 
 import type { DesiredEnvironment } from "../core/placement/reconcile.ts";
 import { renderRoutes, type RouteClaim } from "../core/placement/routes.ts";
-import type { IngressDriver, PullingIngressDriver } from "../core/types/ingress.ts";
 import type { RuntimeProcess } from "../core/types/runtime.ts";
 import type { DaemonContext } from "./app.ts";
 import { parseHostPort } from "./config.ts";
-
-/**
- * Whether this ingress is one the daemon has to publish a configuration for.
- *
- * Structural rather than a name comparison, and it has to be: the daemon may not
- * import a driver — that is the layering — so it cannot ask which one this is,
- * and it does not need to. What decides whether a configuration route has
- * anything to serve is whether the driver holds one.
- */
-export function isPullingIngress(driver: IngressDriver): driver is PullingIngressDriver {
-  return typeof (driver as Partial<PullingIngressDriver>).snapshot === "function";
-}
 
 /** What one pass ended with, as the ingress is told about it. */
 export interface IngressInput {
@@ -31,9 +18,10 @@ export interface IngressInput {
 }
 
 /**
- * Renders the routing for what this node has running and converges the ingress on
- * it. Does nothing when the node has no ingress configured — its processes still
- * run, they are simply not reachable from outside the node.
+ * Renders the routing for what this node has running, tells the counters whose
+ * host is whose, and converges the ingress on it when the node drives one. An
+ * ingress that polls is served the fleet's routing by the node API instead,
+ * and a node with no ingress at all runs its processes without routing to them.
  *
  * Called after every reconcile pass rather than only when something changed:
  * `IngressDriver.apply` is idempotent, and a pass that re-states the routing is
@@ -42,9 +30,6 @@ export interface IngressInput {
  * The routing carries the daemon's own port only when the fleet API is public.
  */
 export async function applyIngress(daemon: DaemonContext, input: IngressInput): Promise<void> {
-  const ingress = daemon.ingress;
-  if (ingress === undefined) return;
-
   const { desired, processes } = input;
 
   /* An environment record mirrors every domain claimed for it, so the custom
@@ -80,5 +65,5 @@ export async function applyIngress(daemon: DaemonContext, input: IngressInput): 
      reached still attributes the traffic that ingress is still serving. */
   daemon.ingressCounters?.observeRouting({ routes: routing.routes, claims });
 
-  await ingress.apply(routing);
+  await daemon.ingress?.apply(routing);
 }

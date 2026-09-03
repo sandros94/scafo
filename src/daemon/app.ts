@@ -14,7 +14,7 @@ import { isLeaseExpired } from "../core/registry/lease.ts";
 import { coordinatorKey, environmentKey, nodeKey } from "../core/registry/paths.ts";
 import { setNodeSelector } from "../core/registry/placement.ts";
 import { retireEnvironment, unretireEnvironment } from "../core/registry/retirement.ts";
-import type { IngressDriver } from "../core/types/ingress.ts";
+import type { IngressDriver, IngressFormat } from "../core/types/ingress.ts";
 import {
   DEFAULT_ARTIFACT_BYTES,
   type ArtifactStager,
@@ -26,7 +26,7 @@ import { isHost } from "../core/utils/host.ts";
 import { assertSlug, parseHostLabel } from "../core/utils/slug.ts";
 import type { AssignmentFailure } from "./_assign.ts";
 import { deleteEnvironmentRequest } from "./_environments.ts";
-import { isPullingIngress } from "./_ingress.ts";
+import { registerIngressRoutes } from "./_ingress-routes.ts";
 import {
   type DeployVerifiers,
   readDeployMetadata,
@@ -88,6 +88,11 @@ export interface DaemonContext {
    * run and are simply not reachable from outside the node.
    */
   ingress?: IngressDriver;
+  /**
+   * The formats this node renders the fleet's routing in for an ingress that
+   * polls, by the name it is served under (`/v1/ingress/<name>`).
+   */
+  ingressFormats?: Record<string, IngressFormat>;
   /** Accepts uploaded artifacts; without it this node refuses deploys. */
   deploys?: DeployService;
   /** Stages request bodies outside memory; without it this node refuses deploys. */
@@ -144,9 +149,9 @@ export interface EnvironmentResult {
 
 /**
  * Builds the node app. Every route answers failures as RFC 9457 problem
- * documents, and every route but health and the two ingress-facing ones — the
- * on-demand-TLS ask and the configuration a pulled ingress polls — requires a
- * node, operator or workload token.
+ * documents, and every route but health and the on-demand-TLS ask requires a
+ * token: a node, operator or workload token, or on the storage and routing
+ * surfaces the ingress token.
  */
 export function createNodeApp(daemon: DaemonContext): H3 {
   /* Reuse verifiers: node replay detection and OIDC key caches are app-wide. */
@@ -178,20 +183,6 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     throw new ScafoError("not-found", "Host is not served here", {
       detail: `"${domain}" is neither a claimed domain nor a label under a platform domain`,
     });
-  });
-
-  /* Public pulled-ingress configuration. Return 404 when this node is not its
-     source; `{}` is the valid configuration that withdraws routes. */
-  app.get("/v1/ingress/traefik", (): unknown => {
-    const ingress = daemon.ingress;
-    if (ingress === undefined || !isPullingIngress(ingress)) {
-      throw new ScafoError("not-found", "This node publishes no ingress configuration", {
-        detail:
-          `node "${daemon.nodeId}" drives no ingress that reads its routing from the daemon; ` +
-          `set "ingress.driver" to "traefik" on the node this ingress polls`,
-      });
-    }
-    return ingress.snapshot();
   });
 
   /* Operator tokens receive project-scoped state; peer and admin tokens receive
@@ -328,7 +319,11 @@ export function createNodeApp(daemon: DaemonContext): H3 {
 
   /* TLS storage carries private keys: serve it only when configured, and never
      expose it through a public ingress. */
-  if (daemon.storage !== undefined) registerStorageRoutes(app, daemon, daemon.storage);
+  if (daemon.storage !== undefined) {
+    registerStorageRoutes(app, daemon, daemon.storage);
+    /* The routing names every node's address and port: same token, same rule. */
+    registerIngressRoutes(app, daemon, daemon.storage);
+  }
 
   return app;
 }

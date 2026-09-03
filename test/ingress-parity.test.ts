@@ -1,4 +1,11 @@
-/* Caddy and Traefik must encode the same routes and API denials. */
+/*
+ * Caddy and Traefik must encode the same routes and API denials.
+ *
+ * They are no longer handed the same document — Caddy is told what one node runs,
+ * Traefik renders what the whole fleet answers — so both inputs are derived here
+ * from ONE fixture, and a disagreement between the two renders is a disagreement
+ * between the two FORMATS and nothing else.
+ */
 
 import { describe, expect, it } from "vitest";
 import {
@@ -6,7 +13,7 @@ import {
   APEX_ENVIRONMENT,
   renderRoutes,
 } from "../src/core/placement/routes.ts";
-import type { IngressDesired } from "../src/core/types/ingress.ts";
+import type { FleetRouting, IngressDesired } from "../src/core/types/ingress.ts";
 import type { EnvironmentRecord } from "../src/core/types/registry.ts";
 import type { RuntimeProcess } from "../src/core/types/runtime.ts";
 import { HOST_LABEL_RE, isHost } from "../src/core/utils/host.ts";
@@ -24,11 +31,12 @@ import {
   API_PRIORITY,
   NOOP_SERVICE,
   renderTraefikConfig,
+  RETRY_MIDDLEWARE,
   TRAEFIK_API_DENY_PREFIX,
   TRAEFIK_API_PREFIX,
   TRAEFIK_KEY_PREFIX,
   type TraefikDynamicConfig,
-  type TraefikService,
+  type TraefikLoadBalancerService,
 } from "../src/drivers/ingress/traefik.ts";
 
 const DOMAIN = "apps.test";
@@ -41,6 +49,9 @@ const CUSTOM_DOMAIN = "shop.example.com";
 
 /** Where the node's own daemon answers, for the routing that falls through to it. */
 const NODE_PORT = 7400;
+
+/** The one node of the fleet these fixtures describe, as the fleet names it. */
+const SELF = "self";
 
 /**
  * One host and the process it reaches: all a routing means, in either format.
@@ -165,7 +176,7 @@ describe("the two drivers say the same thing about the same routing", () => {
   for (const { name, desired } of FIXTURES) {
     it(`agrees on ${name}`, () => {
       const caddy = caddyUpstreams(renderCaddyRoutes(desired));
-      const traefik = traefikUpstreams(renderTraefikConfig(desired));
+      const traefik = traefikUpstreams(renderTraefikConfig(fleetOf(desired)));
 
       expect(traefik).toEqual(caddy);
       expect(caddy).toEqual(essenceOf(desired));
@@ -174,7 +185,7 @@ describe("the two drivers say the same thing about the same routing", () => {
 
   it("agrees that an empty routing means an empty routing, in both formats", () => {
     expect(renderCaddyRoutes({ routes: [] })).toEqual([]);
-    expect(renderTraefikConfig({ routes: [] })).toEqual({});
+    expect(renderTraefikConfig(fleetOf({ routes: [] }))).toEqual({});
   });
 });
 
@@ -182,7 +193,7 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
   for (const { name, desired } of API_FIXTURES) {
     it(`agrees on ${name}`, () => {
       const caddy = caddyUpstreams(renderCaddyRoutes(desired));
-      const traefik = traefikUpstreams(renderTraefikConfig(desired));
+      const traefik = traefikUpstreams(renderTraefikConfig(fleetOf(desired)));
 
       expect(traefik).toEqual(caddy);
       expect(caddy).toEqual(essenceOf(desired));
@@ -197,7 +208,7 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
 
       for (const driver of [
         caddyUpstreams(renderCaddyRoutes(desired)),
-        traefikUpstreams(renderTraefikConfig(desired)),
+        traefikUpstreams(renderTraefikConfig(fleetOf(desired))),
       ]) {
         for (const apex of apexes) {
           const served = driver.filter((leg) => leg.host === apex && leg.upstream !== DENIED);
@@ -212,13 +223,15 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
   });
 
   it("NEVER proxies the excluded prefixes through an apex, in either format", () => {
-    expect(API_DENIED_PREFIXES).toEqual(["/v1/storage", "/v1/ingress/traefik"]);
+    /* One prefix covers the generic routing and every native format under it:
+       any of them says where every process in the fleet listens. */
+    expect(API_DENIED_PREFIXES).toEqual(["/v1/storage", "/v1/ingress/routes"]);
     const denied = [...API_DENIED_PREFIXES].sort().join(",");
 
     for (const { name, desired } of API_FIXTURES) {
       for (const [format, driver] of [
         ["caddy", caddyUpstreams(renderCaddyRoutes(desired))],
-        ["traefik", traefikUpstreams(renderTraefikConfig(desired))],
+        ["traefik", traefikUpstreams(renderTraefikConfig(fleetOf(desired)))],
       ] as const) {
         for (const apex of desired.api?.hosts ?? []) {
           const at = driver.filter((leg) => leg.host === apex);
@@ -257,7 +270,7 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
       );
       expect(firstTail, name).toBeGreaterThan(lastHost);
       for (const [key, router] of Object.entries(
-        renderTraefikConfig(desired).http?.routers ?? {},
+        renderTraefikConfig(fleetOf(desired)).http?.routers ?? {},
       )) {
         const expected = key.startsWith(TRAEFIK_API_DENY_PREFIX)
           ? API_DENY_PRIORITY
@@ -272,7 +285,7 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
 
   it("sends the denial to a service that reaches nothing, and declares no server for it", () => {
     for (const { name, desired } of API_FIXTURES) {
-      const config = renderTraefikConfig(desired);
+      const config = renderTraefikConfig(fleetOf(desired));
 
       for (const apex of desired.api?.hosts ?? []) {
         const router = config.http?.routers[`${TRAEFIK_API_DENY_PREFIX}${apex}`];
@@ -280,6 +293,25 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
         expect(router?.service, `${name}: ${apex}`).toBe(NOOP_SERVICE);
         expect(config.http?.services[NOOP_SERVICE], `${name}: ${apex}`).toBeUndefined();
         expect(config.http?.services[`${TRAEFIK_API_DENY_PREFIX}${apex}`], name).toBeUndefined();
+      }
+    }
+  });
+
+  it("declares every middleware its routers name, and names none on the denial", () => {
+    for (const { name, desired } of [...FIXTURES, ...API_FIXTURES]) {
+      const http = renderTraefikConfig(fleetOf(desired)).http;
+      /* An empty document declares no maps at all, so there is nothing to check. */
+      if (http === undefined) continue;
+
+      for (const [key, router] of Object.entries(http.routers)) {
+        /* The denial dials nothing, so there is no next upstream to retry. */
+        const wanted = router.service === NOOP_SERVICE ? undefined : [RETRY_MIDDLEWARE];
+        expect(router.middlewares, `${name}: ${key}`).toEqual(wanted);
+
+        /* Unqualified like the service names, so every one must be in this document. */
+        for (const named of router.middlewares ?? []) {
+          expect(http.middlewares[named], `${name}: ${key}`).toBeDefined();
+        }
       }
     }
   });
@@ -296,7 +328,7 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
     expect(desired.api?.hosts).toEqual([OTHER_DOMAIN]);
     for (const driver of [
       caddyUpstreams(renderCaddyRoutes(desired)),
-      traefikUpstreams(renderTraefikConfig(desired)),
+      traefikUpstreams(renderTraefikConfig(fleetOf(desired))),
     ]) {
       expect(driver.filter((leg) => leg.host === DOMAIN)).toEqual([
         { host: DOMAIN, upstream: "127.0.0.1:42000", paths: "all" },
@@ -314,7 +346,7 @@ describe("the two drivers agree on the fleet's API at a platform apex", () => {
         name,
       ).toBe(false);
       expect(
-        Object.keys(renderTraefikConfig(desired).http?.routers ?? {}).some(
+        Object.keys(renderTraefikConfig(fleetOf(desired)).http?.routers ?? {}).some(
           (key) => key.startsWith(TRAEFIK_API_PREFIX) || key.startsWith(TRAEFIK_API_DENY_PREFIX),
         ),
         name,
@@ -327,9 +359,9 @@ describe("both renders are deterministic", () => {
   for (const { name, desired } of [...FIXTURES, ...API_FIXTURES]) {
     it(`renders ${name} identically twice`, () => {
       expect(renderCaddyRoutes(desired)).toEqual(renderCaddyRoutes(desired));
-      expect(renderTraefikConfig(desired)).toEqual(renderTraefikConfig(desired));
-      expect(JSON.stringify(renderTraefikConfig(desired))).toBe(
-        JSON.stringify(renderTraefikConfig(desired)),
+      expect(renderTraefikConfig(fleetOf(desired))).toEqual(renderTraefikConfig(fleetOf(desired)));
+      expect(JSON.stringify(renderTraefikConfig(fleetOf(desired)))).toBe(
+        JSON.stringify(renderTraefikConfig(fleetOf(desired))),
       );
     });
   }
@@ -346,7 +378,7 @@ describe("neither namespace can collide with a host", () => {
 
   it("splits every rendered key back into the prefix and the host it names", () => {
     const desired = FIXTURES[FIXTURES.length - 1].desired;
-    const traefik = renderTraefikConfig(desired);
+    const traefik = renderTraefikConfig(fleetOf(desired));
 
     for (const key of Object.keys(traefik.http?.routers ?? {})) {
       const host = key.slice(TRAEFIK_KEY_PREFIX.length);
@@ -364,7 +396,7 @@ describe("neither namespace can collide with a host", () => {
 
   it("gives each host exactly one key in each format", () => {
     const desired = FIXTURES[FIXTURES.length - 1].desired;
-    const traefik = renderTraefikConfig(desired);
+    const traefik = renderTraefikConfig(fleetOf(desired));
 
     const traefikKeys = Object.keys(traefik.http?.routers ?? {});
     const caddyIds = renderCaddyRoutes(desired).map((route) => route["@id"]);
@@ -373,6 +405,37 @@ describe("neither namespace can collide with a host", () => {
     expect([...traefikKeys].sort()).toEqual([...caddyIds].sort());
   });
 });
+
+/**
+ * The same routing as the fleet states it: a one-node fleet, answering every host
+ * this node's own routing answers, at the loopback address the Caddy driver dials.
+ *
+ * A single upstream per host and nobody preferred, which is exactly the fleet a
+ * node-local routing describes — so every service comes out a plain balancer and
+ * the two formats stay comparable leg for leg.
+ */
+function fleetOf(desired: IngressDesired): FleetRouting {
+  const api = desired.api;
+
+  return {
+    v: 1,
+    routes: desired.routes.map((route) => ({
+      host: route.host,
+      project: route.backend.project,
+      env: route.backend.env,
+      upstreams: [{ node: SELF, address: `127.0.0.1:${String(route.backend.port)}` }],
+    })),
+    ...(api === undefined
+      ? {}
+      : {
+          api: {
+            hosts: [...api.hosts],
+            upstreams: [{ node: SELF, address: `127.0.0.1:${String(api.port)}` }],
+            denied: [...api.denied],
+          },
+        }),
+  };
+}
 
 /**
  * What a routing MEANS, straight off the input both drivers were handed — what
@@ -453,9 +516,15 @@ function prefixesOf(patterns: string[]): string {
 function traefikUpstreams(config: TraefikDynamicConfig): Upstream[] {
   const services = config.http?.services ?? {};
 
-  const resolve = (name: string): TraefikService => {
+  const resolve = (name: string): TraefikLoadBalancerService => {
     const service = services[name];
     if (service === undefined) throw new Error(`nothing declares service "${name}"`);
+    /* A failover is what a preferred node renders as, and one node's routing
+       names no preferred node — so anything else here is a leg this reader would
+       silently drop rather than compare. */
+    if (!("loadBalancer" in service)) {
+      throw new Error(`service "${name}" is a failover, which a one-node fleet never renders`);
+    }
     return service;
   };
 

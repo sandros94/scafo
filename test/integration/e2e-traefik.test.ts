@@ -178,7 +178,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   it(
     "publishes an empty configuration before it has anything to serve",
     async () => {
-      const answer = await httpGet(apiPort, "/v1/ingress/traefik", {});
+      const answer = await httpGet(apiPort, "/v1/ingress/routes/traefik", {});
 
       expect(answer.status).toBe(200);
       expect(JSON.parse(answer.body)).toEqual({});
@@ -294,7 +294,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
         "/v1/storage",
         "/v1/storage/list?prefix=",
         "/v1/storage/objects/anything",
-        "/v1/ingress/traefik",
+        "/v1/ingress/routes/traefik",
       ]) {
         const blocked = await httpGet(httpPort, path, { host: PLATFORM_DOMAIN });
 
@@ -303,7 +303,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       }
       observed.apexDeniedStatus = 418;
 
-      const local = await httpGet(apiPort, "/v1/ingress/traefik", {});
+      const local = await httpGet(apiPort, "/v1/ingress/routes/traefik", {});
       expect(local.status).toBe(200);
     },
     STEP_TIMEOUT_MS,
@@ -451,7 +451,7 @@ function operatorToken(): Promise<string> {
 
 /** The configuration the node is publishing for Traefik right now. */
 async function snapshotNow(): Promise<TraefikDynamicConfig> {
-  const answer = await httpGet(apiPort, "/v1/ingress/traefik", {});
+  const answer = await httpGet(apiPort, "/v1/ingress/routes/traefik", {});
   expect(answer.status, answer.body).toBe(200);
   return JSON.parse(answer.body) as TraefikDynamicConfig;
 }

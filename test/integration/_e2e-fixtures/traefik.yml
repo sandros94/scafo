@@ -20,7 +20,7 @@ entryPoints:
 
 providers:
   http:
-    endpoint: "http://127.0.0.1:7400/v1/ingress/traefik"
+    endpoint: "http://127.0.0.1:7400/v1/ingress/routes/traefik"
     pollInterval: "2s"
 
 api:

@@ -326,7 +326,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         "/v1/storage",
         "/v1/storage/list?prefix=",
         "/v1/storage/objects/anything",
-        "/v1/ingress/traefik",
+        "/v1/ingress/routes/traefik",
       ]) {
         const blocked = await httpGet(caddyHttpPort, path, { host: PLATFORM_DOMAIN });
 
@@ -334,7 +334,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         expect(blocked.body, `${path} through the apex`).not.toContain("urn:scafo:");
         expect(blocked.body, `${path} through the apex`).toBe("");
       }
-      observed.apexDenied = ["/v1/storage", "/v1/ingress/traefik"];
+      observed.apexDenied = ["/v1/storage", "/v1/ingress/routes/traefik"];
 
       const local = await httpGet(apiPort, "/v1/storage/list?prefix=", {});
       expect(local.status).toBe(401);

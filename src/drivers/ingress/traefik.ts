@@ -1,7 +1,7 @@
-/* Traefik pulls this driver's cached dynamic configuration from the node API.
+/* Traefik's `http` provider polls the node API for the document rendered here.
    Operator routers remain in other providers; updates apply on Traefik's poll. */
 
-import type { IngressBackend, IngressDesired, IngressDriver } from "../../core/types/ingress.ts";
+import type { FleetRouting, FleetUpstream } from "../../core/types/ingress.ts";
 import { assertHost } from "../../core/utils/host.ts";
 
 /** Default entry point; omission would attach routes to every entry point. */
@@ -21,6 +21,22 @@ export const API_DENY_PRIORITY: number = 3;
 /** Traefik's internal no-op backend makes denial routes active without dialing. */
 export const NOOP_SERVICE: string = "noop@internal";
 
+/** The one middleware every router carries: retry the next upstream on a dial failure. */
+export const RETRY_MIDDLEWARE: string = `${TRAEFIK_KEY_PREFIX}retry`;
+
+/** Where an environment process says whether it is up. */
+export const APP_HEALTH_PATH: string = "/.well-known/celld/health";
+
+/** Where a node's daemon says whether it is up. */
+export const API_HEALTH_PATH: string = "/.well-known/scafo/health";
+
+/** How often Traefik asks each upstream, and how long it waits for the answer. */
+export const HEALTH_INTERVAL: string = "10s";
+export const HEALTH_TIMEOUT: string = "3s";
+
+/** Attempts a request gets before Traefik gives up on every upstream. */
+export const RETRY_ATTEMPTS: number = 3;
+
 /** One router: which requests it matches, and what serves them. */
 export interface TraefikRouter {
   /** Traefik's rule language; a host match is written with backticks. */
@@ -28,86 +44,94 @@ export interface TraefikRouter {
   /** Name of the service in the same document, unqualified by a provider. */
   service: string;
   entryPoints: string[];
+  middlewares?: string[];
   /** Explicit only for API routes, whose denial must take precedence. */
   priority?: number;
 }
 
-/** A service that sends every request it is given to one place. */
+/** A service that spreads requests over its servers, dropping the ones its check finds down. */
 export interface TraefikLoadBalancerService {
-  loadBalancer: { servers: Array<{ url: string }> };
+  loadBalancer: {
+    servers: Array<{ url: string }>;
+    healthCheck: { path: string; interval: string; timeout: string; hostname?: string };
+  };
+}
+
+/** A service that uses one service until it has no healthy server, then another. */
+export interface TraefikFailoverService {
+  failover: { service: string; fallback: string };
 }
 
 /** One service: where the requests its router matched are sent. */
-export type TraefikService = TraefikLoadBalancerService;
+export type TraefikService = TraefikLoadBalancerService | TraefikFailoverService;
+
+export interface TraefikMiddleware {
+  retry: { attempts: number };
+}
 
 /** `http` is omitted to withdraw every route from this provider. */
 export interface TraefikDynamicConfig {
   http?: {
     routers: Record<string, TraefikRouter>;
     services: Record<string, TraefikService>;
+    middlewares: Record<string, TraefikMiddleware>;
   };
 }
 
-export interface TraefikDriverOptions {
+export interface TraefikRenderOptions {
   /** EntryPoints the routers attach to. Defaults to {@link DEFAULT_ENTRY_POINT}. */
   entryPoints?: string[];
-  /** Runtime bind address; must match the address process services dial. */
-  upstreamHost?: string;
+  /**
+   * The node whose upstreams are used while healthy, the others only when it
+   * is not: what a colocated Traefik names, so traffic stays on its machine.
+   * Absent spreads every request over every upstream, which is what an ingress
+   * in front of the whole fleet wants.
+   */
+  prefer?: string;
 }
 
-/** An {@link IngressDriver} whose configuration is served rather than pushed. */
-export interface TraefikDriver extends IngressDriver {
-  /** The configuration as of the last `apply`; what the daemon's route publishes. */
-  snapshot(): TraefikDynamicConfig;
-}
-
-/** Builds an in-memory Traefik configuration driver. */
-export function createTraefikDriver(opts?: TraefikDriverOptions): TraefikDriver {
-  const upstreamHost = opts?.upstreamHost ?? "127.0.0.1";
-  const entryPoints = opts?.entryPoints ?? [DEFAULT_ENTRY_POINT];
-
-  /* Start empty: daemon restart must not retain routes to stopped processes. */
-  let current: TraefikDynamicConfig = renderTraefikConfig({ routes: [] });
-
-  return {
-    apply(desired: IngressDesired): Promise<void> {
-      /* The shared ingress seam is async; rendering is synchronous. */
-      current = renderTraefikConfig(desired, entryPoints, upstreamHost);
-      return Promise.resolve();
-    },
-    snapshot(): TraefikDynamicConfig {
-      return current;
-    },
-  };
-}
-
-/** Renders deterministic dynamic configuration. API apexes use a higher-ranked
- * no-op denial route for excluded paths. Return `{}` rather than empty router
- * maps: Traefik otherwise retains its previous provider configuration. */
+/**
+ * Renders the fleet's routing as Traefik dynamic configuration.
+ *
+ * Every host becomes a router and a service over the upstreams answering on
+ * it, each checked at its health path. With a preferred node, that node's
+ * upstreams are used while healthy and the others only when they are not — a
+ * `failover` service, which is what "prefer" means and what a weighting would
+ * not do. Without one, requests are spread over every upstream.
+ *
+ * Return `{}` rather than empty maps: Traefik otherwise retains its previous
+ * provider configuration.
+ */
 export function renderTraefikConfig(
-  desired: IngressDesired,
-  entryPoints: string[] = [DEFAULT_ENTRY_POINT],
-  upstreamHost = "127.0.0.1",
+  routing: FleetRouting,
+  opts?: TraefikRenderOptions,
 ): TraefikDynamicConfig {
+  const entryPoints = opts?.entryPoints ?? [DEFAULT_ENTRY_POINT];
   const routers: Record<string, TraefikRouter> = {};
   const services: Record<string, TraefikService> = {};
 
-  for (const { host, backend } of [...desired.routes].sort((a, b) => compare(a.host, b.host))) {
+  for (const route of [...routing.routes].sort((a, b) => compare(a.host, b.host))) {
     /* Hosts are embedded in rule syntax, so validate again at this boundary. */
-    assertHost(host);
+    assertHost(route.host);
 
-    const key = traefikKey(host);
-    routers[key] = { rule: `Host(\`${host}\`)`, service: key, entryPoints: [...entryPoints] };
-
-    services[key] = {
-      loadBalancer: { servers: [{ url: upstreamUrl(backend, upstreamHost) }] },
+    const key = traefikKey(route.host);
+    routers[key] = {
+      rule: `Host(\`${route.host}\`)`,
+      service: key,
+      entryPoints: [...entryPoints],
+      middlewares: [RETRY_MIDDLEWARE],
     };
+    Object.assign(
+      services,
+      servicesOf(key, route.upstreams, opts?.prefer, {
+        path: APP_HEALTH_PATH,
+        hostname: route.host,
+      }),
+    );
   }
 
-  const api = desired.api;
+  const api = routing.api;
   if (api !== undefined) {
-    const daemon = `http://127.0.0.1:${String(api.port)}`;
-
     for (const host of [...api.hosts].sort(compare)) {
       assertHost(host);
 
@@ -126,16 +150,26 @@ export function renderTraefikConfig(
         rule: [`Host(\`${host}\`)`, ...denied.map((rule) => `!${rule}`)].join(" && "),
         service: key,
         entryPoints: [...entryPoints],
+        middlewares: [RETRY_MIDDLEWARE],
         priority: API_PRIORITY,
       };
-      services[key] = { loadBalancer: { servers: [{ url: daemon }] } };
+      Object.assign(
+        services,
+        servicesOf(key, api.upstreams, opts?.prefer, { path: API_HEALTH_PATH }),
+      );
     }
   }
 
   /* Empty maps make Traefik retain stale provider configuration. */
   if (Object.keys(routers).length === 0) return {};
 
-  return { http: { routers, services } };
+  return {
+    http: {
+      routers,
+      services,
+      middlewares: { [RETRY_MIDDLEWARE]: { retry: { attempts: RETRY_ATTEMPTS } } },
+    },
+  };
 }
 
 /** The router and service name the routing for `host` is written under. */
@@ -153,14 +187,48 @@ export function traefikApiDenyKey(domain: string): string {
   return `${TRAEFIK_API_DENY_PREFIX}${domain}`;
 }
 
+/**
+ * The service `key` names, and the ones it is built from: one load balancer,
+ * or — when a preferred node answers here and it is not the only one — a
+ * failover from that node's balancer to a balancer over the rest.
+ */
+function servicesOf(
+  key: string,
+  upstreams: FleetUpstream[],
+  prefer: string | undefined,
+  check: { path: string; hostname?: string },
+): Record<string, TraefikService> {
+  const local = upstreams.filter((upstream) => upstream.node === prefer);
+  const peers = upstreams.filter((upstream) => upstream.node !== prefer);
+  if (local.length === 0 || peers.length === 0) return { [key]: balancer(upstreams, check) };
+
+  return {
+    [key]: { failover: { service: `${key}_local`, fallback: `${key}_peers` } },
+    [`${key}_local`]: balancer(local, check),
+    [`${key}_peers`]: balancer(peers, check),
+  };
+}
+
+function balancer(
+  upstreams: FleetUpstream[],
+  check: { path: string; hostname?: string },
+): TraefikLoadBalancerService {
+  return {
+    loadBalancer: {
+      servers: upstreams.map((upstream) => ({ url: `http://${upstream.address}` })),
+      healthCheck: {
+        path: check.path,
+        interval: HEALTH_INTERVAL,
+        timeout: HEALTH_TIMEOUT,
+        ...(check.hostname === undefined ? {} : { hostname: check.hostname }),
+      },
+    },
+  };
+}
+
 /** Matches a denied path and its subtree, not a similarly prefixed path. */
 function deniedRules(prefix: string): string[] {
   return [`Path(\`${prefix}\`)`, `PathPrefix(\`${prefix}/\`)`];
-}
-
-/* Dial the configured runtime bind address. */
-function upstreamUrl(backend: IngressBackend, upstreamHost: string): string {
-  return `http://${upstreamHost}:${String(backend.port)}`;
 }
 
 /* Code-unit ordering, so the document does not depend on the node's locale. */

@@ -61,7 +61,12 @@ export interface IngressDesired {
   api?: ApiRouting;
 }
 
-/** Routes public traffic to the processes a node runs. */
+/**
+ * Routes public traffic to the processes a node runs, by being TOLD: an ingress
+ * with an admin API is converged by calling it after every reconcile pass. An
+ * ingress that polls instead reads the fleet's routing off the node API in its
+ * own format ({@link IngressFormat}) and needs no driver.
+ */
 export interface IngressDriver {
   /**
    * Converges the ingress to exactly this routing and nothing beyond it: hosts
@@ -72,23 +77,14 @@ export interface IngressDriver {
 }
 
 /**
- * An ingress that is READ rather than written to: `apply` renders its
- * configuration and caches it, and the ingress itself polls the daemon for it.
- *
- * The distinction is the ingress's own, not scafo's. An ingress with an admin
- * API (Caddy) is converged by calling it, and `apply` is where the work happens.
- * An ingress configured by a provider it polls (Traefik's `http` provider) can
- * only be told anything by being asked, so the node has to publish what it would
- * otherwise have pushed — which is what {@link snapshot} is for, and why the
- * daemon serves a route per such ingress.
- *
- * `unknown` because the document's shape belongs to the ingress that reads it;
- * the daemon only ever hands it back as JSON.
+ * Renders the fleet's routing in the document format one ingress polls for.
+ * Served by every node under `/v1/ingress/routes/<name>`, so an ingress in
+ * front of the fleet may read it from whichever node answers. `prefer` names
+ * the node the routing was ordered for, when the ingress asked for one, for a
+ * format that can say more than an order — that node first, the rest only when
+ * it fails.
  */
-export interface PullingIngressDriver extends IngressDriver {
-  /** The configuration as of the last {@link IngressDriver.apply}. */
-  snapshot(): unknown;
-}
+export type IngressFormat = (routing: FleetRouting, opts: { prefer?: string }) => unknown;
 
 /**
  * Where one host is answered across the fleet: a running process on a node,

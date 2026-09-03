@@ -12,9 +12,10 @@ import { formatHostLabel } from "../utils/slug.ts";
  */
 export const APEX_ENVIRONMENT: string = "production";
 
-/** Public API paths denied at platform apexes: TLS storage and Traefik's
-    colocated routing feed. Drivers match path-segment boundaries. */
-export const API_DENIED_PREFIXES: string[] = ["/v1/storage", "/v1/ingress/traefik"];
+/** API paths denied at platform apexes: TLS storage, and the fleet's routing in
+    every format, which all live under the one prefix — both name where every
+    process listens. Drivers match path-segment boundaries. */
+export const API_DENIED_PREFIXES: string[] = ["/v1/storage", "/v1/ingress/routes"];
 
 /** A custom domain and the environment that claimed it. */
 export interface RouteClaim {

@@ -33,7 +33,7 @@ import { createCelldDeployRunner } from "../../drivers/deploy/celld.ts";
 import { createFileArtifactStager } from "../../drivers/artifact/file.ts";
 import { type AccessLogTailer, createAccessLogTailer } from "../../drivers/observe/access-log.ts";
 import { createCaddyDriver } from "../../drivers/ingress/caddy.ts";
-import { createTraefikDriver, DEFAULT_ENTRY_POINT } from "../../drivers/ingress/traefik.ts";
+import { DEFAULT_ENTRY_POINT, renderTraefikConfig } from "../../drivers/ingress/traefik.ts";
 import { createCelldDriver, TELEMETRY_ENV } from "../../drivers/runtime/celld.ts";
 import { createChildSupervisor } from "../../drivers/supervisor/child.ts";
 import {
@@ -143,7 +143,7 @@ export const sailArgs: ArgsDef = {
     description:
       "Serve the fleet's API at each platform domain's own apex, so any node is reachable " +
       "at one well-known name (default on; --no-api-public leaves the apex unrouted and " +
-      "without a certificate). /v1/storage and /v1/ingress/traefik are never reachable there",
+      "without a certificate). /v1/storage and /v1/ingress/routes are never reachable there",
   },
   "json-bytes": {
     type: "string",
@@ -264,36 +264,37 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
     );
   }
 
-  /* What every ingress dialer of a process this node starts uses. */
-  const upstreamHost = runtimeDialHost(config.runtime);
-
+  /* Served by every node whatever it drives itself: an ingress in front of the
+     whole fleet reads the fleet's routing from whichever node answers, and the
+     entryPoints are the one thing about it a node has to be told. */
   const ingress = config.ingress;
-  if (ingress === undefined) {
+  const entryPoints = ingress?.entryPoints ?? [DEFAULT_ENTRY_POINT];
+  daemon.ingressFormats = {
+    traefik: (routing, { prefer }) => renderTraefikConfig(routing, { entryPoints, prefer }),
+  };
+
+  if (ingress?.driver === undefined) {
     /* Said once, at boot: a node with no ingress runs its processes and keeps
        them to itself, which is a legitimate way to run one and not a warning
        worth repeating on every reconcile pass. */
     console.log("scafo: no ingress configured, nothing on this node will be routed to");
   } else if (ingress.driver === "traefik") {
-    daemon.ingress = createTraefikDriver({
-      upstreamHost,
-      ...(ingress.entryPoints === undefined ? {} : { entryPoints: ingress.entryPoints }),
-    });
     /* Worth saying once, because nothing else on this node will: an ingress that
        polls and was never pointed at the node API stays silent rather than failing,
        and the node looks like it is routing when nothing is reading it. The
        entryPoints are said too, because a router attached to one the operator's
        Traefik does not define is a route that exists and matches nothing. */
     console.log(
-      `scafo: ingress "traefik" reads this node's routing from ` +
-        `/v1/ingress/traefik on ${config.node.listen}; point its http provider there. ` +
-        `Routers attach to entryPoint(s) ` +
-        `${(ingress.entryPoints ?? [DEFAULT_ENTRY_POINT]).join(", ")}`,
+      `scafo: ingress "traefik" reads the fleet's routing from ` +
+        `/v1/ingress/routes/traefik?prefer=self on ${config.node.listen} with the storage token; ` +
+        `point its http provider there. Routers attach to entryPoint(s) ${entryPoints.join(", ")}`,
     );
   } else {
     daemon.ingress = createCaddyDriver({
       adminUrl: ingress.adminUrl,
       serverName: ingress.serverName,
-      upstreamHost,
+      /* What the Caddy dialer of a process this node starts uses. */
+      upstreamHost: runtimeDialHost(config.runtime),
     });
   }
 

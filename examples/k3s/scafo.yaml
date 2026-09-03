@@ -34,7 +34,7 @@ data:
     providers:
       http:
         # The sidecar pulls routes from its colocated node over pod loopback.
-        endpoint: "http://127.0.0.1:7400/v1/ingress/traefik"
+        endpoint: "http://127.0.0.1:7400/v1/ingress/routes/traefik"
         pollInterval: "5s"
     ping:
       entryPoint: traefik
