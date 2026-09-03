@@ -197,8 +197,7 @@ jobs:
           pnpm vitest run --config vitest.no-store.config.ts test/integration/e2e-k3s.test.ts --slowTestThreshold=1000
 
   preview:
-    # Continuous preview packages via pkg.pr.new — published only once the same
-    # commit has passed everything above, so a preview is never ahead of CI.
+    # Publish previews only after the same commit passes every CI job.
     needs:
       - lint
       - typecheck

@@ -30,11 +30,11 @@ Both documents report Scafo node/API health. They do not aggregate application h
 ```sh
 export SCAFO_HOME="$PWD/.scafo"
 set -a; . ./.env; set +a
-alias scafo='node ../../dist/cli/index.mjs'
-scafo remote add playground --endpoint http://127.0.0.1:7401 --register
+alias scafo='docker compose run --rm cli'
+scafo remote add playground --endpoint http://node-a:7400 --register
 ```
 
-The key is trusted by both nodes because both read the same registry. To run the CLI from the image, use `alias scafo='docker compose run --rm cli'` and register `http://node-a:7400` instead.
+The key is trusted by both nodes because both read the same registry. A built checkout may instead use `alias scafo='node ../../dist/cli/index.mjs'` and `http://127.0.0.1:7401`.
 
 ## 3. Inspect membership and coordination
 
@@ -127,4 +127,4 @@ docker volume ls | grep scafo-multi-node
 rm -rf .env .scafo
 ```
 
-Next: [`../../examples/kubernetes/`](../../examples/kubernetes/), or the single-host [`../../examples/compose.yaml`](../../examples/compose.yaml).
+Next: [`../../examples/k3s/`](../../examples/k3s/), or the single-host [`../../examples/compose.yaml`](../../examples/compose.yaml).

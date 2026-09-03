@@ -11,8 +11,7 @@ on:
 permissions: {}
 
 jobs:
-  # 1. On every push to main: open/update a draft `release/vX.Y.Z` PR from the
-  #    conventional commits since the last tag.
+  # Open or update a draft release PR from commits since the last tag.
   pr:
     if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
@@ -24,8 +23,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # 2. When the release PR is merged: tag the merge commit, publish the GitHub
-  #    Release, and dispatch this workflow again at the new tag.
+  # Tag a merged release PR and dispatch this workflow at the new tag.
   release:
     if: |
       github.event_name == 'pull_request'
@@ -44,8 +42,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # 3. At the new tag: install (--ignore-scripts), run prepack + `pnpm pack`,
-  #    upload the tarball as an artifact.
+  # Pack the tagged release and upload its tarball.
   pack:
     if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
@@ -59,8 +56,7 @@ jobs:
       - id: pack
         uses: danielroe/uppt/pack@775bb233d2c5671b2c12d48f822778aae8231376 # v0.6.7
 
-  # 4. Stage the tarball to npm via OIDC trusted publishing. Runs in the `npm`
-  #    environment; the staged publish waits for maintainer 2FA approval.
+  # Stage the tarball through npm trusted publishing and await approval.
   publish:
     if: |
       github.event_name == 'workflow_dispatch'

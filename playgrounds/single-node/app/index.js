@@ -1,19 +1,3 @@
-/*
- * The playground application. Two routes, and each one exists to make something
- * about scafo visible from a `curl`.
- *
- * `/` answers with the deployment's own version and with the URL it saw. Deploy
- * again with a different version and the answer changes when celld adopts it.
- * The URL is the host header the ingress forwarded, which is every routing
- * decision scafo made, echoed back.
- *
- * `/count` answers from a durable object instead. One name means one cell, and
- * one cell has exactly one owner however many nodes serve the environment: the
- * numbers keep rising whichever node the request arrives at. On one node that is
- * merely true; on two it is the whole point, and the multi-node playground is
- * where it is worth watching.
- */
-
 export class Counter {
   constructor(state) {
     this.state = state;
@@ -34,7 +18,6 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/count") {
-      /* One name, so every request lands on the same cell wherever it arrived. */
       const id = env.COUNTER.idFromName("playground");
       return env.COUNTER.get(id).fetch(request);
     }

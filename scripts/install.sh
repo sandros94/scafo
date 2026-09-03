@@ -202,7 +202,7 @@ want_units() {
 # ---------------------------------------------------------------------------
 # Downloads
 
-# An optional failure message can describe recovery for unavailable release assets.
+# An optional failure message identifies a download or access failure.
 download() {
   # download <url> <destination> [what to say when it fails]
   download_msg="${3:-could not download ${1}}"
@@ -315,23 +315,13 @@ fetch_caddy_scafo() {
   download "${base}/${name}" "${WORK}/caddy" \
     "could not download ${base}/${name}
 
-  That is scafo-caddy — Caddy built with the caddy.storage.scafo module — and it
-  is what this script installs by DEFAULT, because it is what lets every node in
-  a fleet serve one certificate out of the bucket instead of issuing its own.
-  Either there is no release to fetch yet, or this host cannot reach it.
-
-  UNTIL THERE IS ONE, INSTALL THE PLAIN CADDY INSTEAD:
+  Check that the release asset exists and this host can access it. To use
+  upstream Caddy with host-local TLS state, install the supported plain variant:
 
     SCAFO_INSTALL_CADDY=plain sh install.sh
 
-  which is upstream Caddy, pinned and verified in this script, keeping its
-  certificates on this host — per-node TLS, which is correct for one host and is
-  a rate limit waiting to happen on a fleet. Moving to scafo-caddy later is a
-  re-run of this script with /etc/scafo/caddy.json moved out of the way.
-
-  Or point SCAFO_CADDY_BASE at your own \`xcaddy build --with
-  github.com/sandros94/scafo-certmagic\` output, named ${name},
-  with a ${name}.sha256 beside it or SCAFO_CADDY_SHA256 set."
+  SCAFO_CADDY_BASE selects another compatible artifact base. Provide
+  ${name}.sha256 there or set SCAFO_CADDY_SHA256."
 
   if [ -n "${SCAFO_CADDY_SHA256:-}" ]; then
     expected="$SCAFO_CADDY_SHA256"

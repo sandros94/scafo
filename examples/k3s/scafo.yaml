@@ -1,0 +1,254 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scafo-node
+  namespace: scafo
+data:
+  # These non-secret defaults identify one fleet; set them for the external store.
+  SCAFO_S3_ENDPOINT: "https://s3.example.com"
+  SCAFO_S3_BUCKET: "scafo"
+  SCAFO_S3_REGION: "us-east-1"
+  SCAFO_S3_PREFIX: "production"
+  SCAFO_PLATFORM_DOMAINS: "apps.example.com"
+  SCAFO_LISTEN: "0.0.0.0:7400"
+  # One production replica keeps runtime traffic on pod loopback.
+  SCAFO_BIND_HOST: "127.0.0.1"
+  SCAFO_TRANSPORT: "none"
+  SCAFO_INGRESS_DRIVER: "traefik"
+  SCAFO_TRAEFIK_ENTRYPOINTS: "web"
+  SCAFO_OBSERVABILITY: "1"
+  SCAFO_INGRESS_ACCESS_LOG: "/var/log/scafo-ingress/access.log"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scafo-traefik
+  namespace: scafo
+data:
+  traefik.yml: |
+    entryPoints:
+      web:
+        address: ":8000"
+      traefik:
+        address: ":8080"
+    providers:
+      http:
+        # The sidecar pulls routes from its colocated node over pod loopback.
+        endpoint: "http://127.0.0.1:7400/v1/ingress/traefik"
+        pollInterval: "5s"
+    ping:
+      entryPoint: traefik
+    accessLog:
+      filePath: /var/log/scafo-ingress/access.log
+      format: json
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: scafo-nodes
+  namespace: scafo
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: scafo
+  ports:
+    - name: api
+      port: 7400
+      targetPort: api
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: scafo-node
+  namespace: scafo
+  labels:
+    app.kubernetes.io/name: scafo
+spec:
+  # Shared cluster ingress cannot select sidecars assigned to a particular environment.
+  replicas: 1
+  serviceName: scafo-nodes
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: scafo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: scafo
+    spec:
+      # Keep node and descendants inside the container lifecycle.
+      hostPID: false
+      shareProcessNamespace: false
+      # Celld shutdown may take 40 seconds; permit Scafo to drain first.
+      terminationGracePeriodSeconds: 50
+      securityContext:
+        fsGroup: 10001
+      volumes:
+        - name: traefik-config
+          configMap:
+            name: scafo-traefik
+        - name: ingress-log
+          emptyDir: {}
+      containers:
+        - name: node
+          # Replace VERSION with a published Scafo release before applying.
+          image: ghcr.io/sandros94/scafo:VERSION
+          imagePullPolicy: IfNotPresent
+          args: ["sail"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+          envFrom:
+            # Create this Secret outside the manifest; it holds bucket-root credentials.
+            - secretRef:
+                name: scafo-bucket
+            - configMapRef:
+                name: scafo-node
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: SCAFO_ADVERTISE
+              value: "$(POD_IP):7400"
+            - name: SCAFO_NODE_LABELS
+              value: "platform=k3s"
+          ports:
+            - name: api
+              containerPort: 7400
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/scafo
+            - name: ingress-log
+              mountPath: /var/log/scafo-ingress
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /.well-known/scafo/health
+              port: api
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            httpGet:
+              path: /.well-known/scafo/health
+              port: api
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /.well-known/scafo/health
+              port: api
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            # Cgroup bounds do not influence Scafo placement or deploy admission.
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              memory: "2Gi"
+        - name: traefik
+          image: traefik:v3.7.11
+          args: ["--configFile=/etc/traefik/traefik.yml"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+          ports:
+            - name: web
+              containerPort: 8000
+          volumeMounts:
+            - name: traefik-config
+              mountPath: /etc/traefik
+              readOnly: true
+            - name: ingress-log
+              mountPath: /var/log/scafo-ingress
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 8080
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              memory: "256Mi"
+  volumeClaimTemplates:
+    - metadata:
+        name: state
+      spec:
+        # Omit storageClassName to use the K3s default StorageClass.
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: "1Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: scafo-ingress
+  namespace: scafo
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: scafo
+  ports:
+    - name: http
+      port: 80
+      targetPort: web
+---
+# cert-manager and this ClusterIssuer are operator-managed prerequisites.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: scafo-platform
+  namespace: scafo
+spec:
+  secretName: scafo-platform-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+    group: cert-manager.io
+  dnsNames:
+    - apps.example.com
+    - "*.apps.example.com"
+---
+# K3s's bundled Traefik is the cluster edge; each pod retains its own pull-provider sidecar.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: scafo-platform
+  namespace: scafo
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - apps.example.com
+        - "*.apps.example.com"
+      secretName: scafo-platform-tls
+  rules:
+    - host: "apps.example.com"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: scafo-ingress
+                port:
+                  number: 80
+    - host: "*.apps.example.com"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: scafo-ingress
+                port:
+                  number: 80

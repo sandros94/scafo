@@ -2,6 +2,11 @@
   "admin": {
     "listen": "127.0.0.1:2019"
   },
+  "storage": {
+    "module": "scafo",
+    "endpoint": "http://127.0.0.1:7400",
+    "token": "{env.SCAFO_STORAGE_TOKEN}"
+  },
   "logging": {
     "logs": {
       "default": {
@@ -21,10 +26,26 @@
     }
   },
   "apps": {
+    "tls": {
+      "automation": {
+        "policies": [
+          {
+            "on_demand": true
+          }
+        ],
+        "on_demand": {
+          "permission": {
+            "endpoint": "http://127.0.0.1:7400/v1/ingress/ask",
+            "module": "http"
+          }
+        }
+      }
+    },
     "http": {
       "servers": {
         "scafo": {
-          "listen": [":80"],
+          "listen": [":443"],
+          "tls_connection_policies": [{}],
           "routes": [],
           "logs": {
             "default_logger_name": "scafo"

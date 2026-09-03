@@ -1,15 +1,7 @@
-# The single-node playground. README.md is the step sheet.
-#
-#   cp .env.example .env
-#   docker compose up -d
-#
-# `docker compose down -v` removes all of it.
-
+# Disposable local fleet; README.md provides the walkthrough.
 name: scafo-single-node
 
 services:
-  # The registry lives in this bucket. SeaweedFS because it honours conditional
-  # writes; the first node to boot proves that before writing anything for real.
   seaweedfs:
     image: chrislusf/seaweedfs:4.42
     command: ["server", "-s3"]
@@ -18,13 +10,6 @@ services:
     volumes:
       - store:/data
 
-  # Creates the bucket, then exits.
-  #
-  # 409 COUNTS AS SUCCESS. Every run after the first finds the bucket there and
-  # SeaweedFS answers `409 BucketAlreadyOwnedByYou`; a loop accepting only 2xx
-  # spins forever with the node stuck behind `service_completed_successfully`
-  # and nothing in its logs. It retries because SeaweedFS answers on its S3 port
-  # well before it will serve bucket operations on it.
   bucket:
     image: curlimages/curl:8.18.0
     depends_on:
@@ -33,56 +18,39 @@ services:
       - sh
       - -c
       - |
+        # A pre-existing bucket returns 409 and is ready for the node to use.
         until code=$$(curl -sS -o /dev/null -w '%{http_code}' -X PUT http://seaweedfs:8333/scafo)
               [ "$$code" = 200 ] || [ "$$code" = 409 ]
         do sleep 1; done
         echo "bucket \"scafo\": HTTP $$code"
 
   node:
-    image: scafo:local
-    # No `build:` on purpose: the image is built by hand (see ../README.md) so a
-    # slow `up` is never a rebuild happening underneath you.
+    image: ${SCAFO_IMAGE:-ghcr.io/sandros94/scafo:latest}
     depends_on:
       bucket:
         condition: service_completed_successfully
 
-    # NOT DOCKER'S DEFAULT TEN. On SIGTERM the node marks itself draining,
-    # releases the coordinator lease, stops reconciling, and only then stops the
-    # processes serving traffic. Celld 0.4 reserves up to 40s for that shutdown;
-    # ten seconds cuts it off mid-drain.
+    # Drain and Celld shutdown require more than Docker's default 10 seconds.
     stop_grace_period: 50s
 
     ports:
-      # Caddy shares this container's network namespace, so ITS port is
-      # published here: a container joining another's namespace has no network
-      # of its own to publish from.
       - "${SCAFO_HTTP_PORT:-80}:80"
-      # The node API, on your loopback only — it accepts deploys.
-      #
-      # Caddy's admin API is deliberately NOT published: it can rewrite
-      # everything Caddy serves, so caddy.json keeps it on 127.0.0.1:2019 where
-      # the node reaches it across the shared namespace and nothing else can.
+      # Deployment API stays on host loopback; Caddy shares node networking.
       - "127.0.0.1:${SCAFO_NODE_PORT:-7400}:7400"
 
     volumes:
-      # A NODE IS ITS KEYPAIR, and this volume holds it.
       - state:/var/lib/scafo
-      # Shared with the ingress: the access log the node counts requests off.
       - ingress-log:/var/log/scafo-ingress
       - ./scafo.config.jsonc:/etc/scafo/scafo.config.jsonc:ro
 
     environment:
       SCAFO_S3_ACCESS_KEY: ${SCAFO_S3_ACCESS_KEY:?set SCAFO_S3_ACCESS_KEY in .env}
       SCAFO_S3_SECRET_KEY: ${SCAFO_S3_SECRET_KEY:?set SCAFO_S3_SECRET_KEY in .env}
-      # THE `:?` IS LOAD-BEARING. A node given this set to NOTHING refuses to
-      # boot, so compose is told to refuse first, naming the file to fix. Never
-      # write `${SCAFO_STORAGE_TOKEN:-}` here.
+      # Required by Caddy's private storage module; do not default this to empty.
       SCAFO_STORAGE_TOKEN: ${SCAFO_STORAGE_TOKEN:?set SCAFO_STORAGE_TOKEN in .env}
 
     command: ["sail", "--config", "/etc/scafo/scafo.config.jsonc"]
 
-    # `curl` and `wget` are not in this image, so the check is written in the
-    # runtime that is.
     healthcheck:
       test:
         - CMD
@@ -94,22 +62,13 @@ services:
       retries: 30
       start_period: 10s
 
-  # IT SHARES THE NODE'S NETWORK NAMESPACE, which is the whole topology: the
-  # runtime processes bind 127.0.0.1 and Caddy dials them there, the node
-  # converges Caddy's admin API on the same loopback, and Caddy reaches the
-  # node's storage API there too. Nothing exposes a runtime port.
-  #
-  # `service_healthy` AND NOT `service_started`: scafo-caddy fills its
-  # certificate cache from storage at boot, and storage is this node.
-  #
-  # `:edge` AND NOT `:latest`: caddy.json passes the token inline, and the
-  # v0.1.0 module `:latest` points at refuses that field outright —
-  # `json: unknown field "token"`, Caddy exits 1, nothing routes.
   caddy:
-    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:edge}
+    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:latest}
+    # Caddy reaches the node, runtimes, and admin API through shared loopback.
     network_mode: "service:node"
     depends_on:
       node:
+        # Caddy reads certificate storage through this healthy node at startup.
         condition: service_healthy
     command: ["caddy", "run", "--config", "/etc/caddy/config.json"]
     environment:
@@ -127,15 +86,8 @@ services:
       retries: 30
       start_period: 5s
 
-  # The CLI as a one-shot container, for anyone who would rather install no node
-  # toolchain: `docker compose run --rm cli <args>`. `profiles` keeps it out of
-  # `up`. It reaches the node at http://node:7400, on this stack's own network.
-  #
-  # `user:` is not glue: the image runs as uid 10001, this directory is yours,
-  # and the CLI writes the operator home into it. Set SCAFO_CLI_USER in .env to
-  # your own `id -u`:`id -g` if the default is wrong.
   cli:
-    image: scafo:local
+    image: ${SCAFO_IMAGE:-ghcr.io/sandros94/scafo:latest}
     profiles: ["cli"]
     user: "${SCAFO_CLI_USER:-1000:1000}"
     working_dir: /work

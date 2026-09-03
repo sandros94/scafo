@@ -1,4 +1,4 @@
-/* The bucket-creation service every compose stack in this repository ships with. */
+/* Playground bucket provisioning and production Compose's external-store boundary. */
 
 import { execFile } from "node:child_process";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -11,9 +11,8 @@ import { afterAll, describe, expect, it } from "vitest";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-/** Every stack that makes its own bucket, by the path it lives at. */
-const STACKS: string[] = [
-  "examples/compose.yaml",
+/** Self-contained playgrounds create their own bucket. */
+const PLAYGROUNDS: string[] = [
   "playgrounds/single-node/compose.yaml",
   "playgrounds/multi-node/compose.yaml",
 ];
@@ -31,7 +30,7 @@ afterAll(async () => {
   await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
-describe.each(STACKS)("the bucket service of %s", (stack) => {
+describe.each(PLAYGROUNDS)("the bucket service of %s", (stack) => {
   it("creates the bucket on a first run, where the store answers 200", async () => {
     const result = await attempt(stack, "200");
 
@@ -54,6 +53,51 @@ describe.each(STACKS)("the bucket service of %s", (stack) => {
     const result = await attempt(stack, "503", SPIN_TIMEOUT_MS);
 
     expect(result.code).toBeNull();
+  });
+});
+
+describe("the production Compose example", () => {
+  it("uses an externally provisioned store", async () => {
+    const compose = parseYAML<ComposeFile>(
+      await readFile(join(REPO, "examples/compose.yaml"), "utf8"),
+    );
+
+    expect(compose.services?.bucket).toBeUndefined();
+    expect(compose.services?.seaweedfs).toBeUndefined();
+  });
+
+  it("terminates HTTPS through Caddy's shared Scafo storage", async () => {
+    const caddy: unknown = JSON.parse(await readFile(join(REPO, "examples/caddy.json"), "utf8"));
+
+    expect(caddy).toMatchObject({
+      storage: {
+        module: "scafo",
+        endpoint: "http://127.0.0.1:7400",
+        token: "{env.SCAFO_STORAGE_TOKEN}",
+      },
+      apps: {
+        tls: {
+          automation: {
+            policies: [{ on_demand: true }],
+            on_demand: {
+              permission: {
+                endpoint: "http://127.0.0.1:7400/v1/ingress/ask",
+                module: "http",
+              },
+            },
+          },
+        },
+        http: {
+          servers: {
+            scafo: {
+              listen: [":443"],
+              tls_connection_policies: [{}],
+              routes: [],
+            },
+          },
+        },
+      },
+    });
   });
 });
 

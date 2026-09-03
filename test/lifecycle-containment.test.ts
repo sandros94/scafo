@@ -11,7 +11,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const INSTALL = join(REPO, "scripts/install.sh");
-const KUBERNETES = join(REPO, "examples/kubernetes/node.yaml");
+const K3S = join(REPO, "examples/k3s/scafo.yaml");
 const dirs: string[] = [];
 const run = promisify(execFile);
 
@@ -35,8 +35,8 @@ describe("lifecycle containment artifacts", () => {
   });
 
   it("keeps Kubernetes workloads in their own PID namespace with enough stop grace", async () => {
-    const deployment = await deploymentManifest();
-    const pod = deployment.spec?.template?.spec;
+    const workload = await workloadManifest();
+    const pod = workload.spec?.template?.spec;
 
     expect(pod).toMatchObject({
       hostPID: false,
@@ -47,8 +47,8 @@ describe("lifecycle containment artifacts", () => {
   });
 
   it("uses the daemon health endpoint for startup, readiness and liveness", async () => {
-    const deployment = await deploymentManifest();
-    const node = deployment.spec?.template?.spec?.containers?.find(
+    const workload = await workloadManifest();
+    const node = workload.spec?.template?.spec?.containers?.find(
       (container) => container.name === "node",
     );
 
@@ -67,14 +67,85 @@ describe("lifecycle containment artifacts", () => {
   });
 
   it("uses the documented starter resources without making CPU a hard limit", async () => {
-    const deployment = await deploymentManifest();
-    const node = deployment.spec?.template?.spec?.containers?.find(
+    const workload = await workloadManifest();
+    const node = workload.spec?.template?.spec?.containers?.find(
       (container) => container.name === "node",
     );
 
     expect(node?.resources).toEqual({
       requests: { cpu: "500m", memory: "512Mi" },
       limits: { memory: "2Gi" },
+    });
+  });
+
+  it("keeps K3s Traefik at the edge and node-local Traefik beside each daemon", async () => {
+    const documents = await manifestDocuments();
+    const workload = documents.find(
+      (document): document is KubernetesWorkload => document.kind === "StatefulSet",
+    );
+    const ingress = documents.find((document) => document.kind === "Ingress");
+    const certificate = documents.find((document) => document.kind === "Certificate");
+
+    expect(documents.some((document) => document.kind === "Secret")).toBe(false);
+    expect(workload?.spec?.template?.spec?.containers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "node",
+          image: "ghcr.io/sandros94/scafo:VERSION",
+        }),
+        expect.objectContaining({ name: "traefik", image: "traefik:v3.7.11" }),
+      ]),
+    );
+    expect(ingress).toMatchObject({
+      apiVersion: "networking.k8s.io/v1",
+      spec: {
+        ingressClassName: "traefik",
+        rules: [
+          {
+            host: "apps.example.com",
+            http: {
+              paths: [
+                {
+                  backend: { service: { name: "scafo-ingress", port: { number: 80 } } },
+                },
+              ],
+            },
+          },
+          {
+            host: "*.apps.example.com",
+            http: {
+              paths: [
+                {
+                  backend: { service: { name: "scafo-ingress", port: { number: 80 } } },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    });
+    expect(workload).toMatchObject({
+      spec: {
+        replicas: 1,
+        serviceName: "scafo-nodes",
+        volumeClaimTemplates: [
+          {
+            metadata: { name: "state" },
+            spec: {
+              accessModes: ["ReadWriteOnce"],
+              resources: { requests: { storage: "1Gi" } },
+            },
+          },
+        ],
+      },
+    });
+    expect(certificate).toMatchObject({
+      apiVersion: "cert-manager.io/v1",
+      spec: {
+        issuerRef: { kind: "ClusterIssuer" },
+        secretName: "scafo-platform-tls",
+        dnsNames: ["apps.example.com", "*.apps.example.com"],
+      },
     });
   });
 });
@@ -105,25 +176,36 @@ function directivesOf(unit: string): Record<string, string> {
   return directives;
 }
 
-/** The one Deployment in the multi-document Kubernetes manifest. */
-async function deploymentManifest(): Promise<KubernetesDeployment> {
-  const source = await readFile(KUBERNETES, "utf8");
-  const documents = source
+/** The one StatefulSet in the multi-document K3s manifest. */
+async function workloadManifest(): Promise<KubernetesWorkload> {
+  const workload = (await manifestDocuments()).find(
+    (document): document is KubernetesWorkload => document.kind === "StatefulSet",
+  );
+  if (workload === undefined) throw new Error("K3s manifest has no StatefulSet");
+  return workload;
+}
+
+/** Documents in the production K3s manifest. */
+async function manifestDocuments(): Promise<KubernetesDocument[]> {
+  const source = await readFile(K3S, "utf8");
+  return source
     .split(/^---\s*$/m)
     .filter((document) => document.trim() !== "")
     .map((document) => parseYAML<KubernetesDocument>(document))
     .filter((document): document is KubernetesDocument => document !== null);
-  const deployment = documents.find((document) => document.kind === "Deployment");
-  if (deployment === undefined) throw new Error("Kubernetes manifest has no Deployment");
-  return deployment;
 }
 
 interface KubernetesDocument {
+  apiVersion?: string;
   kind?: string;
+  spec?: Record<string, unknown>;
 }
 
-interface KubernetesDeployment extends KubernetesDocument {
+interface KubernetesWorkload extends KubernetesDocument {
   spec?: {
+    replicas?: number;
+    serviceName?: string;
+    volumeClaimTemplates?: KubernetesPersistentVolumeClaim[];
     template?: {
       spec?: {
         hostPID?: boolean;
@@ -141,6 +223,14 @@ interface KubernetesContainer {
   startupProbe?: KubernetesHealthProbe;
   readinessProbe?: KubernetesHealthProbe;
   livenessProbe?: KubernetesHealthProbe;
+}
+
+interface KubernetesPersistentVolumeClaim {
+  metadata?: { name?: string };
+  spec?: {
+    accessModes?: string[];
+    resources?: { requests?: Record<string, string> };
+  };
 }
 
 interface KubernetesResources {

@@ -165,29 +165,16 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
         ports: [{ port: 8333, targetPort: 8333, nodePort: STORE_NODE_PORT }],
       },
     });
-    await applyManifest();
     await apply({
-      apiVersion: "networking.k8s.io/v1",
-      kind: "Ingress",
-      metadata: { name: "scafo", namespace: NAMESPACE },
-      spec: {
-        ingressClassName: "traefik",
-        rules: [
-          {
-            host: `*.${PLATFORM_DOMAIN}`,
-            http: {
-              paths: [
-                {
-                  path: "/",
-                  pathType: "Prefix",
-                  backend: { service: { name: "scafo-ingress", port: { number: 80 } } },
-                },
-              ],
-            },
-          },
-        ],
+      apiVersion: "v1",
+      kind: "Secret",
+      metadata: { name: "scafo-bucket", namespace: NAMESPACE },
+      stringData: {
+        SCAFO_S3_ACCESS_KEY: BUCKET.accessKey,
+        SCAFO_S3_SECRET_KEY: BUCKET.secretKey,
       },
     });
+    await applyManifest();
 
     await readyPod(NAMESPACE, "app=seaweedfs");
     storeEndpoint = `http://${cluster.getHost()}:${String(cluster.getMappedPort(STORE_NODE_PORT))}`;
@@ -272,6 +259,12 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
       if (answer.status !== 200) return null;
       const health = JSON.parse(answer.body) as { node?: string };
       return health.node === controlNodeId ? answer : null;
+    });
+    await until("the K3s Traefik platform apex", DEADLINE_MS, async () => {
+      const answer = await httpGet(ingressPort, "/.well-known/scafo/health", {
+        host: PLATFORM_DOMAIN,
+      });
+      return answer.status === 200 ? answer : null;
     });
   }, SETUP_TIMEOUT_MS);
 
@@ -410,11 +403,24 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
         const record = await readJson<NodeRecord>(registry, nodeKey(leavingId as string));
         return record?.value.drainingAt === undefined ? null : record;
       });
-      const replacement = await until("the Deployment replacement", DEADLINE_MS, async () => {
+      const replacement = await until("the StatefulSet replacement", DEADLINE_MS, async () => {
         const pods = await nodes();
         return pods.length === 2 && pods.every((pod) => pod.metadata?.uid !== oldUid) ? pods : null;
       });
       expect(replacement).toHaveLength(2);
+      const restored = await until(
+        "the replaced node to return with its retained identity",
+        DEADLINE_MS,
+        async () => {
+          const record = await readJson<NodeRecord>(registry, nodeKey(leavingId as string));
+          if (record === null || record.value.drainingAt !== undefined) return null;
+          const pod = (await nodes()).find((candidate) => candidate.metadata?.name === oldName);
+          if (pod === undefined) return null;
+          const state = await stateOf(pod);
+          return state.node?.id === leavingId ? state.node : null;
+        },
+      );
+      expect(restored.id).toBe(leavingId);
       await assignedServes("single", "v1");
       const victim = (await settledSinglePlacement("single")).owner.pod;
       const name = victim.metadata?.name as string;
@@ -422,7 +428,7 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
         victim.status?.containerStatuses?.find((status) => status.name === "node")?.restartCount ??
         0;
       const sandbox = await crictlId(
-        ["pods", "--namespace", NAMESPACE, "--name", name, "--quiet"],
+        ["pods", "--namespace", NAMESPACE, "--name", name, "--state", "ready", "--quiet"],
         `pod sandbox for ${name}`,
       );
       const container = await crictlId(
@@ -455,15 +461,11 @@ async function apply(object: k8s.KubernetesObject & Record<string, unknown>): Pr
 }
 
 async function applyManifest(): Promise<void> {
-  const raw = await readFile(join(REPO_ROOT, "examples/kubernetes/node.yaml"), "utf8");
+  const raw = await readFile(join(REPO_ROOT, "examples/k3s/scafo.yaml"), "utf8");
   for (const object of k8s.loadAllYaml(raw) as Manifest[]) {
     object.metadata.namespace = NAMESPACE;
-    if (object.kind === "Secret" && object.metadata.name === "scafo-bucket") {
-      object.stringData = {
-        SCAFO_S3_ACCESS_KEY: BUCKET.accessKey,
-        SCAFO_S3_SECRET_KEY: BUCKET.secretKey,
-      };
-    }
+    // The disposable K3s cluster has no cert-manager CRDs or production issuer.
+    if (object.kind === "Certificate") continue;
     if (
       object.kind === "ConfigMap" &&
       object.metadata.name === "scafo-node" &&
@@ -475,24 +477,55 @@ async function applyManifest(): Promise<void> {
       object.data.SCAFO_S3_REGION = BUCKET.region;
       object.data.SCAFO_PLATFORM_DOMAINS = PLATFORM_DOMAIN;
     }
-    if (object.kind === "Deployment" && object.metadata.name === "scafo-node") {
+    if (object.kind === "StatefulSet" && object.metadata.name === "scafo-node") {
       const spec = object.spec as {
+        replicas?: number;
         template: {
           spec: { containers: Array<{ name: string; image: string; imagePullPolicy?: string }> };
         };
       };
       const node = spec.template.spec.containers.find((container) => container.name === "node");
       if (node === undefined)
-        throw new Error("the manifest's node Deployment has no node container");
+        throw new Error("the manifest's node StatefulSet has no node container");
+      // The production example is one node; this scenario exercises its multi-node limit.
+      spec.replicas = 2;
       node.image = IMAGE_TAG;
       node.imagePullPolicy = "IfNotPresent";
     }
     if (
-      object.kind === "Service" &&
-      object.metadata.name === "scafo-ingress" &&
+      object.kind === "Ingress" &&
+      object.metadata.name === "scafo-platform" &&
       object.spec !== undefined
     )
-      object.spec.type = "ClusterIP";
+      object.spec = {
+        ingressClassName: "traefik",
+        rules: [
+          {
+            host: PLATFORM_DOMAIN,
+            http: {
+              paths: [
+                {
+                  path: "/",
+                  pathType: "Prefix",
+                  backend: { service: { name: "scafo-ingress", port: { number: 80 } } },
+                },
+              ],
+            },
+          },
+          {
+            host: `*.${PLATFORM_DOMAIN}`,
+            http: {
+              paths: [
+                {
+                  path: "/",
+                  pathType: "Prefix",
+                  backend: { service: { name: "scafo-ingress", port: { number: 80 } } },
+                },
+              ],
+            },
+          },
+        ],
+      };
     await apply(object as unknown as k8s.KubernetesObject & Record<string, unknown>);
   }
 }
@@ -551,18 +584,30 @@ async function assignedServes(env: string, version: string): Promise<void> {
 }
 
 async function settledSinglePlacement(env: string): Promise<{
-  placement: PlacementRecord;
+  placement: { nodes: string[] };
   owner: { pod: k8s.V1Pod; state: DaemonState };
   nonOwner: { pod: k8s.V1Pod; state: DaemonState };
 }> {
   return until(`a settled one-node placement for ${env}`, DEADLINE_MS, async () => {
-    const placement = await readJson<PlacementRecord>(registry, placementKey(PROJECT, env));
-    if (placement?.value.nodes.length !== 1) return null;
     const states = await Promise.all(
       (await nodes()).map(async (pod) => ({ pod, state: await stateOf(pod) })),
     );
-    const owner = states.find(({ state }) => state.node?.id === placement.value.nodes[0]);
-    const nonOwner = states.find(({ state }) => state.node?.id !== placement.value.nodes[0]);
+    const placements = states.map(({ state }) =>
+      state.placements.find((view) => view.project === PROJECT && view.env === env),
+    );
+    const assignedNodeIds = placements[0]?.nodes;
+    if (
+      assignedNodeIds?.length !== 1 ||
+      placements.some(
+        (placement) =>
+          placement === undefined ||
+          placement.nodes.length !== 1 ||
+          placement.nodes[0] !== assignedNodeIds[0],
+      )
+    )
+      return null;
+    const owner = states.find(({ state }) => state.node?.id === assignedNodeIds[0]);
+    const nonOwner = states.find(({ state }) => state.node?.id !== assignedNodeIds[0]);
     const processId = `${PROJECT}--${env}`;
     if (
       owner === undefined ||
@@ -571,7 +616,7 @@ async function settledSinglePlacement(env: string): Promise<{
       nonOwner.state.processes.some((process) => process.id === processId)
     )
       return null;
-    return { placement: placement.value, owner, nonOwner };
+    return { placement: { nodes: assignedNodeIds }, owner, nonOwner };
   });
 }
 

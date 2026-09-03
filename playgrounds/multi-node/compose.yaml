@@ -1,15 +1,4 @@
-# The multi-node playground: one bucket and TWO scafo nodes, each with its own
-# ingress. README.md is the step sheet.
-#
-#   cp .env.example .env
-#   docker compose up -d
-#
-# WHAT MAKES THESE TWO NODES ONE FLEET is that they name the same bucket and the
-# same prefix in scafo.config.jsonc. Nothing else. They are never told about each
-# other: no seed list, no discovery, no gossip.
-#
-# `docker compose down -v` removes all of it.
-
+# Disposable two-node fleet; one bucket and prefix define membership.
 name: scafo-multi-node
 
 services:
@@ -21,9 +10,6 @@ services:
     volumes:
       - store:/data
 
-  # 409 COUNTS AS SUCCESS. Every run after the first finds the bucket already
-  # there, and a loop accepting only 2xx spins forever with both nodes stuck
-  # behind it and nothing in their logs.
   bucket:
     image: curlimages/curl:8.18.0
     depends_on:
@@ -32,41 +18,34 @@ services:
       - sh
       - -c
       - |
+        # Accept a pre-existing bucket so repeat starts do not block both nodes.
         until code=$$(curl -sS -o /dev/null -w '%{http_code}' -X PUT http://seaweedfs:8333/scafo)
               [ "$$code" = 200 ] || [ "$$code" = 409 ]
         do sleep 1; done
         echo "bucket \"scafo\": HTTP $$code"
 
-  # The two nodes are byte-identical apart from three lines: their id, the
-  # address they advertise, and which host ports they publish.
   node-a:
-    image: scafo:local
+    image: ${SCAFO_IMAGE:-ghcr.io/sandros94/scafo:latest}
     depends_on:
       bucket:
         condition: service_completed_successfully
-    # A ceiling, not a wait: on SIGTERM the node drains before it stops the
-    # processes serving traffic. Docker's default ten would cut that off.
+    # Drain and Celld shutdown require more than Docker's default 10 seconds.
     stop_grace_period: 50s
     ports:
-      # Caddy shares this container's namespace, so its port is published here.
       - "${SCAFO_A_HTTP_PORT:-8081}:80"
+      # The node API is local; Caddy shares the node namespace.
       - "127.0.0.1:${SCAFO_A_NODE_PORT:-7401}:7400"
     volumes:
-      # ITS OWN VOLUME, AND THIS IS NOT OPTIONAL. A node IS its keypair. Two
-      # nodes sharing one state volume would come up as the same node, register
-      # over each other, and fight for one identity's work.
+      # Each node needs a distinct persistent keypair and identity.
       - state-a:/var/lib/scafo
       - ingress-log-a:/var/log/scafo-ingress
       - ./scafo.config.jsonc:/etc/scafo/scafo.config.jsonc:ro
     environment:
       SCAFO_S3_ACCESS_KEY: ${SCAFO_S3_ACCESS_KEY:?set SCAFO_S3_ACCESS_KEY in .env}
       SCAFO_S3_SECRET_KEY: ${SCAFO_S3_SECRET_KEY:?set SCAFO_S3_SECRET_KEY in .env}
-      # THE `:?` IS LOAD-BEARING: a node given this set to NOTHING refuses to
-      # boot, so compose refuses first, naming the file to fix.
+      # Required by Caddy's private storage module; do not default this to empty.
       SCAFO_STORAGE_TOKEN: ${SCAFO_STORAGE_TOKEN:?set SCAFO_STORAGE_TOKEN in .env}
       SCAFO_NODE_ID: node-a
-      # WHERE THE OTHER NODE DIALS THIS ONE, and the whole of discovery. Getting
-      # it wrong is invisible until a durable object is owned across the pair.
       SCAFO_ADVERTISE: node-a:7400
     command: ["sail", "--config", "/etc/scafo/scafo.config.jsonc"]
     healthcheck:
@@ -80,18 +59,13 @@ services:
       retries: 30
       start_period: 10s
 
-  # SHARES NODE A'S NETWORK NAMESPACE: the runtime processes bind 127.0.0.1 and
-  # Caddy dials them there, and the node converges Caddy's admin API on the same
-  # loopback. `service_healthy` and not `service_started`, because scafo-caddy
-  # fills its certificate cache from storage at boot and storage is that node.
-  #
-  # `:edge` and not `:latest`: caddy.json passes the token inline, and the v0.1.0
-  # module refuses that field outright with `json: unknown field "token"`.
   caddy-a:
-    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:edge}
+    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:latest}
+    # Shared loopback keeps runtime ports private.
     network_mode: "service:node-a"
     depends_on:
       node-a:
+        # Caddy reads certificate storage through this healthy node at startup.
         condition: service_healthy
     command: ["caddy", "run", "--config", "/etc/caddy/config.json"]
     environment:
@@ -110,15 +84,17 @@ services:
       start_period: 5s
 
   node-b:
-    image: scafo:local
+    image: ${SCAFO_IMAGE:-ghcr.io/sandros94/scafo:latest}
     depends_on:
       bucket:
         condition: service_completed_successfully
+    # Match node A's shutdown grace for coordinated draining.
     stop_grace_period: 50s
     ports:
       - "${SCAFO_B_HTTP_PORT:-8082}:80"
       - "127.0.0.1:${SCAFO_B_NODE_PORT:-7402}:7400"
     volumes:
+      # Do not share node A's identity volume.
       - state-b:/var/lib/scafo
       - ingress-log-b:/var/log/scafo-ingress
       - ./scafo.config.jsonc:/etc/scafo/scafo.config.jsonc:ro
@@ -141,7 +117,7 @@ services:
       start_period: 10s
 
   caddy-b:
-    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:edge}
+    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:latest}
     network_mode: "service:node-b"
     depends_on:
       node-b:
@@ -162,15 +138,8 @@ services:
       retries: 30
       start_period: 5s
 
-  # The CLI as a one-shot container, for anyone who would rather install no node
-  # toolchain: `docker compose run --rm cli <args>`. On this network the nodes
-  # answer to their service names, so the fleet is registered at
-  # http://node-a:7400 and http://node-b:7400 rather than at 127.0.0.1.
-  #
-  # `user:` is not glue: the image runs as uid 10001, this directory is yours,
-  # and the CLI writes the operator home into it.
   cli:
-    image: scafo:local
+    image: ${SCAFO_IMAGE:-ghcr.io/sandros94/scafo:latest}
     profiles: ["cli"]
     user: "${SCAFO_CLI_USER:-1000:1000}"
     working_dir: /work

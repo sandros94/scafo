@@ -1,15 +1,10 @@
 {
-  /* `name` is rewritten by the node to the script name scafo recorded, so the
-     value here is a placeholder and changing it changes nothing. */
   "name": "app",
   "main": "index.js",
   "compatibility_date": "2025-01-01",
 
-  /* THE ONE LINE THE STEP SHEET ASKS YOU TO EDIT. Deploying again with "v2"
-     lets you watch celld adopt the new current deployment. */
   "vars": { "APP_VERSION": "v1" },
 
-  /* SQLite-backed classes are the only kind this runtime migrates. */
   "durable_objects": { "bindings": [{ "name": "COUNTER", "class_name": "Counter" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Counter"] }],
 }

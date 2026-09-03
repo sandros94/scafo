@@ -28,21 +28,21 @@ The `bucket` container exits successfully after creating the bucket. The node th
 ```sh
 export SCAFO_HOME="$PWD/.scafo"
 set -a; . ./.env; set +a
-alias scafo='node ../../dist/cli/index.mjs'
-```
-
-`SCAFO_HOME` keeps the playground's keys and remotes out of your real `~/.scafo`. To use the CLI from the image instead:
-
-```sh
 alias scafo='docker compose run --rm cli'
 ```
 
-Use `http://node:7400` instead of `http://127.0.0.1:7400` in the next step when using that container alias.
+`SCAFO_HOME` keeps the playground's keys and remotes out of your real `~/.scafo`. The container CLI reaches the node at `http://node:7400`, so use that endpoint in the next step. To use a built checkout instead:
+
+```sh
+alias scafo='node ../../dist/cli/index.mjs'
+```
+
+Use `http://127.0.0.1:7400` with the local CLI alias.
 
 ## 3. Register the remote
 
 ```sh
-scafo remote add playground --endpoint http://127.0.0.1:7400 --register
+scafo remote add playground --endpoint http://node:7400 --register
 scafo remote list
 ```
 
