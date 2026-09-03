@@ -20,18 +20,19 @@ Ask before acting when intent is ambiguous. For design or product decisions, run
 
 - `pnpm build`, `pnpm compile [linux-amd64|linux-arm64]`, `pnpm test`
 - `pnpm vitest run test/utils.test.ts`, `pnpm typecheck`, `pnpm lint`, `pnpm fmt`
-- `pnpm bench`, `node dist/cli/index.mjs sail --help`
+- `node dist/cli/index.mjs sail --help`
 
 The ordinary integration suite starts an S3 store with testcontainers. Set `SCAFO_TEST_STORE=seaweedfs|rustfs`, or supply `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, and `S3_BUCKET`.
 
-Docker E2E is opt-in; absent Docker skips a suite, not a product failure:
+Docker E2E is opt-in; absent Docker skips a suite, not a product failure. Run `pnpm build` first (the suites run `dist/cli/index.mjs`) and `docker build --target probe -t scafo-probe .` once (the node host the suites bind-mount the build into). Use `vitest.no-store.config.ts`; these suites own their containers.
 
-- `SCAFO_E2E=1 pnpm vitest run test/integration/e2e.test.ts` — Caddy, deploy adoption, OIDC, retirement.
-- `SCAFO_E2E=1 pnpm vitest run test/integration/e2e-traefik.test.ts` — Traefik pull provider.
-- `SCAFO_E2E=1 pnpm vitest run test/integration/e2e-multinode.test.ts` — replicas, selectors, durable cells, failover, drain, reassignment.
-- `SCAFO_E2E=1 pnpm vitest run test/integration/e2e-image.test.ts` — non-root image, bundled tools, healthcheck, shutdown.
-- `SCAFO_E2E=1 pnpm vitest run test/integration/e2e-tls.test.ts` — TLS storage, locks, and auth.
+- `SCAFO_E2E=1 pnpm vitest run --config vitest.no-store.config.ts test/integration/e2e.test.ts` — Caddy, deploy adoption, OIDC, retirement.
+- `SCAFO_E2E=1 pnpm vitest run --config vitest.no-store.config.ts test/integration/e2e-traefik.test.ts` — Traefik pull provider.
+- `SCAFO_E2E=1 pnpm vitest run --config vitest.no-store.config.ts test/integration/e2e-multinode.test.ts` — replicas, selectors, durable cells, failover, drain, reassignment.
+- `SCAFO_E2E=1 pnpm vitest run --config vitest.no-store.config.ts test/integration/e2e-image.test.ts` — non-root image, bundled tools, healthcheck, shutdown.
+- `SCAFO_E2E=1 pnpm vitest run --config vitest.no-store.config.ts test/integration/e2e-tls.test.ts` — TLS storage, locks, and auth.
 - `SCAFO_K3S_E2E=1 pnpm vitest run --config vitest.no-store.config.ts test/integration/e2e-k3s.test.ts` — real manifest, default Traefik, placement, drain, two-pod recovery; requires privileged containers.
+- `pnpm vitest run test/integration/store.test.ts` — bucket conformance against the `SCAFO_TEST_STORE` matrix (seaweedfs, rustfs).
 
 ## Placement of work
 

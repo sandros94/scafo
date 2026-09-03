@@ -29,6 +29,22 @@ RUN set -eux; \
 # Keep only runtime dependencies.
 RUN pnpm prune --prod --ignore-scripts
 
+# Test host stage: the same Celld and esbuild the image ships, with no
+# application, for suites that bind-mount a worktree's build into a container.
+# Not part of the default build; build it with `--target probe -t scafo-probe`.
+FROM node:24-slim AS probe
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY --from=celld /usr/local/bin/celld /usr/local/bin/celld
+COPY --from=build /out/esbuild /usr/local/bin/esbuild
+ENV CELLD_ESBUILD=/usr/local/bin/esbuild
+
+ENTRYPOINT []
+CMD ["node"]
+
 # Runtime stage.
 FROM node:24-slim
 
