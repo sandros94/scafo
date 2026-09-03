@@ -77,7 +77,14 @@ interface ProjectState extends ProjectUsage {
   ready: boolean;
 }
 
-interface FailedDiscard {
+/**
+ * An artifact whose disposal failed. Its bytes stay charged, because freeing
+ * accounting without freeing storage lies; the task slot it held does not,
+ * because the work is over and a slot pinned until restart would close deploy
+ * intake for the whole node (the default is one active task). Disposal is
+ * retried on every dispatch and once more at stop.
+ */
+interface Orphan {
   project: string;
   artifact: StagedArtifact;
   bytes: number;
@@ -95,8 +102,7 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
   const ready: string[] = [];
   const receiving = new Set<Receiving>();
   const active = new Set<Job>();
-  const stuck = new Set<Job>();
-  const failedDiscards = new Set<FailedDiscard>();
+  const orphans = new Set<Orphan>();
   const pendingCleanups = new Set<Promise<void>>();
   let activeTasks = 0;
   let queuedTasks = 0;
@@ -106,6 +112,7 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
   let stopPromise: Promise<void> | undefined;
   let dispatching = false;
   let dispatchRequested = false;
+  let sweeping: Promise<void> | undefined;
 
   const stateOf = (project: string): ProjectState => {
     let state = projects.get(project);
@@ -122,33 +129,73 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
     }
   };
 
-  const releaseQueued = (project: string, bytes: number): void => {
+  const releaseBytes = (project: string, bytes: number): void => {
     const state = projects.get(project);
-    if (state === undefined || state.queuedTasks <= 0 || state.stagedBytes < bytes) {
-      throw new Error("deploy scheduler queued accounting underflow");
+    if (state === undefined || state.stagedBytes < bytes) {
+      throw new Error("deploy scheduler staged-byte accounting underflow");
     }
-    queuedTasks -= 1;
     stagedBytes -= bytes;
-    state.queuedTasks -= 1;
     state.stagedBytes -= bytes;
     removeEmpty(project, state);
   };
 
-  const releaseActive = (job: Job): void => {
+  const releaseQueuedSlot = (project: string): void => {
+    const state = projects.get(project);
+    if (state === undefined || state.queuedTasks <= 0) {
+      throw new Error("deploy scheduler queued accounting underflow");
+    }
+    queuedTasks -= 1;
+    state.queuedTasks -= 1;
+    removeEmpty(project, state);
+  };
+
+  const releaseActiveSlot = (job: Job): void => {
     const state = projects.get(job.project);
-    if (state === undefined || state.activeTasks <= 0 || state.stagedBytes < job.byteLength) {
+    if (state === undefined || state.activeTasks <= 0) {
       throw new Error("deploy scheduler active accounting underflow");
     }
     activeTasks -= 1;
-    stagedBytes -= job.byteLength;
     state.activeTasks -= 1;
-    state.stagedBytes -= job.byteLength;
     active.delete(job);
     removeEmpty(job.project, state);
   };
 
-  const releaseQueuedJob = (job: Job): void => {
-    releaseQueued(job.project, job.byteLength);
+  /** Disposes an artifact and frees its bytes, or keeps them charged as an orphan. */
+  const disposeCharged = async (
+    project: string,
+    artifact: StagedArtifact,
+    bytes: number,
+  ): Promise<void> => {
+    try {
+      await artifact.dispose();
+    } catch (error) {
+      orphans.add({ project, artifact, bytes });
+      throw error;
+    }
+    releaseBytes(project, bytes);
+  };
+
+  /** Retries every orphaned disposal, one sweep at a time; whatever still fails stays charged. */
+  const sweepOrphans = (): Promise<void> => {
+    if (sweeping !== undefined) return sweeping;
+    sweeping = trackCleanup(
+      (async (): Promise<void> => {
+        try {
+          for (const orphan of orphans) {
+            try {
+              await orphan.artifact.dispose();
+            } catch {
+              continue;
+            }
+            orphans.delete(orphan);
+            releaseBytes(orphan.project, orphan.bytes);
+          }
+        } finally {
+          sweeping = undefined;
+        }
+      })(),
+    );
+    return sweeping;
   };
 
   const markReady = (project: string, state: ProjectState): void => {
@@ -175,13 +222,12 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
   const rejectAfterDispose = async (job: Job, reason: unknown): Promise<void> => {
     job.phase = "cleanup";
     try {
-      await job.artifact.dispose();
-      releaseQueuedJob(job);
-      job.settled.reject(reason);
-    } catch (error) {
-      stuck.add(job);
-      job.settled.reject(error);
+      await disposeCharged(job.project, job.artifact, job.byteLength);
+    } catch {
+      /* Orphaned: the bytes stay charged, the reason the job was refused stands. */
     }
+    releaseQueuedSlot(job.project);
+    job.settled.reject(reason);
   };
 
   const expireQueued = (): void => {
@@ -234,14 +280,15 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
     }
     if (job.deadline !== undefined) clearTimeout(job.deadline);
 
+    /* The slot is freed once the disposal has been attempted, whichever way it
+       went: what the task did is what the caller hears, and an artifact left
+       behind is the node's problem to keep retrying, not the deploy's. */
     try {
-      await job.artifact.dispose();
-      releaseActive(job);
-    } catch (error) {
-      stuck.add(job);
-      job.settled.reject(error);
-      return;
+      await disposeCharged(job.project, job.artifact, job.byteLength);
+    } catch {
+      /* Orphaned. */
     }
+    releaseActiveSlot(job);
 
     if (outcome.ok) job.settled.resolve(outcome.value);
     else job.settled.reject(outcome.error);
@@ -259,6 +306,7 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
     try {
       do {
         dispatchRequested = false;
+        if (orphans.size > 0) void sweepOrphans();
         expireQueued();
         while (!closed && activeTasks < options.activeTasks && ready.length > 0) {
           const project = ready.shift() as string;
@@ -336,7 +384,8 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
           phase = "cancelled";
           clearTimeout(receiveTimer);
           controller.abort(reason);
-          releaseQueued(project, options.artifactBytes);
+          releaseQueuedSlot(project);
+          releaseBytes(project, options.artifactBytes);
           finishReceiving();
         },
         discard(
@@ -349,21 +398,13 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
           phase = "cleanup";
           clearTimeout(receiveTimer);
           controller.abort(reason);
-          const failed: FailedDiscard = {
-            project,
-            artifact,
-            bytes: options.artifactBytes,
-          };
           return trackCleanup(
             (async (): Promise<void> => {
               try {
-                await artifact.dispose();
-                releaseQueued(project, options.artifactBytes);
+                await disposeCharged(project, artifact, options.artifactBytes);
                 phase = "cancelled";
-              } catch (error) {
-                failedDiscards.add(failed);
-                throw error;
               } finally {
+                releaseQueuedSlot(project);
                 finishReceiving();
               }
             })(),
@@ -455,25 +496,7 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
           ...pendingCleanups,
           ...Array.from(active, (job) => job.settled.promise),
         ]);
-        for (const job of stuck) {
-          try {
-            await job.artifact.dispose();
-            if (job.phase === "active") releaseActive(job);
-            else releaseQueuedJob(job);
-            stuck.delete(job);
-          } catch {
-            /* Still charged: freeing accounting without freeing storage lies. */
-          }
-        }
-        for (const failed of failedDiscards) {
-          try {
-            await failed.artifact.dispose();
-            releaseQueued(failed.project, failed.bytes);
-            failedDiscards.delete(failed);
-          } catch {
-            /* Still charged: freeing accounting without freeing storage lies. */
-          }
-        }
+        await sweepOrphans();
       })();
       return stopPromise;
     },

@@ -114,7 +114,8 @@ describe("deploy scheduler accounting", () => {
     };
 
     await expect(reservation.discard(artifact)).rejects.toThrow("disk busy");
-    expect(scheduler.usage()).toMatchObject({ queuedTasks: 1, stagedBytes: 100 });
+    /* The bytes are still on disk, so they stay charged; the queue slot is not. */
+    expect(scheduler.usage()).toMatchObject({ queuedTasks: 0, stagedBytes: 100 });
 
     await scheduler.stop(new Error("node stopping"));
     expect(disposals).toBe(2);
@@ -272,7 +273,7 @@ describe("deploy scheduler deadlines and cleanup", () => {
     expect(scheduler.usage()).toEqual(emptyUsage());
   });
 
-  it("disposes before releasing accounting and fails closed on disposal failure", async () => {
+  it("disposes before releasing accounting", async () => {
     const scheduler = createDeployScheduler(limits());
     const disposal = deferred<void>();
     const artifact = staged(10, disposal.promise);
@@ -283,14 +284,24 @@ describe("deploy scheduler deadlines and cleanup", () => {
     disposal.resolve();
     await task.completion;
     expect(scheduler.usage()).toEqual(emptyUsage());
-
-    const failed = staged(11, Promise.reject(new Error("disk busy")));
-    const failedTask = scheduler.reserve("one").enqueue(failed, async () => {});
-    await expect(failedTask.completion).rejects.toThrow("disk busy");
-    expect(scheduler.usage()).toMatchObject({ activeTasks: 1, stagedBytes: 11 });
   });
 
-  it("keeps failed-cleanup accounting until stop retries disposal", async () => {
+  it("frees the slot but not the bytes when disposal fails, and keeps what the task did", async () => {
+    const scheduler = createDeployScheduler(limits({ activeTasks: 1 }));
+    const failed = staged(11, Promise.reject(new Error("disk busy")));
+    const failedTask = scheduler.reserve("one").enqueue(failed, async () => "landed");
+
+    /* A deploy that landed is not reported failed because its archive lingers. */
+    await expect(failedTask.completion).resolves.toBe("landed");
+    expect(scheduler.usage()).toMatchObject({ activeTasks: 0, stagedBytes: 11 });
+
+    /* The one slot the node has is free for the next deploy. */
+    const next = scheduler.reserve("two").enqueue(staged(1), async () => "next");
+    await expect(next.completion).resolves.toBe("next");
+    expect(scheduler.usage()).toMatchObject({ activeTasks: 0, stagedBytes: 11 });
+  });
+
+  it("retries an orphaned disposal on the next dispatch", async () => {
     const scheduler = createDeployScheduler(limits());
     let disposals = 0;
     const artifact = staged(1);
@@ -301,10 +312,13 @@ describe("deploy scheduler deadlines and cleanup", () => {
     };
 
     const task = scheduler.reserve("one").enqueue(artifact, async () => {});
-    await expect(task.completion).rejects.toThrow("disk busy");
-    expect(scheduler.usage()).toMatchObject({ activeTasks: 1, stagedBytes: 1 });
+    await task.completion;
+    expect(scheduler.usage()).toMatchObject({ activeTasks: 0, stagedBytes: 1 });
 
-    await scheduler.stop(new Error("node stopping"));
+    /* Dispatching another deploy sweeps the orphan, well before any stop. */
+    await scheduler.reserve("two").enqueue(staged(1), async () => {}).completion;
+    await settle();
+    expect(disposals).toBe(2);
     expect(scheduler.usage()).toEqual(emptyUsage());
   });
 
