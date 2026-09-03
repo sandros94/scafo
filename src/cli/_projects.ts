@@ -134,7 +134,6 @@ export function formatProject(project: ProjectRecord): string {
     ``,
     `  state       ${project.blocked === true ? "blocked by an admin of this fleet" : "serving"}`,
     `  created     ${project.createdAt ?? "unknown (this record predates the stamp)"}`,
-    `  placement   ${project.placement}`,
     `  labels      ${formatProjectLabels(project.labels ?? {})}`,
   ];
   if (project.blocked === true) {

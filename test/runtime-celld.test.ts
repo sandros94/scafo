@@ -99,7 +99,6 @@ function specInput(overrides?: Partial<RuntimeSpecInput>): RuntimeSpecInput {
       prefix: "fleets/shop/production",
       deployment: { revision: 1, deployedAt: "2026-01-01T00:00:00.000Z" },
       domains: [],
-      placement: "auto",
       ephemeral: false,
       createdAt: "2026-01-01T00:00:00.000Z",
     },

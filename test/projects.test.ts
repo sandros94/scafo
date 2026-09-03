@@ -48,7 +48,6 @@ describe("when a project came into being", () => {
     await putJson<ProjectRecord>(clock.ctx, projectKey(PROJECT), {
       v: 1,
       slug: PROJECT,
-      placement: "auto",
     });
 
     /* Absent stays absent. A stamp invented now would say the project was
@@ -86,21 +85,6 @@ describe("labels", () => {
 
     await expect(getProject(clock.ctx, PROJECT)).resolves.not.toHaveProperty("labels");
   });
-
-  it("leaves placement and the preview defaults exactly as they stand", async () => {
-    await createProject(clock.ctx, {
-      slug: PROJECT,
-      placement: "dense",
-      previewDefaults: { placement: "dense" },
-    });
-
-    await setProjectLabels(clock.ctx, PROJECT, { tenant: "acme" });
-
-    await expect(getProject(clock.ctx, PROJECT)).resolves.toMatchObject({
-      placement: "dense",
-      previewDefaults: { placement: "dense" },
-    });
-  });
 });
 
 describe("blocking a project", () => {
@@ -130,11 +114,7 @@ describe("blocking a project", () => {
   });
 
   it("touches nothing else about the project", async () => {
-    await createProject(clock.ctx, {
-      slug: PROJECT,
-      placement: "dense",
-      previewDefaults: { placement: "dense" },
-    });
+    await createProject(clock.ctx, { slug: PROJECT });
     await setProjectLabels(clock.ctx, PROJECT, { tenant: "acme" });
     const before = await getProject(clock.ctx, PROJECT);
 

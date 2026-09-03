@@ -129,7 +129,7 @@ describe("GET /v1/projects", () => {
 
     expect(body.projects[0]).not.toHaveProperty("labels");
     expect(JSON.stringify(body.projects[0])).toBe(
-      JSON.stringify({ v: 1, slug: MINE, placement: "auto", createdAt: createdAtOf(MINE) }),
+      JSON.stringify({ v: 1, slug: MINE, createdAt: createdAtOf(MINE) }),
     );
   });
 

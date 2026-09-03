@@ -212,7 +212,7 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
         expect(meta.platformDomains).toEqual(["apps.example.test"]);
         await expect(readMeta(ctx)).resolves.toMatchObject({ v: 1 });
 
-        await createProject(ctx, { slug: project, placement: "dense" });
+        await createProject(ctx, { slug: project });
         await expect(listProjects(ctx)).resolves.toContain(project);
 
         const build = await createBuild(ctx, project, { id: buildId });

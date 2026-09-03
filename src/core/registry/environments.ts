@@ -6,7 +6,6 @@ import { assertSelector } from "../placement/selector.ts";
 import type {
   EnvironmentRecord,
   NodeSelector,
-  PlacementStrategy,
   ReplicaCount,
   VarsetEnvelope,
 } from "../types/registry.ts";
@@ -18,7 +17,6 @@ import { getProject } from "./projects.ts";
 
 export interface CreateEnvironmentInput {
   name: string;
-  placement?: PlacementStrategy;
   ephemeral?: boolean;
   varset?: string;
   /**
@@ -58,7 +56,6 @@ export async function createEnvironment(
     prefix: fleetPrefix(project, input.name),
     deployment: null,
     domains: [],
-    placement: input.placement ?? "auto",
     ephemeral: input.ephemeral ?? false,
     createdAt: nowIso(ctx),
   };
@@ -117,8 +114,8 @@ export async function setEnvironmentVarset(
 }
 
 /* Set at creation and never rewritten, so they identify the record. Everything
-   else (deployment, domains, varset, placement, replicas, nodeSelector) is
-   mutable state and must not break create-retry idempotency. */
+   else (deployment, domains, varset, replicas, nodeSelector) is mutable state
+   and must not break create-retry idempotency. */
 function identity(
   record: EnvironmentRecord,
 ): Pick<EnvironmentRecord, "v" | "name" | "prefix" | "ephemeral"> {

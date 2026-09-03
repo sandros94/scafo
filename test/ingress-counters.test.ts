@@ -367,7 +367,6 @@ function environment(name: string, domains: string[]): EnvironmentRecord {
     prefix: `fleets/shop/${name}`,
     deployment: { revision: 1, deployedAt: new Date(CLOCK_START_MS).toISOString() },
     domains,
-    placement: "auto",
     ephemeral: false,
     createdAt: new Date(CLOCK_START_MS).toISOString(),
   };

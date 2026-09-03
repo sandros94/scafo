@@ -2,7 +2,7 @@
    and labels. Readers enforce blocking without deleting records. */
 
 import { ScafoError } from "../error.ts";
-import type { PlacementStrategy, ProjectRecord } from "../types/registry.ts";
+import type { ProjectRecord } from "../types/registry.ts";
 import type { RetryOptions } from "../utils/backoff.ts";
 import { isCasConflict } from "./_shared.ts";
 import { createJson, readJson, requireJson, updateJson } from "./cas.ts";
@@ -11,8 +11,6 @@ import { projectKey, projectsPrefix } from "./paths.ts";
 
 export interface CreateProjectInput {
   slug: string;
-  placement?: PlacementStrategy;
-  previewDefaults?: ProjectRecord["previewDefaults"];
 }
 
 /** Creates a project or returns existing identity unchanged; stamps only first creation. */
@@ -24,10 +22,8 @@ export async function createProject(
   const record: ProjectRecord = {
     v: 1,
     slug: input.slug,
-    placement: input.placement ?? "auto",
     createdAt: nowIso(ctx),
   };
-  if (input.previewDefaults !== undefined) record.previewDefaults = input.previewDefaults;
 
   try {
     await createJson(ctx, key, record);

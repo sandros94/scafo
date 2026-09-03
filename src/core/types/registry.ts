@@ -5,12 +5,6 @@
  */
 
 /**
- * How environments are packed onto nodes: `isolate` gives an environment its own
- * node, `dense` co-locates it with others, `auto` lets the coordinator decide.
- */
-export type PlacementStrategy = "isolate" | "dense" | "auto";
-
-/**
  * How many nodes serve one environment: a whole number of at least 1, or `"all"`
  * for every node that is live at the moment the decision is made.
  */
@@ -104,7 +98,6 @@ export interface NodeRecord {
   drainingAt?: string;
   /** Its place on the tunnel, when the installation runs one. */
   wireguard?: NodeWireguard;
-  capabilities?: Record<string, unknown>;
   /** Selector labels, replaced from node boot configuration at registration. */
   labels?: Record<string, string>;
 }
@@ -113,12 +106,6 @@ export interface NodeRecord {
 export interface ProjectRecord {
   v: 1;
   slug: string;
-  placement: PlacementStrategy;
-  /** Defaults applied to ephemeral preview environments created under this project. */
-  previewDefaults?: {
-    varset?: string;
-    placement?: PlacementStrategy;
-  };
   /** Creation timestamp. Omitted legacy records are never backfilled. */
   createdAt?: string;
   /** `true` stops deploys, runtime, routing, and certificates without deleting
@@ -187,7 +174,6 @@ export interface EnvironmentRecord {
   deployment: DeploymentRevision | null;
   varset?: string;
   domains: string[];
-  placement: PlacementStrategy;
   ephemeral: boolean;
   /** Replica count; omitted resolves to all long-lived nodes or one ephemeral node. */
   replicas?: ReplicaCount;

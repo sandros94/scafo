@@ -151,7 +151,6 @@ function desired(project: string, env: string, revision: number): DesiredEnviron
       prefix: `fleets/${project}/${env}`,
       deployment: { revision, deployedAt: CREATED_AT },
       domains: [],
-      placement: "auto",
       ephemeral: false,
       createdAt: CREATED_AT,
     },

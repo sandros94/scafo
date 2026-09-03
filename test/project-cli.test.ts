@@ -212,7 +212,7 @@ describe("how one project prints", () => {
   });
 
   it("admits it does not know when a record predates the stamp", () => {
-    const shown = formatProject({ v: 1, slug: MINE, placement: "auto" });
+    const shown = formatProject({ v: 1, slug: MINE });
 
     expect(shown).toContain("unknown");
     expect(shown).toContain("serving");
