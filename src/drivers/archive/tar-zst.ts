@@ -35,7 +35,6 @@ interface TarModule {
 }
 
 export interface PackDirectoryOptions {
-  stagingDir?: string;
   signal?: AbortSignal;
 }
 
@@ -53,7 +52,7 @@ export async function packDirectory(
   opts?: PackDirectoryOptions,
 ): Promise<StagedArtifact> {
   const tar = await loadTar();
-  const stage = await createFileStage({ stagingDir: opts?.stagingDir });
+  const stage = await createFileStage();
   await stage.file.close();
 
   try {
