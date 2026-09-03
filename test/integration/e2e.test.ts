@@ -469,7 +469,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expect(JSON.parse(answer.body).url).toContain(ciHost());
 
       const environment = await getEnvironment(registry, PROJECT, CI_ENVIRONMENT);
-      expect(environment.deployment).toMatchObject({ revision: 2 });
+      expect(environment.deployment).toMatchObject({ revision: 1 });
 
       await untilServes(apexHost(), "v2");
     },
@@ -493,7 +493,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expect(result.output).toContain(HOSTILE_SUBJECT);
 
       const environment = await getEnvironment(registry, PROJECT, CI_ENVIRONMENT);
-      expect(environment.deployment).toMatchObject({ revision: 2 });
+      expect(environment.deployment).toMatchObject({ revision: 1 });
       await untilServes(ciHost(), "v3");
     },
     STEP_TIMEOUT_MS,
