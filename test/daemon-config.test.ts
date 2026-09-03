@@ -1423,58 +1423,82 @@ describe("the Traefik entryPoints the routers attach to", () => {
   });
 });
 
-describe("the tokens guarding the storage surface", () => {
+describe("the tokens guarding what the ingress reads", () => {
   it("reads the comma-separated list an operator shares with their ingress", async () => {
     const config = await loadDaemonConfig({
-      env: { ...REQUIRED_ENV, SCAFO_STORAGE_TOKEN: " new-token , old-token " },
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_TOKEN: " new-token , old-token " },
     });
 
-    expect(config.storage).toEqual({ token: ["new-token", "old-token"] });
+    expect(config.ingress).toEqual({ token: ["new-token", "old-token"] });
   });
 
   it("lets a flag override what the environment names", async () => {
     const config = await loadDaemonConfig({
-      env: { ...REQUIRED_ENV, SCAFO_STORAGE_TOKEN: "from-env" },
-      flags: { "storage-token": "from-flag" },
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_TOKEN: "from-env" },
+      flags: { "ingress-token": "from-flag" },
     });
 
-    expect(config.storage).toEqual({ token: ["from-flag"] });
+    expect(config.ingress).toEqual({ token: ["from-flag"] });
   });
 
   it("takes a plain string or an array from the file, the array carrying entries whole", async () => {
     const asString = await loadDaemonConfig({
       configPath: CONFIG_PATH,
-      readFile: fileAt(CONFIG_PATH, JSON.stringify({ storage: { token: "new,old" } })),
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { token: "new,old" } })),
       env: REQUIRED_ENV,
     });
     const asArray = await loadDaemonConfig({
       configPath: CONFIG_PATH,
       readFile: fileAt(
         CONFIG_PATH,
-        JSON.stringify({ storage: { token: [" new ", "with,comma"] } }),
+        JSON.stringify({ ingress: { token: [" new ", "with,comma"] } }),
       ),
       env: REQUIRED_ENV,
     });
 
-    expect(asString.storage).toEqual({ token: ["new", "old"] });
-    expect(asArray.storage).toEqual({ token: ["new", "with,comma"] });
+    expect(asString.ingress).toEqual({ token: ["new", "old"] });
+    expect(asArray.ingress).toEqual({ token: ["new", "with,comma"] });
   });
 
   it("leaves the node minting its own when nothing names any", async () => {
     const config = await loadDaemonConfig({ env: REQUIRED_ENV });
 
-    expect(config.storage).toBeUndefined();
+    expect(config.ingress).toBeUndefined();
+  });
+
+  it("still answers to the name the token had when it only guarded storage", async () => {
+    const config = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_STORAGE_TOKEN: "old-name" },
+    });
+
+    expect(config.ingress).toEqual({ token: ["old-name"] });
+  });
+
+  it("prefers the current name when both are set", async () => {
+    const config = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_TOKEN: "current", SCAFO_STORAGE_TOKEN: "old-name" },
+    });
+
+    expect(config.ingress).toEqual({ token: ["current"] });
+  });
+
+  it("sits beside the driver this node runs, whichever ingress that is", async () => {
+    const config = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_TOKEN: "shared", SCAFO_INGRESS_DRIVER: "traefik" },
+    });
+
+    expect(config.ingress).toEqual({ driver: "traefik", token: ["shared"] });
   });
 
   it("refuses a value that is there and holds nothing, rather than quietly minting", async () => {
     const written: Array<[string, LoadConfigOptions]> = [
-      ["an empty variable", { env: { ...REQUIRED_ENV, SCAFO_STORAGE_TOKEN: "" } }],
-      ["an empty flag", { env: REQUIRED_ENV, flags: { "storage-token": "" } }],
+      ["an empty variable", { env: { ...REQUIRED_ENV, SCAFO_INGRESS_TOKEN: "" } }],
+      ["an empty flag", { env: REQUIRED_ENV, flags: { "ingress-token": "" } }],
       [
         "an empty string in the file",
         {
           configPath: CONFIG_PATH,
-          readFile: fileAt(CONFIG_PATH, JSON.stringify({ storage: { token: "" } })),
+          readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { token: "" } })),
           env: REQUIRED_ENV,
         },
       ],
@@ -1482,7 +1506,7 @@ describe("the tokens guarding the storage surface", () => {
         "an empty array in the file",
         {
           configPath: CONFIG_PATH,
-          readFile: fileAt(CONFIG_PATH, JSON.stringify({ storage: { token: [] } })),
+          readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { token: [] } })),
           env: REQUIRED_ENV,
         },
       ],
@@ -1492,30 +1516,30 @@ describe("the tokens guarding the storage surface", () => {
       const error = await rejectionOf(() => loadDaemonConfig(opts));
 
       expect(error.code, label).toBe("invalid-input");
-      expect(error.detail, label).toContain("storage.token");
+      expect(error.detail, label).toContain("ingress.token");
     }
   });
 
   it("refuses an entry holding nothing, whichever spelling carried it", async () => {
     for (const written of ["a,,b", " , ", "a,  "]) {
       const error = await rejectionOf(() =>
-        loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_STORAGE_TOKEN: written } }),
+        loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_INGRESS_TOKEN: written } }),
       );
 
       expect(error.code, written).toBe("invalid-input");
-      expect(error.detail, written).toContain("storage.token");
+      expect(error.detail, written).toContain("ingress.token");
     }
 
     const inFile = await rejectionOf(() =>
       loadDaemonConfig({
         configPath: CONFIG_PATH,
-        readFile: fileAt(CONFIG_PATH, JSON.stringify({ storage: { token: ["a", "  "] } })),
+        readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { token: ["a", "  "] } })),
         env: REQUIRED_ENV,
       }),
     );
 
     expect(inFile.code).toBe("invalid-input");
-    expect(inFile.detail).toContain("storage.token");
+    expect(inFile.detail).toContain("ingress.token");
   });
 
   it("refuses a value that is neither a token nor a list of them", async () => {
@@ -1523,13 +1547,13 @@ describe("the tokens guarding the storage surface", () => {
       const error = await rejectionOf(() =>
         loadDaemonConfig({
           configPath: CONFIG_PATH,
-          readFile: fileAt(CONFIG_PATH, JSON.stringify({ storage: { token } })),
+          readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { token } })),
           env: REQUIRED_ENV,
         }),
       );
 
       expect(error.code, JSON.stringify(token)).toBe("invalid-input");
-      expect(error.detail, JSON.stringify(token)).toContain("storage.token");
+      expect(error.detail, JSON.stringify(token)).toContain("ingress.token");
     }
   });
 });

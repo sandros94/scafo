@@ -1,41 +1,42 @@
-/* Node-local storage bearer token, minted or supplied in an owner-readable state
-   file. It is replaceable and not a registry identity. */
+/* The bearer token an ingress presents to this node, for the fleet's routing and
+   for the storage surface, minted or supplied in an owner-readable state file. It
+   is replaceable and not a registry identity. */
 
 import { join } from "node:path";
 import { ScafoError } from "../core/error.ts";
-import { STORAGE_TOKEN_BYTES } from "../daemon/storage.ts";
+import { INGRESS_TOKEN_BYTES } from "../daemon/storage.ts";
 import { toBase64Url } from "../core/utils/base64.ts";
 import { readTextFile, writeSecretFile } from "./_utils.ts";
 
 /** Name of the token file within the state directory. */
-export const STORAGE_TOKEN_FILE: string = "storage-token";
+export const INGRESS_TOKEN_FILE: string = "ingress-token";
 
-/** Reads or mints storage token. Trims file input and refuses an empty token. */
-export async function loadOrCreateStorageToken(stateDir: string): Promise<string> {
-  const path = join(stateDir, STORAGE_TOKEN_FILE);
+/** Reads or mints the ingress token. Trims file input and refuses an empty token. */
+export async function loadOrCreateIngressToken(stateDir: string): Promise<string> {
+  const path = join(stateDir, INGRESS_TOKEN_FILE);
 
   const text = await readTextFile(path);
   if (text !== null) {
     const stored = text.trim();
     if (stored === "") {
-      throw new ScafoError("invalid-input", "Storage token file is unusable", {
+      throw new ScafoError("invalid-input", "Ingress token file is unusable", {
         detail:
-          `"${path}" guards this node's storage surface but holds no token; delete the file ` +
-          `to have the node write a new one, then hand that one to whatever stores through it`,
+          `"${path}" guards what this node serves its ingress but holds no token; delete the ` +
+          `file to have the node write a new one, then hand that one to the ingress`,
       });
     }
     return stored;
   }
 
-  const token = toBase64Url(crypto.getRandomValues(new Uint8Array(STORAGE_TOKEN_BYTES)));
+  const token = toBase64Url(crypto.getRandomValues(new Uint8Array(INGRESS_TOKEN_BYTES)));
   await writeSecretFile(stateDir, path, `${token}\n`);
   return token;
 }
 
 /** Writes a supplied token with secret permissions; identical existing files are
     left unchanged for read-only mounts. */
-export async function writeStorageToken(stateDir: string, token: string): Promise<void> {
-  const path = join(stateDir, STORAGE_TOKEN_FILE);
+export async function writeIngressToken(stateDir: string, token: string): Promise<void> {
+  const path = join(stateDir, INGRESS_TOKEN_FILE);
 
   const text = await readTextFile(path);
   if (text?.trim() === token) return;
@@ -57,30 +58,30 @@ export async function writeStorageToken(stateDir: string, token: string): Promis
  * the same, so that a consumer reading a path keeps working, and saying so is
  * all this line owes them.
  *
- * `supplied` is how many tokens `storage.token` named, and `0` means the node
+ * `supplied` is how many tokens `ingress.token` named, and `0` means the node
  * minted its own. More than one is a rotation in progress, which gets a second
  * line: this node admits them all, so the move is the operator's to make and to
  * finish.
  */
-export function storageTokenNotice(opts: { path: string; supplied: number }): string[] {
+export function ingressTokenNotice(opts: { path: string; supplied: number }): string[] {
   if (opts.supplied === 0) {
     return [
-      `scafo: storage token at ${opts.path}; mount it read-only into the process that ` +
+      `scafo: ingress token at ${opts.path}; mount it read-only into the process that ` +
         `terminates TLS`,
     ];
   }
 
   if (opts.supplied === 1) {
     return [
-      `scafo: storage token supplied by "storage.token"; ${opts.path} holds it, for whatever ` +
+      `scafo: ingress token supplied by "ingress.token"; ${opts.path} holds it, for whatever ` +
         `reads the file rather than the setting`,
     ];
   }
 
   return [
-    `scafo: storage token supplied by "storage.token", which names ${String(opts.supplied)}; ` +
+    `scafo: ingress token supplied by "ingress.token", which names ${String(opts.supplied)}; ` +
       `${opts.path} holds the primary, for whatever reads the file rather than the setting`,
-    `scafo: this node admits every one of them; move what stores through it onto the primary, ` +
+    `scafo: this node admits every one of them; move what reads through it onto the primary, ` +
       `then contract the setting to that token alone and restart`,
   ];
 }

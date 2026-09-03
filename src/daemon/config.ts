@@ -63,8 +63,9 @@ export interface DaemonConfig {
   /** Whether the fleet's API answers at the platform domains' own apexes. */
   api: ApiConfig;
   /**
-   * Where the node publishes what it serves. Absent means no ingress at all:
-   * the processes still run and are simply not reachable from outside the node.
+   * Which ingress this node drives, and what an ingress presents to read from
+   * it. Absent means no ingress at all: the processes still run and are simply
+   * not reachable from outside the node.
    */
   ingress?: IngressConfig;
   /**
@@ -73,12 +74,6 @@ export interface DaemonConfig {
    * at no varset at all.
    */
   varsets?: VarsetsConfig;
-  /**
-   * The tokens this node admits on its storage surface, when the operator chose
-   * them. Absent leaves the node minting one and keeping it in its state
-   * directory, which is what every installation did before this existed.
-   */
-  storage?: StorageConfig;
   /**
    * What carries traffic between this node and its peers. Absent is only legal
    * for a node that stays on loopback: see {@link TransportConfig}.
@@ -128,7 +123,7 @@ export interface ObservabilityConfig {
 }
 
 /** Enables the fleet API at platform-domain apexes. Token gates remain in force;
- * storage and Traefik configuration are denied at ingress. */
+ * the storage surface and the fleet's routing are denied at ingress. */
 export interface ApiConfig {
   public: boolean;
   /** Maximum bytes accepted by any JSON control request. */
@@ -141,19 +136,22 @@ export interface VarsetsConfig {
   keyFile: string;
 }
 
-/** Explicit storage tokens replace minting. Rotate by expanding to `[new, old]`,
- * restart and migrate consumers, then contract to `[new]`. The first token is
- * persisted for local consumers. */
-export interface StorageConfig {
-  /** Every token admitted, primary first. Never empty. */
-  token: [string, ...string[]];
-}
-
 /** Ingress configuration: Caddy is pushed through its admin API; Traefik pulls
- * from the node's configuration endpoint. */
+ * from the node's configuration endpoint. Whatever the driver, every node serves
+ * the fleet's routing and its storage surface behind the ingress token. */
 export interface IngressConfig {
-  /** Which ingress this node drives; anything else fails the boot. */
-  driver: IngressDriverName;
+  /**
+   * Which ingress this node drives; anything else fails the boot. Absent means
+   * this node drives none itself, and only serves what an ingress elsewhere reads.
+   */
+  driver?: IngressDriverName;
+  /**
+   * Every token admitted on `/v1/ingress` and `/v1/storage`, primary first, never
+   * empty. Explicit tokens replace minting: rotate by expanding to `[new, old]`,
+   * restart and migrate consumers, then contract to `[new]`. The first token is
+   * persisted for local consumers.
+   */
+  token?: [string, ...string[]];
   /** Base URL of the Caddy admin API; the driver's own default applies when absent. */
   adminUrl?: string;
   /** Caddy server this node writes its routes into. */
@@ -267,7 +265,6 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
   /* Operator runtime config overrides the observability telemetry default. */
   const celldEnv = withTelemetry(resolveCelldEnv(sources), observing);
   const keyFile = resolve("varsetKeyFile", sources);
-  const storageTokens = resolveStorageTokens(sources);
   const transport = resolveTransport(sources);
   const wireguard = resolveWireguard(sources);
 
@@ -324,7 +321,6 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
     },
     ...(ingress === undefined ? {} : { ingress }),
     ...(keyFile === undefined ? {} : { varsets: { keyFile } }),
-    ...(storageTokens === undefined ? {} : { storage: { token: storageTokens } }),
     ...(transport === undefined ? {} : { transport }),
     ...(wireguard === undefined ? {} : { wireguard }),
   };
@@ -514,7 +510,12 @@ const ORIGINS = {
     env: ["SCAFO_VARSET_KEY_FILE"],
     file: "varsets.keyFile",
   },
-  storageToken: { flag: "storage-token", env: ["SCAFO_STORAGE_TOKEN"], file: "storage.token" },
+  /* `SCAFO_STORAGE_TOKEN` is the name this had when the token only guarded storage. */
+  ingressToken: {
+    flag: "ingress-token",
+    env: ["SCAFO_INGRESS_TOKEN", "SCAFO_STORAGE_TOKEN"],
+    file: "ingress.token",
+  },
   transport: { flag: "transport", env: ["SCAFO_TRANSPORT"], file: "transport.driver" },
   wgAddress: { flag: "wg-address", env: ["SCAFO_WG_ADDRESS"], file: "wireguard.address" },
   wgEndpoint: { flag: "wg-endpoint", env: ["SCAFO_WG_ENDPOINT"], file: "wireguard.endpoint" },
@@ -786,22 +787,22 @@ function resolveCelldEnv(sources: Sources): Record<string, string> | undefined {
   return Object.keys(vars).length === 0 ? undefined : vars;
 }
 
-/** Resolves explicit storage tokens. Text uses comma separation; JSON arrays
+/** Resolves explicit ingress tokens. Text uses comma separation; JSON arrays
  * retain entries verbatim. An explicit empty value is rejected, not treated as absent. */
-function resolveStorageTokens(sources: Sources): [string, ...string[]] | undefined {
-  const origin: Origin = ORIGINS.storageToken;
+function resolveIngressTokens(sources: Sources): [string, ...string[]] | undefined {
+  const origin: Origin = ORIGINS.ingressToken;
   const written = suppliedFlagOrEnv(origin, sources) ?? fileValue(sources.file, origin.file);
   if (written === undefined || written === null) return undefined;
 
   const spellings: unknown = typeof written === "string" ? written.split(",") : written;
   if (!Array.isArray(spellings) || spellings.some((entry) => typeof entry !== "string")) {
-    throw refuseStorageTokens(written, "must be a token, or a list of them");
+    throw refuseIngressTokens(written, "must be a token, or a list of them");
   }
 
   const tokens = (spellings as string[]).map((entry) => entry.trim());
   const [primary, ...rest] = tokens;
   if (tokens.length === 0 || tokens.some((token) => token === "")) {
-    throw refuseStorageTokens(
+    throw refuseIngressTokens(
       written,
       "names no token, and an entry holding nothing would admit a caller presenting nothing",
     );
@@ -809,9 +810,9 @@ function resolveStorageTokens(sources: Sources): [string, ...string[]] | undefin
   return [primary, ...rest];
 }
 
-/** The one refusal the storage tokens get, whichever source carried the value. */
-function refuseStorageTokens(written: unknown, why: string): ScafoError {
-  const origin: Origin = ORIGINS.storageToken;
+/** The one refusal the ingress tokens get, whichever source carried the value. */
+function refuseIngressTokens(written: unknown, why: string): ScafoError {
+  const origin: Origin = ORIGINS.ingressToken;
   return new ScafoError("invalid-input", "Invalid configuration value", {
     detail:
       `"${origin.file}" (--${origin.flag}, or ${origin.env.join(" or ")}) ${why}, got ` +
@@ -855,9 +856,13 @@ function resolveIngress(sources: Sources): IngressConfig | undefined {
   const adminUrl = resolve("caddyAdmin", sources);
   const serverName = resolve("caddyServer", sources);
   const entryPoints = resolveEntryPoints(sources);
+  const token = resolveIngressTokens(sources);
 
-  /* Entry points select Traefik even without an explicit driver name. */
-  if (driver === undefined && adminUrl === undefined && entryPoints === undefined) return undefined;
+  /* Entry points select Traefik even without an explicit driver name. A token
+     alone selects nothing: it guards what every node serves whatever it drives. */
+  if (driver === undefined && adminUrl === undefined && entryPoints === undefined) {
+    return token === undefined ? undefined : { token };
+  }
   if (driver !== undefined && !(INGRESS_DRIVERS as string[]).includes(driver)) {
     throw new ScafoError("invalid-input", "Invalid configuration value", {
       detail:
@@ -891,6 +896,7 @@ function resolveIngress(sources: Sources): IngressConfig | undefined {
 
   return {
     driver: selected,
+    ...(token === undefined ? {} : { token }),
     ...(adminUrl === undefined ? {} : { adminUrl }),
     ...(serverName === undefined ? {} : { serverName }),
     ...(entryPoints === undefined ? {} : { entryPoints }),

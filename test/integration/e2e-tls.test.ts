@@ -76,10 +76,10 @@ const NODE_ALIAS = "node.scafo-e2e.internal";
 /** Not a choice: Pebble's own TLS certificate names `pebble`, `localhost` and `127.0.0.1`. */
 const PEBBLE_ALIAS = "pebble";
 
-/** Where the node keeps its identity, and where it mints the storage token. */
+/** Where the node keeps its identity, and where it mints the ingress token. */
 const NODE_STATE_DIR = "/var/lib/scafo-tls";
 /** The two files a Caddy is given, and the only two it needs. */
-const TOKEN_IN_CADDY = "/etc/scafo/storage-token";
+const TOKEN_IN_CADDY = "/etc/scafo/ingress-token";
 const DIRECTORY_ROOT_IN_CADDY = "/etc/scafo/acme-directory-root.pem";
 const CONFIG_IN_CADDY = "/etc/caddy/config.json";
 
@@ -111,7 +111,7 @@ let registry: RegistryContext;
 
 let apiPort: number;
 /** The token the node minted, read back out of its state directory. */
-let storageToken: string;
+let ingressToken: string;
 /**
  * The static root behind Pebble's OWN certificate, shipped in its image. What
  * Caddy is given, and the only reason it will speak to the directory at all.
@@ -209,7 +209,7 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
       .start();
 
     apiPort = daemon.getMappedPort(NODE_PORT);
-    storageToken = await readStorageToken();
+    ingressToken = await readIngressToken();
 
     caddies.push(await startCaddy("caddy-a", SITE));
   }, SETUP_TIMEOUT_MS);
@@ -229,10 +229,10 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
     "mints the token at boot, and says where the operator will find it",
     () => {
       expect(daemonLog.join(""), daemonLogTail()).toContain(
-        `storage token at ${NODE_STATE_DIR}/storage-token`,
+        `ingress token at ${NODE_STATE_DIR}/ingress-token`,
       );
-      expect(storageToken.length).toBeGreaterThan(0);
-      observed.tokenLength = storageToken.length;
+      expect(ingressToken.length).toBeGreaterThan(0);
+      observed.tokenLength = ingressToken.length;
     },
     STEP_TIMEOUT_MS,
   );
@@ -373,7 +373,7 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
         apiPort,
         "/v1/storage/list?prefix=&recursive=true",
         "GET",
-        { authorization: `Bearer ${storageToken}-not` },
+        { authorization: `Bearer ${ingressToken}-not` },
         undefined,
       );
       const none = await send(
@@ -401,7 +401,7 @@ async function startCaddy(name: string, alias: string): Promise<Caddy> {
     .withNetworkAliases(alias)
     .withCopyContentToContainer([
       { content: caddyConfig(name), target: CONFIG_IN_CADDY },
-      { content: `${storageToken}\n`, target: TOKEN_IN_CADDY, mode: 0o600 },
+      { content: `${ingressToken}\n`, target: TOKEN_IN_CADDY, mode: 0o600 },
       { content: directoryRoot, target: DIRECTORY_ROOT_IN_CADDY },
     ])
     .withCommand(["caddy", "run", "--config", CONFIG_IN_CADDY])
@@ -546,9 +546,9 @@ async function pebbleIssuanceRoot(port: number, trustedRoot: string): Promise<st
   return answer.body;
 }
 
-/** The node's storage token, read out of the state directory it was minted in. */
-async function readStorageToken(): Promise<string> {
-  const read = await daemon.exec(["cat", `${NODE_STATE_DIR}/storage-token`]);
+/** The node's ingress token, read out of the state directory it was minted in. */
+async function readIngressToken(): Promise<string> {
+  const read = await daemon.exec(["cat", `${NODE_STATE_DIR}/ingress-token`]);
   expect(read.exitCode, `${read.output}\n${daemonLogTail()}`).toBe(0);
   return read.output.trim();
 }
@@ -559,7 +559,7 @@ async function storageList(): Promise<string[]> {
     apiPort,
     "/v1/storage/list?prefix=&recursive=true",
     "GET",
-    { authorization: `Bearer ${storageToken}` },
+    { authorization: `Bearer ${ingressToken}` },
     undefined,
   );
   expect(answer.status, answer.body).toBe(200);
@@ -572,7 +572,7 @@ async function storageGet(key: string): Promise<string> {
     apiPort,
     `/v1/storage/objects/${key}`,
     "GET",
-    { authorization: `Bearer ${storageToken}` },
+    { authorization: `Bearer ${ingressToken}` },
     undefined,
   );
   expect(answer.status, answer.body).toBe(200);

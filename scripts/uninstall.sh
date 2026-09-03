@@ -73,7 +73,7 @@ scafo — undo scripts/install.sh on this host.
   uninstall.sh [--purge] [--dry-run] [--bin-dir <dir>]
 
   --purge           also remove the state directory (/var/lib/scafo — the node
-                    identity and the storage token, which nothing can reissue),
+                    identity and the ingress token, which nothing can reissue),
                     the ingress's certificates and ACME account (/var/lib/caddy),
                     what it logged (/var/log/scafo-ingress) and the system users
                     this install created.
@@ -429,7 +429,7 @@ remove_config() {
 remove_state() {
   if [ "$PURGE" != 'yes' ]; then
     # Keep the manifest so a later `--purge` identifies created accounts.
-    [ ! -d "$STATE_DIR" ] || record_kept "$STATE_DIR" 'node identity, storage token, manifest'
+    [ ! -d "$STATE_DIR" ] || record_kept "$STATE_DIR" 'node identity, ingress token, manifest'
     [ ! -d "$CADDY_STATE_DIR" ] || record_kept "$CADDY_STATE_DIR" "$(caddy_state_note)"
     [ ! -d "$INGRESS_LOG_DIR" ] || record_kept "$INGRESS_LOG_DIR" 'what the ingress logged'
     for user in $(users_to_remove); do
@@ -438,7 +438,7 @@ remove_state() {
     return 0
   fi
 
-  remove_path "$STATE_DIR" 'node identity, storage token, tunnel keys' || true
+  remove_path "$STATE_DIR" 'node identity, ingress token, tunnel keys' || true
   remove_path "$CADDY_STATE_DIR" "$(caddy_state_note)" || true
   remove_path "$INGRESS_LOG_DIR" 'what the ingress logged' || true
 

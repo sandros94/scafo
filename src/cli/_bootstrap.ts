@@ -13,7 +13,7 @@ import { withRetry } from "../core/utils/backoff.ts";
 import { isLoopbackHost } from "../core/utils/host.ts";
 import { createUns3Store } from "../drivers/store/uns3.ts";
 import { loadOrCreateNodeState, type NodeState } from "./_node-state.ts";
-import { loadOrCreateStorageToken, writeStorageToken } from "./_storage-token.ts";
+import { loadOrCreateIngressToken, writeIngressToken } from "./_ingress-token.ts";
 import { resolveDefaultStateDir } from "./_utils.ts";
 import { readVarsetKeyFile } from "./_varset-key.ts";
 import {
@@ -124,29 +124,30 @@ export async function loadNodeIdentity(
 }
 
 /**
- * The tokens guarding this node's storage surface, primary first, with that
- * primary left in the state directory for whatever stores through this node to
- * read — a colocated process presents it to keep its TLS material in the
- * installation's bucket without holding a credential for it.
+ * The tokens guarding what this node serves its ingress — the fleet's routing
+ * and the storage surface — primary first, with that primary left in the state
+ * directory for a colocated ingress to read: it presents the token to learn
+ * where to route and to keep its TLS material in the installation's bucket,
+ * without holding a credential for either.
  *
  * WHAT THE OPERATOR SUPPLIED REPLACES MINTING. A configured set is admitted
  * whole and its first token is written to the file, taking over from one this
  * node had minted earlier; a configuration that names none leaves the node
  * reading the file and generating one on the first boot that finds none, which
  * is the only behaviour there was before this. Why it is a set, and what
- * rotating one costs, is on the `storage.token` setting itself.
+ * rotating one costs, is on the `ingress.token` setting itself.
  */
-export async function loadStorageTokens(
+export async function loadIngressTokens(
   config: DaemonConfig,
   opts?: NodeIdentityOptions,
 ): Promise<string[]> {
   const stateDir = nodeStateDir(config, opts);
 
-  const supplied = config.storage?.token;
-  if (supplied === undefined) return [await loadOrCreateStorageToken(stateDir)];
+  const supplied = config.ingress?.token;
+  if (supplied === undefined) return [await loadOrCreateIngressToken(stateDir)];
 
   const [primary] = supplied;
-  await writeStorageToken(stateDir, primary);
+  await writeIngressToken(stateDir, primary);
   return supplied;
 }
 

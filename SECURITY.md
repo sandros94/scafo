@@ -9,7 +9,7 @@ Do not use one installation for arbitrary customer code, public build submission
 ## Protected surfaces
 
 - Node and operator API requests use signed tokens. Operator roles and project scopes limit actions; OIDC deploy policy binds a workload deployer to a project.
-- `/.well-known/scafo/health` and `/v1/ingress/ask` are intentionally public. `/v1/ingress/traefik` is intentionally unauthenticated and reveals the full host-to-loopback routing map; only colocated or private Traefik may reach it. `/v1/storage` has a separate bearer token and must never pass through ingress.
+- `/.well-known/scafo/health` and `/v1/ingress/ask` are intentionally public. Everything under `/v1/ingress/routes` and `/v1/storage` requires the node's ingress bearer token and are denied at the public API apex: the routing reveals every node's address for every host, and storage carries private keys in both directions.
 - `/.well-known/celld/health` is the application runtime health endpoint, not the Scafo node/API health endpoint.
 - Registry conditional writes prevent lost updates. Coordinator leases and fences protect stale placement decisions and other lease-gated work.
 - Node API and runtime listeners default to loopback. Wider binds require an explicit private-network or WireGuard transport decision.
@@ -29,7 +29,7 @@ Do not use one installation for arbitrary customer code, public build submission
 ## Deploy safely
 
 - Keep node, runtime-peer, and operator traffic on a private network or encrypted overlay. Publish only intended application ingress endpoints.
-- Protect bucket, node, storage-token, and deployment credentials as administrative secrets. Use a bucket scoped to one installation.
+- Protect bucket, node, ingress-token, and deployment credentials as administrative secrets. Use a bucket scoped to one installation.
 - Test object-store conditional writes, latency, and failure behavior before production use.
 - Configure Celld runtime policy through `runtime.celldEnv`, `--celld-env`, or `SCAFO_CELLD_ENV`; Scafo adds no Celld policy defaults.
 - If intermittent multi-second stalls are acceptable with slower failure detection, set `CELLD_TTL_MS=30000` consistently on every Scafo node. Celld then renews every 10 seconds and unplanned takeover can take up to 30 seconds. Re-evaluate when [Celld issue #182](https://github.com/denoland/celld/issues/182) is fixed.

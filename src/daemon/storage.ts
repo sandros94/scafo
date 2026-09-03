@@ -21,8 +21,8 @@ export const STORAGE_VERSION_HEADER: string = "x-scafo-storage-version";
 /** The only version this node serves; an absent header means this one. */
 export const STORAGE_VERSION: string = "1";
 
-/** Bytes of entropy behind the token guarding the surface. */
-export const STORAGE_TOKEN_BYTES: number = 32;
+/** Bytes of entropy behind the ingress token guarding this surface and `/v1/ingress`. */
+export const INGRESS_TOKEN_BYTES: number = 32;
 
 /** What the storage routes are served from, and what keeps their locks alive. */
 export interface StorageService {
@@ -117,7 +117,7 @@ export function createStorageService(
          client — so a caller cannot tell a wrong token from a missing one. */
       if (!admits(opts.tokens, bearerToken(event))) {
         throw new ScafoError("auth-invalid", "Authentication failed", {
-          cause: new Error("the presented token is not one of this node's storage tokens"),
+          cause: new Error("the presented token is not one of this node's ingress tokens"),
         });
       }
 

@@ -3,7 +3,7 @@
 # Root on a systemd host also writes, but does not start, node and ingress units.
 # `scafo-caddy` is the default: it stores TLS material through the node storage API
 # without bucket credentials. Set `SCAFO_INSTALL_CADDY=plain` for upstream Caddy.
-# The ingress receives a systemd credential copy of the storage token; do not widen
+# The ingress receives a systemd credential copy of the ingress token; do not widen
 # the token's source-file permissions.
 #
 # Environment: `SCAFO_INSTALL_BASE`, `SCAFO_VERSION`, and `SCAFO_SHA256` select
@@ -46,7 +46,7 @@ CADDY_USER='caddy'
 CADDY_STATE_DIR='/var/lib/caddy'
 
 # Keep the node token, ingress credential, and ingress config name aligned.
-STORAGE_TOKEN_NAME='storage-token'
+INGRESS_TOKEN_NAME='ingress-token'
 # Must match `SCAFO_LISTEN` in the generated node environment.
 STORAGE_ENDPOINT='http://127.0.0.1:7400'
 
@@ -489,7 +489,7 @@ EOF
   "storage": {
     "module": "scafo",
     "endpoint": "${STORAGE_ENDPOINT}",
-    "token_file": "{env.CREDENTIALS_DIRECTORY}/${STORAGE_TOKEN_NAME}"
+    "token_file": "{env.CREDENTIALS_DIRECTORY}/${INGRESS_TOKEN_NAME}"
   },
 EOF
 
@@ -537,7 +537,7 @@ write_units() {
   fi
 }
 
-# Start the node before ingress so the storage token exists on first boot.
+# Start the node before ingress so the ingress token exists on first boot.
 render_node_unit() {
   cat <<EOF
 [Unit]
@@ -609,7 +609,7 @@ EOF
 
   # `LoadCredential=` gives ingress a private copy without exposing the source token.
   [ "$CADDY_FLAVOR" != 'scafo' ] || cat <<EOF
-LoadCredential=${STORAGE_TOKEN_NAME}:${STATE_DIR}/${STORAGE_TOKEN_NAME}
+LoadCredential=${INGRESS_TOKEN_NAME}:${STATE_DIR}/${INGRESS_TOKEN_NAME}
 EOF
 
   cat <<EOF
@@ -697,7 +697,7 @@ explain_manual_setup() {
     say 'no systemd units written: systemd is not running on this host.'
   fi
   say 'Run the two processes yourself, IN THIS ORDER — the ingress may need the'
-  say 'storage token the node mints on its first boot:'
+  say 'ingress token the node mints on its first boot:'
   say ''
   say "  install -d -m ${STATE_DIR_MODE} ${STATE_DIR}"
   say "  SCAFO_STATE_DIR=${STATE_DIR} \\"
@@ -717,7 +717,7 @@ explain_manual_setup() {
     say '  "storage": {'
     say '    "module": "scafo",'
     say "    \"endpoint\": \"${STORAGE_ENDPOINT}\","
-    say "    \"token_file\": \"${STATE_DIR}/${STORAGE_TOKEN_NAME}\""
+    say "    \"token_file\": \"${STATE_DIR}/${INGRESS_TOKEN_NAME}\""
     say '  },'
     say ''
     say 'The token is minted 0600 by whoever runs the node. Under systemd this'
@@ -784,7 +784,7 @@ next_steps() {
 
   printf 'WHERE THINGS ARE\n\n'
   printf '  %-32s node identity, 0600 in a %s directory\n' "${STATE_DIR}/node.json" "$STATE_DIR_MODE"
-  printf '  %-32s the token the ingress presents to /v1/storage,\n' "${STATE_DIR}/${STORAGE_TOKEN_NAME}"
+  printf '  %-32s the token the ingress presents to /v1/ingress and /v1/storage,\n' "${STATE_DIR}/${INGRESS_TOKEN_NAME}"
   printf '  %-32s minted on the first boot. LOCAL OR TUNNELLED CALLERS ONLY:\n' ''
   printf '  %-32s that surface carries private keys in both directions.\n' ''
   if [ "$CADDY_FLAVOR" = 'scafo' ] && [ "$UNITS_WRITTEN" = 'yes' ]; then

@@ -96,11 +96,11 @@ curl -s -H 'Host: scafo.test' \
   http://127.0.0.1/.well-known/scafo/health
 curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: scafo.test' \
   'http://127.0.0.1/v1/storage/list?prefix='
-curl -s -H "Authorization: Bearer $SCAFO_STORAGE_TOKEN" \
+curl -s -H "Authorization: Bearer $SCAFO_INGRESS_TOKEN" \
   'http://127.0.0.1:7400/v1/storage/list?prefix='
 ```
 
-The first request reaches the node API through the platform apex. The second is blocked by Caddy: `/v1/storage` and `/v1/ingress/traefik` are never published through that apex. The same storage route remains available on the node's local listener with its dedicated token.
+The first request reaches the node API through the platform apex. The second is blocked by Caddy: `/v1/storage` and `/v1/ingress/routes` are never published through that apex. The same storage route remains available on the node's local listener with the ingress token.
 
 ## 8. Replace the current deployment
 

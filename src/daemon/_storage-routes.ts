@@ -33,7 +33,7 @@ const OCTET_STREAM = "application/octet-stream";
 /** How `recursive` may be spelled; anything else lists the immediate children. */
 const TRUTHY = ["true", "1"];
 
-/** Adds the storage routes to `app`, each behind the storage token. */
+/** Adds the storage routes to `app`, each behind the ingress token. */
 export function registerStorageRoutes(
   app: H3,
   daemon: DaemonContext,

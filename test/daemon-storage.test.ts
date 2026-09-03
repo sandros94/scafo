@@ -9,17 +9,17 @@ import { type DaemonContext, createNodeApp } from "../src/daemon/app.ts";
 import { type DaemonConfig, loadDaemonConfig } from "../src/daemon/config.ts";
 import {
   createStorageService,
-  STORAGE_TOKEN_BYTES,
+  INGRESS_TOKEN_BYTES,
   STORAGE_VERSION,
   STORAGE_VERSION_HEADER,
   type StorageService,
 } from "../src/daemon/storage.ts";
-import { loadStorageTokens } from "../src/cli/_bootstrap.ts";
+import { loadIngressTokens } from "../src/cli/_bootstrap.ts";
 import {
-  loadOrCreateStorageToken,
-  STORAGE_TOKEN_FILE,
-  writeStorageToken,
-} from "../src/cli/_storage-token.ts";
+  loadOrCreateIngressToken,
+  INGRESS_TOKEN_FILE,
+  writeIngressToken,
+} from "../src/cli/_ingress-token.ts";
 import {
   acquireTlsLock,
   type TlsLock,
@@ -579,35 +579,35 @@ describe("the token file guarding the surface", () => {
   it("writes a fresh token only its owner can read, in a directory only its owner can enter", async () => {
     const dir = await stateDir();
 
-    const token = await loadOrCreateStorageToken(dir);
+    const token = await loadOrCreateIngressToken(dir);
 
-    expect(fromBase64Url(token)).toHaveLength(STORAGE_TOKEN_BYTES);
+    expect(fromBase64Url(token)).toHaveLength(INGRESS_TOKEN_BYTES);
     /* Unpadded base64url: nothing in it needs escaping in a header or a file. */
     expect(token).toMatch(/^[\w-]+$/);
-    expect((await stat(join(dir, STORAGE_TOKEN_FILE))).mode & 0o777).toBe(0o600);
+    expect((await stat(join(dir, INGRESS_TOKEN_FILE))).mode & 0o777).toBe(0o600);
     expect((await stat(dir)).mode & 0o777).toBe(0o700);
   });
 
   it("keeps the token it wrote, so a restarted node stays reachable", async () => {
     const dir = await stateDir();
 
-    expect(await loadOrCreateStorageToken(dir)).toBe(await loadOrCreateStorageToken(dir));
+    expect(await loadOrCreateIngressToken(dir)).toBe(await loadOrCreateIngressToken(dir));
   });
 
   it("takes a token an operator wrote, newline and all", async () => {
     const dir = await stateDir();
     await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, STORAGE_TOKEN_FILE), "  chosen-token\n");
+    await writeFile(join(dir, INGRESS_TOKEN_FILE), "  chosen-token\n");
 
-    expect(await loadOrCreateStorageToken(dir)).toBe("chosen-token");
+    expect(await loadOrCreateIngressToken(dir)).toBe("chosen-token");
   });
 
   it("refuses a file holding no token rather than guarding the surface with nothing", async () => {
     const dir = await stateDir();
     await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, STORAGE_TOKEN_FILE), "\n  \n");
+    await writeFile(join(dir, INGRESS_TOKEN_FILE), "\n  \n");
 
-    await rejectsWith(() => loadOrCreateStorageToken(dir), "invalid-input");
+    await rejectsWith(() => loadOrCreateIngressToken(dir), "invalid-input");
   });
 });
 
@@ -615,53 +615,53 @@ describe("the token set a node boots with", () => {
   it("mints its own when the operator supplied none, and keeps it across boots", async () => {
     const dir = await stateDir();
 
-    const first = await loadStorageTokens(await bootConfig(dir));
-    const again = await loadStorageTokens(await bootConfig(dir));
+    const first = await loadIngressTokens(await bootConfig(dir));
+    const again = await loadIngressTokens(await bootConfig(dir));
 
     expect(first).toHaveLength(1);
-    expect(fromBase64Url(first[0])).toHaveLength(STORAGE_TOKEN_BYTES);
+    expect(fromBase64Url(first[0])).toHaveLength(INGRESS_TOKEN_BYTES);
     expect(again).toEqual(first);
-    await expect(readFile(join(dir, STORAGE_TOKEN_FILE), "utf8")).resolves.toBe(`${first[0]}\n`);
+    await expect(readFile(join(dir, INGRESS_TOKEN_FILE), "utf8")).resolves.toBe(`${first[0]}\n`);
   });
 
   it("writes the primary an operator supplied where every file-reading consumer looks", async () => {
     const dir = await stateDir();
 
-    const tokens = await loadStorageTokens(await bootConfig(dir, " chosen-token "));
+    const tokens = await loadIngressTokens(await bootConfig(dir, " chosen-token "));
 
     /* Supplied REPLACES minting: nothing random is generated, and the file holds
        what the operator chose, at the permissions a minted one gets. */
     expect(tokens).toEqual(["chosen-token"]);
-    await expect(readFile(join(dir, STORAGE_TOKEN_FILE), "utf8")).resolves.toBe("chosen-token\n");
-    expect((await stat(join(dir, STORAGE_TOKEN_FILE))).mode & 0o777).toBe(0o600);
+    await expect(readFile(join(dir, INGRESS_TOKEN_FILE), "utf8")).resolves.toBe("chosen-token\n");
+    expect((await stat(join(dir, INGRESS_TOKEN_FILE))).mode & 0o777).toBe(0o600);
     expect((await stat(dir)).mode & 0o777).toBe(0o700);
   });
 
   it("takes over a token this node had minted, primary first", async () => {
     const dir = await stateDir();
-    const minted = await loadStorageTokens(await bootConfig(dir));
+    const minted = await loadIngressTokens(await bootConfig(dir));
 
-    const tokens = await loadStorageTokens(await bootConfig(dir, "new-token, old-token"));
+    const tokens = await loadIngressTokens(await bootConfig(dir, "new-token, old-token"));
 
     expect(minted[0]).not.toBe("new-token");
     expect(tokens).toEqual(["new-token", "old-token"]);
-    await expect(readFile(join(dir, STORAGE_TOKEN_FILE), "utf8")).resolves.toBe("new-token\n");
+    await expect(readFile(join(dir, INGRESS_TOKEN_FILE), "utf8")).resolves.toBe("new-token\n");
   });
 
   it("leaves the file untouched on a boot the primary did not change", async () => {
     const dir = await stateDir();
-    const path = join(dir, STORAGE_TOKEN_FILE);
-    await writeStorageToken(dir, "chosen-token");
+    const path = join(dir, INGRESS_TOKEN_FILE);
+    await writeIngressToken(dir, "chosen-token");
 
     /* Dated back rather than compared to "now", so nothing here rests on the
        clock's resolution. */
     const past = new Date(CLOCK_START_MS);
     await utimes(path, past, past);
-    await writeStorageToken(dir, "chosen-token");
+    await writeIngressToken(dir, "chosen-token");
 
     expect((await stat(path)).mtimeMs).toBe(past.getTime());
 
-    await writeStorageToken(dir, "rotated-token");
+    await writeIngressToken(dir, "rotated-token");
 
     expect((await stat(path)).mtimeMs).not.toBe(past.getTime());
     await expect(readFile(path, "utf8")).resolves.toBe("rotated-token\n");
@@ -671,7 +671,7 @@ describe("the token set a node boots with", () => {
 describe("rotating a supplied token, as an operator expands and contracts the set", () => {
   it("takes both while the set holds both, and only the new one once it does not", async () => {
     const dir = await stateDir();
-    const path = join(dir, STORAGE_TOKEN_FILE);
+    const path = join(dir, INGRESS_TOKEN_FILE);
 
     /* Before: one token, and it is the file's. */
     const before = await boot(dir, "old-token");
@@ -762,7 +762,7 @@ async function boot(dir: string, token?: string): Promise<H3> {
     version: VERSION,
   };
   agent.storage = createStorageService(agent, {
-    tokens: await loadStorageTokens(config),
+    tokens: await loadIngressTokens(config),
     log: (message) => logs.push(message),
   });
   return createNodeApp(agent);

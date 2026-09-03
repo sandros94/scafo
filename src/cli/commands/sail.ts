@@ -41,13 +41,13 @@ import {
   createRegistry,
   drainThisNode,
   loadNodeIdentity,
-  loadStorageTokens,
+  loadIngressTokens,
   loadVarsetKey,
   loadWireguardRecord,
   nodeStateDir,
   registerThisNode,
 } from "../_bootstrap.ts";
-import { STORAGE_TOKEN_FILE, storageTokenNotice } from "../_storage-token.ts";
+import { INGRESS_TOKEN_FILE, ingressTokenNotice } from "../_ingress-token.ts";
 import { deprecatedAlias, readPackageVersion, readTextFile, reportFailure } from "../_utils.ts";
 
 /* Flag names are kebab-case, matching the keys `loadDaemonConfig` reads them under. */
@@ -80,12 +80,12 @@ export const sailArgs: ArgsDef = {
   "wg-port": { type: "string", description: "UDP port the tunnel interface listens on (51820)" },
   "platform-domains": { type: "string", description: "Comma-separated apex domains to serve" },
   "varset-key-file": { type: "string", description: "File holding the varset encryption key" },
-  "storage-token": {
+  "ingress-token": {
     type: "string",
     description:
-      "Token(s) admitted on /v1/storage, instead of one this node mints: new,old admits both " +
-      "while a rotation is in flight, and the first is written to the state directory's " +
-      "storage-token file. Restart the daemon before reloading what stores through it",
+      "Token(s) admitted on /v1/ingress and /v1/storage, instead of one this node mints: " +
+      "new,old admits both while a rotation is in flight, and the first is written to the " +
+      "state directory's ingress-token file. Restart the daemon before reloading the ingress",
   },
   "celld-bin": { type: "string", description: "Executable that runs an environment" },
   "celld-env": {
@@ -193,7 +193,7 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   const wireguard = await loadWireguardRecord(config);
 
   const state = await loadNodeIdentity(config);
-  const storageTokens = await loadStorageTokens(config);
+  const ingressTokens = await loadIngressTokens(config);
   const varsetKey = await loadVarsetKey(config);
   const registry = createRegistry(config);
 
@@ -286,7 +286,7 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
        Traefik does not define is a route that exists and matches nothing. */
     console.log(
       `scafo: ingress "traefik" reads the fleet's routing from ` +
-        `/v1/ingress/routes/traefik?prefer=self on ${config.node.listen} with the storage token; ` +
+        `/v1/ingress/routes/traefik?prefer=self on ${config.node.listen} with the ingress token; ` +
         `point its http provider there. Routers attach to entryPoint(s) ${entryPoints.join(", ")}`,
     );
   } else {
@@ -301,15 +301,15 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   /* What a colocated ingress keeps its certificates, its account key and its
      issuance locks in: this node's bucket, reached through this node, which is
      the only process on the machine holding a credential for it. */
-  const storage = createStorageService(daemon, { tokens: storageTokens });
+  const storage = createStorageService(daemon, { tokens: ingressTokens });
   daemon.storage = storage;
   /* Said once, because the operator has to act on it — and what they have to do
      depends on where the token came from: a minted one is distributed by the
      file, a supplied one arrived through their own configuration and the file is
      only there for whatever reads a path. */
-  for (const line of storageTokenNotice({
-    path: join(nodeStateDir(config), STORAGE_TOKEN_FILE),
-    supplied: config.storage?.token?.length ?? 0,
+  for (const line of ingressTokenNotice({
+    path: join(nodeStateDir(config), INGRESS_TOKEN_FILE),
+    supplied: config.ingress?.token?.length ?? 0,
   })) {
     console.log(line);
   }

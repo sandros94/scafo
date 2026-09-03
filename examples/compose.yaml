@@ -26,7 +26,7 @@ services:
       SCAFO_TRANSPORT: none
       SCAFO_ADVERTISE: 127.0.0.1:7400
       SCAFO_CADDY_ADMIN: http://127.0.0.1:2019
-      SCAFO_STORAGE_TOKEN: ${SCAFO_STORAGE_TOKEN:?set SCAFO_STORAGE_TOKEN in .env}
+      SCAFO_INGRESS_TOKEN: ${SCAFO_INGRESS_TOKEN:?set SCAFO_INGRESS_TOKEN in .env}
       SCAFO_OBSERVABILITY: "1"
       SCAFO_INGRESS_ACCESS_LOG: /var/log/scafo-ingress/access.log
     healthcheck:
@@ -52,7 +52,7 @@ services:
         condition: service_healthy
     command: ["caddy", "run", "--config", "/etc/caddy/config.json"]
     environment:
-      SCAFO_STORAGE_TOKEN: ${SCAFO_STORAGE_TOKEN:?set SCAFO_STORAGE_TOKEN in .env}
+      SCAFO_INGRESS_TOKEN: ${SCAFO_INGRESS_TOKEN:?set SCAFO_INGRESS_TOKEN in .env}
     volumes:
       - ./caddy.json:/etc/caddy/config.json:ro
       - ingress-log:/var/log/scafo-ingress

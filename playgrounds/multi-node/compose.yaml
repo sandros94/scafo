@@ -44,7 +44,7 @@ services:
       SCAFO_S3_ACCESS_KEY: ${SCAFO_S3_ACCESS_KEY:?set SCAFO_S3_ACCESS_KEY in .env}
       SCAFO_S3_SECRET_KEY: ${SCAFO_S3_SECRET_KEY:?set SCAFO_S3_SECRET_KEY in .env}
       # Required by Caddy's private storage module; do not default this to empty.
-      SCAFO_STORAGE_TOKEN: ${SCAFO_STORAGE_TOKEN:?set SCAFO_STORAGE_TOKEN in .env}
+      SCAFO_INGRESS_TOKEN: ${SCAFO_INGRESS_TOKEN:?set SCAFO_INGRESS_TOKEN in .env}
       SCAFO_NODE_ID: node-a
       SCAFO_ADVERTISE: node-a:7400
     command: ["sail", "--config", "/etc/scafo/scafo.config.jsonc"]
@@ -69,7 +69,7 @@ services:
         condition: service_healthy
     command: ["caddy", "run", "--config", "/etc/caddy/config.json"]
     environment:
-      SCAFO_STORAGE_TOKEN: ${SCAFO_STORAGE_TOKEN:?set SCAFO_STORAGE_TOKEN in .env}
+      SCAFO_INGRESS_TOKEN: ${SCAFO_INGRESS_TOKEN:?set SCAFO_INGRESS_TOKEN in .env}
     volumes:
       - ./caddy.json:/etc/caddy/config.json:ro
       - ingress-log-a:/var/log/scafo-ingress
@@ -101,7 +101,7 @@ services:
     environment:
       SCAFO_S3_ACCESS_KEY: ${SCAFO_S3_ACCESS_KEY:?set SCAFO_S3_ACCESS_KEY in .env}
       SCAFO_S3_SECRET_KEY: ${SCAFO_S3_SECRET_KEY:?set SCAFO_S3_SECRET_KEY in .env}
-      SCAFO_STORAGE_TOKEN: ${SCAFO_STORAGE_TOKEN:?set SCAFO_STORAGE_TOKEN in .env}
+      SCAFO_INGRESS_TOKEN: ${SCAFO_INGRESS_TOKEN:?set SCAFO_INGRESS_TOKEN in .env}
       SCAFO_NODE_ID: node-b
       SCAFO_ADVERTISE: node-b:7400
     command: ["sail", "--config", "/etc/scafo/scafo.config.jsonc"]
@@ -124,7 +124,7 @@ services:
         condition: service_healthy
     command: ["caddy", "run", "--config", "/etc/caddy/config.json"]
     environment:
-      SCAFO_STORAGE_TOKEN: ${SCAFO_STORAGE_TOKEN:?set SCAFO_STORAGE_TOKEN in .env}
+      SCAFO_INGRESS_TOKEN: ${SCAFO_INGRESS_TOKEN:?set SCAFO_INGRESS_TOKEN in .env}
     volumes:
       - ./caddy.json:/etc/caddy/config.json:ro
       - ingress-log-b:/var/log/scafo-ingress

@@ -35,7 +35,7 @@ docker pull ghcr.io/sandros94/scafo-caddy:latest
 
 Each playground uses the released node and Caddy images. Set `SCAFO_IMAGE` or `SCAFO_CADDY_IMAGE` in `.env` to test local images. The walkthroughs use the container CLI; a built checkout remains an optional alternative.
 
-The Caddy image includes `caddy.storage.scafo` and uses the storage token without bucket credentials.
+The Caddy image includes `caddy.storage.scafo` and uses the ingress token without bucket credentials.
 
 ## Scope
 

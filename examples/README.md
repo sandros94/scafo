@@ -17,9 +17,9 @@ docker compose --env-file .env up -d
 curl -s http://127.0.0.1:7400/.well-known/scafo/health
 ```
 
-The node API is loopback-only. Use it for deploys or operator commands; do not publish it. Caddy shares the node network namespace and stores certificates, ACME account material, and locks through the loopback storage API with `SCAFO_STORAGE_TOKEN`, never bucket credentials.
+The node API is loopback-only. Use it for deploys or operator commands; do not publish it. Caddy shares the node network namespace and stores certificates, ACME account material, and locks through the loopback storage API with the ingress token (`SCAFO_INGRESS_TOKEN`), never bucket credentials.
 
-Scafo publishes only claimed application hosts and the platform API apex. `/v1/storage` and `/v1/ingress/traefik` remain denied at that public apex; the storage API requires its bearer token on the loopback listener.
+Scafo publishes only claimed application hosts and the platform API apex. `/v1/storage` and everything under `/v1/ingress/routes` remain denied at that public apex; on the loopback listener they require the ingress token.
 
 Add independent operator routes, redirects, or TLS policy in [caddy.json](caddy.json) without using the `scafo_` route-id prefix reserved for Scafo; reconciliation preserves those routes.
 
