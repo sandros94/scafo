@@ -276,8 +276,11 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
         return served.status === 200 && served.body.includes(`"v1"`) ? served : null;
       });
 
-      const runtimeHealth = await httpGet(caddyHttpPort, "/.well-known/celld/health", { host });
-      expect(runtimeHealth.status).toBe(200);
+      /* Celld reports healthy shortly after the first request it served. */
+      const runtimeHealth = await until(`${host} to answer celld health`, DEADLINE_MS, async () => {
+        const probed = await httpGet(caddyHttpPort, "/.well-known/celld/health", { host });
+        return probed.status === 200 ? probed : null;
+      });
       expect(JSON.parse(runtimeHealth.body)).toEqual({ ok: true });
 
       observed.served = { host, build, body: answer.body, celldHealth: runtimeHealth.status };
