@@ -79,14 +79,11 @@ export function createUns3Store(client: S3Client, opts: Uns3StoreOptions): CasSt
 
     async list(keyPrefix: string): Promise<string[]> {
       const keys: string[] = [];
-      let continuationToken: string | undefined;
+      const prefix = toObjectKey(keyPrefix);
+      let next: { continuationToken: string } | { query: { marker: string } } | undefined;
 
       do {
-        const page = await client.list({
-          bucket,
-          prefix: toObjectKey(keyPrefix),
-          continuationToken,
-        });
+        const page = await client.list({ bucket, prefix, ...next });
         for (const object of page.contents) {
           /* File-backed stores materialize the folders between keys and list
              them as zero-byte entries ending in `/` — phantoms this store
@@ -94,12 +91,35 @@ export function createUns3Store(client: S3Client, opts: Uns3StoreOptions): CasSt
           if (object.key.endsWith("/")) continue;
           keys.push(toStoreKey(object.key));
         }
-        continuationToken = page.isTruncated ? page.nextContinuationToken : undefined;
-      } while (continuationToken !== undefined);
+        next = nextPage(page, prefix);
+      } while (next !== undefined);
 
       return keys.sort();
     },
   };
+}
+
+/**
+ * How the next listing page is asked for, or undefined on the last one. A store
+ * that ignores `list-type=2` pages V1-style: it says the page is truncated and
+ * hands back a marker rather than a continuation token. A truncated page that
+ * offers neither is one the store can never be walked past, which is worse than
+ * a short listing, since a reaper acting on one would treat the unseen keys as
+ * gone.
+ */
+function nextPage(
+  page: { isTruncated: boolean; nextContinuationToken?: string; nextMarker?: string },
+  prefix: string,
+): { continuationToken: string } | { query: { marker: string } } | undefined {
+  if (!page.isTruncated) return undefined;
+  if (page.nextContinuationToken !== undefined) {
+    return { continuationToken: page.nextContinuationToken };
+  }
+  if (page.nextMarker !== undefined) return { query: { marker: page.nextMarker } };
+
+  throw new ScafoError("store-nonconforming", "The store cut a listing short", {
+    detail: `listing "${prefix}" was truncated with neither a continuation token nor a marker`,
+  });
 }
 
 function normalizePrefix(prefix?: string): string {
