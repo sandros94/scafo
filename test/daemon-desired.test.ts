@@ -51,6 +51,7 @@ describe("an environment nobody has placed", () => {
       const state = await readDesired(registry, { nodeId });
 
       expect(state.environments, nodeId).toEqual([]);
+      expect(state.fleet, nodeId).toEqual([]);
       expect(state.placements, nodeId).toEqual([]);
     }
   });
@@ -74,6 +75,10 @@ describe("an environment that has been placed", () => {
     const state = await readDesired(registry, { nodeId: SELF });
 
     expect(state.environments).toEqual([]);
+    /* Still part of the fleet view: this node routes to it, it just does not run it. */
+    expect(state.fleet.map((entry) => `${entry.project}/${entry.env.name}`)).toEqual([
+      `${PROJECT}/prod`,
+    ]);
     expect(state.placements).toEqual([
       { project: PROJECT, env: "prod", nodes: [PEER], self: false },
     ]);
@@ -125,6 +130,7 @@ describe("an environment that carries a node selector", () => {
     for (const nodeId of [SELF, PEER, "node-c"]) {
       const state = await readDesired(registry, { nodeId });
       expect(state.environments, nodeId).toEqual([]);
+      expect(state.fleet, nodeId).toEqual([]);
       expect(state.placements, nodeId).toEqual([]);
     }
   });
@@ -242,6 +248,7 @@ describe("what is left out for reasons other than placement", () => {
     for (const nodeId of [SELF, PEER, "node-c"]) {
       const state = await readDesired(registry, { nodeId });
       expect(state.environments, nodeId).toEqual([]);
+      expect(state.fleet, nodeId).toEqual([]);
       expect(state.placements, nodeId).toEqual([]);
     }
   });
@@ -251,6 +258,7 @@ describe("what is left out for reasons other than placement", () => {
 
     expect(await readDesired(empty, { nodeId: SELF })).toEqual({
       environments: [],
+      fleet: [],
       placements: [],
       failures: [],
     });

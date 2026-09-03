@@ -582,6 +582,7 @@ function bothProjectsReconciled(): Reconciler {
     shutdown: () => Promise.resolve(),
     stop: () => {},
     status: (): ReconcileStatus => status,
+    fleetRouting: () => ({ v: 1, routes: [] }),
   };
 }
 

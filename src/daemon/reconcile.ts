@@ -1,9 +1,13 @@
 /* Reconciles this node's registry placement with its supervised processes. */
 
+import { renderFleetRouting } from "../core/placement/fleet-routes.ts";
 import { createPortAllocator } from "../core/placement/ports.ts";
 import { planReconcile, type ReconcileAction } from "../core/placement/reconcile.ts";
 import { sameServing, servingOf } from "../core/placement/serving.ts";
+import { nowDate } from "../core/registry/context.ts";
 import { countingRegistry, storeOpsOf } from "../core/registry/counting.ts";
+import { listNodeRecords } from "../core/registry/nodes.ts";
+import type { FleetRouting } from "../core/types/ingress.ts";
 import type { NodeServing } from "../core/types/registry.ts";
 import type { RuntimeDriver, RuntimeProcess } from "../core/types/runtime.ts";
 import { type PlacementView, readDesired } from "./_desired.ts";
@@ -47,6 +51,12 @@ export interface Reconciler {
   shutdown(): Promise<void>;
   stop(): void;
   status(): ReconcileStatus;
+  /**
+   * The fleet's routing as of the last pass that read it: every host the fleet
+   * answers on and every node answering, in node order. Empty before the first
+   * pass. What the ingress routes of the node API serve.
+   */
+  fleetRouting(): FleetRouting;
 }
 
 export interface ReconcilerOptions {
@@ -97,6 +107,7 @@ export function createReconciler(
   let lastActions: ReconcileAction[] = [];
   let failures: ReconcileFailure[] = [];
   let lastPlacements: PlacementView[] = [];
+  let fleetRouting: FleetRouting = { v: 1, routes: [] };
   /* What the heartbeat was last asked to tell the fleet this node serves. */
   let announced: NodeServing | undefined;
 
@@ -133,9 +144,22 @@ export function createReconciler(
     let placements: PlacementView[] = [];
     try {
       /* Other nodes' placements are not desired locally and are stopped if present. */
-      const state = await readDesired(registry, { nodeId: daemon.nodeId });
+      const [state, nodes] = await Promise.all([
+        readDesired(registry, { nodeId: daemon.nodeId }),
+        listNodeRecords(registry),
+      ]);
       const desired = state.environments;
       placements = state.placements;
+      /* Rendered from what the pass read, before anything here changes: this
+         node's own processes reach the fleet through its heartbeat, like every
+         other node's, so every node's copy of the routing says the same. */
+      fleetRouting = renderFleetRouting({
+        platformDomains: daemon.config.platformDomains,
+        environments: state.fleet,
+        nodes,
+        now: nowDate(registry),
+        api: daemon.config.api.public,
+      });
       /* Preserve read failures beside actions for the resolvable environments. */
       for (const failure of state.failures) {
         pending.push({ at: new Date().toISOString(), ...failure });
@@ -253,6 +277,8 @@ export function createReconciler(
       shutdown = (activePass ?? Promise.resolve()).then(() => {});
       return shutdown;
     },
+
+    fleetRouting: (): FleetRouting => fleetRouting,
 
     status(): ReconcileStatus {
       return {

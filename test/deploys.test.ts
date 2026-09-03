@@ -1024,6 +1024,7 @@ function fakeReconciler(processes: () => RuntimeProcess[] = () => running): Reco
     start: () => {},
     shutdown: () => Promise.resolve(),
     stop: () => {},
+    fleetRouting: () => ({ v: 1, routes: [] }),
     status: () => ({
       lastRunAt: null,
       running: false,

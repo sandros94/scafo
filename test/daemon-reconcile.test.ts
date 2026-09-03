@@ -210,6 +210,42 @@ describe("what a node tells the fleet it serves", () => {
   });
 });
 
+describe("the fleet routing a pass leaves behind", () => {
+  it("is empty before the first pass, then lists every live node serving, this one included", async () => {
+    const world = await seededWorld();
+    const heartbeat = await attachHeartbeat(world);
+    await registerNode(world.daemon.registry, {
+      v: 1,
+      id: "node-b",
+      publicKey: { kty: "OKP", crv: "Ed25519", x: "b" },
+      addresses: { internal: "10.0.0.2", apiPort: 7400 },
+      heartbeatAt: new Date().toISOString(),
+      serving: { "shop/production": { port: 42_010 } },
+    });
+    expect(world.reconciler.fleetRouting()).toEqual({ v: 1, routes: [] });
+
+    await world.reconciler.runOnce();
+    /* This node's own process reaches the routing the way every node's does:
+       through its record, so it shows up one pass after it started. */
+    expect(world.reconciler.fleetRouting().routes.map((route) => route.upstreams)).toEqual([
+      [{ node: "node-b", address: "10.0.0.2:42010" }],
+      [{ node: "node-b", address: "10.0.0.2:42010" }],
+    ]);
+
+    await heartbeat.beat();
+    await world.reconciler.runOnce();
+    expect(world.reconciler.fleetRouting().routes[0]).toEqual({
+      host: "shop--production.apps.test",
+      project: PROJECT,
+      env: ENV,
+      upstreams: [
+        { node: "node-a", address: "127.0.0.1:42000" },
+        { node: "node-b", address: "10.0.0.2:42010" },
+      ],
+    });
+  });
+});
+
 async function attachHeartbeat(world: Awaited<ReturnType<typeof seededWorld>>) {
   await registerNode(world.daemon.registry, {
     v: 1,
