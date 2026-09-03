@@ -14,7 +14,7 @@ Ask before acting when intent is ambiguous. For design or product decisions, run
 - Each deployed environment has its own Celld fleet. A Scafo node may supervise one Celld node process per assigned environment. Unqualified `fleet` and `node` mean Scafo's machine-level concepts; name Celld's process-level concepts explicitly.
 - Scafo requires Celld 0.4.0. Celld owns deployment adoption, application health, cells, and runtime resource policy; Scafo owns registry, auth, placement, supervision, deploy intake, and the routing every ingress reads.
 - Celld exposes one current deployment per environment fleet. Scafo records a monotonic deployment revision, not a selected version; it has no old-build host or local version selection. See https://github.com/denoland/celld/issues/181.
-- `/.well-known/scafo/health` is served by the node/API listener; `/.well-known/celld/health` is served on application hosts.
+- `/.well-known/scafo/health` is served by the node/API listener; `/.well-known/celld/health` is served on application hosts. `scafo health` probes the former at the listener it resolves from the daemon's own sources (env and config file, not `sail` flags); it is the image's HEALTHCHECK.
 
 ## Commands
 

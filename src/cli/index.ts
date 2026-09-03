@@ -6,6 +6,7 @@ import { readPackageVersion } from "./_utils.ts";
 import { deploy } from "./commands/deploy.ts";
 import { env } from "./commands/env.ts";
 import { fleet } from "./commands/fleet.ts";
+import { health } from "./commands/health.ts";
 import { metrics } from "./commands/metrics.ts";
 import { keygenAlias, operator } from "./commands/operator.ts";
 import { project } from "./commands/project.ts";
@@ -28,11 +29,16 @@ const main = defineCommand({
    * people; `fleet` is the machines of one installation; `project` is the things
    * it hosts. Everything after them acts on what is deployed.
    *
+   * `health` comes straight after `sail` because it is the other half of it:
+   * what a machine does, and whether it is doing it. It is what the image's
+   * HEALTHCHECK runs.
+   *
    * `up` and `keygen` are what two of these were called before the rename. They
    * are hidden, they say so once, and they go at launch.
    */
   subCommands: {
     sail,
+    health,
     remote,
     operator,
     fleet,

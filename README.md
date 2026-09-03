@@ -36,6 +36,8 @@ They use mock `*.scafo.test` hosts and a SeaweedFS container as the S3-compatibl
 
 `/.well-known/scafo/health` is the Scafo node/API health endpoint. `/.well-known/celld/health` is the deployed application's Celld health endpoint.
 
+`scafo health` asks the node on the machine it runs on. It resolves the listener from the same environment and config file the node boots from, so it follows a listener moved onto the tunnel or any other address; it is the container image's healthcheck. A listener chosen with `sail --listen` is not in either source, so pass the same flag or set `SCAFO_LISTEN`.
+
 ## Production use
 
 - **Linux host:** [`scripts/install.sh`](./scripts/install.sh) downloads and SHA-256 verifies Scafo, Celld, Caddy, and esbuild, then writes systemd units and `/etc/scafo` when run as root. It does not start a node; configure bucket credentials first.

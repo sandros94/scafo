@@ -49,11 +49,17 @@ services:
       SCAFO_ADVERTISE: node-a:7400
     command: ["sail", "--config", "/etc/scafo/scafo.config.jsonc"]
     healthcheck:
+      # The image's own probe, given the same config file the node boots from:
+      # it asks whatever that says the node bound, rather than a fixed address.
       test:
-        - CMD
-        - node
-        - -e
-        - "fetch('http://127.0.0.1:7400/.well-known/scafo/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+        [
+          "CMD",
+          "node",
+          "/app/dist/cli/index.mjs",
+          "health",
+          "--config",
+          "/etc/scafo/scafo.config.jsonc",
+        ]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -112,11 +118,17 @@ services:
       SCAFO_ADVERTISE: node-b:7400
     command: ["sail", "--config", "/etc/scafo/scafo.config.jsonc"]
     healthcheck:
+      # The image's own probe, given the same config file the node boots from:
+      # it asks whatever that says the node bound, rather than a fixed address.
       test:
-        - CMD
-        - node
-        - -e
-        - "fetch('http://127.0.0.1:7400/.well-known/scafo/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+        [
+          "CMD",
+          "node",
+          "/app/dist/cli/index.mjs",
+          "health",
+          "--config",
+          "/etc/scafo/scafo.config.jsonc",
+        ]
       interval: 5s
       timeout: 5s
       retries: 30

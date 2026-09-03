@@ -136,8 +136,12 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
         SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
         SCAFO_INGRESS_TOKEN: INGRESS_TOKEN,
         SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
+        /* In the environment rather than on the command line, because the
+           image's healthcheck resolves the listener from the same sources the
+           daemon does and a flag is not one of them. */
+        SCAFO_LISTEN: `0.0.0.0:${String(NODE_PORT)}`,
       })
-      .withCommand(["sail", "--listen", `0.0.0.0:${String(NODE_PORT)}`])
+      .withCommand(["sail"])
       .withLogConsumer((stream: Readable) => {
         stream.on("data", (chunk) => nodeLog.push(String(chunk)));
         stream.on("err", (chunk) => nodeLog.push(String(chunk)));
@@ -184,7 +188,7 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
   );
 
   it(
-    "declares and reaches a healthy fixed-loopback image healthcheck",
+    "declares a healthcheck that reads the node's own configuration, and reaches it",
     async () => {
       const health = await until(
         "the node to answer /.well-known/scafo/health",
@@ -210,13 +214,10 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
         StartPeriod?: number;
         Retries?: number;
       };
+      /* The probe is the CLI's own `health`, so the container's listener — set
+         here to the wildcard, not the default loopback — is what it asks. */
       expect(healthcheck).toMatchObject({
-        Test: [
-          "CMD",
-          "node",
-          "-e",
-          'fetch("http://127.0.0.1:7400/.well-known/scafo/health").then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))',
-        ],
+        Test: ["CMD", "node", "/app/dist/cli/index.mjs", "health"],
         Interval: 5_000_000_000,
         Timeout: 3_000_000_000,
         StartPeriod: 30_000_000_000,
@@ -233,9 +234,19 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
         return state.code === 0 && state.output.trim() === "healthy" ? state : null;
       });
 
+      /* What the probe itself says, run the way the healthcheck runs it: the
+         line names the listener it read out of the node's own configuration. */
+      const probe = await node.exec(["node", "/app/dist/cli/index.mjs", "health"]);
+      expect(probe.exitCode, probe.output).toBe(0);
+      expect(probe.output).toContain(`0.0.0.0:${String(NODE_PORT)}`);
+
       const record = await readJson<NodeRecord>(registry, nodeKey(NODE_ID));
       expect(record?.value.addresses).toMatchObject({ apiPort: NODE_PORT });
-      observed.health = { ...JSON.parse(health.body), imageHealth: healthy.output.trim() };
+      observed.health = {
+        ...JSON.parse(health.body),
+        imageHealth: healthy.output.trim(),
+        probe: probe.output.trim(),
+      };
     },
     STEP_TIMEOUT_MS,
   );

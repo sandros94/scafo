@@ -141,8 +141,12 @@ const MAX_CAUSE_DEPTH = 4;
  * The chain is what carries the reason in the common case — `fetch` reports
  * `TypeError: fetch failed` and puts the refused connection in its `cause`, so a
  * renderer that stopped at the top would print nothing an operator could act on.
+ *
+ * Exported for the callers that wrap such a failure in a scafo one of their own:
+ * a `ScafoError` is printed by its problem document alone, so whatever the cause
+ * chain said has to be carried into the detail or it is lost.
  */
-function describeUnexpected(error: unknown): string {
+export function describeUnexpected(error: unknown): string {
   const said: string[] = [];
 
   let current: unknown = error;

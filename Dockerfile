@@ -77,8 +77,11 @@ USER scafo
 # The default listener remains loopback; wider binding requires explicit transport configuration.
 EXPOSE 7400
 
-# This probe assumes the default loopback listener; custom listeners need a custom probe.
-HEALTHCHECK --interval=5s --timeout=3s --start-period=30s --retries=3 CMD ["node", "-e", "fetch(\"http://127.0.0.1:7400/.well-known/scafo/health\").then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+# The probe reads the same configuration the daemon does, so it follows the
+# listener wherever it is bound, the WireGuard default included. It reads the
+# environment and the config file; a listener chosen with a `sail --listen` flag
+# is invisible to it, so set SCAFO_LISTEN or node.listen instead.
+HEALTHCHECK --interval=5s --timeout=3s --start-period=30s --retries=3 CMD ["node", "/app/dist/cli/index.mjs", "health"]
 
 # Configure at least 50s stop grace (or CELLD_SHUTDOWN_TOTAL_MS + 10s) so the node can drain.
 STOPSIGNAL SIGTERM

@@ -331,10 +331,17 @@ export function advertisedAddress(node: DaemonConfig["node"]): HostPort {
   return parseHostPort(node.listen, "node.listen");
 }
 
+/** How a listener bound on this machine is dialled from it. A wildcard bind
+ * answers on loopback; every specific bind is dialled as it was bound,
+ * tunnel addresses included. */
+export function localDialHost(host: string): string {
+  return WILDCARD_BIND_HOSTS.includes(host) ? DEFAULT_BIND_HOST : host;
+}
+
 /** Local runtime dial address. Wildcard binds use loopback; specific binds stay
  * specific, including tunnel addresses. */
 export function runtimeDialHost(runtime: DaemonConfig["runtime"]): string {
-  return WILDCARD_BIND_HOSTS.includes(runtime.bindHost) ? DEFAULT_BIND_HOST : runtime.bindHost;
+  return localDialHost(runtime.bindHost);
 }
 
 /**
