@@ -12,11 +12,12 @@ data:
   SCAFO_PLATFORM_DOMAINS: "apps.example.com"
   SCAFO_LISTEN: "0.0.0.0:7400"
   # `none` declares the pod network private: runtime processes bind the pod
-  # address, so every sidecar can reach whichever node holds a host.
+  # address, so the cluster's Traefik dials whichever pod holds a host directly.
   SCAFO_TRANSPORT: "none"
-  SCAFO_TRAEFIK_ENTRYPOINTS: "web"
+  # The entryPoint the routers are attached to is the TLS one of the bundled
+  # Traefik; see traefik-config.yaml, which is what polls this routing.
+  SCAFO_TRAEFIK_ENTRYPOINTS: "websecure"
   SCAFO_OBSERVABILITY: "1"
-  SCAFO_INGRESS_ACCESS_LOG: "/var/log/scafo-ingress/access.log"
 ---
 apiVersion: v1
 kind: Service
@@ -32,6 +33,23 @@ spec:
       port: 7400
       targetPort: api
 ---
+# Where the bundled Traefik polls the fleet's routing. Every node renders the
+# same document, so this Service may answer from any of them; it asks for no
+# preferred node, which spreads each host over every pod serving it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: scafo-api
+  namespace: scafo
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: scafo
+  ports:
+    - name: api
+      port: 7400
+      targetPort: api
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -40,7 +58,8 @@ metadata:
   labels:
     app.kubernetes.io/name: scafo
 spec:
-  # Shared cluster ingress cannot select sidecars assigned to a particular environment.
+  # One node to start with. Scaling out is supported: the cluster edge reads the
+  # whole fleet's routing, so it reaches a host on whichever pod holds it.
   replicas: 1
   serviceName: scafo-nodes
   persistentVolumeClaimRetentionPolicy:
@@ -61,9 +80,6 @@ spec:
       terminationGracePeriodSeconds: 50
       securityContext:
         fsGroup: 10001
-      volumes:
-        - name: ingress-log
-          emptyDir: {}
       containers:
         - name: node
           # Replace VERSION with a published Scafo release before applying.
@@ -78,7 +94,8 @@ spec:
           envFrom:
             # Create these Secrets outside the manifest: `scafo-bucket` holds the
             # bucket-root credentials, `scafo-ingress` the SCAFO_INGRESS_TOKEN the
-            # sidecar presents to read the fleet's routing and to keep TLS state.
+            # cluster's Traefik presents to read the fleet's routing. That token
+            # needs a second copy in `kube-system`, where Traefik runs.
             - secretRef:
                 name: scafo-bucket
             - secretRef:
@@ -100,9 +117,6 @@ spec:
           volumeMounts:
             - name: state
               mountPath: /var/lib/scafo
-            - name: ingress-log
-              mountPath: /var/log/scafo-ingress
-              readOnly: true
           startupProbe:
             httpGet:
               path: /.well-known/scafo/health
@@ -127,49 +141,6 @@ spec:
               memory: "512Mi"
             limits:
               memory: "2Gi"
-        - name: traefik
-          image: traefik:v3.7.11
-          env:
-            - name: SCAFO_INGRESS_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: scafo-ingress
-                  key: SCAFO_INGRESS_TOKEN
-          # Traefik reads one source of static configuration, and a file cannot
-          # carry a Secret: the whole of it is arguments, the token expanded in.
-          args:
-            - "--entryPoints.web.address=:8000"
-            - "--entryPoints.traefik.address=:8080"
-            # The sidecar pulls the fleet's routing from its colocated node over
-            # pod loopback; `prefer=self` puts that node's own processes first.
-            - "--providers.http.endpoint=http://127.0.0.1:7400/v1/ingress/routes/traefik?prefer=self"
-            - "--providers.http.headers.Authorization=Bearer $(SCAFO_INGRESS_TOKEN)"
-            - "--providers.http.pollInterval=5s"
-            - "--ping.entryPoint=traefik"
-            - "--accessLog.filePath=/var/log/scafo-ingress/access.log"
-            - "--accessLog.format=json"
-          securityContext:
-            runAsNonRoot: true
-            runAsUser: 10001
-            runAsGroup: 10001
-            allowPrivilegeEscalation: false
-          ports:
-            - name: web
-              containerPort: 8000
-          volumeMounts:
-            - name: ingress-log
-              mountPath: /var/log/scafo-ingress
-          readinessProbe:
-            httpGet:
-              path: /ping
-              port: 8080
-            periodSeconds: 5
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              memory: "256Mi"
   volumeClaimTemplates:
     - metadata:
         name: state
@@ -179,20 +150,6 @@ spec:
         resources:
           requests:
             storage: "1Gi"
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: scafo-ingress
-  namespace: scafo
-spec:
-  type: ClusterIP
-  selector:
-    app.kubernetes.io/name: scafo
-  ports:
-    - name: http
-      port: 80
-      targetPort: web
 ---
 # cert-manager and this ClusterIssuer are operator-managed prerequisites.
 apiVersion: cert-manager.io/v1
@@ -210,11 +167,16 @@ spec:
     - apps.example.com
     - "*.apps.example.com"
 ---
-# K3s's bundled Traefik is the cluster edge; each pod retains its own pull-provider sidecar.
+# The routing comes from Scafo's http provider, so nothing here routes anything.
+# This Ingress exists to hand the wildcard Secret to Traefik: its Kubernetes
+# provider reads `spec.tls` into the certificate store before it looks at rules,
+# so an Ingress with no rules adds the certificate and creates no router. The
+# store is matched by SNI, which is how the platform hosts of the `@http`
+# routers are served this certificate rather than an ACME-issued one.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: scafo-platform
+  name: scafo-platform-tls
   namespace: scafo
 spec:
   ingressClassName: traefik
@@ -223,24 +185,3 @@ spec:
         - apps.example.com
         - "*.apps.example.com"
       secretName: scafo-platform-tls
-  rules:
-    - host: "apps.example.com"
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: scafo-ingress
-                port:
-                  number: 80
-    - host: "*.apps.example.com"
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: scafo-ingress
-                port:
-                  number: 80

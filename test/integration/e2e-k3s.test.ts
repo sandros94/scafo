@@ -1,7 +1,8 @@
 /*
- * The Kubernetes contract: the operator manifest, K3s's default Traefik, and a locally built node
- * image meet in one disposable cluster. Product-specific TLS behaviour stays in its focused
- * Docker suite.
+ * The Kubernetes contract: the operator manifest, K3s's default Traefik reading the fleet's
+ * routing through the example's HelmChartConfig, and a locally built node image meet in one
+ * disposable cluster. The routers move to the `web` entryPoint here — nothing in this cluster
+ * can obtain a certificate, and product-specific TLS behaviour stays in its focused Docker suite.
  */
 
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -43,7 +44,7 @@ const K3S_IMAGE = "rancher/k3s:v1.36.3-k3s1";
 const IMAGE_TAG = "scafo-e2e-k3s";
 const NAMESPACE = "scafo-e2e";
 const PLATFORM_DOMAIN = "scafo.k3s.test";
-/** What the Traefik sidecar presents to its node; the manifest reads it from a Secret. */
+/** What the cluster's Traefik presents to the fleet; both Secrets carry it. */
 const INGRESS_TOKEN = "e2e-k3s-ingress-token";
 const PROJECT = "app";
 const BUCKET: BucketSettings = {
@@ -60,9 +61,13 @@ const SETUP_TIMEOUT_MS = 600_000;
 const SCENARIO_TIMEOUT_MS = 900_000;
 const TEARDOWN_TIMEOUT_MS = 180_000;
 const TRAEFIK_HTTP_PORT = 80;
+/** Where the bundled Traefik polls the routing, once the manifest's Service is namespaced here. */
+const PROVIDER_ENDPOINT = `http://scafo-api.${NAMESPACE}.svc:7400/v1/ingress/routes/traefik`;
 const STORE_NODE_PORT = 30_333;
 const API_NODE_PORT = 30_400;
 const WGET_TIMEOUT_SECONDS = 10;
+/** The suite's own Service, distinct from the manifest's `scafo-api`: one daemon, published. */
+const CONTROL_SERVICE = "scafo-control-api";
 const CONTROL_LABEL = "scafo.e2e/control";
 const CONTROL_VALUE = "true";
 const CONTROL_LABEL_PATH = CONTROL_LABEL.replaceAll("~", "~0").replaceAll("/", "~1");
@@ -182,7 +187,16 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
       metadata: { name: "scafo-ingress", namespace: NAMESPACE },
       stringData: { SCAFO_INGRESS_TOKEN: INGRESS_TOKEN },
     });
+    /* Traefik runs in kube-system and expands the token into its provider header
+       from there, so the fleet's token needs a second copy in that namespace. */
+    await apply({
+      apiVersion: "v1",
+      kind: "Secret",
+      metadata: { name: "scafo-ingress", namespace: "kube-system" },
+      stringData: { SCAFO_INGRESS_TOKEN: INGRESS_TOKEN },
+    });
     await applyManifest();
+    await applyTraefikConfig();
 
     await readyPod(NAMESPACE, "app=seaweedfs");
     storeEndpoint = `http://${cluster.getHost()}:${String(cluster.getMappedPort(STORE_NODE_PORT))}`;
@@ -202,12 +216,23 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
       throw new Error(`could not register the operator key:\n${keygen.output}`);
     operatorKey = JSON.parse(await readFile(keyPath, "utf8")) as OperatorKeyFile;
 
-    await until("K3s bundled Traefik", DEADLINE_MS, async () => {
-      const deployment = await apps.readNamespacedDeploymentStatus({
+    /* The helm-controller upgrades the bundled release when the HelmChartConfig
+       lands, so readiness is the rolled-out pod carrying the provider argument,
+       not merely an available one. */
+    await until("K3s bundled Traefik to poll the fleet's routing", DEADLINE_MS, async () => {
+      const deployment = await apps.readNamespacedDeployment({
         namespace: "kube-system",
         name: "traefik",
       });
-      return deployment.status?.availableReplicas === 1 ? deployment : null;
+      const args = deployment.spec?.template.spec?.containers[0]?.args ?? [];
+      if (!args.some((argument) => argument.includes(PROVIDER_ENDPOINT))) return null;
+      const status = deployment.status;
+      return status?.availableReplicas === 1 &&
+        status.updatedReplicas === 1 &&
+        status.replicas === 1 &&
+        status.observedGeneration === deployment.metadata?.generation
+        ? deployment
+        : null;
     });
     const control = (await nodes())[0];
     controlPodName = control.metadata?.name as string;
@@ -225,7 +250,7 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
     await apply({
       apiVersion: "v1",
       kind: "Service",
-      metadata: { name: "scafo-api", namespace: NAMESPACE },
+      metadata: { name: CONTROL_SERVICE, namespace: NAMESPACE },
       spec: {
         type: "NodePort",
         selector: { [CONTROL_LABEL]: CONTROL_VALUE },
@@ -234,12 +259,12 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
     });
     await until("the test API service to pin one daemon", DEADLINE_MS, async () => {
       const [service, pods, endpoints] = await Promise.all([
-        core.readNamespacedService({ namespace: NAMESPACE, name: "scafo-api" }),
+        core.readNamespacedService({ namespace: NAMESPACE, name: CONTROL_SERVICE }),
         core.listNamespacedPod({
           namespace: NAMESPACE,
           labelSelector: "app.kubernetes.io/name=scafo",
         }),
-        core.readNamespacedEndpoints({ namespace: NAMESPACE, name: "scafo-api" }),
+        core.readNamespacedEndpoints({ namespace: NAMESPACE, name: CONTROL_SERVICE }),
       ]);
       const targets = pods.items
         .filter((pod) => pod.metadata?.labels?.[CONTROL_LABEL] === CONTROL_VALUE)
@@ -387,11 +412,10 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
 
       const placed = await settledSinglePlacement("single");
       expect(placed.placement.nodes).toHaveLength(1);
-      const { owner, nonOwner } = placed;
+      /* One node holds this host and the edge, which is colocated with neither,
+         reaches it there: the routing it polls names the pod that runs it. */
       await assignedServes("single", "v1");
-      /* The other node holds nothing for this host, but its sidecar forwards to the holder. */
-      await sidecarServes(nonOwner.pod, "single", "v1");
-      const leaving = owner.pod;
+      const leaving = placed.owner.pod;
       const leavingState = await stateOf(leaving);
       const leavingId = leavingState.node?.id;
       expect(leavingId).toBeDefined();
@@ -464,8 +488,10 @@ async function applyManifest(): Promise<void> {
   const raw = await readFile(join(REPO_ROOT, "examples/k3s/scafo.yaml"), "utf8");
   for (const object of k8s.loadAllYaml(raw) as Manifest[]) {
     object.metadata.namespace = NAMESPACE;
-    // The disposable K3s cluster has no cert-manager CRDs or production issuer.
-    if (object.kind === "Certificate") continue;
+    // The disposable K3s cluster has no cert-manager CRDs or production issuer,
+    // so neither the Certificate nor the Ingress that hands its Secret to
+    // Traefik's certificate store has anything to carry here.
+    if (object.kind === "Certificate" || object.kind === "Ingress") continue;
     if (
       object.kind === "ConfigMap" &&
       object.metadata.name === "scafo-node" &&
@@ -476,6 +502,8 @@ async function applyManifest(): Promise<void> {
       object.data.SCAFO_S3_PREFIX = BUCKET.prefix;
       object.data.SCAFO_S3_REGION = BUCKET.region;
       object.data.SCAFO_PLATFORM_DOMAINS = PLATFORM_DOMAIN;
+      // Nothing here can obtain a certificate: the routers move to plain HTTP.
+      object.data.SCAFO_TRAEFIK_ENTRYPOINTS = "web";
     }
     if (object.kind === "StatefulSet" && object.metadata.name === "scafo-node") {
       const spec = object.spec as {
@@ -492,42 +520,36 @@ async function applyManifest(): Promise<void> {
       node.image = IMAGE_TAG;
       node.imagePullPolicy = "IfNotPresent";
     }
-    if (
-      object.kind === "Ingress" &&
-      object.metadata.name === "scafo-platform" &&
-      object.spec !== undefined
-    )
-      object.spec = {
-        ingressClassName: "traefik",
-        rules: [
-          {
-            host: PLATFORM_DOMAIN,
-            http: {
-              paths: [
-                {
-                  path: "/",
-                  pathType: "Prefix",
-                  backend: { service: { name: "scafo-ingress", port: { number: 80 } } },
-                },
-              ],
-            },
-          },
-          {
-            host: `*.${PLATFORM_DOMAIN}`,
-            http: {
-              paths: [
-                {
-                  path: "/",
-                  pathType: "Prefix",
-                  backend: { service: { name: "scafo-ingress", port: { number: 80 } } },
-                },
-              ],
-            },
-          },
-        ],
-      };
     await apply(object as unknown as k8s.KubernetesObject & Record<string, unknown>);
   }
+}
+
+/**
+ * The example's HelmChartConfig, with this cluster's endpoint and without what
+ * it cannot exercise: no `websecure` TLS, no ACME resolver, and no volume for
+ * certificates that are never issued. What is left is the load-bearing half —
+ * the http provider and the token expanded into its header.
+ */
+async function applyTraefikConfig(): Promise<void> {
+  const raw = await readFile(join(REPO_ROOT, "examples/k3s/traefik-config.yaml"), "utf8");
+  const config = k8s.loadYaml<Manifest & { spec: { valuesContent: string } }>(raw);
+  const values = k8s.loadYaml<Record<string, unknown> & { additionalArguments: string[] }>(
+    config.spec.valuesContent,
+  );
+  const trimmed = {
+    additionalArguments: values.additionalArguments.map((argument) =>
+      argument.replace("http://scafo-api.scafo.svc:7400", `http://scafo-api.${NAMESPACE}.svc:7400`),
+    ),
+    env: values.env,
+  };
+  if (!trimmed.additionalArguments.some((argument) => argument.includes(PROVIDER_ENDPOINT)))
+    throw new Error(`the example's provider endpoint is not ${PROVIDER_ENDPOINT}`);
+  await apply({
+    apiVersion: config.apiVersion as string,
+    kind: config.kind as string,
+    metadata: { name: config.metadata.name, namespace: config.metadata.namespace },
+    spec: { valuesContent: k8s.dumpYaml(trimmed) },
+  });
 }
 
 async function nodes(): Promise<k8s.V1Pod[]> {
@@ -576,28 +598,26 @@ async function serves(host: string, version: string): Promise<void> {
       last = `last answer: ${String(answer.status)} ${answer.body.slice(0, 200)}`;
       return answer.status === 200 && answer.body.includes(`"${version}"`) ? answer : null;
     },
-    /* Which side went quiet: the edge, or the sidecars it balances across. */
+    /* Which side went quiet: the edge, or the pods whose routing it polls. */
     {
       context: async () => `${last}
-${await sidecarLogs()}`,
+${await edgeLogs()}`,
     },
   );
 }
 
 /**
- * What each pod's containers logged last and what its sidecar answers, so a
- * host that never answers says which side went quiet.
+ * What the node and Traefik containers logged last, and what each pod publishes
+ * as the fleet's routing, so a host that never answers says which side went
+ * quiet: the document, or the edge that reads it.
  */
-async function sidecarLogs(): Promise<string> {
+async function edgeLogs(): Promise<string> {
   const logs = [await containerLogs(["node", "traefik"])];
   for (const pod of await nodes()) {
-    const doc = await podGet(pod, 7400, "/v1/ingress/routes/traefik?prefer=self", {
+    const doc = await podGet(pod, 7400, "/v1/ingress/routes/traefik", {
       authorization: `Bearer ${INGRESS_TOKEN}`,
     });
-    const edge = await podGet(pod, 8000, "/", { host: `app.${PLATFORM_DOMAIN}` });
-    logs.push(
-      `--- ${pod.metadata?.name ?? "pod"} ---\nrouting: ${doc.output.slice(0, 1500)}\nsidecar: ${edge.output.slice(0, 300)}`,
-    );
+    logs.push(`--- ${pod.metadata?.name ?? "pod"} ---\nrouting: ${doc.output.slice(0, 1500)}`);
   }
   return logs.join("\n");
 }
@@ -615,24 +635,10 @@ async function containerLogs(names: string[]): Promise<string> {
   return logs.join("\n");
 }
 
+/** The placement settles on one node, and the shared edge answers wherever that is. */
 async function assignedServes(env: string, version: string): Promise<void> {
-  const { owner } = await settledSinglePlacement(env);
-  await sidecarServes(owner.pod, env, version);
-}
-
-/** Until this pod's sidecar answers the host with this version, from wherever it is held. */
-async function sidecarServes(pod: k8s.V1Pod, env: string, version: string): Promise<void> {
-  await until(
-    `${pod.metadata?.name ?? "pod"}'s sidecar to serve ${env} ${version}`,
-    DEADLINE_MS,
-    async () => {
-      const answer = await podGet(pod, 8000, "/", {
-        host: `${PROJECT}--${env}.${PLATFORM_DOMAIN}`,
-      });
-      return answer.exitCode === 0 && answer.output.includes(`"${version}"`) ? answer : null;
-    },
-    { context: sidecarLogs },
-  );
+  await settledSinglePlacement(env);
+  await serves(`${PROJECT}--${env}.${PLATFORM_DOMAIN}`, version);
 }
 
 async function settledSinglePlacement(env: string): Promise<{

@@ -12,6 +12,7 @@ import { afterAll, describe, expect, it } from "vitest";
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const INSTALL = join(REPO, "scripts/install.sh");
 const K3S = join(REPO, "examples/k3s/scafo.yaml");
+const TRAEFIK_CONFIG = join(REPO, "examples/k3s/traefik-config.yaml");
 const dirs: string[] = [];
 const run = promisify(execFile);
 
@@ -78,50 +79,26 @@ describe("lifecycle containment artifacts", () => {
     });
   });
 
-  it("keeps K3s Traefik at the edge and node-local Traefik beside each daemon", async () => {
+  it("leaves the pods without an ingress and publishes the routing K3s Traefik polls", async () => {
     const documents = await manifestDocuments();
     const workload = documents.find(
       (document): document is KubernetesWorkload => document.kind === "StatefulSet",
     );
-    const ingress = documents.find((document) => document.kind === "Ingress");
+    const api = documents.find(
+      (document) => document.kind === "Service" && document.metadata?.name === "scafo-api",
+    );
     const certificate = documents.find((document) => document.kind === "Certificate");
 
     expect(documents.some((document) => document.kind === "Secret")).toBe(false);
-    expect(workload?.spec?.template?.spec?.containers).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          name: "node",
-          image: "ghcr.io/sandros94/scafo:VERSION",
-        }),
-        expect.objectContaining({ name: "traefik", image: "traefik:v3.7.11" }),
-      ]),
-    );
-    expect(ingress).toMatchObject({
-      apiVersion: "networking.k8s.io/v1",
+    /* The cluster's Traefik routes the whole fleet, so a pod is one container. */
+    expect(workload?.spec?.template?.spec?.containers).toEqual([
+      expect.objectContaining({ name: "node", image: "ghcr.io/sandros94/scafo:VERSION" }),
+    ]);
+    expect(api).toMatchObject({
       spec: {
-        ingressClassName: "traefik",
-        rules: [
-          {
-            host: "apps.example.com",
-            http: {
-              paths: [
-                {
-                  backend: { service: { name: "scafo-ingress", port: { number: 80 } } },
-                },
-              ],
-            },
-          },
-          {
-            host: "*.apps.example.com",
-            http: {
-              paths: [
-                {
-                  backend: { service: { name: "scafo-ingress", port: { number: 80 } } },
-                },
-              ],
-            },
-          },
-        ],
+        type: "ClusterIP",
+        selector: { "app.kubernetes.io/name": "scafo" },
+        ports: [{ port: 7400, targetPort: "api" }],
       },
     });
     expect(workload).toMatchObject({
@@ -147,6 +124,66 @@ describe("lifecycle containment artifacts", () => {
         dnsNames: ["apps.example.com", "*.apps.example.com"],
       },
     });
+  });
+
+  it("carries the platform certificate to Traefik's store without routing anything", async () => {
+    const ingress = (await manifestDocuments()).find((document) => document.kind === "Ingress");
+
+    /* Rules would be routes, and every route here comes from the http provider:
+       Traefik's Kubernetes provider reads `spec.tls` before it reads rules, so
+       this loads the Secret into the certificate store and nothing else. */
+    expect(ingress).toMatchObject({
+      apiVersion: "networking.k8s.io/v1",
+      spec: {
+        ingressClassName: "traefik",
+        tls: [
+          {
+            hosts: ["apps.example.com", "*.apps.example.com"],
+            secretName: "scafo-platform-tls",
+          },
+        ],
+      },
+    });
+    expect(ingress?.spec?.rules).toBeUndefined();
+  });
+
+  it("points the bundled Traefik at the routing service on the entryPoint the nodes render", async () => {
+    const documents = await manifestDocuments();
+    const settings = documents.find(
+      (document) => document.kind === "ConfigMap" && document.metadata?.name === "scafo-node",
+    );
+    const chart = parseYAML<KubernetesDocument>(await readFile(TRAEFIK_CONFIG, "utf8"));
+    const values = parseYAML<TraefikValues>(
+      (chart.spec as { valuesContent: string }).valuesContent,
+    );
+    const service = documents.find(
+      (document) => document.kind === "Service" && document.metadata?.name === "scafo-api",
+    );
+
+    expect(chart).toMatchObject({
+      apiVersion: "helm.cattle.io/v1",
+      kind: "HelmChartConfig",
+      metadata: { name: "traefik", namespace: "kube-system" },
+    });
+    expect(values.additionalArguments).toContain(
+      `--providers.http.endpoint=http://${String(service?.metadata?.name)}.scafo.svc:7400/v1/ingress/routes/traefik`,
+    );
+    /* The token reaches the header through the container's environment, so it
+       stays in the Secret rather than in the chart values. */
+    expect(values.additionalArguments).toContain(
+      "--providers.http.headers.Authorization=Bearer $(SCAFO_INGRESS_TOKEN)",
+    );
+    expect(values.env).toEqual([
+      {
+        name: "SCAFO_INGRESS_TOKEN",
+        valueFrom: { secretKeyRef: { name: "scafo-ingress", key: "SCAFO_INGRESS_TOKEN" } },
+      },
+    ]);
+    /* One entryPoint named in two files; were they to disagree, the routers
+       would attach to an entryPoint the chart never opened. */
+    expect(Object.keys(values.ports)).toEqual([settings?.data?.SCAFO_TRAEFIK_ENTRYPOINTS]);
+    expect(values.ports.websecure?.http?.tls?.certResolver).toBe("letsencrypt");
+    expect(values.certificatesResolvers.letsencrypt.acme.httpChallenge.entryPoint).toBe("web");
   });
 });
 
@@ -198,7 +235,19 @@ async function manifestDocuments(): Promise<KubernetesDocument[]> {
 interface KubernetesDocument {
   apiVersion?: string;
   kind?: string;
+  metadata?: { name?: string };
+  data?: Record<string, string>;
   spec?: Record<string, unknown>;
+}
+
+/** The half of the bundled chart's values this example sets. */
+interface TraefikValues {
+  additionalArguments: string[];
+  env: unknown[];
+  ports: Record<string, { http?: { tls?: { certResolver?: string } } }>;
+  certificatesResolvers: {
+    letsencrypt: { acme: { httpChallenge: { entryPoint: string } } };
+  };
 }
 
 interface KubernetesWorkload extends KubernetesDocument {

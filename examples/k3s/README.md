@@ -1,35 +1,37 @@
 # Scafo on K3s
 
-This production-shaped example uses K3s's bundled Traefik as the cluster edge. Each Scafo pod retains a node-local Traefik sidecar that polls its colocated node and routes only locally running processes. K3s Traefik forwards the original `Host` header to that sidecar through the `scafo-ingress` ClusterIP Service.
+This production-shaped example makes K3s's bundled Traefik the fleet's ingress. Traefik polls `/v1/ingress/routes/traefik` on the Scafo pods through the `scafo-api` Service and routes each host to whichever pod runs it, so the pods carry no ingress of their own.
 
-Native direct use of cluster Traefik as Scafo's pull provider is not supported by this example.
+Scafo's routers are `<name>@http`; operator-owned Ingress and IngressRoute objects keep working beside them in their own providers.
 
 ## Prerequisites
 
-- K3s's bundled Traefik is enabled and owns the `traefik` IngressClass.
-- An external S3-compatible store is reachable from every pod and honours `If-Match` / `If-None-Match` conditional writes.
-- The `scafo` namespace and its `scafo-bucket` and `scafo-ingress` Secrets exist before applying the manifest. `scafo-bucket` contains only `SCAFO_S3_ACCESS_KEY` and `SCAFO_S3_SECRET_KEY`; bucket credentials are fleet-root authority. `scafo-ingress` holds `SCAFO_INGRESS_TOKEN`, the one credential the Traefik sidecar presents to its node.
-- cert-manager is installed separately. K3s does not bundle it. An operator-created `ClusterIssuer` that can issue the platform apex and wildcard already exists.
+- K3s v1.32 or newer with its bundled Traefik enabled. Older releases ship Traefik 2.11, which has no `providers.http.headers` and cannot present the ingress token. RKE2 works the same way; see the notes in [traefik-config.yaml](traefik-config.yaml) for its chart name and manifests directory.
+- An external S3-compatible store, reachable from every pod, honouring `If-Match` / `If-None-Match` conditional writes.
+- cert-manager, installed separately — K3s does not bundle it — with a `ClusterIssuer` that can issue the platform apex and its wildcard. That needs DNS-01, so configure the issuer, its DNS-provider credentials, and DNS first.
+- Apex and wildcard DNS pointing at the K3s Traefik address.
 
-Create the namespace and Secrets outside the manifest:
+Create the namespace and Secrets outside the manifest. `scafo-bucket` holds the bucket credentials, which are fleet-root authority. `scafo-ingress` holds `SCAFO_INGRESS_TOKEN`, the one credential an ingress ever holds; Traefik runs in `kube-system`, so the same token goes there too.
 
 ```sh
 kubectl create namespace scafo
 kubectl -n scafo create secret generic scafo-bucket \
   --from-literal=SCAFO_S3_ACCESS_KEY="$SCAFO_S3_ACCESS_KEY" \
   --from-literal=SCAFO_S3_SECRET_KEY="$SCAFO_S3_SECRET_KEY"
-kubectl -n scafo create secret generic scafo-ingress \
-  --from-literal=SCAFO_INGRESS_TOKEN="$(openssl rand -base64 32)"
-```
 
-`*.apps.example.com` requires DNS-01 validation. Configure the ClusterIssuer, its DNS-provider credentials, and DNS before applying this manifest.
+INGRESS_TOKEN="$(openssl rand -base64 32)"
+kubectl -n scafo create secret generic scafo-ingress \
+  --from-literal=SCAFO_INGRESS_TOKEN="$INGRESS_TOKEN"
+kubectl -n kube-system create secret generic scafo-ingress \
+  --from-literal=SCAFO_INGRESS_TOKEN="$INGRESS_TOKEN"
+```
 
 ## Apply
 
 1. Edit the non-secret `scafo-node` ConfigMap values: S3 endpoint, bucket, prefix, and transport decision. Replace `apps.example.com` consistently in the ConfigMap, Certificate, and Ingress.
 2. Set the manifest image's `VERSION` tag to a published Scafo release. This is the only publication-time substitution; never use a floating tag.
 3. Set `Certificate.spec.issuerRef.name` to the existing ClusterIssuer.
-4. Apply the manifest and wait for the Certificate and StatefulSet:
+4. Apply the manifest and wait for the Certificate and the StatefulSet:
 
    ```sh
    kubectl apply -f scafo.yaml
@@ -37,15 +39,34 @@ kubectl -n scafo create secret generic scafo-ingress \
    kubectl -n scafo rollout status statefulset/scafo-node
    ```
 
-The Certificate covers `apps.example.com` and `*.apps.example.com`. The Ingress routes the platform apex to the Scafo API and application subdomains through K3s Traefik; configure apex and wildcard DNS to the K3s Traefik address.
+5. Set the ACME contact address in `traefik-config.yaml`, then place it on every server node. The helm-controller picks it up and upgrades the bundled release.
+
+   ```sh
+   sudo cp traefik-config.yaml /var/lib/rancher/k3s/server/manifests/traefik-config.yaml
+   kubectl -n kube-system rollout status deploy/traefik
+   ```
+
+## Verify
+
+```sh
+kubectl -n kube-system logs deploy/traefik | grep -i "provider.*http"
+curl -sk https://<cluster-edge>/.well-known/scafo/health -H "Host: apps.example.com"
+```
+
+A deployed environment answers at its own host the same way. Until a project is deployed, only the platform apex is routed: Scafo publishes no wildcard fallback, and an unclaimed host is a 404 at the edge.
+
+## Certificates
+
+- The platform apex and `*.apps.example.com` come from cert-manager. The rules-less `scafo-platform-tls` Ingress exists only to put that Secret into Traefik's certificate store, which is matched by SNI for the `@http` routers.
+- A custom domain an environment claimed is issued by Traefik itself, HTTP-01 on the `web` entryPoint, once its DNS points at the cluster edge. Traefik skips any host the store already covers, so the wildcard is never re-issued.
 
 ## Operating constraints
 
 - A fleet is one bucket and prefix. Use separate ones for separate trust domains.
 - The external object store is a control-plane dependency, not backup-only storage. Reliable low-latency conditional writes are required.
-- `SCAFO_LISTEN=0.0.0.0:7400` permits in-cluster service access. `SCAFO_TRANSPORT=none` is valid only when the pod network is private and trusted; use an explicit transport decision for other networks. With it, runtime processes bind the pod address, which is how the sidecars reach a host's holder on any node.
+- `SCAFO_LISTEN=0.0.0.0:7400` permits in-cluster service access. `SCAFO_TRANSPORT=none` is valid only when the pod network is private and trusted; use an explicit transport decision for other networks. With it, runtime processes bind the pod address, which is how Traefik reaches a host's holder on any node.
 - The node process stays PID 1 in a private PID namespace. `terminationGracePeriodSeconds: 50` is the minimum; use at least `CELLD_SHUTDOWN_TOTAL_MS + 10s` when that Celld value is raised.
 - The StatefulSet gives each node a retained `1Gi` claim through K3s's default StorageClass. This preserves its identity across replacement; size the claim and retention policy for the operator's recovery plan.
-- The StatefulSet starts with one replica. Scaling it out is supported: each sidecar reads the fleet's routing from its node and forwards a host to whichever node holds it, its own first.
+- The StatefulSet starts with one replica and scales out: the routing Traefik polls names every pod serving a host, so a new node joins the edge as soon as it runs something.
 
 Use `kubectl -n scafo port-forward svc/scafo-nodes 7400:7400` for deploy and operator commands. Application traffic enters through K3s Traefik, not the node API.

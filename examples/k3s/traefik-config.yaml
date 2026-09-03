@@ -1,0 +1,71 @@
+# Customises K3s's bundled Traefik so it reads the fleet's routing itself.
+#
+# Copy this file to /var/lib/rancher/k3s/server/manifests/traefik-config.yaml on
+# every server node; the filename must be RFC-1123. K3s's helm-controller merges
+# it into the bundled chart and upgrades the release. Never edit the neighbouring
+# traefik.yaml: K3s rewrites it on every start. On RKE2 the directory is
+# /var/lib/rancher/rke2/server/manifests/ and the chart is named `rke2-traefik`.
+#
+# Requires K3s or RKE2 v1.32 or newer, whose chart ships Traefik v3: the bearer
+# header below is `providers.http.headers`, which Traefik 2.11 does not have.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    # A Traefik provider is static configuration, settled at startup, and the
+    # chart has no value for the http one — its schema rejects unknown keys — so
+    # arguments are the only way to declare it.
+    #
+    # Kubernetes expands $(VAR) in a container's arguments from that container's
+    # environment, so the token stays in the Secret rather than in this file.
+    additionalArguments:
+      - "--providers.http.endpoint=http://scafo-api.scafo.svc:7400/v1/ingress/routes/traefik"
+      - "--providers.http.pollInterval=5s"
+      - "--providers.http.headers.Authorization=Bearer $(SCAFO_INGRESS_TOKEN)"
+    # Traefik runs in kube-system, so the ingress token needs a copy there. It is
+    # the only credential Traefik holds; it never sees bucket credentials.
+    env:
+      - name: SCAFO_INGRESS_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: scafo-ingress
+            key: SCAFO_INGRESS_TOKEN
+    # Scafo's routers are attached to `websecure` (SCAFO_TRAEFIK_ENTRYPOINTS);
+    # `asDefault` keeps operator-owned Kubernetes routes on the same entryPoint.
+    ports:
+      websecure:
+        asDefault: true
+        http:
+          tls:
+            enabled: true
+            certResolver: letsencrypt
+    # For domains an environment claimed: their DNS points at this cluster, so
+    # HTTP-01 on the `web` entryPoint resolves without a DNS-provider plugin.
+    # The platform apex and its wildcard are not issued here — cert-manager holds
+    # them, and ACME skips a host the certificate store already covers.
+    certificatesResolvers:
+      letsencrypt:
+        acme:
+          email: "operator@example.com"
+          storage: /data/acme.json
+          httpChallenge:
+            entryPoint: web
+    # Issued certificates survive a restart only on a volume. The chart mounts
+    # the claim at /data as uid 65532; acme.json must exist with mode 600 before
+    # Traefik reads it, which is what the init container is for.
+    persistence:
+      enabled: true
+      size: 128Mi
+    deployment:
+      initContainers:
+        - name: volume-permissions
+          image: busybox:latest
+          command: ["sh", "-c", "touch /data/acme.json; chmod -v 600 /data/acme.json"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+    podSecurityContext:
+      fsGroup: 65532
