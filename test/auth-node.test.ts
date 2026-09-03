@@ -15,12 +15,10 @@ import {
   signNodeToken,
 } from "../src/core/auth/index.ts";
 import {
-  acquireLease,
   createCountingStore,
-  type LeaseHandle,
+  nodeKey,
   operatorKey,
   registerNode,
-  removeNode,
 } from "../src/core/registry/index.ts";
 import type { ScafoError } from "../src/core/error.ts";
 import type { NodeRecord, OperatorRecord } from "../src/core/types/registry.ts";
@@ -413,10 +411,9 @@ function refusal(token: string): Promise<ScafoError> {
   return rejectionOf(() => verifier.verify(token));
 }
 
+/** The node's record gone from the bucket, however it got that way. */
 async function removeRegisteredNode(): Promise<void> {
-  const lease = await acquireLease(clock.ctx, "coordinator");
-  expect(lease, "expected to hold the coordinator lease").not.toBeNull();
-  await removeNode(clock.ctx, NODE_ID, lease as LeaseHandle);
+  await clock.ctx.store.del(nodeKey(NODE_ID));
 }
 
 function jsonSegment(value: unknown): string {

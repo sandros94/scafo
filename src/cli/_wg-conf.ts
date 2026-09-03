@@ -74,10 +74,11 @@ export function renderWireguardConf(opts: RenderConfOptions): string {
  * migrated one node at a time, and the ones already on the tunnel have to keep
  * reaching each other while the rest catch up.
  *
- * So is a node whose record is gone by the time it is read. The listing and the
- * reads are not one atomic view, and the coordinator deregisters nodes as it
- * reaps them: a node that left mid-render is simply not a peer, and taking the
- * whole fleet's configuration down over it would be the worse answer.
+ * So is a node whose record has gone missing between the listing and the read.
+ * Nothing in scafo deregisters a node — a node on its way out marks itself
+ * draining and its record stays — so the only way that happens is an operator
+ * emptying the key by hand; taking the whole fleet's configuration down over one
+ * absent entry would be the worse answer.
  */
 export async function collectWireguardPeers(
   registry: RegistryContext,

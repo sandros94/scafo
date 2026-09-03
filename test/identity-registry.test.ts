@@ -1,9 +1,8 @@
 /* The single reservation object is the atomic boundary between node and operator identities. */
 
 import { describe, expect, it } from "vitest";
-import { acquireLease } from "../src/core/registry/lease.ts";
 import { readJson } from "../src/core/registry/cas.ts";
-import { registerNode, removeNode } from "../src/core/registry/nodes.ts";
+import { registerNode } from "../src/core/registry/nodes.ts";
 import {
   revokeOperator,
   trustOperator,
@@ -105,7 +104,7 @@ describe("identity reservations", () => {
     });
   });
 
-  it("keeps tombstones after operator revocation and node removal", async () => {
+  it("keeps tombstones after an operator is revoked", async () => {
     const store = new MemoryCasStore();
     const { ctx } = ctxWith(store);
     await trustOperator(ctx, operator(ID, "admin"));
@@ -117,16 +116,23 @@ describe("identity reservations", () => {
     );
     await rejectsWith(() => registerNode(ctx, node(ID, "operator-key")), "reference-held");
 
+    /* And a node's own id is reserved the same way, in both directions. */
     const nodeId = "node-tombstone";
     await registerNode(ctx, node(nodeId, "node-key"));
-    const lease = await acquireLease(ctx, "coordinator-a");
-    expect(lease).not.toBeNull();
-    await removeNode(ctx, nodeId, lease!);
     await rejectsWith(() => registerNode(ctx, node(nodeId, "different")), "reference-held");
     await rejectsWith(
       () => trustOperator(ctx, operator(nodeId, "admin", { publicKey: key("node-key") })),
       "reference-held",
     );
+
+    /* The reservation, not the record, is what refused both: it names the kind
+       the id was first claimed as and never changes hands. */
+    await expect(readJson<IdentityReservation>(ctx, identityKey(nodeId))).resolves.toMatchObject({
+      value: { kind: "node", publicKey: key("node-key") },
+    });
+    await expect(readJson<IdentityReservation>(ctx, identityKey(ID))).resolves.toMatchObject({
+      value: { kind: "operator" },
+    });
   });
 
   it("keeps same-key node restarts mutable", async () => {

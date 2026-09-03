@@ -1,10 +1,9 @@
 import { ScafoError } from "../error.ts";
 import type { NodeRecord } from "../types/registry.ts";
 import { deepEqual, isCasConflict, namesFromKeys } from "./_shared.ts";
-import { createJson, deleteKey, readJson, requireJson, updateJson } from "./cas.ts";
+import { createJson, readJson, requireJson, updateJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
 import { claimIdentity, identityReservation } from "./identity.ts";
-import { type LeaseHandle, verifyLease } from "./lease.ts";
 import { nodeKey, nodesPrefix, operatorKey } from "./paths.ts";
 
 /** How often a running daemon refreshes its own record's `heartbeatAt`. */
@@ -150,21 +149,4 @@ export function isNodeLive(record: NodeRecord, now: Date, opts?: { windowMs?: nu
   const seen = Date.parse(seenAt);
   if (!Number.isFinite(seen)) return false;
   return now.getTime() - seen < (opts?.windowMs ?? NODE_LIVENESS_WINDOW_MS);
-}
-
-/**
- * Deregisters a node. Deletes cannot be conditional, so this is gated on the
- * caller still holding the coordinator lease; otherwise `ScafoError("lease-lost")`.
- */
-export async function removeNode(
-  ctx: RegistryContext,
-  id: string,
-  lease: LeaseHandle,
-): Promise<void> {
-  if (!(await verifyLease(ctx, lease))) {
-    throw new ScafoError("lease-lost", "Coordinator lease is no longer held", {
-      detail: `refusing to remove node "${id}"`,
-    });
-  }
-  await deleteKey(ctx, nodeKey(id));
 }
