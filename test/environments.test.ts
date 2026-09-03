@@ -125,6 +125,10 @@ describe("deployment revision", () => {
         deployment: { revision: 1, deployedAt: "not-a-date" },
       }),
     ).toThrow(expect.objectContaining({ code: "invalid-input" }));
+    /* A record written before the notice existed carries no key at all. */
+    expect(() => deploymentRevision({ ...environment, deployment: undefined as never })).toThrow(
+      expect.objectContaining({ code: "invalid-input" }),
+    );
 
     await clock.ctx.store.put(
       environmentKey(PROJECT, ENV),

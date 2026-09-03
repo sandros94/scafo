@@ -59,7 +59,10 @@ export async function recordDeployment(
 export function deploymentRevision(environment: EnvironmentRecord): number | null {
   const deployment = environment.deployment;
   if (deployment === null) return null;
+  /* The record is bucket input: a missing or non-object notice must surface as
+     a typed error, never as a TypeError out of the field reads below. */
   if (
+    typeof deployment !== "object" ||
     !Number.isSafeInteger(deployment.revision) ||
     deployment.revision <= 0 ||
     typeof deployment.deployedAt !== "string" ||
