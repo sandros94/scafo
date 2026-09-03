@@ -233,20 +233,6 @@ export function fleetPrefix(project: string, env: string): string {
 }
 
 /**
- * Prefix the FLEET's OWN named locks live under.
- *
- * Deliberately apart from `_scafo/tls/locks/`, which is the same mechanism for a
- * different owner: the names under that one come from the colocated ingress
- * through `/v1/storage/locks`, free-form and validated only for being
- * addressable, so an ingress could otherwise take — or take over — a lock the
- * fleet's own writers serialize on. Names here are built from validated slugs
- * and file as `<name>.json`, like every other registry record.
- */
-export function locksPrefix(): string {
-  return `${ROOT}/locks/`;
-}
-
-/**
  * Prefix the TLS material an ingress persists through this node lives under:
  * its certificates, its account keys, and anything else it must keep across
  * restarts. The keys beneath it are the CALLER's, not the registry's — nothing

@@ -1,10 +1,9 @@
 /*
- * Named locks in the bucket: taking one, waiting for one, keeping one alive while the work runs,
- * and finding out that it is gone.
+ * Named locks in the bucket: taking one, keeping one alive, giving one back, and
+ * finding out that somebody else has it.
  */
 
-import { describe, expect, it, vi } from "vitest";
-import { ScafoError } from "../src/core/error.ts";
+import { describe, expect, it } from "vitest";
 import { readJson } from "../src/core/registry/cas.ts";
 import {
   acquireLock,
@@ -12,12 +11,13 @@ import {
   LOCK_POLL_MS,
   LOCK_REFRESH_MS,
   LOCK_STALE_MS,
+  lockHolder,
   type LockSpace,
   type NamedLock,
+  refreshLock,
   releaseLock,
-  withLock,
 } from "../src/core/registry/locks.ts";
-import { locksPrefix, tlsLockKey } from "../src/core/registry/paths.ts";
+import { tlsLockKey } from "../src/core/registry/paths.ts";
 import { TLS_LOCK_SPACE } from "../src/core/registry/tls-lock.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { CLOCK_START_MS, ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
@@ -27,347 +27,127 @@ const FOREIGN = "somebody-else";
 
 /** The shipped durations, scaled so a case runs in milliseconds. */
 const SPACE: LockSpace = {
-  keyOf: (name: string): string => `${locksPrefix()}test/${name}.json`,
+  keyOf: (name: string): string => `_scafo/tls/locks/test/${name}.json`,
   refreshMs: LOCK_REFRESH_MS / 200,
   staleMs: LOCK_STALE_MS / 200,
   pollMs: LOCK_POLL_MS / 200,
 };
 
-describe("running work under a lock", () => {
-  it("takes the name, hands back what the work returned, and gives it back", async () => {
+describe("taking a lock", () => {
+  it("writes the record, and refuses the second caller of the same name", async () => {
     const { store, clock } = world();
-    let held: NamedLock | null = null;
 
-    const answer = await withLock(clock.ctx, request(), async () => {
-      held = await record(store, "one");
-      return "done";
-    });
+    const handle = await acquireLock(clock.ctx, SPACE, "one", HOLDER);
 
-    expect(answer).toBe("done");
-    expect(held).toMatchObject({ holder: HOLDER });
-    /* And the name is free the moment the work is over. */
-    await expect(store.get(SPACE.keyOf("one"))).resolves.toBeNull();
-  });
-
-  it("hands a failure of the work back untouched, and still gives the lock back", async () => {
-    const { store, clock } = world();
+    expect(handle).toMatchObject({ name: "one", lock: { holder: HOLDER } });
+    await expect(record(store, "one")).resolves.toMatchObject({ holder: HOLDER });
 
     const error = await rejectsWith(
-      () =>
-        withLock(clock.ctx, request(), () =>
-          Promise.reject(new ScafoError("invalid-input", "The work refused")),
-        ),
-      "invalid-input",
-    );
-
-    expect(error.message).toBe("The work refused");
-    await expect(store.get(SPACE.keyOf("one"))).resolves.toBeNull();
-  });
-
-  it("runs the work of two different names at the same time", async () => {
-    const { clock } = world();
-    const inside: string[] = [];
-    const one = deferred<void>();
-    const two = deferred<void>();
-
-    const first = withLock(clock.ctx, request({ name: "one" }), async () => {
-      inside.push("one");
-      await one.promise;
-    });
-    const second = withLock(clock.ctx, request({ name: "two" }), async () => {
-      inside.push("two");
-      await two.promise;
-    });
-
-    /* Neither waited for the other: two names are two locks, and an environment
-       must never be serialized behind an unrelated one. */
-    await settle();
-    expect(inside).toEqual(["one", "two"]);
-
-    one.resolve();
-    two.resolve();
-    await Promise.all([first, second]);
-  });
-});
-
-describe("waiting for a lock somebody else has", () => {
-  it("takes it the moment it is given back", async () => {
-    const { clock } = world();
-    const first = await acquireLock(clock.ctx, SPACE, "one", FOREIGN);
-    let ran = false;
-
-    const second = withLock(clock.ctx, request({ timeoutMs: 1000 }), () => {
-      ran = true;
-      return Promise.resolve("second");
-    });
-
-    await settle();
-    expect(ran, "the work ran while somebody else held the lock").toBe(false);
-
-    await releaseLock(clock.ctx, SPACE, first);
-    await expect(second).resolves.toBe("second");
-  });
-
-  it("aborts while waiting and never acquires later", async () => {
-    const { clock } = world();
-    const first = await acquireLock(clock.ctx, SPACE, "one", FOREIGN);
-    const controller = new AbortController();
-    const reason = new Error("task deadline");
-    let ran = false;
-    const waiting = withLock(
-      clock.ctx,
-      request({ timeoutMs: 1000, signal: controller.signal }),
-      async () => {
-        ran = true;
-      },
-    );
-
-    controller.abort(reason);
-    await expect(waiting).rejects.toBe(reason);
-    await releaseLock(clock.ctx, SPACE, first);
-    await elapse(SPACE.pollMs * 2);
-    expect(ran).toBe(false);
-  });
-
-  it("never acquires or invokes work for a signal already aborted", async () => {
-    const { store, clock } = world();
-    const controller = new AbortController();
-    const reason = new Error("task deadline");
-    controller.abort(reason);
-    let ran = false;
-
-    await expect(
-      withLock(clock.ctx, request({ signal: controller.signal }), async () => {
-        ran = true;
-      }),
-    ).rejects.toBe(reason);
-
-    expect(ran).toBe(false);
-    await expect(record(store, "one")).resolves.toBeNull();
-  });
-
-  it("gives up with a refusal rather than hanging, and never runs the work", async () => {
-    const { clock } = world();
-    await acquireLock(clock.ctx, SPACE, "one", FOREIGN);
-    let ran = false;
-
-    const started = Date.now();
-    const error = await rejectsWith(
-      () =>
-        withLock(clock.ctx, request({ timeoutMs: SPACE.pollMs * 4 }), () => {
-          ran = true;
-          return Promise.resolve("never");
-        }),
+      () => acquireLock(clock.ctx, SPACE, "one", FOREIGN),
       "cas-conflict",
     );
-
-    expect(ran).toBe(false);
-    expect(Date.now() - started).toBeGreaterThanOrEqual(SPACE.pollMs * 4);
-    expect(error.detail).toContain("one");
     expect(error.detail).toContain(HOLDER);
   });
 
-  it("tries exactly once when it was told to wait for nothing", async () => {
+  it("leaves a different name alone: two names are two locks", async () => {
     const { clock } = world();
-    await acquireLock(clock.ctx, SPACE, "one", FOREIGN);
+    await acquireLock(clock.ctx, SPACE, "one", HOLDER);
 
-    const started = Date.now();
-    await rejectsWith(() => withLock(clock.ctx, request({ timeoutMs: 0 }), work), "cas-conflict");
-
-    expect(Date.now() - started).toBeLessThan(SPACE.pollMs * 4);
+    await expect(acquireLock(clock.ctx, SPACE, "two", FOREIGN)).resolves.toMatchObject({
+      name: "two",
+    });
   });
 
-  it("keeps its whole wait when the machine's clock jumps forward under it", async () => {
-    const { clock } = world();
-    const first = await acquireLock(clock.ctx, SPACE, "one", FOREIGN);
-    const timeoutMs = SPACE.pollMs * 100;
-
-    steppableWallClock();
-    try {
-      const second = withLock(clock.ctx, request({ timeoutMs }), work);
-
-      /* A jump of ten times the budget, while barely any of it has been spent. */
-      await elapse(SPACE.pollMs * 2);
-      vi.setSystemTime(Date.now() + timeoutMs * 10);
-
-      /* And the lock comes back well inside the wait it was given. */
-      await elapse(SPACE.pollMs * 2);
-      await releaseLock(clock.ctx, SPACE, first);
-
-      /* A wait budgeted on the wall clock would have been spent by the jump —
-         and this caller refused a lock nobody was holding, told it had waited
-         the whole of a wait it never got. */
-      await expect(second).resolves.toBe("done");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("gives up on time when the machine's clock jumps backwards under it", async () => {
-    const { clock } = world();
-    await acquireLock(clock.ctx, SPACE, "one", FOREIGN);
-    const timeoutMs = SPACE.pollMs * 20;
-    const started = performance.now();
-
-    steppableWallClock();
-    try {
-      const waiting = rejectsWith(
-        () => withLock(clock.ctx, request({ timeoutMs }), work),
-        "cas-conflict",
-      );
-
-      await elapse(SPACE.pollMs * 2);
-      vi.setSystemTime(Date.now() - timeoutMs * 20);
-      await waiting;
-    } finally {
-      vi.useRealTimers();
-    }
-
-    /* The other half of the same rule: a jump backwards must not buy the waiter
-       time either, or work told to give up in five seconds holds its pass
-       up for as long as the clock went back. */
-    expect(performance.now() - started).toBeLessThan(timeoutMs * 5);
-  });
-
-  it("takes over one whose holder stopped restamping it", async () => {
+  it("takes over one whose holder stopped restamping it, and not a moment sooner", async () => {
     const { clock } = world();
     await acquireLock(clock.ctx, SPACE, "one", FOREIGN);
 
     /* Nobody is left to give it back, so it is waited out rather than waited on
        forever — and not a moment before it is due. */
     clock.tick(SPACE.staleMs - 1);
-    await rejectsWith(() => withLock(clock.ctx, request({ timeoutMs: 0 }), work), "cas-conflict");
+    await rejectsWith(() => acquireLock(clock.ctx, SPACE, "one", HOLDER), "cas-conflict");
 
     clock.tick(1);
-    await expect(withLock(clock.ctx, request({ timeoutMs: 0 }), work)).resolves.toBe("done");
+    await expect(acquireLock(clock.ctx, SPACE, "one", HOLDER)).resolves.toMatchObject({
+      lock: { holder: HOLDER },
+    });
+  });
+
+  it("hands a holder id that tells two daemons of one node apart", () => {
+    const first = lockHolder("node-a");
+    expect(first).toMatch(/^node-a-[0-9a-f]{8}$/);
+    expect(first).not.toBe(lockHolder("node-a"));
   });
 });
 
-describe("keeping a lock while the work runs", () => {
-  it("aborts held work and awaits cleanup before release", async () => {
+describe("keeping a lock", () => {
+  it("restamps it, so one held across the stale window is never taken over", async () => {
     const { store, clock } = world();
-    const controller = new AbortController();
-    const cleanup = deferred<void>();
-    const reason = new Error("task deadline");
-    let cleaned = false;
-    const held = withLock(clock.ctx, request({ signal: controller.signal }), async (signal) => {
-      await new Promise<void>((resolve) =>
-        signal.addEventListener("abort", () => resolve(), { once: true }),
-      );
-      await cleanup.promise;
-      cleaned = true;
-    });
-    await expect.poll(() => record(store, "one"), { interval: 2 }).not.toBeNull();
+    let handle = await acquireLock(clock.ctx, SPACE, "one", HOLDER);
 
-    controller.abort(reason);
-    await elapse(1);
-    expect(cleaned).toBe(false);
-    await expect(record(store, "one")).resolves.not.toBeNull();
-
-    cleanup.resolve();
-    await expect(held).rejects.toBe(reason);
-    expect(cleaned).toBe(true);
-    await expect(record(store, "one")).resolves.toBeNull();
-  });
-  it("restamps it, so work outlasting the stale window is never taken over", async () => {
-    const { store, clock } = world();
-    const working = deferred<string>();
-
-    const held = withLock(clock.ctx, request(), () => working.promise);
-
-    /* Three stale windows of work — what bundling and uploading an artifact
-       costs — with the clock moved half a window at a time and a restamp landing
-       between each pair. */
+    /* Three stale windows of work, with the clock moved half a window at a time
+       and a restamp landing between each pair. */
     for (let round = 0; round < 6; round++) {
       clock.tick(SPACE.staleMs / 2);
-      await expect
-        .poll(async () => (await record(store, "one"))?.refreshedAt, { interval: 2 })
-        .toBe(new Date(clock.nowMs()).toISOString());
+      handle = await refreshLock(clock.ctx, SPACE, handle);
+      await expect(record(store, "one")).resolves.toMatchObject({
+        refreshedAt: new Date(clock.nowMs()).toISOString(),
+      });
     }
 
     await rejectsWith(() => acquireLock(clock.ctx, SPACE, "one", FOREIGN), "cas-conflict");
-    working.resolve("done");
-    await expect(held).resolves.toBe("done");
   });
 
-  it("aborts the work and awaits its cleanup while a successor holds the name", async () => {
-    const { store, clock } = world();
-    const cleanup = deferred<void>();
-    let signalSeen: AbortSignal | undefined;
-    let cleaned = false;
+  it("types a restamp onto a record a successor has taken as lease loss", async () => {
+    const { clock } = world();
+    const handle = await acquireLock(clock.ctx, SPACE, "one", HOLDER);
 
-    const held = withLock(clock.ctx, request(), async (signal: AbortSignal) => {
-      signalSeen = signal;
-      await new Promise<void>((resolve) =>
-        signal.addEventListener("abort", () => resolve(), { once: true }),
-      );
-      await cleanup.promise;
-      cleaned = true;
-      return "stale";
-    });
-    await expect.poll(() => record(store, "one"), { interval: 2 }).not.toBeNull();
+    clock.tick(SPACE.staleMs);
+    await acquireLock(clock.ctx, SPACE, "one", FOREIGN);
 
-    /* Another node, whose clock is well past this holder's last restamp, takes
-       the lock over and completes its own section. */
-    const ahead = ctxWith(store, CLOCK_START_MS + SPACE.staleMs * 5);
-    const successor = withLock(
-      ahead.ctx,
-      request({ timeoutMs: SPACE.pollMs * 20, holder: FOREIGN }),
-      async () => "winner",
-    );
-
-    await expect(successor).resolves.toBe("winner");
-    await expect.poll(() => signalSeen?.aborted, { interval: 2 }).toBe(true);
-
-    /* Losing the lock is not allowed to abandon stale work. The callback owns
-       its cleanup, and the lock boundary does not return until that cleanup has
-       completed. */
-    let returned = false;
-    held.catch(() => {
-      returned = true;
-    });
-    await settle();
-    expect(returned).toBe(false);
-    expect(cleaned).toBe(false);
-
-    cleanup.resolve();
-
-    const error = await rejectsWith(() => held, "lease-lost");
+    const error = await rejectsWith(() => refreshLock(clock.ctx, SPACE, handle), "lease-lost");
     expect(error.detail).toContain(HOLDER);
-    expect(signalSeen?.reason).toBe(error);
-    expect(cleaned).toBe(true);
-    expect(returned).toBe(true);
-    /* The successor gave its own handle back; the stale holder removed nothing
-       on its way out. */
-    await expect(record(store, "one")).resolves.toBeNull();
   });
 
-  it("types an unreachable refresh as lease loss and preserves its cause", async () => {
+  it("types an unreachable restamp as lease loss too, and preserves its cause", async () => {
     const { store, clock } = world();
+    const handle = await acquireLock(clock.ctx, SPACE, "one", HOLDER);
+
     const put = store.put.bind(store);
     const storeFailure = new Error("the bucket is unreachable");
     store.put = (key, body, cas) =>
       cas?.ifMatch === undefined ? put(key, body, cas) : Promise.reject(storeFailure);
 
-    let signalSeen: AbortSignal | undefined;
-    const held = withLock(clock.ctx, request(), async (signal) => {
-      signalSeen = signal;
-      await new Promise<void>((resolve) =>
-        signal.addEventListener("abort", () => resolve(), { once: true }),
-      );
-    });
-
-    const error = await rejectsWith(() => held, "lease-lost");
-
+    /* Neither a conflict nor a transport failure proves the restamp landed, so
+       both cost the holder its authority rather than its certainty. */
+    const error = await rejectsWith(() => refreshLock(clock.ctx, SPACE, handle), "lease-lost");
     expect(error.cause).toBe(storeFailure);
-    expect(signalSeen?.reason).toBe(error);
+  });
+});
+
+describe("giving a lock back", () => {
+  it("removes the record this handle wrote, and says so", async () => {
+    const { store, clock } = world();
+    const handle = await acquireLock(clock.ctx, SPACE, "one", HOLDER);
+
+    await expect(releaseLock(clock.ctx, SPACE, handle)).resolves.toBe(true);
+    await expect(record(store, "one")).resolves.toBeNull();
+  });
+
+  it("removes NOTHING once a successor holds the name", async () => {
+    const { store, clock } = world();
+    const stale = await acquireLock(clock.ctx, SPACE, "one", HOLDER);
+    clock.tick(SPACE.staleMs);
+    await acquireLock(clock.ctx, SPACE, "one", FOREIGN);
+
+    await expect(releaseLock(clock.ctx, SPACE, stale)).resolves.toBe(false);
+    await expect(record(store, "one")).resolves.toMatchObject({ holder: FOREIGN });
   });
 });
 
 describe("where a lock lives", () => {
-  it("keeps the ingress lock namespace apart from fleet-owned locks", () => {
+  it("keeps every ingress lock under the prefix of its own", () => {
     expect(tlsLockKey("issue/example.com")).toBe("_scafo/tls/locks/issue/example.com");
-    expect(tlsLockKey("locks/pointer/shop/prod.json").startsWith(locksPrefix())).toBe(false);
   });
 
   it("waits on the same durations wherever it is taken", () => {
@@ -412,68 +192,8 @@ function world(): { store: MemoryCasStore; clock: ManualClock } {
   return { store, clock: ctxWith(store) };
 }
 
-/** One request for the test lock, with whatever a case wants to change about it. */
-function request(opts?: {
-  name?: string;
-  holder?: string;
-  timeoutMs?: number;
-  signal?: AbortSignal;
-}): {
-  space: LockSpace;
-  name: string;
-  holder: string;
-  timeoutMs: number;
-  signal?: AbortSignal;
-} {
-  return {
-    space: SPACE,
-    name: opts?.name ?? "one",
-    holder: opts?.holder ?? HOLDER,
-    timeoutMs: opts?.timeoutMs ?? 0,
-    ...(opts?.signal === undefined ? {} : { signal: opts.signal }),
-  };
-}
-
 /** The lock record as it stands in the bucket, or null when the name is free. */
 async function record(store: MemoryCasStore, name: string): Promise<NamedLock | null> {
   const found = await readJson<NamedLock>({ store }, SPACE.keyOf(name));
   return found?.value ?? null;
-}
-
-function work(): Promise<string> {
-  return Promise.resolve("done");
-}
-
-/** Long enough for a waiting caller to have polled several times over. */
-function settle(): Promise<void> {
-  return elapse(SPACE.pollMs * 4);
-}
-
-/** Real elapsed time, whatever the wall clock a case is faking says. */
-function elapse(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * A wall clock a case can JUMP, which is a thing that happens to a running node:
- * an NTP correction, a resumed virtual machine, an operator setting the date.
- *
- * `Date` alone is faked, so the polls and the sleeps a wait is spent on stay
- * real elapsed time — that separation IS the case — and it is left tracking real
- * time so a `setSystemTime` call is the only thing that ever moves it out of
- * step. The registry's own clock is the manual one and is untouched by any of
- * this, so staleness is still decided by hand as everywhere else in this file.
- */
-function steppableWallClock(): void {
-  vi.useFakeTimers({ toFake: ["Date"], shouldAdvanceTime: true, advanceTimeDelta: 1 });
-}
-
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve: (value: T) => void;
-}
-
-function deferred<T>(): Deferred<T> {
-  const { promise, resolve } = Promise.withResolvers<T>();
-  return { promise, resolve };
 }

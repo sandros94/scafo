@@ -9,8 +9,8 @@
  * same things, for the same lengths of time, as one keeping them on a disk.
  *
  * The names are the CALLER's — free-form keys under `_scafo/tls/locks/`, checked
- * only for being addressable — which is why they live apart from the fleet's own
- * fleet-owned locks.
+ * only for being addressable — which is why they live under a prefix of their
+ * own, well away from the records the registry names itself.
  */
 
 import type { RegistryContext } from "./context.ts";
