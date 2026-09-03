@@ -1,6 +1,10 @@
 /*
- * End-to-end two-node path. Caddy and daemon share a namespace locally; peer traffic needs
+ * End-to-end two-node path. Traefik and daemon share a namespace locally; peer traffic needs
  * explicit non-loopback transport.
+ *
+ * Each node's Traefik polls THAT node for the whole fleet's routing, preferring the node it
+ * sits on. So an ingress colocated with a node that holds no process for a host still answers
+ * for it, over the upstreams the fleet document names on the nodes that do.
  */
 
 import { spawn } from "node:child_process";
@@ -42,14 +46,15 @@ const FIXTURES = join(HERE, "_e2e-fixtures");
 const CLI = join(REPO_ROOT, "dist/cli/index.mjs");
 
 const STORE_IMAGE = "chrislusf/seaweedfs:4.42";
-const CADDY_IMAGE = "caddy:2";
+const TRAEFIK_IMAGE = "traefik:v3";
 /** node24 + celld + esbuild; the same image the single-node suite needs. */
 const NODE_IMAGE = "scafo-probe";
 
 const STORE_PORT = 8333;
-const CADDY_HTTP_PORT = 80;
-const CADDY_ADMIN_PORT = 2019;
-/** Published on each Caddy container, because its daemon has no network of its own. */
+const TRAEFIK_HTTP_PORT = 80;
+/** Carries Traefik's own API and its ping; the suite waits on the latter. */
+const TRAEFIK_API_PORT = 8080;
+/** Published on each Traefik container, because its daemon has no network of its own. */
 const NODE_PORT = 7400;
 
 const BUCKET = "scafo-e2e-multinode";
@@ -98,6 +103,14 @@ const SUNSET_DOMAIN = "sunset.example.test";
 const NODE_A = "node-a";
 const NODE_B = "node-b";
 
+/**
+ * Supplied rather than minted: each Traefik starts before its daemon and has to
+ * present the token from its first poll, so both sides are told the same one.
+ * Traefik reads ONE source of static configuration, so it is templated into the
+ * fixture rather than added to the container's environment.
+ */
+const INGRESS_TOKEN = "e2e-multinode-ingress-token";
+
 const BRIDGE_NETWORK = "bridge";
 
 const SETUP_TIMEOUT_MS = 420_000;
@@ -119,12 +132,11 @@ const LEASE_TTL_MS = 15_000;
 /** One node's ingress, daemon, and host-facing ports. */
 interface Node {
   id: string;
-  caddy: StartedTestContainer;
+  ingress: StartedTestContainer;
   daemon: StartedTestContainer;
   /** Address the other containers reach this pair at. */
   bridgeAddress: string;
   httpPort: number;
-  adminPort: number;
   apiPort: number;
   /** Daemon output retained for failure context. */
   log: string[];
@@ -194,7 +206,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   afterAll(async () => {
     for (const node of nodes) {
       await node.daemon.stop().catch(() => {});
-      await node.caddy.stop().catch(() => {});
+      await node.ingress.stop().catch(() => {});
     }
     await store?.stop().catch(() => {});
     for (const dir of tmpDirs) await rm(dir, { recursive: true, force: true });
@@ -405,11 +417,11 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         const state = await stateOf(plain);
         return state.processes.some(runsTargeted) ? null : state;
       });
-      /* A node that holds no process for the host publishes no route for it,
-       * so its ingress answers with its own default rather than the app; reaching
-       * the holder is the ingress layer's job (fleet routing document, phase 1). */
-      const excludedAnswer = await httpGet(plain.httpPort, "/", { host: targetedHost() });
-      expect(excludedAnswer.body).not.toContain('"v1"');
+      /* The node the selector excluded runs nothing for the host, and still
+       * answers for it: its Traefik reads the FLEET's routing from it, and that
+       * document names the holder's upstream because nothing local can serve. */
+      const excludedAnswer = await untilServes(plain, targetedHost(), "v1");
+      expect(JSON.parse(excludedAnswer.body).version).toBe("v1");
       expect((await stateOf(plain)).processes.some(runsTargeted)).toBe(false);
 
       const view = (await stateOf(plain)).placements.find(
@@ -422,9 +434,12 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expectCleanExit(cleared);
       expect(cleared.output).toContain("no nodes any more");
 
+      /* Serving is no longer what says the environment arrived: the excluded node
+       * already answered for it by forwarding. The process on it is. */
       await until(`${TARGETED} to spread to both nodes`, DEADLINE_MS, async () => {
         const states = await Promise.all(nodes.map(async (node) => stateOf(node)));
-        return states.every((state) => placedNodes(state, TARGETED)?.length === 2) ? states : null;
+        if (!states.every((state) => placedNodes(state, TARGETED)?.length === 2)) return null;
+        return states.every((state) => state.processes.some(runsTargeted)) ? states : null;
       });
       const spread = await untilServes(plain, targetedHost(), "v1");
       const spreadMs = Date.now() - clearedAt;
@@ -439,6 +454,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         placedOn: labelled.id,
         excluded: plain.id,
         placedMs,
+        /* The excluded node's own ingress, answering out of the holder's process. */
         excludedAnswer: { status: excludedAnswer.status, body: excludedAnswer.body.slice(0, 120) },
         clearedThrough: plain.id,
         spreadMs,
@@ -519,11 +535,11 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         const state = await stateOf(unassigned);
         return state.processes.some(runsSolo) ? null : state;
       });
-      /* Same contract as the selector case: the unassigned node publishes no
-       * route and does not proxy to the holder; that is left to ingress (fleet
-       * routing document, phase 1). */
-      const unassignedAnswer = await httpGet(unassigned.httpPort, "/", { host: soloHost() });
-      expect(unassignedAnswer.body).not.toContain('"v1"');
+      /* Same contract as the selector case: the node scaling took the process off
+       * keeps answering for the host, because the fleet document its own Traefik
+       * polls names the one node left running it. */
+      const unassignedAnswer = await untilServes(unassigned, soloHost(), "v1");
+      expect(JSON.parse(unassignedAnswer.body).version).toBe("v1");
       expect((await stateOf(unassigned)).processes.some(runsSolo)).toBe(false);
       expect(placedNodes(await stateOf(unassigned), SOLO)).toEqual([holder.id]);
 
@@ -533,6 +549,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         heldBy: holder.id,
         unassigned: unassigned.id,
         scaledDownMs: Date.now() - scaledAt,
+        /* The unassigned node's own ingress, answering out of the holder's process. */
         unassignedAnswer: {
           status: unassignedAnswer.status,
           body: unassignedAnswer.body.slice(0, 120),
@@ -637,12 +654,16 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expectCleanExit(retired);
       expect(retired.output).toContain("retired");
 
+      /* A retired environment leaves the fleet document entirely, so neither node
+       * has an upstream to forward to and both fall through to Traefik's own 404. */
       for (const node of nodes) {
         await until(`${node.id} to stop serving ${SUNSET}`, DEADLINE_MS, async () => {
           const state = await stateOf(node);
           if (state.processes.some(runsSunset)) return null;
           const answer = await httpGet(node.httpPort, "/", { host: sunsetHost() });
-          return answer.status === 200 && answer.body === "" ? answer : null;
+          return answer.status === 404 && answer.body.includes("404 page not found")
+            ? answer
+            : null;
         });
       }
       const stoppedMs = Date.now() - retiredAt;
@@ -774,29 +795,34 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
 });
 
 /**
- * Starts one Caddy and the daemon that shares its network namespace.
+ * Starts one Traefik and the daemon that shares its network namespace.
+ *
+ * The fixture points Traefik's http provider at `127.0.0.1:7400` — which is the
+ * daemon, because of that shared namespace — and asks it with `prefer=self`, so
+ * this node's own processes are what it uses while they are healthy and the rest
+ * of the fleet is what it falls over to.
  *
  * `labels` is what the operator says this node IS, written `k=v,k2=v2`. It is
  * boot configuration: the daemon writes it into the node's registry record on
  * every registration, so it is set here and nowhere else.
  */
 async function startNode(id: string, labels?: string): Promise<Node> {
-  const caddy = await new GenericContainer(CADDY_IMAGE)
-    .withCopyFilesToContainer([
-      { source: join(FIXTURES, "caddy.json"), target: "/etc/caddy/config.json" },
-    ])
-    .withCommand(["caddy", "run", "--config", "/etc/caddy/config.json"])
-    .withExposedPorts(CADDY_HTTP_PORT, CADDY_ADMIN_PORT, NODE_PORT)
-    .withWaitStrategy(
-      Wait.forHttp(`/config/apps/http/servers/scafo/routes`, CADDY_ADMIN_PORT).forStatusCode(200),
-    )
+  const staticConfig = (await readFile(join(FIXTURES, "traefik.yml"), "utf8")).replace(
+    "${SCAFO_INGRESS_TOKEN}",
+    INGRESS_TOKEN,
+  );
+  const ingress = await new GenericContainer(TRAEFIK_IMAGE)
+    .withCopyContentToContainer([{ content: staticConfig, target: "/etc/traefik/traefik.yml" }])
+    .withExposedPorts(TRAEFIK_HTTP_PORT, TRAEFIK_API_PORT, NODE_PORT)
+    .withWaitStrategy(Wait.forHttp("/ping", TRAEFIK_API_PORT).forStatusCode(200))
+    .withStartupTimeout(BOOT_DEADLINE_MS)
     .start();
 
-  const bridgeAddress = caddy.getIpAddress(BRIDGE_NETWORK);
+  const bridgeAddress = ingress.getIpAddress(BRIDGE_NETWORK);
   const log: string[] = [];
 
   const daemon = await new GenericContainer(NODE_IMAGE)
-    .withNetworkMode(`container:${caddy.getId()}`)
+    .withNetworkMode(`container:${ingress.getId()}`)
     .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "rw" }])
     .withWorkingDir("/work")
     .withEnvironment({
@@ -810,7 +836,9 @@ async function startNode(id: string, labels?: string): Promise<Node> {
       SCAFO_TRANSPORT: "none",
       SCAFO_STATE_DIR: `/var/lib/scafo-${id}`,
       SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
-      SCAFO_CADDY_ADMIN: `http://127.0.0.1:${String(CADDY_ADMIN_PORT)}`,
+      SCAFO_INGRESS_DRIVER: "traefik",
+      SCAFO_INGRESS_TOKEN: INGRESS_TOKEN,
+      /* What the peers dial: the fleet document's upstreams are this address. */
       SCAFO_ADVERTISE: `${bridgeAddress}:${String(NODE_PORT)}`,
       SCAFO_BIND_HOST: "0.0.0.0",
       CELLD_ESBUILD: "/usr/local/bin/esbuild",
@@ -827,12 +855,11 @@ async function startNode(id: string, labels?: string): Promise<Node> {
 
   return {
     id,
-    caddy,
+    ingress,
     daemon,
     bridgeAddress,
-    httpPort: caddy.getMappedPort(CADDY_HTTP_PORT),
-    adminPort: caddy.getMappedPort(CADDY_ADMIN_PORT),
-    apiPort: caddy.getMappedPort(NODE_PORT),
+    httpPort: ingress.getMappedPort(TRAEFIK_HTTP_PORT),
+    apiPort: ingress.getMappedPort(NODE_PORT),
     log,
     running: true,
   };
