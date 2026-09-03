@@ -1,0 +1,19 @@
+# The block to merge into Dokploy's static Traefik configuration, edited under
+# Traefik File System in the UI (on disk: /etc/dokploy/traefik/traefik.yml).
+#
+# That file already has a `providers` mapping holding `swarm`, `docker` and
+# `file`. Add `http` as a fourth key inside it — do not paste a second top-level
+# `providers`, which would replace the first and unroute everything Dokploy
+# deploys.
+#
+# A Traefik provider is static configuration, read once at startup, so this
+# cannot go in the dynamic directory and the ingress token is written to
+# /etc/dokploy/traefik/traefik.yml in plain text. Treat that file as a secret.
+providers:
+  http:
+    # `prefer=self` keeps traffic on this machine while its processes are
+    # healthy, and uses the fleet's other nodes only when they are not.
+    endpoint: "http://scafo-node:7400/v1/ingress/routes/traefik?prefer=self"
+    pollInterval: 5s
+    headers:
+      Authorization: "Bearer <SCAFO_INGRESS_TOKEN>"

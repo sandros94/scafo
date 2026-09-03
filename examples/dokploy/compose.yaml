@@ -1,0 +1,55 @@
+# One Scafo node on a Dokploy-managed server. Dokploy's Traefik is the fleet's
+# ingress, so this file carries no ingress of its own and publishes no web ports.
+services:
+  scafo-node:
+    image: ghcr.io/sandros94/scafo:${SCAFO_VERSION:?set SCAFO_VERSION in .env}
+    restart: unless-stopped
+    stop_grace_period: 50s
+    ports:
+      # Deploy and operator APIs stay on host loopback, for the `scafo` CLI.
+      # Dokploy's proxy does not use this mapping; it dials the alias below.
+      - "127.0.0.1:7400:7400"
+    volumes:
+      - state:/var/lib/scafo
+    environment:
+      SCAFO_S3_ENDPOINT: ${SCAFO_S3_ENDPOINT:?set SCAFO_S3_ENDPOINT in .env}
+      SCAFO_S3_BUCKET: ${SCAFO_S3_BUCKET:?set SCAFO_S3_BUCKET in .env}
+      SCAFO_S3_ACCESS_KEY: ${SCAFO_S3_ACCESS_KEY:?set SCAFO_S3_ACCESS_KEY in .env}
+      SCAFO_S3_SECRET_KEY: ${SCAFO_S3_SECRET_KEY:?set SCAFO_S3_SECRET_KEY in .env}
+      SCAFO_S3_REGION: ${SCAFO_S3_REGION:-us-east-1}
+      SCAFO_S3_PREFIX: ${SCAFO_S3_PREFIX:-scafo}
+      SCAFO_PLATFORM_DOMAINS: ${SCAFO_PLATFORM_DOMAINS:?set SCAFO_PLATFORM_DOMAINS in .env}
+      SCAFO_LISTEN: 0.0.0.0:7400
+      # `none` declares the `dokploy-network` bridge trusted. With it, runtime
+      # processes bind every interface of this container, which is how the proxy
+      # reaches them.
+      SCAFO_TRANSPORT: none
+      # What the fleet's routing names as this node's address, for the node API
+      # and for every process port. The proxy resolves it through the network
+      # alias below, so it holds whatever Dokploy names the container.
+      SCAFO_ADVERTISE: scafo-node:7400
+      # Dokploy's HTTPS entryPoint, which already terminates TLS with the
+      # `letsencrypt` resolver. Scafo's routers carry no TLS block of their own.
+      SCAFO_TRAEFIK_ENTRYPOINTS: websecure
+      SCAFO_INGRESS_TOKEN: ${SCAFO_INGRESS_TOKEN:?set SCAFO_INGRESS_TOKEN in .env}
+      SCAFO_NODE_LABELS: platform=dokploy
+    networks:
+      dokploy-network:
+        aliases:
+          - scafo-node
+    healthcheck:
+      # The image's own probe, which asks this service's configuration what the
+      # node bound. Only the timings are tightened here.
+      test: ["CMD", "node", "/app/dist/cli/index.mjs", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+volumes:
+  state:
+
+networks:
+  # Created by Dokploy on install. `dokploy-traefik` is on it.
+  dokploy-network:
+    external: true

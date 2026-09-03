@@ -1,0 +1,24 @@
+# Additions to Coolify's proxy compose, edited at Server -> Proxy ->
+# Configuration in the UI (on disk: /data/coolify/proxy/docker-compose.yml).
+#
+# Merge these entries into the existing `services.traefik.command` list; do not
+# replace it. Coolify's own arguments — its two entryPoints, its Docker and file
+# providers, its Let's Encrypt resolver — must stay.
+#
+# A Traefik provider is static configuration, settled at startup, so the http
+# provider cannot be declared from Coolify's dynamic directory
+# (/data/coolify/proxy/dynamic/). Arguments are the only place it fits, which
+# means the ingress token is written in this file. Treat the file as a secret.
+services:
+  traefik:
+    command:
+      - "--providers.http.endpoint=http://scafo-node:7400/v1/ingress/routes/traefik?prefer=self"
+      - "--providers.http.pollInterval=5s"
+      # Compose exec-form arguments are not word-split, so the space is safe.
+      - "--providers.http.headers.Authorization=Bearer <SCAFO_INGRESS_TOKEN>"
+      # Scafo's routers carry no TLS block, and Coolify's arguments give the
+      # `https` entryPoint no default resolver. These two supply it. Coolify's
+      # own routers set `tls.certresolver` per router, which still wins, so
+      # nothing already deployed changes.
+      - "--entrypoints.https.http.tls=true"
+      - "--entrypoints.https.http.tls.certresolver=letsencrypt"
