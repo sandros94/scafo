@@ -71,14 +71,14 @@ const NODE_ID = "node-e2e-traefik";
  */
 const INGRESS_TOKEN = "e2e-traefik-ingress-token";
 
+/** What the suite presents where Traefik would. */
+const INGRESS_HEADERS = { authorization: `Bearer ${INGRESS_TOKEN}` };
+
 /**
  * The routers this node publishes whatever it is serving: the pair that answers
  * the fleet's API at the domain's own apex — the second of which
  * is what keeps `/v1/storage` off that public name.
  */
-/** What the suite presents where Traefik would. */
-const INGRESS_HEADERS = { authorization: `Bearer ${INGRESS_TOKEN}` };
-
 const STANDING_ROUTERS = [`scafo_api_${PLATFORM_DOMAIN}`, `scafo_apideny_${PLATFORM_DOMAIN}`];
 
 let store: StartedStore;
@@ -186,18 +186,58 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   );
 
   it(
-    "publishes an empty configuration before it has anything to serve",
+    "refuses the routing until its first pass, then publishes the standing routers and nothing else",
     async () => {
       const unauthenticated = await httpGet(apiPort, "/v1/ingress/routes/traefik", {});
       expect(unauthenticated.status).toBe(401);
 
-      const answer = await httpGet(apiPort, "/v1/ingress/routes/traefik", INGRESS_HEADERS);
+      /* A node that has not finished a reconcile pass refuses with 503
+         `urn:scafo:draining` rather than answering: an empty configuration says
+         the fleet answers on nothing, which Traefik's http provider acts on by
+         withdrawing every router it holds, and a node that has just booted has
+         not read enough to say that. Whether this suite catches the window is a
+         race with that first pass — the refusals are recorded, never required —
+         but the poll accepts nothing but a 200, so an emptiness read BEFORE the
+         pass can never pass for the answer the pass gives. */
+      const refused: HttpAnswer[] = [];
+      const answer = await wait(
+        "the node to know what the fleet answers on",
+        DEADLINE_MS,
+        async () => {
+          const got = await httpGet(apiPort, "/v1/ingress/routes/traefik", INGRESS_HEADERS);
+          if (got.status === 200) return got;
+          refused.push(got);
+          return null;
+        },
+      );
 
-      expect(answer.status).toBe(200);
-      expect(JSON.parse(answer.body)).toEqual({});
-      observed.emptySnapshot = answer.body;
+      /* Whatever it answered before that was the draining refusal, and nothing
+         else: any other status is the node failing, not waiting. */
+      for (const refusal of refused) {
+        expect(refusal.status, refusal.body).toBe(503);
+        expect(JSON.parse(refusal.body)).toMatchObject({ type: "urn:scafo:draining" });
+      }
 
-      expect(await scafoRouters()).toEqual([]);
+      /* What a finished pass over a fleet with nothing deployed publishes: the
+         pair that answers the platform apex, and not one application router. */
+      const snapshot = JSON.parse(answer.body) as TraefikDynamicConfig;
+      expect(Object.keys(snapshot.http?.routers ?? {}).sort()).toEqual(
+        [...STANDING_ROUTERS].sort(),
+      );
+      observed.standingSnapshot = answer.body;
+      observed.drainingRefusals = refused.map((refusal) => refusal.body);
+
+      /* And Traefik holds exactly that once it has polled: the standing pair is
+         a published route like any other, not something the suite waits out. */
+      const held = await wait(
+        "Traefik to hold nothing but the standing routers",
+        DEADLINE_MS,
+        async () => {
+          const routers = await scafoRouters();
+          return routers.length === STANDING_ROUTERS.length ? routers : null;
+        },
+      );
+      expect(held.sort()).toEqual([...STANDING_ROUTERS].map((name) => `${name}@http`).sort());
     },
     STEP_TIMEOUT_MS,
   );

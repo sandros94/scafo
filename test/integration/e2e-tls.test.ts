@@ -52,6 +52,17 @@ const E2E = process.env.SCAFO_E2E === "1";
 const CADDY_IMAGE: string =
   process.env.SCAFO_E2E_CADDY_IMAGE ?? "ghcr.io/sandros94/scafo-caddy:edge";
 
+/**
+ * What the `scafo` dynamic-upstreams module logs about a poll that did not
+ * return a document, and about the poll that ended the run. It says which of
+ * the two it is, and that distinction is the whole of the assertion below: the
+ * cold line is a Caddy that has never held a document, the warm one a Caddy
+ * that holds one and keeps serving it.
+ */
+const FETCH_FAILED_COLD = "fetching the routing document failed and none is known yet";
+const FETCH_FAILED_WARM = "fetching the routing document failed; serving the last one that parsed";
+const FETCH_RECOVERED = "the routing document is available again";
+
 /** The ACME test CA. It mints a fresh issuance chain on every start. */
 const PEBBLE_IMAGE = "ghcr.io/letsencrypt/pebble:latest";
 
@@ -367,16 +378,50 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
 
   it(
     "read the routing document with the same token, from the same process",
-    () => {
+    async () => {
       /* The other half of what one token buys. The module logs a failed fetch
-         once per state change and nothing at all when they succeed, so the
-         absence of that line IS the evidence — and the presence of a Caddy that
-         provisioned at all is the evidence that both modules resolved. */
+         once per state change and nothing at all when they succeed, so what it
+         logged IS the evidence — and the presence of a Caddy that provisioned at
+         all is the evidence that both modules resolved.
+
+         Exactly one failure is expected here, and it is correct: a node refuses
+         both routing routes with 503 `urn:scafo:draining` until its first
+         reconcile pass has finished, because `{"v":1,"routes":[]}` would tell a
+         poller the fleet answers on nothing. This Caddy polls every second and
+         starts beside a node that has just booted, so its first poll may land
+         inside that window — the cold line, once, carrying that 503, and then
+         the recovery line as soon as the pass lands.
+
+         Anything else fails: a warm failure is a document that WAS known and a
+         later poll refused, and a cold failure that is not that 503 is the
+         module, the token, or the endpoint. */
       const log = caddies[0].log.join("");
 
       expect(log, caddyLogTail(caddies[0])).toContain('"msg":"serving initial configuration"');
-      expect(log, caddyLogTail(caddies[0])).not.toContain("fetching the routing document failed");
-      observed.routingFetch = "no failure logged";
+      expect(log, caddyLogTail(caddies[0])).not.toContain(FETCH_FAILED_WARM);
+
+      const refused = log.split("\n").filter((line) => line.includes(FETCH_FAILED_COLD));
+      for (const line of refused) {
+        expect(line, caddyLogTail(caddies[0])).toContain("HTTP 503");
+        expect(line, caddyLogTail(caddies[0])).toContain("The fleet's routing is not known yet");
+      }
+
+      /* And the refusal has to have lifted. A poll a second later parses a
+         document and the module says so; one that never does is a node whose
+         first pass never finished, which is the failure this window hides. */
+      if (refused.length > 0) {
+        await until(
+          "the module to report the routing document available again",
+          DEADLINE_MS,
+          () => Promise.resolve(caddies[0].log.join("").includes(FETCH_RECOVERED) ? true : null),
+          { context: () => caddyLogTail(caddies[0]) },
+        );
+      }
+
+      observed.routingFetch = {
+        drainingRefusalsBeforeFirstDocument: refused.length,
+        failuresWithADocumentKnown: 0,
+      };
     },
     STEP_TIMEOUT_MS,
   );
