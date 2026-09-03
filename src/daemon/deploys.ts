@@ -43,6 +43,9 @@ export const DEFAULT_HISTORY: number = 256;
     a publish not yet recorded. */
 export type DeployState = "accepted" | "uploading" | "deployed" | "failed";
 
+/** The states a deploy stops moving in, and never moves out of again. */
+const TERMINAL: ReadonlySet<DeployState> = new Set<DeployState>(["deployed", "failed"]);
+
 /** What a caller polling a deploy is told. */
 export interface DeployStatus {
   id: string;
@@ -129,6 +132,12 @@ export function createDeployService(
   function update(id: string, patch: Partial<DeployStatus>): DeployStatus | null {
     const current = statuses.get(id);
     if (current === undefined) return null;
+    /* Terminal means terminal. A deploy that reached `deployed` HAPPENED — its
+       revision is in the registry, and the environment is serving the build —
+       so a cancellation that lands afterwards has nothing left to cancel and
+       must not rewrite the outcome as a failure. The scheduler reports one
+       whenever the task's signal was aborted, whatever the task returned. */
+    if (TERMINAL.has(current.state)) return current;
 
     const next: DeployStatus = { ...current, ...patch };
     statuses.set(id, next);
@@ -174,8 +183,10 @@ export function createDeployService(
       });
       update(id, { build: build.id });
       throwIfStopped(signal);
+      /* The commit point. Past it the deployment revision is written and there
+         is nothing left to abandon, so the signal is not consulted again: a
+         cancellation that arrives now would only mislabel work that is done. */
       await recordDeployment(daemon.registry, meta.project, meta.environment, build.id, { signal });
-      throwIfStopped(signal);
       update(id, { state: "deployed" });
       return build;
     } catch (error) {

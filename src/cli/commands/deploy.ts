@@ -8,7 +8,7 @@ import {
   type DeployMetadata,
 } from "../../daemon/_intake.ts";
 import type { StagedArtifact } from "../../core/types/deploy.ts";
-import { ScafoError } from "../../core/error.ts";
+import { isScafoError, ScafoError } from "../../core/error.ts";
 import { parseReplicas } from "../../core/placement/replicas.ts";
 import { parseLabels } from "../../core/utils/labels.ts";
 import { packDirectory } from "../../drivers/archive/tar-zst.ts";
@@ -60,8 +60,10 @@ const deployArgs: ArgsDef = {
   "token": {
     type: "string",
     /* A node token is spent by the first request that presents it, so one passed
-       in cannot also be used for the polling that follows. */
-    description: "Bearer token to present instead of signing one; single-use tokens will not poll",
+       in cannot also be used for the polling that follows; a workload token the
+       project trusts is not spent, and watches the deploy to its end. */
+    description:
+      "Bearer token to present instead of signing one; a single-use node token cannot watch",
   },
 };
 
@@ -121,7 +123,9 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
   const location = accepted.headers.get("location") ?? `/v1/deploys/${status.id}`;
 
   console.log(`scafo: deploy ${status.id} ${status.state}`);
-  await watch(new URL(location, `${nodeUrl}/`).href, authorize, status);
+  await watchDeploy(new URL(location, `${nodeUrl}/`).href, authorize, status, {
+    fixedToken: fixed !== undefined,
+  });
 }
 
 /** What the flags say about the deploy, in the shape the node's intake reads. */
@@ -176,15 +180,40 @@ export function uploadArtifact(opts: DeployUploadOptions): Promise<Response> {
   );
 }
 
-/** Polls a deploy, printing each state it moves into, until it settles. */
-async function watch(url: string, authorize: Authorize, from: DeployStatus): Promise<DeployStatus> {
+export interface DeployWatchOptions {
+  /** True when `authorize` re-presents ONE token it was handed instead of minting one. */
+  fixedToken?: boolean;
+  /** Milliseconds between two looks; defaults to {@link DEFAULT_POLL_MS}. */
+  pollMs?: number;
+  /** How the polls are made; defaults to the global `fetch`. */
+  fetchFn?: typeof fetch;
+}
+
+/**
+ * Polls a deploy, printing each state it moves into, until it settles.
+ *
+ * @internal exported for its tests.
+ */
+export async function watchDeploy(
+  url: string,
+  authorize: Authorize,
+  from: DeployStatus,
+  opts?: DeployWatchOptions,
+): Promise<DeployStatus> {
+  const pollMs = opts?.pollMs ?? DEFAULT_POLL_MS;
+  const call = opts?.fetchFn === undefined ? {} : { fetchFn: opts.fetchFn };
   let last = from;
 
   for (;;) {
     if (SETTLED.includes(last.state)) return last;
-    await delay(DEFAULT_POLL_MS);
+    await delay(pollMs);
 
-    const status = (await (await nodeRequest(url, await authorize())).json()) as DeployStatus;
+    let status: DeployStatus;
+    try {
+      status = (await (await nodeRequest(url, await authorize(), call)).json()) as DeployStatus;
+    } catch (error) {
+      throw unwatchable(error, last, opts?.fixedToken === true);
+    }
     if (status.state !== last.state) console.log(`scafo: deploy ${status.id} ${status.state}`);
     last = status;
     if (!SETTLED.includes(status.state)) continue;
@@ -195,6 +224,33 @@ async function watch(url: string, authorize: Authorize, from: DeployStatus): Pro
     if (status.build !== undefined) console.log(`scafo: build ${status.build}`);
     return status;
   }
+}
+
+/**
+ * What an authentication failure DURING the polling means, which is not what one
+ * during the upload meant.
+ *
+ * A node spends the `jti` of every token it accepts, so a `--token` that was
+ * good enough to deploy with is already spent by the time the first poll
+ * presents it again — the node refuses it as a replay. The deploy itself was
+ * accepted and is running; only the watching stopped. Left as the bare
+ * "Authentication failed" the node answered, that reads as the deploy having
+ * been rejected, which is the opposite of what happened.
+ *
+ * Anything else is passed through untouched: it is the node's own answer, and
+ * this is not the place to reinterpret it.
+ */
+function unwatchable(error: unknown, last: DeployStatus, fixedToken: boolean): unknown {
+  if (!fixedToken || !isScafoError(error) || error.code !== "auth-invalid") return error;
+
+  return new ScafoError("auth-invalid", "Deploy accepted, but it cannot be watched", {
+    detail:
+      `deploy ${last.id} was accepted by the node and is running; the token given to --token ` +
+      `was then refused, and a scafo node token is spent by the first request that presents ` +
+      `it. Sign with an operator key, or present a workload token the project's trust policy ` +
+      `admits, to watch a deploy through to its outcome`,
+    cause: error,
+  });
 }
 
 /** Where the deploy is sent, which nothing here can guess at. */

@@ -1,6 +1,9 @@
 import { parseArgs } from "citty";
 import { describe, expect, it } from "vitest";
-import { deploy, deployMetadataFrom } from "../src/cli/commands/deploy.ts";
+import { deploy, deployMetadataFrom, watchDeploy } from "../src/cli/commands/deploy.ts";
+import type { ProblemDetails } from "../src/core/error.ts";
+import type { DeployStatus } from "../src/daemon/deploys.ts";
+import { rejectsWith } from "./_helpers.ts";
 
 /** The flags exactly as citty hands them to the command's run. */
 function flagsOf(argv: string[]): Record<string, unknown> {
@@ -41,5 +44,91 @@ describe("scafo deploy flags", () => {
       replicas: 2,
       nodeSelector: { tier: "fast" },
     });
+  });
+});
+
+const WATCHED = "https://node.test/v1/deploys/a1b2c3d4";
+const ACCEPTED: DeployStatus = { id: "a1b2c3d4", project: "shop", state: "accepted" };
+
+/** Answers every poll with the node's uniform authentication refusal. */
+const refusing: typeof fetch = () =>
+  Promise.resolve(
+    new Response(
+      JSON.stringify({
+        type: "urn:scafo:auth-invalid",
+        title: "Authentication failed",
+        status: 401,
+      } satisfies ProblemDetails),
+      { status: 401, headers: { "content-type": "application/problem+json" } },
+    ),
+  );
+
+/** Answers each poll with the next status, so a watch runs to a settled one. */
+function answering(states: DeployStatus[]): typeof fetch {
+  const remaining = [...states];
+  return () => Promise.resolve(new Response(JSON.stringify(remaining.shift() ?? states.at(-1))));
+}
+
+describe("watching a deploy the node already accepted", () => {
+  it("blames the spent --token when a poll is refused, not the deploy", async () => {
+    /* The node spends the jti of every token it accepts, so the token that
+       uploaded the artifact is refused as a replay by the poll that follows.
+       Reported as the bare "Authentication failed" the node answered, that reads
+       as the deploy having been rejected — and it was not. */
+    const error = await rejectsWith(
+      () =>
+        watchDeploy(WATCHED, () => Promise.resolve("spent"), ACCEPTED, {
+          fixedToken: true,
+          pollMs: 0,
+          fetchFn: refusing,
+        }),
+      "auth-invalid",
+    );
+
+    expect(error.message).toContain("Deploy accepted");
+    expect(error.detail).toContain(ACCEPTED.id);
+    expect(error.detail).toContain("--token");
+    /* The refusal it is built on is kept, so nothing about the cause is lost. */
+    expect(error.cause).toBeInstanceOf(Error);
+  });
+
+  it("leaves the node's own refusal alone for an operator key, which mints a fresh token", async () => {
+    const error = await rejectsWith(
+      () =>
+        watchDeploy(WATCHED, () => Promise.resolve("minted"), ACCEPTED, {
+          pollMs: 0,
+          fetchFn: refusing,
+        }),
+      "auth-invalid",
+    );
+
+    expect(error.message).toBe("Authentication failed");
+  });
+
+  it("follows a deploy to the build it recorded", async () => {
+    const watched = await watchDeploy(WATCHED, () => Promise.resolve("minted"), ACCEPTED, {
+      pollMs: 0,
+      fetchFn: answering([
+        { ...ACCEPTED, state: "uploading" },
+        { ...ACCEPTED, state: "deployed", build: "0f0f0f0f" },
+      ]),
+    });
+
+    expect(watched).toMatchObject({ state: "deployed", build: "0f0f0f0f" });
+  });
+
+  it("fails on a deploy the node reports as failed, and says why", async () => {
+    const error = await rejectsWith(
+      () =>
+        watchDeploy(WATCHED, () => Promise.resolve("minted"), ACCEPTED, {
+          pollMs: 0,
+          fetchFn: answering([
+            { ...ACCEPTED, state: "failed", detail: "celld exited with code 1" },
+          ]),
+        }),
+      "invalid-input",
+    );
+
+    expect(error.detail).toBe("celld exited with code 1");
   });
 });

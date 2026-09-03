@@ -22,6 +22,7 @@ import {
 } from "../src/daemon/_intake.ts";
 import type { Reconciler } from "../src/daemon/reconcile.ts";
 import { OIDC_AUDIENCE, signNodeToken } from "../src/core/auth/index.ts";
+import { environmentKey } from "../src/core/registry/paths.ts";
 import { ScafoError, type ProblemDetails } from "../src/core/error.ts";
 import {
   blockProject,
@@ -45,7 +46,7 @@ import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { packDirectory } from "../src/drivers/archive/tar-zst.ts";
 import { createFileArtifactStager } from "../src/drivers/artifact/file.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock } from "./_helpers.ts";
+import { ctxWith, FaultStore, type ManualClock } from "./_helpers.ts";
 
 const OPERATOR = "op-1234abcd";
 const PROJECT = "shop";
@@ -876,6 +877,51 @@ describe("what happens to an accepted deploy", () => {
       detail:
         "Artifact expands too large: the archive exceeded the 1024-byte expanded-artifact limit",
     });
+  });
+
+  it("keeps a deploy the cancellation only caught after its commit point", async () => {
+    /*
+     * Writing the deployment revision is the commit point: past it the
+     * environment IS serving the build, and no abort undoes that. The task
+     * deadline elapses here while the revision's own write is in flight, so the
+     * write lands and the signal is aborted by the time it returns — which used
+     * to be reported to the operator as a deploy that failed.
+     */
+    const envKey = environmentKey(PROJECT, ENVIRONMENT);
+    const faulted = new FaultStore(clock.ctx.store);
+    let committing = false;
+    faulted.onBeforePut = async (key): Promise<void> => {
+      if (key === envKey && committing) await new Promise((wake) => setTimeout(wake, 300));
+    };
+    publish = (): Promise<DeployRunResult> => {
+      committing = true;
+      return Promise.resolve({ celldVersionId: VERSION_ID });
+    };
+
+    daemon.registry = { ...clock.ctx, store: faulted };
+    daemon.deploys = createDeployService(daemon, fakeRunner(), {
+      scheduler: {
+        artifactBytes: 10_000_000,
+        activeTasks: 1,
+        projectActiveTasks: 1,
+        queuedTasks: 4,
+        projectQueuedTasks: 2,
+        stagedBytes: 10_000_000,
+        projectStagedBytes: 10_000_000,
+        receiveTimeoutMs: 600_000,
+        queueTimeoutMs: 600_000,
+        taskTimeoutMs: 50,
+      },
+    });
+
+    const id = (await responseId(await upload(await operatorToken()))) as string;
+
+    await expect(settled(id)).resolves.toMatchObject({ state: "deployed", build: VERSION_ID });
+    /* And the abort the scheduler reports afterwards does not rewrite it. */
+    await new Promise((wake) => setTimeout(wake, 50));
+    expect(daemon.deploys?.get(id)).toMatchObject({ state: "deployed" });
+    const environment = await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
+    expect(environment.deployment?.revision).toBe(1);
   });
 
   it("disposes the staged artifact after background publishing is cancelled", async () => {
