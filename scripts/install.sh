@@ -491,7 +491,7 @@ EOF
                     "try_duration": "5s"
                   },
                   "health_checks": {
-                    "passive": { "fail_duration": "30s", "max_fails": 3 }
+                    "passive": { "fail_duration": "30s", "max_fails": 1 }
                   }
                 }
               ]
