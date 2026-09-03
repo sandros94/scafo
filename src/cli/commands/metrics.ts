@@ -63,8 +63,8 @@ async function runMetrics(flags: Record<string, unknown>): Promise<void> {
 
   const found = await readObservations(registry, { window });
   /* What the counted names ARE, rather than what the counting node guessed they
-     were: a build's own host is that build's, and a label no project answers to
-     is nobody's. Only the projects this window named are looked up. */
+     were: a label no project or environment answers to is nobody's. Only the
+     projects this window named are looked up. */
   const naming = await readMetricsNaming(registry, projectsCounted(found.records));
   const summary = summarizeMetrics(found.records, window, {
     naming,

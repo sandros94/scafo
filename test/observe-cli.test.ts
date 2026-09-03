@@ -38,7 +38,7 @@ import {
 import { formatTraces, selectTraces } from "../src/cli/_traces.ts";
 import { readMetricsNaming } from "../src/cli/_metrics-names.ts";
 import { traces } from "../src/cli/commands/traces.ts";
-import { createBuild, createEnvironment, createProject } from "../src/core/registry/index.ts";
+import { createEnvironment, createProject } from "../src/core/registry/index.ts";
 import type { RegistryContext } from "../src/core/registry/context.ts";
 import { observeKey } from "../src/core/registry/paths.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
@@ -46,9 +46,6 @@ import { CLOCK_START_MS, rejectsWith } from "./_helpers.ts";
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
-
-/** A build id as the runtime hands them out: lowercase hex, and not a name. */
-const BUILD = "b1b1b1b1c2c2c2c2";
 
 let store: MemoryCasStore;
 let registry: RegistryContext;
@@ -504,23 +501,7 @@ describe("whose traffic a counted host actually was", () => {
   const naming: MetricsNaming = {
     projects: new Set(["shop"]),
     environments: new Map([["shop", new Set(["production", "preview-7"])]]),
-    builds: new Map([["shop", new Set([BUILD])]]),
   };
-
-  it("reads a build's own host as the project it belongs to, never as an environment of it", () => {
-    /* A node counts an unrouted `<project>--<ref>` host by the platform grammar,
-       which cannot tell a build id from an environment name — so a build's hash
-       host arrives here labelled as an environment called `<build id>`, which is
-       an environment nobody ever made. */
-    const records = run("shop", BUILD, 40, 140);
-
-    const summary = summarizeMetrics(records, window, { naming });
-
-    expect(summary.rows).toHaveLength(1);
-    expect(summary.rows[0].project).toBe("shop");
-    expect(summary.rows[0].env).toBe(`(build ${BUILD.slice(0, 12)})`);
-    expect(summary.rows[0].requests).toBe(100);
-  });
 
   it("keeps an environment the registry really holds exactly as it was counted", () => {
     const summary = summarizeMetrics(run("shop", "preview-7", 5, 25), window, { naming });
@@ -553,28 +534,24 @@ describe("whose traffic a counted host actually was", () => {
   });
 
   it("filters on what a row turned out to be, not on what the counter wrote", () => {
-    const records = [...run("shop", BUILD, 0, 60), ...run("wat", "production", 0, 4)];
+    const records = [...run("shop", "typo", 0, 60), ...run("wat", "production", 0, 4)];
 
-    const summary = summarizeMetrics(records, window, { naming, project: "shop" });
+    const summary = summarizeMetrics(records, window, { naming, project: UNMATCHED });
 
-    expect(summary.rows).toMatchObject([{ project: "shop", requests: 60 }]);
+    expect(summary.rows).toMatchObject([{ project: UNMATCHED, requests: 64 }]);
   });
 
   it("leaves every name alone when nothing was read back about them", () => {
     /* Without a registry to check against there is nothing to correct, and
        guessing would be exactly the failure this fixes. */
-    const summary = summarizeMetrics(run("shop", BUILD, 0, 8), window);
+    const summary = summarizeMetrics(run("shop", "typo", 0, 8), window);
 
-    expect(summary.rows).toMatchObject([{ project: "shop", env: BUILD, requests: 8 }]);
+    expect(summary.rows).toMatchObject([{ project: "shop", env: "typo", requests: 8 }]);
   });
 
   it("reads back what the registry holds, for those projects and no others", async () => {
     await createProject(registry, { slug: "shop" });
     await createEnvironment(registry, "shop", { name: "production" });
-    await createBuild(registry, "shop", {
-      id: BUILD,
-      celldVersionId: BUILD,
-    });
     await createProject(registry, { slug: "untouched" });
 
     const read = await readMetricsNaming(registry, ["shop", "wat"]);
@@ -583,14 +560,13 @@ describe("whose traffic a counted host actually was", () => {
     /* A label under a platform domain that no project answers to. */
     expect(read.projects.has("wat")).toBe(false);
     expect([...(read.environments.get("shop") ?? [])]).toEqual(["production"]);
-    expect([...(read.builds.get("shop") ?? [])]).toEqual([BUILD]);
     /* A project this window never counted costs no listing at all. */
     expect(read.environments.has("untouched")).toBe(false);
   });
 
   it("names the projects a window counted, so only those have to be read back", () => {
     const records = [
-      ...run("shop", BUILD, 0, 1),
+      ...run("shop", "typo", 0, 1),
       ...run("-", "-", 0, 1),
       ...run("blog", "production", 0, 1),
     ];

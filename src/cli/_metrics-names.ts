@@ -3,17 +3,15 @@
  *
  * A counting node attributes a host through the routing it published, and falls
  * back to a PURE, REGISTRY-FREE host grammar for everything the routing does not
- * name. That grammar cannot tell a build id from an environment name, nor a
- * real project from a label a crawler invented, because only the registry can.
- * So the reader checks: three listings' worth of names, and every counted pair
- * held against them.
+ * name. That grammar cannot tell a real environment from a label a crawler
+ * invented, because only the registry can. So the reader checks: two listings'
+ * worth of names, and every counted pair held against them.
  *
  * LISTINGS ONLY, AND THAT IS THE BUDGET. One listing for the projects, then one
- * of environments and one of builds per project the window actually counted —
- * never a record read, and never a project nothing in the window named.
+ * of environments per project the window actually counted — never a record
+ * read, and never a project nothing in the window named.
  */
 
-import { listBuilds } from "../core/registry/builds.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
 import { listEnvironments } from "../core/registry/environments.ts";
 import { listProjects } from "../core/registry/projects.ts";
@@ -36,16 +34,13 @@ export async function readMetricsNaming(
 
   /* Independent reads, so they overlap under the same bound every other fan-out
      in the codebase takes. */
-  const held = await mapConcurrent(named, DEFAULT_CONCURRENCY, async (project) => ({
-    environments: new Set(await listEnvironments(ctx, project)),
-    builds: new Set(await listBuilds(ctx, project)),
-  }));
+  const held = await mapConcurrent(
+    named,
+    DEFAULT_CONCURRENCY,
+    async (project) => new Set(await listEnvironments(ctx, project)),
+  );
 
   const environments = new Map<string, ReadonlySet<string>>();
-  const builds = new Map<string, ReadonlySet<string>>();
-  for (const [index, project] of named.entries()) {
-    environments.set(project, held[index].environments);
-    builds.set(project, held[index].builds);
-  }
-  return { projects, environments, builds };
+  for (const [index, project] of named.entries()) environments.set(project, held[index]);
+  return { projects, environments };
 }

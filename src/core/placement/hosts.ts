@@ -3,9 +3,9 @@
  * `renderRoutes` writes, and the one place that inversion lives.
  *
  * PURE AND REGISTRY-FREE, which is what makes it shareable. It tells the project
- * from the ref beside it and stops there: whether that ref is an environment or
- * a build is a question only the bucket answers. Ingress counters take the label
- * as written, because a log line is counted rather than served.
+ * from the ref beside it and stops there: whether that ref is an environment the
+ * project really has is a question only the bucket answers. Ingress counters
+ * take the label as written, because a log line is counted rather than served.
  */
 
 import { parseHostLabel } from "../utils/slug.ts";
@@ -14,9 +14,9 @@ import { parseHostLabel } from "../utils/slug.ts";
 export interface PlatformHost {
   project: string;
   /**
-   * The half after `--`, when the label carries one: an environment name or a
-   * build id, indistinguishable here. Absent for an apex host, which names the
-   * project's `APEX_ENVIRONMENT` and nothing else.
+   * The half after `--`, when the label carries one: an environment name, or
+   * whatever a caller put there, indistinguishable here. Absent for an apex
+   * host, which names the project's `APEX_ENVIRONMENT` and nothing else.
    */
   ref?: string;
 }
