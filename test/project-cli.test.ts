@@ -1,8 +1,10 @@
 /* `scafo project` commands through the node API. */
 
+import { type CommandDef, parseArgs } from "citty";
 import { generateJWK } from "unjwt/jwk";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { beforeEach, describe, expect, it } from "vitest";
+import { project, trailingPositionals } from "../src/cli/commands/project.ts";
 import { createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import {
@@ -142,6 +144,18 @@ describe("scafo project label", () => {
 
     await asAdmin.setLabels(MINE, readLabelArgs([]));
     await expect(getProject(clock.ctx, MINE)).resolves.not.toHaveProperty("labels");
+  });
+
+  it("reads the pairs after the slug, which citty leaves among the positionals too", async () => {
+    const subCommands = (await project.subCommands) as Record<string, CommandDef>;
+    const argv = ["my-app", "tenant=acme", "plan=pro"];
+    const flags = parseArgs(argv, subCommands.label?.args as never) as Record<string, unknown>;
+
+    expect(flags.slug).toBe("my-app");
+    expect(trailingPositionals(flags, 1)).toEqual(["tenant=acme", "plan=pro"]);
+    expect(trailingPositionals(parseArgs(["my-app"], subCommands.label?.args as never), 1)).toEqual(
+      [],
+    );
   });
 
   it("keeps a value that carries its own separators", async () => {

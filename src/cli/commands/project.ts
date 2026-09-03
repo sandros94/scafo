@@ -172,7 +172,7 @@ async function runUnblock(flags: Record<string, unknown>): Promise<void> {
 async function runLabel(flags: Record<string, unknown>): Promise<void> {
   const slug = required(flags, "slug");
   /* Read before anything is contacted, so a malformed pair costs no request. */
-  const labels = readLabelArgs(positionals(flags));
+  const labels = readLabelArgs(trailingPositionals(flags, 1));
   const api = await apiFor(flags);
 
   const updated = await api.setLabels(slug, labels);
@@ -234,11 +234,15 @@ function guarded(
   };
 }
 
-/** The trailing positionals citty collects, which is where the label pairs land. */
-function positionals(flags: Record<string, unknown>): string[] {
+/**
+ * The positionals after the named ones, which is where the label pairs land.
+ * citty keeps every positional in `_`, the named slug included, so the first
+ * `named` entries are the ones already read by name.
+ */
+export function trailingPositionals(flags: Record<string, unknown>, named: number): string[] {
   const rest = flags._;
   if (!Array.isArray(rest)) return [];
-  return rest.filter((entry): entry is string => typeof entry === "string");
+  return rest.filter((entry): entry is string => typeof entry === "string").slice(named);
 }
 
 function required(flags: Record<string, unknown>, name: string): string {
