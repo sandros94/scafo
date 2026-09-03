@@ -588,36 +588,52 @@ async function settledSinglePlacement(env: string): Promise<{
   owner: { pod: k8s.V1Pod; state: DaemonState };
   nonOwner: { pod: k8s.V1Pod; state: DaemonState };
 }> {
-  return until(`a settled one-node placement for ${env}`, DEADLINE_MS, async () => {
-    const states = await Promise.all(
-      (await nodes()).map(async (pod) => ({ pod, state: await stateOf(pod) })),
-    );
-    const placements = states.map(({ state }) =>
-      state.placements.find((view) => view.project === PROJECT && view.env === env),
-    );
-    const assignedNodeIds = placements[0]?.nodes;
-    if (
-      assignedNodeIds?.length !== 1 ||
-      placements.some(
-        (placement) =>
-          placement === undefined ||
-          placement.nodes.length !== 1 ||
-          placement.nodes[0] !== assignedNodeIds[0],
+  /* What each node last claimed, so a timeout says which side never settled. */
+  let seen = "nothing observed yet";
+  return until(
+    `a settled one-node placement for ${env}`,
+    DEADLINE_MS,
+    async () => {
+      const states = await Promise.all(
+        (await nodes()).map(async (pod) => ({ pod, state: await stateOf(pod) })),
+      );
+      seen = states
+        .map(({ pod, state }) => {
+          const placement = state.placements.find(
+            (view) => view.project === PROJECT && view.env === env,
+          );
+          const processes = state.processes.map((process) => process.id).join(",");
+          return `${pod.metadata?.name ?? "pod"} (${state.node?.id ?? "no id"}): placement=${JSON.stringify(placement?.nodes ?? null)} processes=[${processes}]`;
+        })
+        .join("\n");
+      const placements = states.map(({ state }) =>
+        state.placements.find((view) => view.project === PROJECT && view.env === env),
+      );
+      const assignedNodeIds = placements[0]?.nodes;
+      if (
+        assignedNodeIds?.length !== 1 ||
+        placements.some(
+          (placement) =>
+            placement === undefined ||
+            placement.nodes.length !== 1 ||
+            placement.nodes[0] !== assignedNodeIds[0],
+        )
       )
-    )
-      return null;
-    const owner = states.find(({ state }) => state.node?.id === assignedNodeIds[0]);
-    const nonOwner = states.find(({ state }) => state.node?.id !== assignedNodeIds[0]);
-    const processId = `${PROJECT}--${env}`;
-    if (
-      owner === undefined ||
-      nonOwner === undefined ||
-      !owner.state.processes.some((process) => process.id === processId) ||
-      nonOwner.state.processes.some((process) => process.id === processId)
-    )
-      return null;
-    return { placement: { nodes: assignedNodeIds }, owner, nonOwner };
-  });
+        return null;
+      const owner = states.find(({ state }) => state.node?.id === assignedNodeIds[0]);
+      const nonOwner = states.find(({ state }) => state.node?.id !== assignedNodeIds[0]);
+      const processId = `${PROJECT}--${env}`;
+      if (
+        owner === undefined ||
+        nonOwner === undefined ||
+        !owner.state.processes.some((process) => process.id === processId) ||
+        nonOwner.state.processes.some((process) => process.id === processId)
+      )
+        return null;
+      return { placement: { nodes: assignedNodeIds }, owner, nonOwner };
+    },
+    { context: () => seen },
+  );
 }
 
 async function podGet(
