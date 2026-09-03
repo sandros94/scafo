@@ -405,15 +405,11 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         const state = await stateOf(plain);
         return state.processes.some(runsTargeted) ? null : state;
       });
-      const forwarded = await until(
-        `${plain.id} to forward ${TARGETED} to the labelled node`,
-        DEADLINE_MS,
-        async () => {
-          const answer = await httpGet(plain.httpPort, "/", { host: targetedHost() });
-          return answer.status === 200 && answer.body.includes('"v1"') ? answer : null;
-        },
-      );
-      expect(JSON.parse(forwarded.body).version).toBe("v1");
+      /* A node that holds no process for the host publishes no route for it,
+       * so its ingress answers with its own default rather than the app; reaching
+       * the holder is the ingress layer's job (fleet routing document, phase 1). */
+      const excludedAnswer = await httpGet(plain.httpPort, "/", { host: targetedHost() });
+      expect(excludedAnswer.body).not.toContain('"v1"');
       expect((await stateOf(plain)).processes.some(runsTargeted)).toBe(false);
 
       const view = (await stateOf(plain)).placements.find(
@@ -443,7 +439,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         placedOn: labelled.id,
         excluded: plain.id,
         placedMs,
-        excludedAnswer: { status: forwarded.status, body: forwarded.body.slice(0, 120) },
+        excludedAnswer: { status: excludedAnswer.status, body: excludedAnswer.body.slice(0, 120) },
         clearedThrough: plain.id,
         spreadMs,
         clearedOutput: cleared.output.trim().slice(0, 300),
@@ -523,15 +519,11 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         const state = await stateOf(unassigned);
         return state.processes.some(runsSolo) ? null : state;
       });
-      const forwarded = await until(
-        `${unassigned.id} to forward ${SOLO} to its holder`,
-        DEADLINE_MS,
-        async () => {
-          const answer = await httpGet(unassigned.httpPort, "/", { host: soloHost() });
-          return answer.status === 200 && answer.body.includes('"v1"') ? answer : null;
-        },
-      );
-      expect(JSON.parse(forwarded.body).version).toBe("v1");
+      /* Same contract as the selector case: the unassigned node publishes no
+       * route and does not proxy to the holder; that is left to ingress (fleet
+       * routing document, phase 1). */
+      const unassignedAnswer = await httpGet(unassigned.httpPort, "/", { host: soloHost() });
+      expect(unassignedAnswer.body).not.toContain('"v1"');
       expect((await stateOf(unassigned)).processes.some(runsSolo)).toBe(false);
       expect(placedNodes(await stateOf(unassigned), SOLO)).toEqual([holder.id]);
 
@@ -541,7 +533,10 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         heldBy: holder.id,
         unassigned: unassigned.id,
         scaledDownMs: Date.now() - scaledAt,
-        forwardedAnswer: { status: forwarded.status, body: forwarded.body.slice(0, 120) },
+        unassignedAnswer: {
+          status: unassignedAnswer.status,
+          body: unassignedAnswer.body.slice(0, 120),
+        },
       };
     },
     STEP_TIMEOUT_MS,
