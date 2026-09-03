@@ -49,11 +49,18 @@ export interface Reconciler {
   stop(): void;
   status(): ReconcileStatus;
   /**
-   * The fleet's routing as of the last pass that read it: every host the fleet
-   * answers on and every node answering, in node order. Empty before the first
-   * pass. What the ingress routes of the node API serve.
+   * The fleet's routing as of the last pass that rendered one: every host the
+   * fleet answers on and every node answering, in node order. What the ingress
+   * routes of the node API serve.
+   *
+   * Undefined until a pass has rendered one, and never an empty document
+   * standing in for that: an empty routing is a fleet with nothing deployed,
+   * which is knowledge, and a node that has only just booted has none. A poller
+   * cannot tell the two apart, so it would drop every route it holds for the
+   * seconds before this node's first pass finishes. The absence is the honest
+   * answer, and the ingress routes refuse rather than serve it.
    */
-  fleetRouting(): FleetRouting;
+  fleetRouting(): FleetRouting | undefined;
 }
 
 export interface ReconcilerOptions {
@@ -104,7 +111,9 @@ export function createReconciler(
   let lastActions: ReconcileAction[] = [];
   let failures: ReconcileFailure[] = [];
   let lastPlacements: PlacementView[] = [];
-  let fleetRouting: FleetRouting = { v: 1, routes: [] };
+  /* Set by the first pass that renders one, and kept across a pass that fails to
+     read the registry: see {@link Reconciler.fleetRouting}. */
+  let fleetRouting: FleetRouting | undefined;
   /* What the heartbeat was last asked to tell the fleet this node serves. */
   let announced: NodeServing | undefined;
 
@@ -270,7 +279,7 @@ export function createReconciler(
       return shutdown;
     },
 
-    fleetRouting: (): FleetRouting => fleetRouting,
+    fleetRouting: (): FleetRouting | undefined => fleetRouting,
 
     status(): ReconcileStatus {
       return {

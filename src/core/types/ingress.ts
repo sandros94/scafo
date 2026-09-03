@@ -120,6 +120,11 @@ export interface FleetApiRouting {
  * host any environment answers on, and every node currently answering. Rendered
  * by every node from the same registry, so every node's copy says the same
  * thing, give or take a heartbeat.
+ *
+ * A document with no routes says the fleet answers on nothing, and an ingress
+ * withdraws everything it holds on reading one. That is a statement, not a
+ * default: a node that has not finished a reconcile pass has no document at all
+ * and its routing routes refuse rather than render this.
  */
 export interface FleetRouting {
   v: 1;

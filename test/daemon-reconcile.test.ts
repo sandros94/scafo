@@ -211,7 +211,7 @@ describe("what a node tells the fleet it serves", () => {
 });
 
 describe("the fleet routing a pass leaves behind", () => {
-  it("is empty before the first pass, then lists every live node serving, this one included", async () => {
+  it("is unknown before the first pass, then lists every live node serving, this one included", async () => {
     const world = await seededWorld();
     const heartbeat = await attachHeartbeat(world);
     await registerNode(world.daemon.registry, {
@@ -222,19 +222,21 @@ describe("the fleet routing a pass leaves behind", () => {
       heartbeatAt: new Date().toISOString(),
       serving: { "shop/production": { port: 42_010 } },
     });
-    expect(world.reconciler.fleetRouting()).toEqual({ v: 1, routes: [] });
+    /* Not the empty document: that one says the fleet answers on nothing, which
+       is something this node has not read yet and an ingress would act on. */
+    expect(world.reconciler.fleetRouting()).toBeUndefined();
 
     await world.reconciler.runOnce();
     /* This node's own process reaches the routing the way every node's does:
        through its record, so it shows up one pass after it started. */
-    expect(world.reconciler.fleetRouting().routes.map((route) => route.upstreams)).toEqual([
+    expect(world.reconciler.fleetRouting()?.routes.map((route) => route.upstreams)).toEqual([
       [{ node: "node-b", address: "10.0.0.2:42010" }],
       [{ node: "node-b", address: "10.0.0.2:42010" }],
     ]);
 
     await heartbeat.beat();
     await world.reconciler.runOnce();
-    expect(world.reconciler.fleetRouting().routes[0]).toEqual({
+    expect(world.reconciler.fleetRouting()?.routes[0]).toEqual({
       host: "shop--production.apps.test",
       project: PROJECT,
       env: ENV,

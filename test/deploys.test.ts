@@ -1024,6 +1024,8 @@ function fakeReconciler(processes: () => RuntimeProcess[] = () => running): Reco
     start: () => {},
     shutdown: () => Promise.resolve(),
     stop: () => {},
+    /* A pass has finished and the fleet answers on nothing — not the absence of
+       one, which no route under test reads. */
     fleetRouting: () => ({ v: 1, routes: [] }),
     status: () => ({
       lastRunAt: null,

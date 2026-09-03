@@ -320,6 +320,51 @@ describe("GET /v1/ingress/routes", () => {
   });
 });
 
+describe("a node whose first reconcile pass has not finished", () => {
+  it.each(POLLED)(
+    "refuses %s rather than answering as if the fleet served nothing",
+    async (path) => {
+      const response = await poll(appWith(undefined), path);
+
+      /* A poller keeps the last document that parsed on anything but a 2xx, so
+       this costs one skipped poll. The empty document would cost every route. */
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({
+        type: "urn:scafo:draining",
+        detail: expect.stringContaining("no reconcile pass has completed"),
+      });
+    },
+  );
+
+  it.each(POLLED)(
+    "refuses %s the same way on a node running no reconciler at all",
+    async (path) => {
+      const daemon = context(FLEET);
+      daemon.reconciler = undefined;
+      daemon.storage = createStorageService(daemon, { tokens: [TOKEN] });
+
+      const response = await poll(createNodeApp(daemon), path);
+
+      expect(response.status).toBe(503);
+    },
+  );
+
+  it.each(POLLED)("serves %s once a pass has run, empty fleet and all", async (path) => {
+    /* The distinction the refusal exists for: nothing deployed is an answer, and
+       it is given as one the moment a pass has read the registry. */
+    const app = appWith(fleet([]));
+
+    const response = await poll(app, path);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual(
+      path === "/v1/ingress/routes"
+        ? fleet([])
+        : renderTraefikConfig(fleet([]), { entryPoints: ENTRY_POINTS }),
+    );
+  });
+});
+
 describe("the token both routing routes are behind", () => {
   it.each(POLLED)(
     "refuses %s to a caller without one, or with one this node does not admit",
@@ -420,7 +465,7 @@ async function polled(app: H3, path: string): Promise<FleetRouting> {
 }
 
 /** The node app as a node serving the routing builds it: the token, and the formats. */
-function appWith(routing: FleetRouting): H3 {
+function appWith(routing: FleetRouting | undefined): H3 {
   const daemon = context(routing);
   /* The routing names every node's address and port, so it is behind the token
      the TLS storage surface is behind: one credential for the one thing in front
@@ -430,7 +475,7 @@ function appWith(routing: FleetRouting): H3 {
 }
 
 /** Everything the node app serves the routing from, short of the token. */
-function context(routing: FleetRouting): DaemonContext {
+function context(routing: FleetRouting | undefined): DaemonContext {
   return {
     config: daemonConfig(),
     nodeId: NODE_ID,
@@ -469,8 +514,11 @@ function daemonConfig(): DaemonConfig {
   };
 }
 
-/** Holds the routing of one finished pass; no route under test runs another. */
-function fakeReconciler(routing: FleetRouting): Reconciler {
+/**
+ * Holds the routing of one finished pass; no route under test runs another.
+ * `undefined` is a node whose first pass has not finished yet.
+ */
+function fakeReconciler(routing: FleetRouting | undefined): Reconciler {
   return {
     runOnce: () => Promise.resolve([]),
     kick: () => {},

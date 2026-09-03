@@ -61,12 +61,33 @@ export function registerIngressRoutes(
  * The fleet's routing as of the last reconcile pass, ordered for whoever asks,
  * with the node it was ordered for: a format that can say more than an order
  * (Traefik's failover) needs the name, not just the arrangement.
+ *
+ * A node with no document yet — no reconciler, or none of its passes has
+ * finished — refuses, rather than answering the empty document it would have
+ * had one pass earlier. Both this and every format route go through here, so
+ * they refuse alike. An ingress polls this on a timer and reads the answer as
+ * the whole truth about the fleet, and every ingress scafo speaks to keeps the
+ * last document that parsed when a poll does not return one: Caddy's `scafo`
+ * upstreams module logs the failure once and serves what it holds, or, when it
+ * has never held one, resolves `scafo.route=unavailable` and lets Caddy answer
+ * 503; Traefik's http provider logs the error and keeps its previous
+ * configuration. A 503 for the few seconds after a node restart is therefore a
+ * pause in one poller, where `{"v":1,"routes":[]}` would be every route in the
+ * fleet withdrawn.
  */
 function routing(
   daemon: DaemonContext,
   event: H3Event,
 ): { routing: FleetRouting; prefer?: string } {
-  const current = daemon.reconciler?.fleetRouting() ?? { v: 1, routes: [] };
+  const current = daemon.reconciler?.fleetRouting();
+  if (current === undefined) {
+    throw new ScafoError("draining", "The fleet's routing is not known yet", {
+      detail:
+        `no reconcile pass has completed on node "${daemon.nodeId}" yet, so this node cannot ` +
+        `say what the fleet answers on — retry in a few seconds and keep the last routing ` +
+        `that parsed until then`,
+    });
+  }
   const asked = event.url.searchParams.get("prefer");
   if (asked === null || asked === "") return { routing: current };
   const prefer = asked === PREFER_SELF ? daemon.nodeId : asked;
