@@ -97,6 +97,33 @@ describe("a token the policy admits", () => {
     expect(await refusal(await mint({ aud: [] }))).toMatchObject(AUTH_INVALID);
   });
 
+  it("takes the audience from the grant, not from a platform-wide default", async () => {
+    await setTrustPolicy(clock.ctx, TRUSTING, {
+      v: 1,
+      issuers: [{ iss: ISS, aud: "staging", subjects: [SUBJECT_GLOB] }],
+    });
+
+    await expect(verifier.verify(await mint({ aud: "staging" }), TRUSTING)).resolves.toMatchObject({
+      issuer: { aud: "staging" },
+    });
+    /* The default audience is what the CLI writes, not what a policy means. */
+    expect(await refusal(await mint())).toMatchObject(AUTH_INVALID);
+  });
+
+  it("admits a token under whichever of its audiences the grant names", async () => {
+    await setTrustPolicy(clock.ctx, TRUSTING, {
+      v: 1,
+      issuers: [
+        { iss: ISS, aud: "staging", subjects: ["repo:acme/app:ref:refs/tags/*"] },
+        { iss: ISS, aud: "production", subjects: [SUBJECT_GLOB] },
+      ],
+    });
+
+    await expect(
+      verifier.verify(await mint({ aud: ["staging", "production"] }), TRUSTING),
+    ).resolves.toMatchObject({ issuer: { aud: "production", subjects: [SUBJECT_GLOB] } });
+  });
+
   it("accepts an nbf that has already passed", async () => {
     await expect(
       verifier.verify(await mint({ nbf: nowS() - 10 }), TRUSTING),
@@ -234,6 +261,10 @@ describe("the JWKS cache", () => {
     { jwksFailureTtlS: -1 },
     { jwksFailureTtlS: Number.NaN },
     { jwksFailureTtlS: Number.POSITIVE_INFINITY },
+    { jwksTimeoutS: 0 },
+    { jwksTimeoutS: -1 },
+    { jwksTimeoutS: Number.NaN },
+    { jwksTimeoutS: Number.POSITIVE_INFINITY },
   ])("refuses an invalid public cache option: %o", (options) => {
     expect(() => createOidcVerifier(clock.ctx, { now, fetchFn, ...options })).toThrowError(
       expect.objectContaining({ code: "invalid-input" }),
@@ -250,6 +281,30 @@ describe("the JWKS cache", () => {
     clock.tick((JWKS_TTL_S + 1) * 1000);
     await verifier.verify(token, TRUSTING);
     expect(calls).toEqual([DISCOVERY_URL, JWKS_URL, DISCOVERY_URL, JWKS_URL]);
+  });
+
+  it("abandons an issuer that takes the request and then says nothing", async () => {
+    const reasons: unknown[] = [];
+    verifier = createOidcVerifier(clock.ctx, {
+      now,
+      jwksTimeoutS: 0.05,
+      fetchFn: (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => {
+              reasons.push(init.signal?.reason);
+              reject(init.signal?.reason as Error);
+            },
+            { once: true },
+          );
+        }),
+    });
+
+    expect(await refusal(await mint())).toMatchObject(AUTH_INVALID);
+    /* The request itself is cancelled, not just given up on. */
+    expect(reasons).toHaveLength(1);
+    expect(reasons[0]).toMatchObject({ name: "TimeoutError" });
   });
 
   it("coalesces concurrent discovery and key-set requests for one issuer", async () => {
