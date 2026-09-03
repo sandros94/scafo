@@ -66,7 +66,11 @@ describe("the production Compose example", () => {
     expect(compose.services?.seaweedfs).toBeUndefined();
   });
 
-  it("terminates HTTPS through Caddy's shared Scafo storage", async () => {
+  it("terminates HTTPS through Caddy's shared Scafo storage, and routes by reading the node", async () => {
+    /* Both halves of what a scafo-caddy is given, and NEITHER is a credential
+       for anything but this node: certificates come out of the bucket through
+       `/v1/storage`, and where a request goes comes out of `/v1/ingress/routes`.
+       Nothing writes this file — the example ships what an operator keeps. */
     const caddy: unknown = JSON.parse(await readFile(join(REPO, "examples/caddy.json"), "utf8"));
 
     expect(caddy).toMatchObject({
@@ -92,7 +96,33 @@ describe("the production Compose example", () => {
             scafo: {
               listen: [":443"],
               tls_connection_policies: [{}],
-              routes: [],
+              routes: [
+                {
+                  handle: [
+                    {
+                      handler: "reverse_proxy",
+                      dynamic_upstreams: {
+                        source: "scafo",
+                        endpoint: "http://127.0.0.1:7400",
+                        token: "{env.SCAFO_INGRESS_TOKEN}",
+                        prefer: "self",
+                      },
+                      /* The node's order is a priority, not a weighting. */
+                      load_balancing: { selection_policy: { policy: "first" } },
+                    },
+                  ],
+                },
+              ],
+              /* A host the fleet does not serve and a denied API path are one
+                 answer, so a denial does not confirm the path exists. */
+              errors: {
+                routes: [
+                  {
+                    match: [{ vars: { "scafo.route": ["unknown", "denied"] } }],
+                    handle: [{ handler: "static_response", status_code: 404 }],
+                  },
+                ],
+              },
             },
           },
         },

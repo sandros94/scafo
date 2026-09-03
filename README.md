@@ -40,7 +40,7 @@ They use mock `*.scafo.test` hosts and a SeaweedFS container as the S3-compatibl
 
 - **Linux host:** [`scripts/install.sh`](./scripts/install.sh) downloads and SHA-256 verifies Scafo, Celld, Caddy, and esbuild, then writes systemd units and `/etc/scafo` when run as root. It does not start a node; configure bucket credentials first.
 
-  The default ingress is `scafo-caddy`, which uses [`caddy.storage.scafo`](https://github.com/sandros94/scafo-certmagic) to keep certificates, ACME account material, and locks in the bucket through the node's loopback `/v1/storage` API. It receives only the node's ingress bearer token, not bucket credentials. `SCAFO_INSTALL_CADDY=plain` installs upstream Caddy with host-local TLS state. `wireguard-tools` remains an operating-system prerequisite.
+  The default ingress is `scafo-caddy`, built from [scafo-ingress](https://github.com/sandros94/scafo-ingress). It carries two Caddy modules: `caddy.storage.scafo` keeps certificates, ACME account material, and locks in the bucket through the node's loopback `/v1/storage` API, and `http.reverse_proxy.upstreams.scafo` reads the fleet's routing from the node's `/v1/ingress/routes` and resolves each request's host to the processes currently running for it. Caddy pulls, the way Traefik does; the node configures no ingress. It receives only the node's ingress bearer token, not bucket credentials. `wireguard-tools` remains an operating-system prerequisite.
 
   The ingress token is owner-readable state. The installed Caddy unit receives it through systemd `LoadCredential=`; it may initially retry until the node creates the token.
 

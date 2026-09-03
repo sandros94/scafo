@@ -9,7 +9,7 @@ Do not use one installation for arbitrary customer code, public build submission
 ## Protected surfaces
 
 - Node and operator API requests use signed tokens. Operator roles and project scopes limit actions; OIDC deploy policy binds a workload deployer to a project.
-- `/.well-known/scafo/health` and `/v1/ingress/ask` are intentionally public. Everything under `/v1/ingress/routes` and `/v1/storage` requires the node's ingress bearer token and are denied at the public API apex: the routing reveals every node's address for every host, and storage carries private keys in both directions.
+- `/.well-known/scafo/health` and `/v1/ingress/ask` are intentionally public. `/v1/ingress/routes` and `/v1/storage` are the ingress's only privileged surfaces: the routing reveals every node's address for every host, and storage carries private keys in both directions. Both live on the node's own listener and require its ingress bearer token, which is all the ingress ever holds. The ingress enforces the rest of that boundary itself: it never proxies either prefix through the public platform API apex.
 - `/.well-known/celld/health` is the application runtime health endpoint, not the Scafo node/API health endpoint.
 - Registry conditional writes prevent lost updates. Coordinator leases and fences protect stale placement decisions and other lease-gated work.
 - Node API and runtime listeners default to loopback. Wider binds require an explicit private-network or WireGuard transport decision.
@@ -37,7 +37,7 @@ Do not use one installation for arbitrary customer code, public build submission
 
 ## Celld boundary
 
-Scafo requires Celld 0.4.0 and creates one Celld fleet per environment. Celld owns deployment adoption, application health, cells, and runtime resource policy; Scafo owns registry, authorization, placement, supervision, deploy intake, and ingress convergence.
+Scafo requires Celld 0.4.0 and creates one Celld fleet per environment. Celld owns deployment adoption, application health, cells, and runtime resource policy; Scafo owns registry, authorization, placement, supervision, deploy intake, and the routing every ingress reads.
 
 Celld exposes one current deployment per fleet. Scafo records a monotonic deployment revision, not a selected version; it provides no old-build routing or historical deployment selector. See [Celld issue #181](https://github.com/denoland/celld/issues/181).
 

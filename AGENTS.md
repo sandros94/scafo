@@ -12,7 +12,7 @@ Ask before acting when intent is ambiguous. For design or product decisions, run
 
 - A Scafo fleet is one installation: one registry and its Scafo nodes. A Scafo node is a machine running `scafo sail`.
 - Each deployed environment has its own Celld fleet. A Scafo node may supervise one Celld node process per assigned environment. Unqualified `fleet` and `node` mean Scafo's machine-level concepts; name Celld's process-level concepts explicitly.
-- Scafo requires Celld 0.4.0. Celld owns deployment adoption, application health, cells, and runtime resource policy; Scafo owns registry, auth, placement, supervision, deploy intake, and ingress convergence.
+- Scafo requires Celld 0.4.0. Celld owns deployment adoption, application health, cells, and runtime resource policy; Scafo owns registry, auth, placement, supervision, deploy intake, and the routing every ingress reads.
 - Celld exposes one current deployment per environment fleet. Scafo records a monotonic deployment revision, not a selected version; it has no old-build host or local version selection. See https://github.com/denoland/celld/issues/181.
 - `/.well-known/scafo/health` is served by the node/API listener; `/.well-known/celld/health` is served on application hosts.
 
@@ -49,8 +49,8 @@ Docker E2E is opt-in; absent Docker skips a suite, not a product failure. Run `p
 - Placement is selectors, rendezvous hashing, then replica count. Scafo neither infers nor reserves host resources; operators set runtime policy through Celld and the host/container platform via `runtime.celldEnv`, `--celld-env`, or `SCAFO_CELLD_ENV`. Scafo adds no Celld policy defaults.
 - Bound deploy intake by archive size and entries, output tail, active/queued tasks, staged bytes, and receive/queue/task deadlines. These are scheduling bounds, not runtime admission.
 - Run one environment-owned process per assigned Scafo node. Celld adopts deployments; varset changes restart the process, retirement or reassignment stops it.
-- Publish only routes backed by local running processes and the optional platform API apex—never a wildcard application fallback. Caddy uses its admin API; Traefik polls `/v1/ingress/traefik`; both preserve operator configuration.
-- Deny `/v1/storage` and `/v1/ingress/traefik` at the public API apex. Storage has its own bearer token.
+- Publish only routes backed by running processes and the optional platform API apex—never a wildcard application fallback. Every ingress pulls: nothing is pushed into one. A node serves the fleet's routing at `/v1/ingress/routes`, generic or in a format an ingress speaks natively (`/v1/ingress/routes/traefik`); Caddy reads it through the `scafo` dynamic-upstreams module and Traefik through its http provider. Operator configuration is the ingress's own and Scafo never rewrites it.
+- Deny `/v1/storage` and `/v1/ingress/routes` at the public API apex, matched at a path-segment boundary, and the ingress must enforce that itself rather than trust the daemon behind it. Both surfaces are behind the ingress bearer token, which is the only credential an ingress holds.
 - Observability is opt-in: events and access counters are ZSTD Parquet in the bucket; `scafo metrics` and `scafo traces` read them.
 - Scafo API and Celld peer listeners default to loopback. Widen only through an explicit private-network or WireGuard decision.
 

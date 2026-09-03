@@ -38,7 +38,16 @@ import {
 
 const E2E = process.env.SCAFO_E2E === "1";
 
-const CADDY_IMAGE = "caddy:2";
+/**
+ * Caddy with both `scafo` modules compiled in; it reads this node rather than
+ * being written to. Point the variable at a locally built tag to run against
+ * modules that are not released yet.
+ */
+const CADDY_IMAGE: string =
+  process.env.SCAFO_E2E_CADDY_IMAGE ?? "ghcr.io/sandros94/scafo-caddy:edge";
+
+/** Supplied, because Caddy starts before the node and polls it from the first second. */
+const INGRESS_TOKEN = "e2e-image-ingress-token";
 
 /**
  * Tagged and KEPT rather than built anonymously and deleted on exit. The layer
@@ -49,7 +58,6 @@ const CADDY_IMAGE = "caddy:2";
 const IMAGE_TAG = "scafo-e2e-image";
 
 const CADDY_HTTP_PORT = 80;
-const CADDY_ADMIN_PORT = 2019;
 /** Published on the Caddy container, because the node shares its namespace. */
 const NODE_PORT = 7400;
 
@@ -109,11 +117,11 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
       .withCopyFilesToContainer([
         { source: join(FIXTURES, "caddy.json"), target: "/etc/caddy/config.json" },
       ])
+      .withEnvironment({ SCAFO_INGRESS_TOKEN: INGRESS_TOKEN })
       .withCommand(["caddy", "run", "--config", "/etc/caddy/config.json"])
-      .withExposedPorts(CADDY_HTTP_PORT, CADDY_ADMIN_PORT, NODE_PORT)
-      .withWaitStrategy(
-        Wait.forHttp("/config/apps/http/servers/scafo/routes", CADDY_ADMIN_PORT).forStatusCode(200),
-      )
+      .withExposedPorts(CADDY_HTTP_PORT, NODE_PORT)
+      .withWaitStrategy(Wait.forLogMessage(/serving initial configuration/))
+      .withStartupTimeout(BOOT_DEADLINE_MS)
       .start();
 
     caddyHttpPort = caddy.getMappedPort(CADDY_HTTP_PORT);
@@ -126,7 +134,7 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
         SCAFO_NODE_ID: NODE_ID,
         SCAFO_TRANSPORT: "none",
         SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
-        SCAFO_CADDY_ADMIN: `http://127.0.0.1:${String(CADDY_ADMIN_PORT)}`,
+        SCAFO_INGRESS_TOKEN: INGRESS_TOKEN,
         SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
       })
       .withCommand(["sail", "--listen", `0.0.0.0:${String(NODE_PORT)}`])

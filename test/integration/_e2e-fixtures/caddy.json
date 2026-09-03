@@ -1,21 +1,54 @@
 {
-  "admin": {
-    "listen": "0.0.0.0:2019",
-    "origins": ["127.0.0.1:2019", "localhost:2019", "0.0.0.0:2019"]
-  },
+  "admin": { "disabled": true },
   "apps": {
     "http": {
       "servers": {
         "scafo": {
           "listen": [":80"],
+          "automatic_https": { "disable": true },
           "routes": [
             {
               "@id": "operator_authored",
               "match": [{ "host": ["operator.test"] }],
               "handle": [{ "handler": "static_response", "status_code": 200, "body": "operator" }],
               "terminal": true
+            },
+            {
+              "@id": "scafo_dynamic",
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "dynamic_upstreams": {
+                    "source": "scafo",
+                    "endpoint": "http://127.0.0.1:7400",
+                    "token": "{env.SCAFO_INGRESS_TOKEN}",
+                    "prefer": "self",
+                    "poll_interval": "1s"
+                  },
+                  "load_balancing": {
+                    "selection_policy": { "policy": "first" },
+                    "retries": 2,
+                    "try_duration": "5s"
+                  },
+                  "health_checks": { "passive": { "fail_duration": "30s", "max_fails": 3 } }
+                }
+              ]
             }
-          ]
+          ],
+          "errors": {
+            "routes": [
+              {
+                "match": [{ "vars": { "scafo.route": ["unknown", "denied"] } }],
+                "handle": [
+                  {
+                    "handler": "static_response",
+                    "status_code": 404,
+                    "body": "scafo: no route"
+                  }
+                ]
+              }
+            ]
+          }
         }
       }
     }

@@ -82,12 +82,14 @@ The first two names reach the same environment: `production` also owns the short
 ## 6. Inspect the ingress boundary
 
 ```sh
-docker compose exec caddy wget -qO- \
-  http://127.0.0.1:2019/config/apps/http/servers/scafo/routes | grep -o '"@id":"[^"]*"'
+curl -s -H "Authorization: Bearer $SCAFO_INGRESS_TOKEN" \
+  'http://127.0.0.1:7400/v1/ingress/routes?prefer=self'
 curl -H 'Host: operator.test' http://127.0.0.1/
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: nothing.scafo.test' \
+  http://127.0.0.1/
 ```
 
-Caddy contains routes for the environment host, the production short host, and the platform API apex. The `operator_authored` route from [`caddy.json`](caddy.json) remains untouched. There is no wildcard fallback for an undeployed host.
+That document is what Caddy polls every five seconds: the environment host and the production short host, each with the node addresses running it, then the platform API apex as its own entry carrying the prefixes an ingress must never proxy. Caddy keeps no route list of its own, so nothing writes to [`caddy.json`](caddy.json) and the `operator_authored` route in it — matched before the catch-all that consults the document — stays exactly as written. An unclaimed host resolves to no upstream and the error route answers 404; there is no wildcard fallback.
 
 ## 7. Use the platform apex safely
 
@@ -100,7 +102,7 @@ curl -s -H "Authorization: Bearer $SCAFO_INGRESS_TOKEN" \
   'http://127.0.0.1:7400/v1/storage/list?prefix='
 ```
 
-The first request reaches the node API through the platform apex. The second is blocked by Caddy: `/v1/storage` and `/v1/ingress/routes` are never published through that apex. The same storage route remains available on the node's local listener with the ingress token.
+The first request reaches the node API through the platform apex. The second is refused by Caddy itself: it resolves no upstream for `/v1/storage` or `/v1/ingress/routes` on a platform host, so neither is ever published there. The same storage route remains available on the node's local listener with the ingress token, which is how Caddy uses it.
 
 ## 8. Replace the current deployment
 

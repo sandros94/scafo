@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import { createIngressCounters } from "../../daemon/access-counters.ts";
 import type { DaemonContext } from "../../daemon/app.ts";
-import { loadDaemonConfig, runtimeDialHost } from "../../daemon/config.ts";
+import { loadDaemonConfig } from "../../daemon/config.ts";
 import { createCoordinator } from "../../daemon/coordinator.ts";
 import { createHeartbeat } from "../../daemon/heartbeat.ts";
 import { createObservability, OBSERVED_RING_SIZE } from "../../daemon/observe.ts";
@@ -32,7 +32,6 @@ import { createDeployService } from "../../daemon/deploys.ts";
 import { createCelldDeployRunner } from "../../drivers/deploy/celld.ts";
 import { createFileArtifactStager } from "../../drivers/artifact/file.ts";
 import { type AccessLogTailer, createAccessLogTailer } from "../../drivers/observe/access-log.ts";
-import { createCaddyDriver } from "../../drivers/ingress/caddy.ts";
 import { DEFAULT_ENTRY_POINT, renderTraefikConfig } from "../../drivers/ingress/traefik.ts";
 import { createCelldDriver, TELEMETRY_ENV } from "../../drivers/runtime/celld.ts";
 import { createChildSupervisor } from "../../drivers/supervisor/child.ts";
@@ -148,9 +147,6 @@ export const sailArgs: ArgsDef = {
     type: "string",
     description: "Maximum bytes accepted by a JSON API control request",
   },
-  "ingress-driver": { type: "string", description: "Ingress this node drives (caddy, traefik)" },
-  "caddy-admin": { type: "string", description: "Base URL of the Caddy admin API" },
-  "caddy-server": { type: "string", description: "Caddy server the node writes its routes into" },
   "traefik-entrypoints": {
     type: "string",
     description: "Traefik entryPoints the published routers attach to (web,websecure)",
@@ -263,39 +259,25 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
     );
   }
 
-  /* Served by every node whatever it drives itself: an ingress in front of the
-     whole fleet reads the fleet's routing from whichever node answers, and the
+  /* Served by every node, because every ingress pulls: whatever stands in front
+     of the fleet reads the fleet's routing from whichever node answers, and the
      entryPoints are the one thing about it a node has to be told. */
-  const ingress = config.ingress;
-  const entryPoints = ingress?.entryPoints ?? [DEFAULT_ENTRY_POINT];
+  const entryPoints = config.ingress?.entryPoints ?? [DEFAULT_ENTRY_POINT];
   daemon.ingressFormats = {
     traefik: (routing, { prefer }) => renderTraefikConfig(routing, { entryPoints, prefer }),
   };
 
-  if (ingress?.driver === undefined) {
-    /* Said once, at boot: a node with no ingress runs its processes and keeps
-       them to itself, which is a legitimate way to run one and not a warning
-       worth repeating on every reconcile pass. */
-    console.log("scafo: no ingress configured, nothing on this node will be routed to");
-  } else if (ingress.driver === "traefik") {
-    /* Worth saying once, because nothing else on this node will: an ingress that
-       polls and was never pointed at the node API stays silent rather than failing,
-       and the node looks like it is routing when nothing is reading it. The
-       entryPoints are said too, because a router attached to one the operator's
-       Traefik does not define is a route that exists and matches nothing. */
-    console.log(
-      `scafo: ingress "traefik" reads the fleet's routing from ` +
-        `/v1/ingress/routes/traefik?prefer=self on ${config.node.listen} with the ingress token; ` +
-        `point its http provider there. Routers attach to entryPoint(s) ${entryPoints.join(", ")}`,
-    );
-  } else {
-    daemon.ingress = createCaddyDriver({
-      adminUrl: ingress.adminUrl,
-      serverName: ingress.serverName,
-      /* What the Caddy dialer of a process this node starts uses. */
-      upstreamHost: runtimeDialHost(config.runtime),
-    });
-  }
+  /* Said once, at boot, because nothing else on this node ever will: an ingress
+     that polls and was never pointed at the node API stays silent rather than
+     failing, and the node looks like it is routing when nothing is reading it.
+     The entryPoints come along because a Traefik router attached to one the
+     operator does not define is a route that exists and matches nothing. */
+  console.log(
+    `scafo: this node serves the fleet's routing at /v1/ingress/routes (Caddy's ` +
+      `"dynamic scafo") and /v1/ingress/routes/traefik?prefer=self (Traefik's http provider) ` +
+      `on ${config.node.listen}, behind the ingress token; point your ingress there. Traefik ` +
+      `routers attach to entryPoint(s) ${entryPoints.join(", ")}`,
+  );
 
   /* What a colocated ingress keeps its certificates, its account key and its
      issuance locks in: this node's bucket, reached through this node, which is

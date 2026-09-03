@@ -14,7 +14,6 @@ data:
   # `none` declares the pod network private: runtime processes bind the pod
   # address, so every sidecar can reach whichever node holds a host.
   SCAFO_TRANSPORT: "none"
-  SCAFO_INGRESS_DRIVER: "traefik"
   SCAFO_TRAEFIK_ENTRYPOINTS: "web"
   SCAFO_OBSERVABILITY: "1"
   SCAFO_INGRESS_ACCESS_LOG: "/var/log/scafo-ingress/access.log"

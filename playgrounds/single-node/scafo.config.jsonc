@@ -16,13 +16,6 @@
 
   "transport": { "driver": "none" },
 
-  "ingress": {
-    // Keep Caddy's configuration authority on shared loopback.
-    "driver": "caddy",
-    "adminUrl": "http://127.0.0.1:2019",
-    "serverName": "scafo",
-  },
-
   "observability": {
     "enabled": true,
     "ingressAccessLog": "/var/log/scafo-ingress/access.log",

@@ -45,9 +45,9 @@ import {
 const E2E = process.env.SCAFO_E2E === "1";
 
 /**
- * Caddy with the `caddy.storage.scafo` module compiled in. The published image
- * is the default; point this at a locally built tag to run the suite against a
- * module that is not released yet.
+ * Caddy with both `scafo` modules compiled in. The published image is the
+ * default; point this at a locally built tag to run the suite against modules
+ * that are not released yet.
  */
 const CADDY_IMAGE: string =
   process.env.SCAFO_E2E_CADDY_IMAGE ?? "ghcr.io/sandros94/scafo-caddy:edge";
@@ -56,7 +56,6 @@ const CADDY_IMAGE: string =
 const PEBBLE_IMAGE = "ghcr.io/letsencrypt/pebble:latest";
 
 const CADDY_HTTPS_PORT = 443;
-const CADDY_ADMIN_PORT = 2019;
 /** Port for Pebble's unused HTTP challenge. */
 const HTTP_PORT = 80;
 const NODE_PORT = 7400;
@@ -367,6 +366,22 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
   );
 
   it(
+    "read the routing document with the same token, from the same process",
+    () => {
+      /* The other half of what one token buys. The module logs a failed fetch
+         once per state change and nothing at all when they succeed, so the
+         absence of that line IS the evidence — and the presence of a Caddy that
+         provisioned at all is the evidence that both modules resolved. */
+      const log = caddies[0].log.join("");
+
+      expect(log, caddyLogTail(caddies[0])).toContain('"msg":"serving initial configuration"');
+      expect(log, caddyLogTail(caddies[0])).not.toContain("fetching the routing document failed");
+      observed.routingFetch = "no failure logged";
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
     "answers a caller presenting the wrong token, or none, with 401",
     async () => {
       const wrong = await send(
@@ -405,7 +420,7 @@ async function startCaddy(name: string, alias: string): Promise<Caddy> {
       { content: directoryRoot, target: DIRECTORY_ROOT_IN_CADDY },
     ])
     .withCommand(["caddy", "run", "--config", CONFIG_IN_CADDY])
-    .withExposedPorts(CADDY_HTTPS_PORT, CADDY_ADMIN_PORT)
+    .withExposedPorts(CADDY_HTTPS_PORT)
     .withLogConsumer((stream: Readable) => {
       stream.on("data", (chunk) => log.push(String(chunk)));
       stream.on("err", (chunk) => log.push(String(chunk)));
@@ -426,14 +441,16 @@ async function startCaddy(name: string, alias: string): Promise<Caddy> {
  * only the TLS-ALPN CHALLENGE. Both would work, and the CA is configured for
  * both ports, but leaving the HTTP one enabled means the first attempt goes to a
  * port this server does not listen on, which costs a retry and proves nothing.
+ *
+ * BOTH MODULES, ON ONE TOKEN AND ONE ENDPOINT. The routing half is here not
+ * because this suite deploys anything — it deploys nothing — but because that is
+ * the whole shape an operator runs, and provisioning it beside the storage half
+ * is what proves the two coexist against one daemon rather than only apart.
  */
 function caddyConfig(name: string): string {
   return JSON.stringify(
     {
-      admin: {
-        listen: `0.0.0.0:${String(CADDY_ADMIN_PORT)}`,
-        origins: [`127.0.0.1:${String(CADDY_ADMIN_PORT)}`, `localhost:${String(CADDY_ADMIN_PORT)}`],
-      },
+      /* No admin block: nothing calls Caddy's admin API here, or anywhere. */
       storage: {
         module: "scafo",
         endpoint: `http://${NODE_ALIAS}:${String(NODE_PORT)}`,
@@ -452,7 +469,25 @@ function caddyConfig(name: string): string {
                   ],
                   terminal: true,
                 },
+                {
+                  handle: [
+                    {
+                      handler: "reverse_proxy",
+                      dynamic_upstreams: {
+                        source: "scafo",
+                        endpoint: `http://${NODE_ALIAS}:${String(NODE_PORT)}`,
+                        token_file: TOKEN_IN_CADDY,
+                        prefer: "self",
+                        poll_interval: "1s",
+                      },
+                      load_balancing: { selection_policy: { policy: "first" }, retries: 2 },
+                    },
+                  ],
+                },
               ],
+              /* No error route: this server holds a certificate for `SITE`
+                 alone, so no request for an unrouted name can complete a
+                 handshake to reach one. `e2e.test.ts` is where that 404 lives. */
               automatic_https: { disable_redirects: true },
             },
           },

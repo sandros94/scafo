@@ -134,15 +134,17 @@ export interface VarsetsConfig {
   keyFile: string;
 }
 
-/** Ingress configuration: Caddy is pushed through its admin API; Traefik pulls
- * from the node's configuration endpoint. Whatever the driver, every node serves
- * the fleet's routing and its storage surface behind the ingress token. */
+/**
+ * Ingress configuration.
+ *
+ * THERE IS NO DRIVER TO SELECT. Both ingresses pull: Caddy through the `scafo`
+ * dynamic-upstreams module reading `/v1/ingress/routes`, Traefik through its http
+ * provider reading `/v1/ingress/routes/traefik`, and both present the ingress
+ * token to do it. So a node is never configured with WHICH ingress stands in
+ * front of it — it is configured with what that ingress needs to read it, which
+ * is a token, plus the one thing about a Traefik router a document cannot infer.
+ */
 export interface IngressConfig {
-  /**
-   * Which ingress this node drives; anything else fails the boot. Absent means
-   * this node drives none itself, and only serves what an ingress elsewhere reads.
-   */
-  driver?: IngressDriverName;
   /**
    * Every token admitted on `/v1/ingress` and `/v1/storage`, primary first, never
    * empty. Explicit tokens replace minting: rotate by expanding to `[new, old]`,
@@ -150,19 +152,9 @@ export interface IngressConfig {
    * persisted for local consumers.
    */
   token?: [string, ...string[]];
-  /** Base URL of the Caddy admin API; the driver's own default applies when absent. */
-  adminUrl?: string;
-  /** Caddy server this node writes its routes into. */
-  serverName?: string;
   /** Traefik entry points; never empty because omission attaches to all of them. */
   entryPoints?: string[];
 }
-
-/** Every ingress a node can drive. */
-export type IngressDriverName = "caddy" | "traefik";
-
-/** The ingresses that can be configured, in the order a refusal lists them. */
-const INGRESS_DRIVERS: IngressDriverName[] = ["caddy", "traefik"];
 
 /** Every runtime setting, with the defaults already applied. */
 export interface RuntimeConfig {
@@ -475,13 +467,6 @@ const ORIGINS = {
   },
   apiPublic: { flag: "api-public", env: ["SCAFO_API_PUBLIC"], file: "api.public" },
   jsonBytes: { flag: "json-bytes", env: ["SCAFO_JSON_BYTES"], file: "api.jsonBytes" },
-  ingressDriver: {
-    flag: "ingress-driver",
-    env: ["SCAFO_INGRESS_DRIVER"],
-    file: "ingress.driver",
-  },
-  caddyAdmin: { flag: "caddy-admin", env: ["SCAFO_CADDY_ADMIN"], file: "ingress.adminUrl" },
-  caddyServer: { flag: "caddy-server", env: ["SCAFO_CADDY_SERVER"], file: "ingress.serverName" },
   traefikEntryPoints: {
     flag: "traefik-entrypoints",
     env: ["SCAFO_TRAEFIK_ENTRYPOINTS"],
@@ -831,58 +816,16 @@ function resolvePlatformDomains(sources: Sources): string[] {
   return domains;
 }
 
-/** Resolves the selected ingress. A Caddy admin URL retains its implicit-Caddy
- * compatibility; settings for the other driver are rejected. */
+/**
+ * Resolves the ingress settings — which are not about WHICH ingress, only about
+ * what one needs to read this node. See {@link IngressConfig}.
+ */
 function resolveIngress(sources: Sources): IngressConfig | undefined {
-  const driver = resolve("ingressDriver", sources);
-  const adminUrl = resolve("caddyAdmin", sources);
-  const serverName = resolve("caddyServer", sources);
   const entryPoints = resolveEntryPoints(sources);
   const token = resolveIngressTokens(sources);
 
-  /* Entry points select Traefik even without an explicit driver name. A token
-     alone selects nothing: it guards what every node serves whatever it drives. */
-  if (driver === undefined && adminUrl === undefined && entryPoints === undefined) {
-    return token === undefined ? undefined : { token };
-  }
-  if (driver !== undefined && !(INGRESS_DRIVERS as string[]).includes(driver)) {
-    throw new ScafoError("invalid-input", "Invalid configuration value", {
-      detail:
-        `"${ORIGINS.ingressDriver.file}" must be one of ` +
-        `${INGRESS_DRIVERS.map((name) => `"${name}"`).join(", ")}, got ${JSON.stringify(driver)}`,
-    });
-  }
-
-  const selected: IngressDriverName = (driver as IngressDriverName | undefined) ?? "caddy";
-  if (selected === "caddy") {
-    refuseForeign(
-      [[ORIGINS.traefikEntryPoints, entryPoints]],
-      (named) =>
-        `${named} configures Traefik, but "${ORIGINS.ingressDriver.file}" selects "caddy", ` +
-        `which this node pushes its routing to through the admin API and which has no ` +
-        `entryPoints — those belong to Traefik, whose routers attach to them. Drop the ` +
-        `Traefik setting, or select "traefik"`,
-    );
-  } else {
-    refuseForeign(
-      [
-        [ORIGINS.caddyAdmin, adminUrl],
-        [ORIGINS.caddyServer, serverName],
-      ],
-      (named) =>
-        `${named} configures Caddy, but "${ORIGINS.ingressDriver.file}" selects ` +
-        `"${selected}", which has no admin API this node calls — it reads the routing the ` +
-        `node publishes instead. Drop the Caddy setting, or select "caddy"`,
-    );
-  }
-
-  return {
-    driver: selected,
-    ...(token === undefined ? {} : { token }),
-    ...(adminUrl === undefined ? {} : { adminUrl }),
-    ...(serverName === undefined ? {} : { serverName }),
-    ...(entryPoints === undefined ? {} : { entryPoints }),
-  };
+  if (entryPoints === undefined) return token === undefined ? undefined : { token };
+  return { ...(token === undefined ? {} : { token }), entryPoints };
 }
 
 /** Resolves Traefik entry points from comma text or JSON. Empty is rejected:
@@ -910,22 +853,6 @@ function resolveEntryPoints(sources: Sources): string[] | undefined {
     });
   }
   return names;
-}
-
-/** Refuses the settings that belong to the ingress this node is NOT driving. */
-function refuseForeign(
-  settings: Array<[Origin, string | string[] | undefined]>,
-  detail: (named: string) => string,
-): void {
-  const written = settings.filter(([, value]) => value !== undefined);
-  if (written.length === 0) return;
-
-  const named = written
-    .map(([origin, value]) => `"${origin.file}" (--${origin.flag}) = ${JSON.stringify(value)}`)
-    .join(" and ");
-  throw new ScafoError("invalid-input", "Conflicting ingress configuration", {
-    detail: detail(named),
-  });
 }
 
 /** Resolves explicit transport. Non-loopback configuration may not infer one. */

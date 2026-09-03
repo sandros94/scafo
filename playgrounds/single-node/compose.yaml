@@ -46,7 +46,7 @@ services:
     environment:
       SCAFO_S3_ACCESS_KEY: ${SCAFO_S3_ACCESS_KEY:?set SCAFO_S3_ACCESS_KEY in .env}
       SCAFO_S3_SECRET_KEY: ${SCAFO_S3_SECRET_KEY:?set SCAFO_S3_SECRET_KEY in .env}
-      # Required by Caddy's private storage module; do not default this to empty.
+      # Required by Caddy for both storage and routing; do not default this to empty.
       SCAFO_INGRESS_TOKEN: ${SCAFO_INGRESS_TOKEN:?set SCAFO_INGRESS_TOKEN in .env}
 
     command: ["sail", "--config", "/etc/scafo/scafo.config.jsonc"]
@@ -63,12 +63,12 @@ services:
       start_period: 10s
 
   caddy:
-    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:latest}
-    # Caddy reaches the node, runtimes, and admin API through shared loopback.
+    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:edge}
+    # Caddy reaches the node and the runtimes through shared loopback.
     network_mode: "service:node"
     depends_on:
       node:
-        # Caddy reads certificate storage through this healthy node at startup.
+        # Caddy reads certificate storage and routing through this node at startup.
         condition: service_healthy
     command: ["caddy", "run", "--config", "/etc/caddy/config.json"]
     environment:
@@ -79,8 +79,14 @@ services:
       - caddy-data:/data
       - caddy-config:/config
     healthcheck:
+      # Healthy once the polled routing resolves the platform apex to the node.
       test:
-        ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:2019/config/apps/http/servers/scafo/routes"]
+        - CMD
+        - wget
+        - -q
+        - -O-
+        - "--header=Host: scafo.test"
+        - http://127.0.0.1/.well-known/scafo/health
       interval: 5s
       timeout: 5s
       retries: 30

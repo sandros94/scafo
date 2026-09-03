@@ -16,14 +16,9 @@
   "transport": { "driver": "none" },
 
   "runtime": {
-    // Required for cross-node Celld forwarding; use only a trusted transport.
+    // Required for cross-node Celld forwarding and for an ingress that reaches
+    // a host held by the other node; use only a trusted transport.
     "bindHost": "0.0.0.0",
-  },
-
-  "ingress": {
-    "driver": "caddy",
-    "adminUrl": "http://127.0.0.1:2019",
-    "serverName": "scafo",
   },
 
   "observability": {

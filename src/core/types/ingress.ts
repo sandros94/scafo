@@ -1,8 +1,17 @@
 /*
  * The seam between placement and whatever puts a node's running processes on the
- * public network. Core describes the contract; a driver
- * (`scafo/drivers/ingress/caddy`) implements it, and the reconcile loop calls it
- * with the routing it renders after every pass.
+ * public network.
+ *
+ * EVERY INGRESS PULLS. Nothing here is pushed into an ingress and nothing here
+ * calls one: a node renders the fleet's routing and serves it, and the ingress in
+ * front reads it — as the generic document, or in the format it speaks natively
+ * ({@link IngressFormat}). Caddy reads it through the `scafo` dynamic-upstreams
+ * module, Traefik through its http provider, and both present the same ingress
+ * token to do it.
+ *
+ * {@link IngressDesired} is what ONE NODE has running, rendered per pass: the
+ * input the access counters read whose host is whose from, and the node-local
+ * half of what the fleet document is assembled out of.
  */
 
 /** One routable backend: a running runtime process serving an environment. */
@@ -27,12 +36,12 @@ export interface IngressRoute {
  * AN EXPLICIT ROUTE PER APEX, which is also why the apex has no wildcard
  * certificate and mints its own.
  *
- * {@link ApiRouting.denied} IS THE SECURITY RULE OF THIS SURFACE AND A DRIVER
- * MUST ENFORCE IT AT THE INGRESS, not by trusting the daemon behind it: a request
- * for one of these prefixes on one of these hosts must be answered by the
- * ingress itself and must never be proxied. Both prefixes are matched at a path
- * SEGMENT boundary — the prefix exactly, or the prefix followed by `/` and
- * anything — which is what the two implemented drivers were pinned to.
+ * {@link ApiRouting.denied} IS THE SECURITY RULE OF THIS SURFACE AND THE INGRESS
+ * MUST ENFORCE IT ITSELF, not by trusting the daemon behind it: a request for one
+ * of these prefixes on one of these hosts must be answered by the ingress and
+ * must never be proxied. Both prefixes are matched at a path SEGMENT boundary —
+ * the prefix exactly, or the prefix followed by `/` and anything — which is what
+ * both ingresses are pinned to.
  */
 export interface ApiRouting {
   /** Loopback port the daemon answers on. */
@@ -59,21 +68,6 @@ export interface IngressDesired {
    * leaves an apex out entirely when an application already answers on it.
    */
   api?: ApiRouting;
-}
-
-/**
- * Routes public traffic to the processes a node runs, by being TOLD: an ingress
- * with an admin API is converged by calling it after every reconcile pass. An
- * ingress that polls instead reads the fleet's routing off the node API in its
- * own format ({@link IngressFormat}) and needs no driver.
- */
-export interface IngressDriver {
-  /**
-   * Converges the ingress to exactly this routing and nothing beyond it: hosts
-   * that are no longer desired stop being served. Idempotent, so a caller may
-   * apply the same routing after every reconcile pass.
-   */
-  apply(desired: IngressDesired): Promise<void>;
 }
 
 /**

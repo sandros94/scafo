@@ -1,15 +1,16 @@
 /*
- * Internal: telling the ingress what this node currently serves — by pushing it
- * to one that is called, or by holding it for one that asks.
+ * Internal: what this node currently serves, rendered once per reconcile pass for
+ * the one reader left that needs it node-locally — the access counters.
  */
 
 import type { DesiredEnvironment } from "../core/placement/reconcile.ts";
 import { renderRoutes, type RouteClaim } from "../core/placement/routes.ts";
+import type { IngressDesired } from "../core/types/ingress.ts";
 import type { RuntimeProcess } from "../core/types/runtime.ts";
 import type { DaemonContext } from "./app.ts";
 import { parseHostPort } from "./config.ts";
 
-/** What one pass ended with, as the ingress is told about it. */
+/** What one pass ended with, as this node's own routing is rendered from it. */
 export interface IngressInput {
   /** Environments this node serves, with the builds it resolved for them. */
   desired: DesiredEnvironment[];
@@ -18,18 +19,19 @@ export interface IngressInput {
 }
 
 /**
- * Renders the routing for what this node has running, tells the counters whose
- * host is whose, and converges the ingress on it when the node drives one. An
- * ingress that polls is served the fleet's routing by the node API instead,
- * and a node with no ingress at all runs its processes without routing to them.
+ * Renders the routing for what this node has running and tells the counters whose
+ * host is whose. Returns the routing, which is also what makes this readable in a
+ * test without a counter attached.
  *
- * Called after every reconcile pass rather than only when something changed:
- * `IngressDriver.apply` is idempotent, and a pass that re-states the routing is
- * also what repairs an ingress that was restarted or edited underneath the node.
+ * NOTHING IS PUSHED ANYWHERE. Both ingresses read the fleet's routing off the
+ * node API — `/v1/ingress/routes` for Caddy's `scafo` upstreams module,
+ * `/v1/ingress/routes/traefik` for Traefik's http provider — so a pass converges
+ * the ingress by leaving the document it polls correct, and a node with no
+ * ingress in front of it simply runs its processes without routing to them.
  *
  * The routing carries the daemon's own port only when the fleet API is public.
  */
-export async function applyIngress(daemon: DaemonContext, input: IngressInput): Promise<void> {
+export function recordRouting(daemon: DaemonContext, input: IngressInput): IngressDesired {
   const { desired, processes } = input;
 
   /* An environment record mirrors every domain claimed for it, so the custom
@@ -57,13 +59,10 @@ export async function applyIngress(daemon: DaemonContext, input: IngressInput): 
     ...(daemon.config.api.public ? { api: { port } } : {}),
   });
 
-  /* WHAT THE INGRESS IS ABOUT TO BE TOLD IS ALSO WHAT SAYS WHOSE HOST IS WHOSE.
-     The counters read the ingress's access log, and only this knows that a
-     custom domain belongs to an environment — a second reading of that would
-     be a second routing.
-     Handed over BEFORE the ingress call, so a pass whose ingress cannot be
-     reached still attributes the traffic that ingress is still serving. */
+  /* THIS IS ALSO WHAT SAYS WHOSE HOST IS WHOSE. The counters read the ingress's
+     access log, and only this knows that a custom domain belongs to an
+     environment — a second reading of that would be a second routing. */
   daemon.ingressCounters?.observeRouting({ routes: routing.routes, claims });
 
-  await daemon.ingress?.apply(routing);
+  return routing;
 }

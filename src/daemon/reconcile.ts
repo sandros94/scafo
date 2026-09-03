@@ -12,7 +12,7 @@ import type { NodeServing } from "../core/types/registry.ts";
 import type { RuntimeDriver, RuntimeProcess } from "../core/types/runtime.ts";
 import { type PlacementView, readDesired } from "./_desired.ts";
 import { createExecutor, failureOf, type ReconcileFailure } from "./_execute.ts";
-import { applyIngress } from "./_ingress.ts";
+import { recordRouting } from "./_ingress.ts";
 import type { DaemonContext } from "./app.ts";
 
 export type { PlacementView } from "./_desired.ts";
@@ -20,9 +20,6 @@ export type { ReconcileFailure } from "./_execute.ts";
 
 /** Time between two passes of the loop when none is configured. */
 export const DEFAULT_RECONCILE_INTERVAL_MS: number = 5_000;
-
-/** What a failure to converge the ingress is recorded against. */
-export const INGRESS_SUBJECT: string = "ingress";
 
 /** What the loop did last, as reported by the node API. */
 export interface ReconcileStatus {
@@ -178,16 +175,11 @@ export function createReconciler(
       await executor.execute(plan, desired, pending, abort.signal);
 
       if (!abort.signal.aborted) {
-        try {
-          /* Publish routes from the actual post-execution process state. */
-          await applyIngress(daemon, {
-            desired,
-            processes: executor.currentProcesses(),
-          });
-        } catch (error) {
-          /* Ingress failures are retried next pass without stopping runtime reconciliation. */
-          pending.push(failureOf(error, { subject: INGRESS_SUBJECT }));
-        }
+        /* Attribute traffic from the actual post-execution process state. Nothing
+           leaves the node here — what an ingress reads is `fleetRouting` above,
+           which it polls for itself — so there is no call to fail and nothing to
+           record a failure against. */
+        recordRouting(daemon, { desired, processes: executor.currentProcesses() });
       }
     } catch (error) {
       /* A registry read failure must not be interpreted as every environment removed. */

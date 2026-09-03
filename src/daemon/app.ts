@@ -14,7 +14,7 @@ import { isLeaseExpired } from "../core/registry/lease.ts";
 import { coordinatorKey, environmentKey, nodeKey } from "../core/registry/paths.ts";
 import { setNodeSelector } from "../core/registry/placement.ts";
 import { retireEnvironment, unretireEnvironment } from "../core/registry/retirement.ts";
-import type { IngressDriver, IngressFormat } from "../core/types/ingress.ts";
+import type { IngressFormat } from "../core/types/ingress.ts";
 import {
   DEFAULT_ARTIFACT_BYTES,
   type ArtifactStager,
@@ -83,11 +83,6 @@ export interface DaemonContext {
   observability?: Observability;
   /** Optional ingress counters, updated with routing after reconciliation. */
   ingressCounters?: IngressCounters;
-  /**
-   * Where the node publishes what it serves. Without one the processes still
-   * run and are simply not reachable from outside the node.
-   */
-  ingress?: IngressDriver;
   /**
    * The formats this node renders the fleet's routing in for an ingress that
    * polls, by the name it is served under (`/v1/ingress/<name>`).

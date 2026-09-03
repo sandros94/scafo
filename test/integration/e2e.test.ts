@@ -1,4 +1,12 @@
-/* End-to-end single-node Caddy deployment path. Caddy and daemon share a network namespace; runtimes bind loopback. */
+/*
+ * End-to-end single-node Caddy deployment path. Caddy and daemon share a network
+ * namespace; runtimes bind loopback.
+ *
+ * CADDY PULLS. Nothing here is written into Caddy: the fixture config names the
+ * `scafo` dynamic-upstreams module, and Caddy asks the node where each host lives
+ * every second. So an assertion after a deploy is a poll, not a one-shot — the
+ * routing document has to be fetched before the new host resolves.
+ */
 
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -47,12 +55,26 @@ import { startStubIssuer, type StubIssuer } from "./_stub-issuer.ts";
 
 const E2E = process.env.SCAFO_E2E === "1";
 
-const CADDY_IMAGE = "caddy:2";
+/**
+ * Caddy with both `scafo` modules compiled in. The published image is the
+ * default; point this at a locally built tag to run the suite against modules
+ * that are not released yet.
+ */
+const CADDY_IMAGE: string =
+  process.env.SCAFO_E2E_CADDY_IMAGE ?? "ghcr.io/sandros94/scafo-caddy:edge";
 
 const CADDY_HTTP_PORT = 80;
-const CADDY_ADMIN_PORT = 2019;
 /** Published on the Caddy container, because the daemon shares its namespace. */
 const NODE_PORT = 7400;
+
+/**
+ * Supplied rather than minted: Caddy starts before the node and has to present
+ * the token from its very first poll, so both sides are told the same one.
+ */
+const INGRESS_TOKEN = "e2e-caddy-ingress-token";
+
+/** What the fixture's error route answers with, for a host or a path nothing serves. */
+const NO_ROUTE = "scafo: no route";
 
 const BUCKET = "scafo-e2e";
 const KEY_PREFIX = "e2e";
@@ -95,7 +117,6 @@ let storeFromHost: string;
 let storeFromContainers: string;
 
 let caddyHttpPort: number;
-let caddyAdminPort: number;
 let apiPort: number;
 
 let registry: RegistryContext;
@@ -119,19 +140,20 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
     storeFromHost = store.fromHost;
     storeFromContainers = store.fromContainers;
 
+    /* Started first, and deliberately before the node it will poll: a Caddy whose
+       daemon is not up yet must come up anyway and start routing once it is. */
     caddy = await new GenericContainer(CADDY_IMAGE)
       .withCopyFilesToContainer([
         { source: join(FIXTURES, "caddy.json"), target: "/etc/caddy/config.json" },
       ])
+      .withEnvironment({ SCAFO_INGRESS_TOKEN: INGRESS_TOKEN })
       .withCommand(["caddy", "run", "--config", "/etc/caddy/config.json"])
-      .withExposedPorts(CADDY_HTTP_PORT, CADDY_ADMIN_PORT, NODE_PORT)
-      .withWaitStrategy(
-        Wait.forHttp(`/config/apps/http/servers/scafo/routes`, CADDY_ADMIN_PORT).forStatusCode(200),
-      )
+      .withExposedPorts(CADDY_HTTP_PORT, NODE_PORT)
+      .withWaitStrategy(Wait.forLogMessage(/serving initial configuration/))
+      .withStartupTimeout(BOOT_DEADLINE_MS)
       .start();
 
     caddyHttpPort = caddy.getMappedPort(CADDY_HTTP_PORT);
-    caddyAdminPort = caddy.getMappedPort(CADDY_ADMIN_PORT);
     apiPort = caddy.getMappedPort(NODE_PORT);
 
     daemon = await new GenericContainer(NODE_IMAGE)
@@ -149,7 +171,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         SCAFO_TRANSPORT: "none",
         SCAFO_STATE_DIR: "/var/lib/scafo",
         SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
-        SCAFO_CADDY_ADMIN: `http://127.0.0.1:${String(CADDY_ADMIN_PORT)}`,
+        SCAFO_INGRESS_TOKEN: INGRESS_TOKEN,
         SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
         CELLD_ESBUILD: "/usr/local/bin/esbuild",
       })
@@ -278,13 +300,14 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   it(
     "leaves the route the operator authored in Caddy untouched",
     async () => {
+      /* An operator route sits BEFORE the scafo catch-all and is matched first.
+         Nothing scafo does can disturb it, because scafo writes nothing into
+         this Caddy at all — but that is exactly what deserves stating once, and
+         it is stated after a deploy so it is not vacuously true. */
       const answer = await httpGet(caddyHttpPort, "/", { host: OPERATOR_HOST });
       expect(answer.status).toBe(200);
       expect(answer.body).toBe("operator");
-
-      const routes = await caddyRoutes();
-      expect(routes.map((route) => route["@id"])).toContain("operator_authored");
-      observed.caddyRouteIds = routes.map((route) => route["@id"]);
+      observed.operatorRoute = { status: answer.status, body: answer.body };
     },
     STEP_TIMEOUT_MS,
   );
@@ -305,9 +328,12 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expect(JSON.parse(health.body)).toMatchObject({ ok: true, node: NODE_ID });
       observed.apexHealth = JSON.parse(health.body);
 
+      /* Reached the node and was answered by it: a path the API does not serve
+         is the node's own 404, not the ingress's. */
       const missing = await httpGet(caddyHttpPort, "/v1/nope", { host: PLATFORM_DOMAIN });
       expect(missing.status).toBe(404);
       expect(missing.body).not.toContain("urn:scafo:not-found");
+      expect(missing.body).not.toBe(NO_ROUTE);
 
       const app = await httpGet(caddyHttpPort, "/", { host: apexHost() });
       expect(app.status).toBe(200);
@@ -320,25 +346,52 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   );
 
   it(
-    "NEVER reaches /v1/storage or the pull-provider route through that apex",
+    "NEVER reaches /v1/storage or the routing document through that apex",
     async () => {
+      /* Answered by CADDY, not by the node behind it: the module resolves these
+         to no upstream at all and records `denied`, and the fixture's error route
+         is what turns that into this 404. The body is how the two are told
+         apart — the node's own 404 never says this. */
       for (const path of [
         "/v1/storage",
         "/v1/storage/list?prefix=",
         "/v1/storage/objects/anything",
+        "/v1/ingress/routes",
         "/v1/ingress/routes/traefik",
       ]) {
         const blocked = await httpGet(caddyHttpPort, path, { host: PLATFORM_DOMAIN });
 
         expect(blocked.status, `${path} through the apex`).toBe(404);
         expect(blocked.body, `${path} through the apex`).not.toContain("urn:scafo:");
-        expect(blocked.body, `${path} through the apex`).toBe("");
+        expect(blocked.body, `${path} through the apex`).toBe(NO_ROUTE);
       }
-      observed.apexDenied = ["/v1/storage", "/v1/ingress/routes/traefik"];
+      observed.apexDenied = ["/v1/storage", "/v1/ingress/routes"];
+
+      /* The denial is at a path SEGMENT boundary, so a path that merely starts
+         with the same letters is proxied like any other — and reaches the node,
+         which is what its own answer proves. */
+      for (const path of ["/v1/storagex", "/v1/ingress/routesx"]) {
+        const proxied = await httpGet(caddyHttpPort, path, { host: PLATFORM_DOMAIN });
+
+        expect(proxied.body, `${path} through the apex`).not.toBe(NO_ROUTE);
+      }
+      observed.apexNotDenied = ["/v1/storagex", "/v1/ingress/routesx"];
 
       const local = await httpGet(apiPort, "/v1/storage/list?prefix=", {});
       expect(local.status).toBe(401);
       expect(local.body).toContain("urn:scafo:");
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "answers a host the fleet does not serve with the same 404, and says nothing more",
+    async () => {
+      const unknown = await httpGet(caddyHttpPort, "/", { host: "unrouted.scafo.test" });
+
+      expect(unknown.status).toBe(404);
+      expect(unknown.body).toBe(NO_ROUTE);
+      observed.unknownHost = { status: unknown.status, body: unknown.body };
     },
     STEP_TIMEOUT_MS,
   );
@@ -373,8 +426,8 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       await untilServes(envHost(), "v2");
       await untilServes(apexHost(), "v2");
 
-      const routes = await caddyRoutes();
-      expect(routes.map((route) => route["@id"])).toContain("operator_authored");
+      const operator = await httpGet(caddyHttpPort, "/", { host: OPERATOR_HOST });
+      expect(operator.body, "the operator's own route outlives a deploy").toBe("operator");
     },
     STEP_TIMEOUT_MS,
   );
@@ -555,15 +608,6 @@ async function untilServes(host: string, version: string): Promise<HttpAnswer> {
     if (answer.status !== 200) return null;
     return answer.body.includes(`"${version}"`) ? answer : null;
   });
-}
-
-/** The routes Caddy currently holds in the server the node writes into. */
-async function caddyRoutes(): Promise<Array<Record<string, unknown>>> {
-  const answer = await httpGet(caddyAdminPort, "/config/apps/http/servers/scafo/routes", {});
-  expect(answer.status, `the Caddy admin API answered ${answer.body}`).toBe(200);
-
-  const body: unknown = JSON.parse(answer.body);
-  return Array.isArray(body) ? (body as Array<Record<string, unknown>>) : [];
 }
 
 /** Polls until `probe` returns a value, attaching daemon logs on timeout. */

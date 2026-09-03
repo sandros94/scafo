@@ -59,10 +59,6 @@
       "types": "./dist/drivers/supervisor/child.d.mts",
       "default": "./dist/drivers/supervisor/child.mjs"
     },
-    "./drivers/ingress/caddy": {
-      "types": "./dist/drivers/ingress/caddy.d.mts",
-      "default": "./dist/drivers/ingress/caddy.mjs"
-    },
     "./drivers/ingress/traefik": {
       "types": "./dist/drivers/ingress/traefik.d.mts",
       "default": "./dist/drivers/ingress/traefik.mjs"

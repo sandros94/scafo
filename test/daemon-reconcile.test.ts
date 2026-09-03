@@ -8,8 +8,8 @@ import { writePlacement } from "../src/core/registry/placement.ts";
 import { createProject } from "../src/core/registry/projects.ts";
 import { importVarsetKey, putVarset, sealVarset } from "../src/core/registry/varsets.ts";
 import type { RuntimeDriver, RuntimeSpecInput } from "../src/core/types/runtime.ts";
-import type { IngressDesired } from "../src/core/types/ingress.ts";
 import type { ProcessSpec, ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
+import type { RoutingAttribution } from "../src/daemon/access-counters.ts";
 import type { DaemonContext } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { createHeartbeat } from "../src/daemon/heartbeat.ts";
@@ -277,9 +277,17 @@ async function seededWorld() {
     registry: registry.ctx,
     supervisor,
     version: "test",
-    ingress: {
-      async apply(desired: IngressDesired) {
-        events.push(`ingress:${String(desired.routes.length)}`);
+    /* The one thing a pass still does with its own routing once execution is
+       over: hand it to the counters, so a host is counted as whoever the pass
+       decided it belongs to. Recording it here is what puts the routing in the
+       event order below, where the driver call used to be. */
+    ingressCounters: {
+      ingest: () => {},
+      snapshot: () => {
+        throw new Error("no snapshot is taken here");
+      },
+      observeRouting(routing: RoutingAttribution) {
+        events.push(`ingress:${String(routing.routes.length)}`);
       },
     },
   };

@@ -836,7 +836,6 @@ async function startNode(id: string, labels?: string): Promise<Node> {
       SCAFO_TRANSPORT: "none",
       SCAFO_STATE_DIR: `/var/lib/scafo-${id}`,
       SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
-      SCAFO_INGRESS_DRIVER: "traefik",
       SCAFO_INGRESS_TOKEN: INGRESS_TOKEN,
       /* What the peers dial: the fleet document's upstreams are this address. */
       SCAFO_ADVERTISE: `${bridgeAddress}:${String(NODE_PORT)}`,

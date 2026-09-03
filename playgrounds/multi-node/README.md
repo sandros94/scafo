@@ -78,7 +78,7 @@ curl -H 'Host: shop--solo.scafo.test' http://127.0.0.1:8081/
 curl -H 'Host: shop--solo.scafo.test' http://127.0.0.1:8082/
 ```
 
-The placement record names one node. Only that node publishes the environment's route; the other ingress returns its native unmatched response. Scafo does not proxy application requests between nodes. Put replicas-constrained workloads behind routing that targets their assigned nodes, or serve them on every node.
+The placement record names one node, and only that node runs the process — yet both addresses answer. Every node renders the same fleet-wide routing from the registry, so each ingress reads one document naming every host and every node currently serving it; `prefer=self` only reorders the upstreams. The holder's ingress therefore serves the host from its own machine and the other forwards to the holder's advertised address, which is why `runtime.bindHost` must reach beyond loopback here. The forwarding is the ingress's; the node daemon proxies no application request. A host nobody serves is absent from the document altogether: no upstream resolves, and the error route answers 404 rather than any wildcard fallback.
 
 Placement uses rendezvous hashing over eligible node ids. A node selector first narrows the candidates; the replica count then chooses from them. The placement fence ties the decision to its coordinator lease.
 

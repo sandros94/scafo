@@ -1,8 +1,11 @@
 #!/bin/sh
 # Installs verified scafo, Celld, Caddy, and esbuild binaries.
 # Root on a systemd host also writes, but does not start, node and ingress units.
-# `scafo-caddy` is the default: it stores TLS material through the node storage API
-# without bucket credentials. Set `SCAFO_INSTALL_CADDY=plain` for upstream Caddy.
+# The ingress is `scafo-caddy`, and only `scafo-caddy`: it carries the two modules
+# this install depends on — `caddy.storage.scafo`, which keeps TLS material in the
+# bucket through the node's storage API without a bucket credential, and the
+# `scafo` dynamic-upstreams source, which PULLS the fleet's routing off this node.
+# Upstream Caddy has neither, so it cannot route for scafo at all.
 # The ingress receives a systemd credential copy of the ingress token; do not widen
 # the token's source-file permissions.
 #
@@ -26,11 +29,6 @@ CELLD_VERSION='0.4.0'
 CELLD_SHA256_amd64='0488628597154725db2f61f85434fb381e1b2535d1e9f097c6d20727cd337973'
 CELLD_SHA256_arm64='d95ec7108d2c280144599727ac66106c0123d09c573f5724d3b4d3bc33f7603e'
 
-# `SCAFO_INSTALL_CADDY=plain` installs this pinned upstream Caddy release.
-CADDY_VERSION='2.11.4'
-CADDY_SHA256_amd64='527fbf917c39189a1e3b31d34fa955601680b2d5c8055d2a87b8b9588dec7bb9'
-CADDY_SHA256_arm64='52d42ae12b3462097e9868da6dfed3c9648ae12edd3b3638102312af84cb6904'
-
 ESBUILD_VERSION='0.28.2'
 ESBUILD_SHA256_amd64='9573bb2233aab0f9ea7647d5cca9726113cc1768de61d66b17267f4db84488f6'
 ESBUILD_SHA256_arm64='a96dbfa41d3ef5dbd1ef22b1c10d5187be9267e86093a870f06402a7ec931596'
@@ -42,7 +40,8 @@ CONFIG_DIR='/etc/scafo'
 INGRESS_LOG_DIR='/var/log/scafo-ingress'
 SERVICE_USER='scafo'
 CADDY_USER='caddy'
-# This matches the ingress unit's `StateDirectory`; plain Caddy stores TLS material here.
+# This matches the ingress unit's `StateDirectory`. The certificates are NOT here —
+# they are in the bucket, through the node — so this holds little more than scratch.
 CADDY_STATE_DIR='/var/lib/caddy'
 
 # Keep the node token, ingress credential, and ingress config name aligned.
@@ -55,7 +54,7 @@ STOP_TIMEOUT='50'
 
 DEFAULT_INSTALL_BASE_LATEST='https://github.com/sandros94/scafo/releases/latest/download'
 DEFAULT_INSTALL_BASE_TAGGED='https://github.com/sandros94/scafo/releases/download'
-DEFAULT_CADDY_BASE='https://github.com/sandros94/scafo-certmagic/releases/latest/download'
+DEFAULT_CADDY_BASE='https://github.com/sandros94/scafo-ingress/releases/latest/download'
 
 # ---------------------------------------------------------------------------
 
@@ -73,11 +72,10 @@ main() {
   detect_downloader
 
   detect_platform
-  resolve_caddy_flavor
   resolve_destination
 
   say "installing into ${BIN_DIR} for ${OS}-${ARCH}"
-  say "ingress: ${CADDY_FLAVOR_LABEL}"
+  say 'ingress: scafo-caddy (TLS material in the bucket, routing pulled from this node)'
 
   WORK="$(mktemp -d)"
   trap 'rm -rf "$WORK"' EXIT INT TERM
@@ -135,26 +133,6 @@ detect_platform() {
   from the container image instead: ghcr.io/sandros94/scafo, or \`docker build\`
   from the repository."
   fi
-}
-
-# Validate the selected ingress before downloading or creating directories.
-resolve_caddy_flavor() {
-  case "${SCAFO_INSTALL_CADDY:-scafo}" in
-    scafo)
-      CADDY_FLAVOR='scafo'
-      CADDY_FLAVOR_LABEL='scafo-caddy (caddy.storage.scafo — TLS material in the bucket)'
-      ;;
-    plain)
-      CADDY_FLAVOR='plain'
-      CADDY_FLAVOR_LABEL="upstream Caddy ${CADDY_VERSION} (certificates on this host)"
-      ;;
-    *)
-      die "SCAFO_INSTALL_CADDY is \"${SCAFO_INSTALL_CADDY}\", and it is one of two words:
-  scafo   the default — Caddy built with the caddy.storage.scafo module, which
-          keeps this node's TLS material in the bucket through /v1/storage
-  plain   upstream Caddy, pinned in this script, certificates on this host"
-      ;;
-  esac
 }
 
 detect_downloader() {
@@ -303,27 +281,19 @@ fetch_celld() {
   gzip -dc "${WORK}/celld.gz" > "${WORK}/celld"
 }
 
-# Both ingress variants are staged as `${WORK}/caddy`.
+# Staged as `${WORK}/caddy`. Latest scafo-caddy releases require an explicit
+# checksum pin for authentication.
 fetch_caddy() {
-  if [ "$CADDY_FLAVOR" = 'plain' ]; then
-    fetch_caddy_plain
-  else
-    fetch_caddy_scafo
-  fi
-}
-
-# Latest scafo-caddy releases require an explicit checksum pin for authentication.
-fetch_caddy_scafo() {
   base="${SCAFO_CADDY_BASE:-$DEFAULT_CADDY_BASE}"
   name="scafo-caddy-${OS}-${ARCH}"
 
   download "${base}/${name}" "${WORK}/caddy" \
     "could not download ${base}/${name}
 
-  Check that the release asset exists and this host can access it. To use
-  upstream Caddy with host-local TLS state, install the supported plain variant:
-
-    SCAFO_INSTALL_CADDY=plain sh install.sh
+  Check that the release asset exists and this host can access it. There is no
+  fallback: upstream Caddy carries neither caddy.storage.scafo nor the scafo
+  dynamic-upstreams source, so it cannot hold this fleet's TLS material and
+  cannot answer for a single deployed name.
 
   SCAFO_CADDY_BASE selects another compatible artifact base. Provide
   ${name}.sha256 there or set SCAFO_CADDY_SHA256."
@@ -339,21 +309,6 @@ fetch_caddy_scafo() {
   fi
 
   verify "${WORK}/caddy" "$expected" "$name"
-}
-
-# The plain Caddy variant is pinned and may use `SCAFO_INSTALL_MIRROR`.
-fetch_caddy_plain() {
-  expected="$CADDY_SHA256_amd64"
-  [ "$ARCH" = 'arm64' ] && expected="$CADDY_SHA256_arm64"
-
-  name="caddy_${CADDY_VERSION}_linux_${ARCH}.tar.gz"
-  download "$(artifact_url \
-    "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/${name}" "$name")" \
-    "${WORK}/caddy.tar.gz"
-  verify "${WORK}/caddy.tar.gz" "$expected" "caddy ${CADDY_VERSION} (${ARCH})"
-
-  tar -xzf "${WORK}/caddy.tar.gz" -C "$WORK" caddy
-  CADDY_CHECKSUM_SOURCE="pinned in this script (caddy ${CADDY_VERSION})"
 }
 
 # Esbuild is distributed as a platform npm package rather than a release asset.
@@ -428,9 +383,8 @@ SCAFO_LISTEN=127.0.0.1:7400
 #SCAFO_ADVERTISE=
 #SCAFO_TRANSPORT=
 
-# Caddy's admin API, on this host's loopback. This is how the node converges the
-# routing; it owns only the routes it created inside the "scafo" server.
-SCAFO_CADDY_ADMIN=http://127.0.0.1:2019
+# The ingress is not configured from here. It READS the fleet's routing off this
+# node's API, at /v1/ingress/routes behind the ingress token, and follows it.
 
 # What this machine IS, for environments that ask for a class of node.
 #SCAFO_NODE_LABELS=tier=fast,region=eu-west-1
@@ -452,12 +406,8 @@ EOF
   fi
 
   if [ -f "${CONFIG_DIR}/caddy.json" ]; then
-    # Preserve the existing config; changing ingress variants requires a matching config.
+    # An operator's edits outrank the generated file; never rewrite one that exists.
     say "keeping ${CONFIG_DIR}/caddy.json"
-    if ! caddy_json_matches_flavor; then
-      warn "${CONFIG_DIR}/caddy.json was written for the OTHER ingress flavour;
-  move it aside and re-run this script to have the matching one written"
-    fi
   else
     render_caddy_json > "${CONFIG_DIR}/caddy.json"
     chmod 0644 "${CONFIG_DIR}/caddy.json"
@@ -465,35 +415,21 @@ EOF
   fi
 }
 
-# The storage block distinguishes the two ingress configurations.
-caddy_json_matches_flavor() {
-  if grep -q '"module": "scafo"' "${CONFIG_DIR}/caddy.json" 2>/dev/null; then
-    [ "$CADDY_FLAVOR" = 'scafo' ]
-  else
-    [ "$CADDY_FLAVOR" = 'plain' ]
-  fi
-}
-
-# Generate the tested ingress config. The node updates only `scafo_` routes,
-# preserving other routes in the same server. The readable access log supports opt-in counters.
+# Generate the tested ingress config. Nothing pushes into this file or into
+# Caddy: the ingress PULLS the fleet's routing from this node and follows it.
+# There is no "admin" block on purpose — no one calls Caddy's admin API any more,
+# and Caddy's own default (localhost:2019) is what the unit's ExecReload needs.
+# The readable access log supports opt-in counters.
 render_caddy_json() {
+  # Every block naming the node reads the private systemd credential copy of the
+  # ingress token, never the source file.
   cat <<EOF
 {
-  "admin": {
-    "listen": "127.0.0.1:2019"
-  },
-EOF
-
-  # The unit exposes a private systemd credential copy, not the source token.
-  [ "$CADDY_FLAVOR" != 'scafo' ] || cat <<EOF
   "storage": {
     "module": "scafo",
     "endpoint": "${STORAGE_ENDPOINT}",
     "token_file": "{env.CREDENTIALS_DIRECTORY}/${INGRESS_TOKEN_NAME}"
   },
-EOF
-
-  cat <<EOF
   "logging": {
     "logs": {
       "default": { "exclude": ["http.log.access.scafo"] },
@@ -509,11 +445,77 @@ EOF
     }
   },
   "apps": {
+EOF
+
+  # This ingress answers on :443 for names it only learns at request time, so
+  # every certificate is on demand — and the node, not Caddy, decides which names
+  # deserve one. Without this the server would listen and serve nothing.
+  cat <<EOF
+    "tls": {
+      "automation": {
+        "policies": [{ "on_demand": true }],
+        "on_demand": {
+          "permission": {
+            "module": "http",
+            "endpoint": "${STORAGE_ENDPOINT}/v1/ingress/ask"
+          }
+        }
+      }
+    },
+EOF
+
+  # One catch-all route. The upstreams source polls this node, caches the routing
+  # document, and resolves the request's Host to that name's upstreams. The list
+  # is a PRIORITY, not a weighting — this node first, hence "first" rather than a
+  # balancing policy — and passive health checks step down the list when the head
+  # of it keeps failing.
+  cat <<EOF
     "http": {
       "servers": {
         "scafo": {
           "listen": [":80", ":443"],
-          "routes": [],
+          "routes": [
+            {
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "dynamic_upstreams": {
+                    "source": "scafo",
+                    "endpoint": "${STORAGE_ENDPOINT}",
+                    "token_file": "{env.CREDENTIALS_DIRECTORY}/${INGRESS_TOKEN_NAME}",
+                    "prefer": "self"
+                  },
+                  "load_balancing": {
+                    "selection_policy": { "policy": "first" },
+                    "retries": 2,
+                    "try_duration": "5s"
+                  },
+                  "health_checks": {
+                    "passive": { "fail_duration": "30s", "max_fails": 3 }
+                  }
+                }
+              ]
+            }
+          ],
+EOF
+
+  # A name nobody deployed and a path the node refused are ONE answer here, on
+  # purpose: 404 either way, so a denial never confirms that the path exists.
+  cat <<EOF
+          "errors": {
+            "routes": [
+              {
+                "match": [{ "vars": { "scafo.route": ["unknown", "denied"] } }],
+                "handle": [
+                  {
+                    "handler": "static_response",
+                    "status_code": 404,
+                    "body": "No deployment answers to this name.\\n"
+                  }
+                ]
+              }
+            ]
+          },
           "logs": { "default_logger_name": "scafo" }
         }
       }
@@ -590,41 +592,26 @@ Description=Caddy, the ingress a scafo node routes through
 Documentation=https://caddyserver.com/docs/
 Wants=network-online.target
 After=network-online.target scafo-node.service
-EOF
-
-  # The token is unavailable on first boot until the node starts. `LoadCredential=`
-  # fails before `ExecStartPre`, so disable start-rate limiting and retry on failure.
-  # Do not add `Requires=`: running ingress may continue through a node restart.
-  [ "$CADDY_FLAVOR" != 'scafo' ] || cat <<EOF
+# The token is unavailable on first boot until the node starts. LoadCredential=
+# fails before ExecStartPre, so disable start-rate limiting and retry on failure.
+# Do not add Requires=: a running ingress may continue through a node restart.
 StartLimitIntervalSec=0
-EOF
-
-  cat <<EOF
 
 [Service]
 Type=notify
 User=${CADDY_USER}
 Group=${CADDY_USER}
-EOF
-
-  # `LoadCredential=` gives ingress a private copy without exposing the source token.
-  [ "$CADDY_FLAVOR" != 'scafo' ] || cat <<EOF
+# This gives the ingress a private copy without exposing the source token.
 LoadCredential=${INGRESS_TOKEN_NAME}:${STATE_DIR}/${INGRESS_TOKEN_NAME}
-EOF
-
-  cat <<EOF
 ExecStart=${BIN_DIR}/caddy run --config ${CONFIG_DIR}/caddy.json
 ExecReload=${BIN_DIR}/caddy reload --config ${CONFIG_DIR}/caddy.json --force
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=5s
 
-# Caddy's own state directory. With scafo-caddy the certificates and the ACME
-# account are NOT here — they are in the bucket, reached through the node — and
-# this holds little more than scratch; with plain Caddy it holds all of it, on
-# this host's disk, which is the per-node TLS the installer's header describes.
-# Set either way, so that changing flavour never leaves a file with nowhere to
-# land.
+# Caddy's own state directory. The certificates and the ACME account are NOT
+# here — they are in the bucket, reached through the node — so this holds little
+# more than scratch. Set anyway, so nothing Caddy writes has nowhere to land.
 StateDirectory=caddy
 Environment=XDG_DATA_HOME=${CADDY_STATE_DIR}
 Environment=XDG_CONFIG_HOME=${CADDY_STATE_DIR}
@@ -678,8 +665,9 @@ write_manifest() {
     printf 'caddy_state_dir=%s\n' "$CADDY_STATE_DIR"
     printf 'service_user=%s\n' "$SERVICE_USER"
     printf 'caddy_user=%s\n' "$CADDY_USER"
-    # Records TLS storage location for the uninstall report.
-    printf 'caddy_flavor=%s\n' "$CADDY_FLAVOR"
+    # Only scafo-caddy is installable now, but the key stays: uninstall.sh reads
+    # it, and an older manifest on this host may still say something else.
+    printf 'caddy_flavor=scafo\n'
     for name in $CREATED_USERS; do printf 'created_user=%s\n' "$name"; done
   } > "$manifest"
   chmod 0644 "$manifest"
@@ -704,28 +692,36 @@ explain_manual_setup() {
   say "  CELLD_ESBUILD=${BIN_DIR}/esbuild SCAFO_CELLD_BIN=${BIN_DIR}/celld \\"
   say "  SCAFO_S3_ENDPOINT=... SCAFO_S3_BUCKET=... SCAFO_S3_ACCESS_KEY=... \\"
   say "  SCAFO_S3_SECRET_KEY=... SCAFO_PLATFORM_DOMAINS=... \\"
-  say "  SCAFO_CADDY_ADMIN=http://127.0.0.1:2019 \\"
   say "    ${BIN_DIR}/scafo sail --listen 127.0.0.1:7400"
   say ''
   say "  ${BIN_DIR}/caddy run --config ./caddy.json"
   say ''
-  if [ "$CADDY_FLAVOR" = 'scafo' ]; then
-    # Manual ingress must read the source token; generated systemd config cannot do that.
-    say 'THAT CADDY IS scafo-caddy, and it needs a "storage" block naming the'
-    say 'node — write ./caddy.json with:'
-    say ''
-    say '  "storage": {'
-    say '    "module": "scafo",'
-    say "    \"endpoint\": \"${STORAGE_ENDPOINT}\","
-    say "    \"token_file\": \"${STATE_DIR}/${INGRESS_TOKEN_NAME}\""
-    say '  },'
-    say ''
-    say 'The token is minted 0600 by whoever runs the node. Under systemd this'
-    say 'script hands it over with LoadCredential= and nothing is loosened;'
-    say 'running both by hand, the ingress must be a user that can read it —'
-    say 'the same user as the node, or a group you give it yourself.'
-    say ''
-  fi
+  # A hand-run ingress reads the SOURCE token: there is no systemd credential
+  # directory to point at, so both blocks name the file the node minted.
+  say 'THAT CADDY IS scafo-caddy, and BOTH of its scafo modules have to name this'
+  say 'node — one for the TLS material, one for the routing it follows. Write'
+  say './caddy.json with:'
+  say ''
+  say '  "storage": {'
+  say '    "module": "scafo",'
+  say "    \"endpoint\": \"${STORAGE_ENDPOINT}\","
+  say "    \"token_file\": \"${STATE_DIR}/${INGRESS_TOKEN_NAME}\""
+  say '  },'
+  say ''
+  say '  ... and, inside the reverse_proxy handler that answers for everything:'
+  say ''
+  say '  "dynamic_upstreams": {'
+  say '    "source": "scafo",'
+  say "    \"endpoint\": \"${STORAGE_ENDPOINT}\","
+  say "    \"token_file\": \"${STATE_DIR}/${INGRESS_TOKEN_NAME}\","
+  say '    "prefer": "self"'
+  say '  }'
+  say ''
+  say 'The token is minted 0600 by whoever runs the node. Under systemd this'
+  say 'script hands it over with LoadCredential= and nothing is loosened;'
+  say 'running both by hand, the ingress must be a user that can read it —'
+  say 'the same user as the node, or a group you give it yourself.'
+  say ''
   say 'Whatever supervises them must give the node AT LEAST 50 SECONDS between'
   say 'SIGTERM and SIGKILL, and must signal the daemon alone rather than every'
   say 'process beside it: it drains its runtimes itself, in an order that matters.'
@@ -740,9 +736,7 @@ next_steps() {
   printf '  %s/esbuild  %s\n' "$BIN_DIR" "$ESBUILD_VERSION"
   printf '\n'
   printf 'The scafo binary was %s.\n' "$SCAFO_CHECKSUM_SOURCE"
-  if [ "$CADDY_FLAVOR" = 'scafo' ]; then
-    printf 'The scafo-caddy binary was %s.\n' "$CADDY_CHECKSUM_SOURCE"
-  fi
+  printf 'The scafo-caddy binary was %s.\n' "$CADDY_CHECKSUM_SOURCE"
 
   case ":${PATH}:" in
     *":${BIN_DIR}:"*) ;;
@@ -787,39 +781,32 @@ next_steps() {
   printf '  %-32s the token the ingress presents to /v1/ingress and /v1/storage,\n' "${STATE_DIR}/${INGRESS_TOKEN_NAME}"
   printf '  %-32s minted on the first boot. LOCAL OR TUNNELLED CALLERS ONLY:\n' ''
   printf '  %-32s that surface carries private keys in both directions.\n' ''
-  if [ "$CADDY_FLAVOR" = 'scafo' ] && [ "$UNITS_WRITTEN" = 'yes' ]; then
+  if [ "$UNITS_WRITTEN" = 'yes' ]; then
     printf '  %-32s 0600 and left that way: systemd reads it as root\n' ''
     printf '  %-32s (LoadCredential=) and hands the ingress a private copy.\n' ''
-  fi
-  if [ "$UNITS_WRITTEN" = 'yes' ]; then
     printf '  %-32s bucket credentials and every other setting\n' "${CONFIG_DIR}/node.env"
-    printf '  %-32s the ingress config the node writes its routes into\n' "${CONFIG_DIR}/caddy.json"
+    printf '  %-32s the ingress config: where the ingress is told to read\n' "${CONFIG_DIR}/caddy.json"
+    printf '  %-32s this node for TLS material and for the routing\n' ''
     printf '  %-32s where Caddy logs what it served, when asked to\n' "${INGRESS_LOG_DIR}/"
     printf '  %-32s what this run installed, for scripts/uninstall.sh\n' "${STATE_DIR}/install.manifest"
   fi
 
   printf '\nWHAT THIS INSTALL IS NOT\n\n'
-  if [ "$CADDY_FLAVOR" = 'scafo' ]; then
-    printf '  * THE INGRESS HAS NO BUCKET CREDENTIAL, AND MUST NOT GET ONE. scafo-caddy\n'
-    printf '    keeps its certificates, their keys and its ACME account in the bucket by\n'
-    printf '    asking THIS NODE for them over %s — a loopback URL\n' "$STORAGE_ENDPOINT"
-    printf '    and a bearer token, nothing more. That is the point of it: every node in\n'
-    printf '    the fleet serves the one certificate, and the most exposed process on the\n'
-    printf '    host still cannot address the bucket.\n'
-    if [ "$UNITS_WRITTEN" = 'yes' ]; then
-      printf '    ON THE FIRST BOOT THE INGRESS WILL FAIL AND RETRY for as long as it\n'
-      printf '    takes the node to mint that token — seconds, normally. It is written to\n'
-      printf '    do exactly that (Restart=on-failure with the start rate limit off), so\n'
-      printf '    "243/CREDENTIALS" in the first moments of the journal is the design and\n'
-      printf '    not a fault. It stops the moment the token is there.\n'
-    fi
-  else
-    printf '  * TLS IS PER-NODE, BY YOUR CHOICE. SCAFO_INSTALL_CADDY=plain installed\n'
-    printf '    upstream Caddy, which keeps its certificates on this host, so a second\n'
-    printf '    node issues its own for the same names — fine until it is a rate limit.\n'
-    printf '    The default here is scafo-caddy, which reads one certificate out of the\n'
-    printf '    bucket through this node. Moving to it is a re-run of this script with\n'
-    printf '    %s/caddy.json moved aside; nothing else has to be undone.\n' "$CONFIG_DIR"
+  printf '  * THE INGRESS HAS NO BUCKET CREDENTIAL, AND MUST NOT GET ONE. scafo-caddy\n'
+  printf '    keeps its certificates, their keys and its ACME account in the bucket by\n'
+  printf '    asking THIS NODE for them over %s — a loopback URL\n' "$STORAGE_ENDPOINT"
+  printf '    and a bearer token, nothing more. That is the point of it: every node in\n'
+  printf '    the fleet serves the one certificate, and the most exposed process on the\n'
+  printf '    host still cannot address the bucket.\n'
+  printf '  * NOTHING IS PUSHED INTO THE INGRESS. It reads the fleet'\''s routing off\n'
+  printf '    this node, over that same URL and token, and follows it; a name nobody\n'
+  printf '    deployed gets a 404 and no certificate is issued for it.\n'
+  if [ "$UNITS_WRITTEN" = 'yes' ]; then
+    printf '    ON THE FIRST BOOT THE INGRESS WILL FAIL AND RETRY for as long as it\n'
+    printf '    takes the node to mint that token — seconds, normally. It is written to\n'
+    printf '    do exactly that (Restart=on-failure with the start rate limit off), so\n'
+    printf '    "243/CREDENTIALS" in the first moments of the journal is the design and\n'
+    printf '    not a fault. It stops the moment the token is there.\n'
   fi
   printf '  * NO WIREGUARD. A tunnel needs a kernel module and NET_ADMIN, so it is\n'
   printf '    your package manager'\''s job:\n\n'
@@ -838,12 +825,8 @@ scafo_version() {
   "${BIN_DIR}/scafo" --version 2>/dev/null || echo '(unknown)'
 }
 
-# Plain Caddy is pinned; query latest scafo-caddy for its installed version.
+# scafo-caddy tracks its own release, so ask the installed binary what it is.
 caddy_label() {
-  if [ "$CADDY_FLAVOR" = 'plain' ]; then
-    printf '%s\n' "$CADDY_VERSION"
-    return 0
-  fi
   caddy_reported="$("${BIN_DIR}/caddy" version 2>/dev/null | head -n 1 | cut -d' ' -f1)"
   printf 'scafo-caddy %s\n' "${caddy_reported:-(unknown)}"
 }

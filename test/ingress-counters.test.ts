@@ -11,10 +11,10 @@ import {
   type IngressCounters,
   UNATTRIBUTED,
 } from "../src/daemon/access-counters.ts";
-import { applyIngress } from "../src/daemon/_ingress.ts";
+import { recordRouting } from "../src/daemon/_ingress.ts";
 import type { DaemonContext } from "../src/daemon/app.ts";
 import { API_DENIED_PREFIXES } from "../src/core/placement/routes.ts";
-import type { IngressDesired, IngressRoute } from "../src/core/types/ingress.ts";
+import type { IngressRoute } from "../src/core/types/ingress.ts";
 import type { EnvironmentRecord } from "../src/core/types/registry.ts";
 import type { RuntimeProcess } from "../src/core/types/runtime.ts";
 import { CLOCK_START_MS } from "./_helpers.ts";
@@ -265,36 +265,22 @@ describe("the snapshot", () => {
 });
 
 describe("what the reconcile pass hands over", () => {
-  it("attributes off the same routing the ingress is given", async () => {
+  it("attributes off the same routing the node renders for itself", () => {
     /* The attribution is not a second reading of what serves an environment —
-       it is the routing itself, handed over where it is rendered. A second
-       reading would drift from what traffic actually reaches. */
+       it is the routing itself, read where it is rendered. A second reading
+       would drift from what traffic actually reaches. */
     const counters = counting();
-    const applied: IngressDesired[] = [];
-    const daemon = {
-      config: {
-        platformDomains: DOMAINS,
-        node: { listen: "127.0.0.1:7400" },
-        api: { public: true, jsonBytes: 65_536 },
-      },
-      ingress: {
-        apply: (desired: IngressDesired): Promise<void> => {
-          applied.push(desired);
-          return Promise.resolve();
-        },
-      },
-      ingressCounters: counters,
-    } as unknown as DaemonContext;
+    const daemon = daemonWith(counters, true);
 
     const env = environment("production", ["shop.example.com"]);
-    await applyIngress(daemon, {
+    const routing = recordRouting(daemon, {
       desired: [{ project: "shop", env }],
       processes: [process_("shop", "production", "aaaa1111", 9101)],
     });
 
-    /* Exactly the hosts the ingress was told about, each read as the
-       environment that ingress will send it to. */
-    expect(applied[0].routes.map((entry) => entry.host)).toContain("shop.example.com");
+    /* Exactly the hosts the pass rendered, each read as the environment the
+       ingress reading them will send them to. */
+    expect(routing.routes.map((entry) => entry.host)).toContain("shop.example.com");
 
     for (const host of ["shop.apps.test", "shop--production.apps.test", "shop.example.com"]) {
       counters.ingest(line({ host }));
@@ -304,29 +290,17 @@ describe("what the reconcile pass hands over", () => {
     expect(named(counters)).toEqual([{ project: "shop", env: "production", requests: 3 }]);
   });
 
-  it("publishes the platform apexes as the fleet's API, or not at all", async () => {
+  it("publishes the platform apexes as the fleet's API, or not at all", () => {
     /* The one thing `api.public` does to the routing, at the seam that reads it:
        the apexes are named with the daemon's own port, or the routing carries no
        `api` at all and is what scafo rendered before the apex answered. */
     for (const isPublic of [true, false]) {
-      const applied: IngressDesired[] = [];
-      const daemon = {
-        config: {
-          platformDomains: DOMAINS,
-          node: { listen: "127.0.0.1:7400" },
-          api: { public: isPublic, jsonBytes: 65_536 },
-        },
-        ingress: {
-          apply: (desired: IngressDesired): Promise<void> => {
-            applied.push(desired);
-            return Promise.resolve();
-          },
-        },
-      } as unknown as DaemonContext;
+      const routing = recordRouting(daemonWith(undefined, isPublic), {
+        desired: [],
+        processes: [],
+      });
 
-      await applyIngress(daemon, { desired: [], processes: [] });
-
-      expect(applied[0].api, String(isPublic)).toEqual(
+      expect(routing.api, String(isPublic)).toEqual(
         isPublic
           ? { port: 7400, hosts: [...DOMAINS].sort(), denied: API_DENIED_PREFIXES }
           : undefined,
@@ -334,6 +308,18 @@ describe("what the reconcile pass hands over", () => {
     }
   });
 });
+
+/** Just enough daemon for the routing seam: the domains, the port, and the switch. */
+function daemonWith(counters: IngressCounters | undefined, apiPublic: boolean): DaemonContext {
+  return {
+    config: {
+      platformDomains: DOMAINS,
+      node: { listen: "127.0.0.1:7400" },
+      api: { public: apiPublic, jsonBytes: 65_536 },
+    },
+    ...(counters === undefined ? {} : { ingressCounters: counters }),
+  } as unknown as DaemonContext;
+}
 
 function counting(): IngressCounters {
   return createIngressCounters({

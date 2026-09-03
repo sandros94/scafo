@@ -1287,105 +1287,52 @@ describe("node identity and defaults", () => {
   });
 });
 
-describe("which ingress the node drives", () => {
-  it("leaves the ingress off when nothing says there is one", async () => {
+describe("the ingress settings, which are not about which ingress", () => {
+  it("leaves the ingress off when nothing configures one", async () => {
     const config = await loadDaemonConfig({ env: REQUIRED_ENV });
 
     expect(config.ingress).toBeUndefined();
   });
 
-  it("reads a Caddy admin API on its own as asking for Caddy", async () => {
+  it("carries the token, which is the one thing every ingress needs", async () => {
     const config = await loadDaemonConfig({
-      env: { ...REQUIRED_ENV, SCAFO_CADDY_ADMIN: "http://127.0.0.1:2019" },
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_TOKEN: "shared" },
     });
 
-    expect(config.ingress).toEqual({ driver: "caddy", adminUrl: "http://127.0.0.1:2019" });
-  });
-
-  it("takes Traefik by name, and needs nothing else to reach it", async () => {
-    const config = await loadDaemonConfig({
-      env: { ...REQUIRED_ENV, SCAFO_INGRESS_DRIVER: "traefik" },
-    });
-
-    expect(config.ingress).toEqual({ driver: "traefik" });
-  });
-
-  it("REFUSES a Caddy setting alongside a driver that has no admin API", async () => {
-    for (const [variable, value] of [
-      ["SCAFO_CADDY_ADMIN", "http://127.0.0.1:2019"],
-      ["SCAFO_CADDY_SERVER", "scafo"],
-    ]) {
-      const error = await rejectionOf(() =>
-        loadDaemonConfig({
-          env: { ...REQUIRED_ENV, SCAFO_INGRESS_DRIVER: "traefik", [variable]: value },
-        }),
-      );
-
-      expect(error.code, variable).toBe("invalid-input");
-      expect(error.detail, variable).toContain("traefik");
-      expect(error.detail, variable).toContain(value);
-    }
-  });
-
-  it("refuses an ingress nothing implements, listing the ones that are", async () => {
-    const error = await rejectionOf(() =>
-      loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_INGRESS_DRIVER: "nginx" } }),
-    );
-
-    expect(error.code).toBe("invalid-input");
-    expect(error.detail).toContain(`"caddy"`);
-    expect(error.detail).toContain(`"traefik"`);
-  });
-
-  it("lets a flag pick the driver over what the file says", async () => {
-    const config = await loadDaemonConfig({
-      configPath: CONFIG_PATH,
-      readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { driver: "caddy" } })),
-      env: REQUIRED_ENV,
-      flags: { "ingress-driver": "traefik" },
-    });
-
-    expect(config.ingress).toEqual({ driver: "traefik" });
+    expect(config.ingress).toEqual({ token: ["shared"] });
   });
 });
 
 describe("the Traefik entryPoints the routers attach to", () => {
-  const TRAEFIK_ENV: Record<string, string> = { ...REQUIRED_ENV, SCAFO_INGRESS_DRIVER: "traefik" };
-
   it("reads a comma-separated list from the environment", async () => {
     const config = await loadDaemonConfig({
-      env: { ...TRAEFIK_ENV, SCAFO_TRAEFIK_ENTRYPOINTS: "web, websecure" },
+      env: { ...REQUIRED_ENV, SCAFO_TRAEFIK_ENTRYPOINTS: "web, websecure" },
     });
 
-    expect(config.ingress).toEqual({ driver: "traefik", entryPoints: ["web", "websecure"] });
+    expect(config.ingress).toEqual({ entryPoints: ["web", "websecure"] });
   });
 
   it("lets a flag override what the environment names", async () => {
     const config = await loadDaemonConfig({
-      env: { ...TRAEFIK_ENV, SCAFO_TRAEFIK_ENTRYPOINTS: "web" },
+      env: { ...REQUIRED_ENV, SCAFO_TRAEFIK_ENTRYPOINTS: "web" },
       flags: { "traefik-entrypoints": "websecure" },
     });
 
-    expect(config.ingress).toEqual({ driver: "traefik", entryPoints: ["websecure"] });
+    expect(config.ingress).toEqual({ entryPoints: ["websecure"] });
   });
 
   it("reads the array the file carries, which is what the text parses into", async () => {
     const config = await loadDaemonConfig({
       configPath: CONFIG_PATH,
-      readFile: fileAt(
-        CONFIG_PATH,
-        JSON.stringify({ ingress: { driver: "traefik", entryPoints: ["websecure"] } }),
-      ),
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { entryPoints: ["websecure"] } })),
       env: REQUIRED_ENV,
     });
 
-    expect(config.ingress).toEqual({ driver: "traefik", entryPoints: ["websecure"] });
+    expect(config.ingress).toEqual({ entryPoints: ["websecure"] });
   });
 
-  it("leaves them absent when nothing names any, so the driver's default applies", async () => {
-    const config = await loadDaemonConfig({
-      env: { ...REQUIRED_ENV, SCAFO_INGRESS_DRIVER: "traefik" },
-    });
+  it("leaves them absent when nothing names any, so the node's default applies", async () => {
+    const config = await loadDaemonConfig({ env: REQUIRED_ENV });
 
     expect(config.ingress?.entryPoints).toBeUndefined();
   });
@@ -1393,29 +1340,12 @@ describe("the Traefik entryPoints the routers attach to", () => {
   it("refuses a list that names nothing, because Traefik reads it as everything", async () => {
     const error = await rejectionOf(() =>
       loadDaemonConfig({
-        env: { ...REQUIRED_ENV, SCAFO_INGRESS_DRIVER: "traefik", SCAFO_TRAEFIK_ENTRYPOINTS: " , " },
+        env: { ...REQUIRED_ENV, SCAFO_TRAEFIK_ENTRYPOINTS: " , " },
       }),
     );
 
     expect(error.code).toBe("invalid-input");
     expect(error.detail).toContain("ingress.entryPoints");
-  });
-
-  it("REFUSES them alongside Caddy, which has no entryPoints to attach to", async () => {
-    for (const env of [
-      { SCAFO_TRAEFIK_ENTRYPOINTS: "websecure" },
-      {
-        SCAFO_INGRESS_DRIVER: "caddy",
-        SCAFO_CADDY_ADMIN: "http://127.0.0.1:2019",
-        SCAFO_TRAEFIK_ENTRYPOINTS: "websecure",
-      },
-    ]) {
-      const error = await rejectionOf(() => loadDaemonConfig({ env: { ...REQUIRED_ENV, ...env } }));
-
-      expect(error.code).toBe("invalid-input");
-      expect(error.detail).toContain("caddy");
-      expect(error.detail).toContain("websecure");
-    }
   });
 });
 
@@ -1478,12 +1408,16 @@ describe("the tokens guarding what the ingress reads", () => {
     expect(config.ingress).toEqual({ token: ["current"] });
   });
 
-  it("sits beside the driver this node runs, whichever ingress that is", async () => {
+  it("sits beside the entryPoints, which are the only other ingress setting left", async () => {
     const config = await loadDaemonConfig({
-      env: { ...REQUIRED_ENV, SCAFO_INGRESS_TOKEN: "shared", SCAFO_INGRESS_DRIVER: "traefik" },
+      env: {
+        ...REQUIRED_ENV,
+        SCAFO_INGRESS_TOKEN: "shared",
+        SCAFO_TRAEFIK_ENTRYPOINTS: "websecure",
+      },
     });
 
-    expect(config.ingress).toEqual({ driver: "traefik", token: ["shared"] });
+    expect(config.ingress).toEqual({ token: ["shared"], entryPoints: ["websecure"] });
   });
 
   it("refuses a value that is there and holds nothing, rather than quietly minting", async () => {

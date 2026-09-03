@@ -25,7 +25,6 @@ services:
       # `none` declares this single-host Docker network trusted.
       SCAFO_TRANSPORT: none
       SCAFO_ADVERTISE: 127.0.0.1:7400
-      SCAFO_CADDY_ADMIN: http://127.0.0.1:2019
       SCAFO_INGRESS_TOKEN: ${SCAFO_INGRESS_TOKEN:?set SCAFO_INGRESS_TOKEN in .env}
       SCAFO_OBSERVABILITY: "1"
       SCAFO_INGRESS_ACCESS_LOG: /var/log/scafo-ingress/access.log
@@ -41,10 +40,11 @@ services:
       start_period: 10s
 
   caddy:
-    # The released image includes the `caddy.storage.scafo` module.
-    image: ghcr.io/sandros94/scafo-caddy:${SCAFO_CADDY_VERSION:-0.2.0}
+    # The image includes both `caddy.storage.scafo` and the `scafo` dynamic
+    # upstreams module. `edge` until a release pins the pair.
+    image: ghcr.io/sandros94/scafo-caddy:${SCAFO_CADDY_VERSION:-edge}
     restart: unless-stopped
-    # Caddy reaches node, runtimes, and its admin API through shared loopback.
+    # Caddy reaches the node and the runtimes through shared loopback.
     network_mode: "service:node"
     depends_on:
       node:
@@ -52,6 +52,7 @@ services:
         condition: service_healthy
     command: ["caddy", "run", "--config", "/etc/caddy/config.json"]
     environment:
+      # The one credential Caddy holds, for both storage and routing.
       SCAFO_INGRESS_TOKEN: ${SCAFO_INGRESS_TOKEN:?set SCAFO_INGRESS_TOKEN in .env}
     volumes:
       - ./caddy.json:/etc/caddy/config.json:ro

@@ -131,7 +131,6 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
         SCAFO_TRANSPORT: "none",
         SCAFO_STATE_DIR: "/var/lib/scafo",
         SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
-        SCAFO_INGRESS_DRIVER: "traefik",
         SCAFO_INGRESS_TOKEN: INGRESS_TOKEN,
         SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
         CELLD_ESBUILD: "/usr/local/bin/esbuild",

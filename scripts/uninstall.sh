@@ -23,7 +23,7 @@ NODE_UNIT='scafo-node.service'
 # The ingress unit uses its service-account name.
 INGRESS_UNIT='caddy.service'
 
-# Both ingress variants install as `caddy`; the manifest flavor is report-only.
+# The ingress installs as `caddy` whatever built it; the manifest flavor is report-only.
 BINARIES='scafo celld caddy esbuild'
 
 MANIFEST_NAME='install.manifest'
@@ -74,9 +74,10 @@ scafo — undo scripts/install.sh on this host.
 
   --purge           also remove the state directory (/var/lib/scafo — the node
                     identity and the ingress token, which nothing can reissue),
-                    the ingress's certificates and ACME account (/var/lib/caddy),
-                    what it logged (/var/log/scafo-ingress) and the system users
-                    this install created.
+                    the ingress's own state directory (/var/lib/caddy — scratch,
+                    unless an older install kept certificates there), what it
+                    logged (/var/log/scafo-ingress) and the system users this
+                    install created.
   --dry-run, -n     print every removal without performing any of them.
   --bin-dir <dir>   where the executables were installed. Defaults to the
                     manifest, then to the unit's ExecStart, then to
@@ -183,7 +184,9 @@ read_manifest() {
       config_dir=*) MANIFEST_CONFIG_DIR="${line#config_dir=}" ;;
       ingress_log_dir=*) MANIFEST_INGRESS_LOG_DIR="${line#ingress_log_dir=}" ;;
       caddy_state_dir=*) MANIFEST_CADDY_STATE_DIR="${line#caddy_state_dir=}" ;;
-      # Flavor affects reporting only.
+      # Reporting only, and only install.sh ever writes it. It says "scafo" on
+      # anything installed now; an OLD manifest on this host may still say
+      # "plain", and that host really does keep its certificates on this disk.
       caddy_flavor=*) MANIFEST_CADDY_FLAVOR="${line#caddy_flavor=}" ;;
       *) ;;
     esac
@@ -398,7 +401,9 @@ remove_binaries() {
   done
 }
 
-# The manifest flavor adds the Caddy TLS-storage detail to the report.
+# A known scafo-caddy adds the TLS-storage detail. Anything else — an old
+# manifest, or none — says only what it is; where its TLS material lives is
+# reported on the state directory, which is where it would actually be.
 binary_note() {
   [ "$1" = 'caddy' ] || {
     printf 'executable\n'
@@ -406,12 +411,13 @@ binary_note() {
   }
   case "$MANIFEST_CADDY_FLAVOR" in
     scafo) printf 'executable (scafo-caddy; its TLS material is in the bucket)\n' ;;
-    plain) printf 'executable (upstream Caddy; its certificates are on this host)\n' ;;
     *) printf 'executable\n' ;;
   esac
 }
 
-# Plain Caddy stores certificates and its ACME account in this directory.
+# scafo-caddy keeps its certificates in the bucket, so this directory is scratch.
+# Any other Caddy — an old install, or one this script cannot identify — keeps
+# them right here, which is worth saying before `--purge` removes them.
 caddy_state_note() {
   case "$MANIFEST_CADDY_FLAVOR" in
     scafo) printf 'scafo-caddy kept its certificates in the bucket, not here\n' ;;

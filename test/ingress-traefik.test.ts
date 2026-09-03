@@ -465,7 +465,7 @@ function daemonConfig(): DaemonConfig {
     },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },
-    ingress: { driver: "traefik", entryPoints: ENTRY_POINTS },
+    ingress: { entryPoints: ENTRY_POINTS },
   };
 }
 
