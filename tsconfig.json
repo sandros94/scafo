@@ -23,6 +23,6 @@
     "allowImportingTsExtensions": true,
     "lib": ["ESNext", "DOM"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "playground/**/*.ts"],
-  "exclude": ["node_modules", "dist", "docs"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "playgrounds/**/*.ts"],
+  "exclude": ["node_modules", "dist", "docs", ".claude", ".agents"]
 }

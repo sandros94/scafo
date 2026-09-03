@@ -19,6 +19,8 @@
     "**/.nitro/**",
     "**/.cache/**",
     "**/node_modules/**",
+    "**/.claude/**",
+    "**/.agents/**",
     "**/coverage/**",
     "**/playwright-report/**",
     "**/test-results/**",
