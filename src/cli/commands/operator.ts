@@ -15,7 +15,6 @@
  * The two paths are never chosen by default; see `enrollPath`.
  */
 
-import { chmod, writeFile } from "node:fs/promises";
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import { loadDaemonConfig } from "../../daemon/config.ts";
 import { ScafoError } from "../../core/error.ts";
@@ -50,7 +49,7 @@ import {
   showOperator,
 } from "../_operators.ts";
 import { describeRotation, rotateRemoteKey } from "../_rotate.ts";
-import { deprecatedAlias, readTextFile, reportFailure } from "../_utils.ts";
+import { deprecatedAlias, readTextFile, reportFailure, writeSecretContents } from "../_utils.ts";
 
 export type { OperatorKeyFile };
 
@@ -228,12 +227,7 @@ async function runKeygen(flags: Record<string, unknown>): Promise<void> {
 
   const file = await generateOperatorKey(id);
 
-  /* The mode is given at CREATION, because it only applies there: a key that
-     briefly existed world-readable is a key that has to be assumed read. The
-     `chmod` after it is what narrows a file that was ALREADY on disk, which
-     `writeFile` would otherwise leave at whatever mode it had. */
-  await writeFile(out, `${JSON.stringify(file, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  await chmod(out, 0o600);
+  await writeSecretContents(out, `${JSON.stringify(file, null, 2)}\n`);
   console.log(`scafo: wrote operator key "${file.id}" to ${out}`);
 
   if (flags.register !== true) {

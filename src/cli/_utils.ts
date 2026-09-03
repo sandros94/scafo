@@ -22,9 +22,22 @@ export async function writeSecretFile(
   path: string,
   contents: string,
 ): Promise<void> {
+  /* `mkdir` reports the OUTERMOST directory it created, and the mode it takes
+     is umask-narrowed; the directory the secret lands in is the one to narrow. */
   const created = await mkdir(stateDir, { recursive: true, mode: STATE_DIR_MODE });
-  if (created !== undefined) await chmod(created, STATE_DIR_MODE);
+  if (created !== undefined) await chmod(stateDir, STATE_DIR_MODE);
 
+  await writeSecretContents(path, contents);
+}
+
+/**
+ * Writes a file nobody but its owner may read. The mode is given at CREATION,
+ * because it only applies there: a key that briefly existed world-readable is a
+ * key that has to be assumed read. The `chmod` after it is what narrows a file
+ * that was ALREADY on disk, which `writeFile` would otherwise leave at whatever
+ * mode it had.
+ */
+export async function writeSecretContents(path: string, contents: string): Promise<void> {
   await writeFile(path, contents, { encoding: "utf8", mode: SECRET_FILE_MODE });
   await chmod(path, SECRET_FILE_MODE);
 }

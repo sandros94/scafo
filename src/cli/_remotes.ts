@@ -1,7 +1,7 @@
 /* Local remote registry: endpoints and private-key references. The registry
    contains no key material. */
 
-import { rm, writeFile } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { type JSONCParseError, parseJSONC } from "confbox";
 import { ScafoError } from "../core/error.ts";
 import {
@@ -22,7 +22,7 @@ import {
   PORTABLE_VERSION,
   readOperatorDocument,
 } from "./_operator-key.ts";
-import { readTextFile, SECRET_FILE_MODE, writeSecretFile } from "./_utils.ts";
+import { readTextFile, writeSecretContents, writeSecretFile } from "./_utils.ts";
 
 /** Version of the remote registry written today. */
 export const REMOTES_VERSION: number = 1;
@@ -322,10 +322,7 @@ export async function exportRemote(
     return portable;
   }
 
-  await writeFile(opts.out, `${formatPortable(portable)}\n`, {
-    encoding: "utf8",
-    mode: SECRET_FILE_MODE,
-  });
+  await writeSecretContents(opts.out, `${formatPortable(portable)}\n`);
   write(`scafo: wrote the portable file for remote "${name}" to ${opts.out}`);
   return portable;
 }

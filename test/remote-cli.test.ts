@@ -270,6 +270,17 @@ describe("exporting a remote", () => {
     expect(lines.join("\n")).not.toContain("privateKey");
   });
 
+  it("narrows a file that already existed wider than 0600", async () => {
+    const home = await scratch();
+    await addRemote(home, { name: "prod", endpoints: [ENDPOINT] });
+    const out = join(home, "prod.operator.json");
+    await writeFile(out, "stale\n", { mode: 0o644 });
+
+    await exportRemote(home, "prod", { out, write: () => {} });
+
+    expect((await stat(out)).mode & 0o777).toBe(0o600);
+  });
+
   it("warns before it puts a private key on a terminal", async () => {
     const home = await scratch();
     await addRemote(home, { name: "prod", endpoints: [ENDPOINT] });
