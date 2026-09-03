@@ -186,7 +186,8 @@ function run(
 
     const cancel = (): void => {
       cancelled = true;
-      /* A lost lease may leave a publish completed; stop the whole process group. */
+      /* Whatever the abort reason, no descendant of the publish may outlive it:
+         take the group down now, or at spawn when there is not one yet. */
       beginCleanup();
     };
     opts.signal.addEventListener("abort", cancel, { once: true });

@@ -53,11 +53,9 @@ export function createChildSupervisor(): Supervisor {
         entry.child = null;
         leaderExit.resolve(code);
         if (!entry.selfInflicted) {
-          const cleanup = (entry.cleanup ??= finish(entry, true));
-          cleanup.catch(() => {
-            /* A later explicit stop must be able to retry exact group cleanup. */
-            if (entry.cleanup === cleanup) entry.cleanup = undefined;
-          });
+          /* The kernel has already reaped the leader, so this teardown — begun in
+             the same turn as the exit — is the last one that may name its pid. */
+          (entry.cleanup ??= finish(entry, true)).catch(() => {});
         }
       });
 
@@ -90,6 +88,7 @@ export function createChildSupervisor(): Supervisor {
     async stop(id: string, opts?: StopOptions): Promise<void> {
       const entry = supervised.get(id);
       if (entry === undefined) return;
+      /* Replays the one teardown this group got, including its failure. */
       if (entry.cleanup !== undefined) return entry.cleanup;
 
       entry.selfInflicted = true;
@@ -98,8 +97,11 @@ export function createChildSupervisor(): Supervisor {
       try {
         await cleanup;
       } catch (error) {
-        /* Keep running status and allow a later stop retry until teardown confirms. */
-        if (entry.cleanup === cleanup) entry.cleanup = undefined;
+        /* Only a leader the kernel has not reaped still holds its pid, and with
+           it the group id: retry teardown only while that is true, because a
+           freed pid names whichever group the kernel hands it to next. Otherwise
+           keep the failure, so no later stop signals a group that is not ours. */
+        if (entry.child !== null && entry.cleanup === cleanup) entry.cleanup = undefined;
         throw error;
       }
     },
@@ -131,12 +133,13 @@ export function createChildSupervisor(): Supervisor {
 
 interface Supervised {
   status: ProcessStatus;
-  /** The running process, or null once it has exited. */
+  /** The running process, or null once it has exited and its pid is reclaimable. */
   child: ChildProcess | null;
   /** True when the supervisor ended the process, so its exit stays unreported. */
   selfInflicted: boolean;
   /** Resolves once the direct group leader exits. */
   leaderExit: Promise<number | null>;
-  /** Resolves only once every process in the owned group is gone. */
+  /** Resolves only once every process in the owned group is gone. Set once the
+      group has been signalled, and kept even when teardown failed. */
   cleanup?: Promise<void>;
 }

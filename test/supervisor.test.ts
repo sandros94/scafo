@@ -7,7 +7,7 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProcessSpec, ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import { createChildSupervisor } from "../src/drivers/supervisor/child.ts";
 import { rejectsWith } from "./_helpers.ts";
@@ -31,12 +31,13 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  /* A failed assertion must not leak a child process into the rest of the run. */
+  /* A failed assertion must not leak a child process into the rest of the run;
+     an id whose teardown already failed for good has nothing left to try. */
   await Promise.all(
     supervisor
       .list()
       .filter((status) => status.state === "running")
-      .map((status) => supervisor.stop(status.id, { graceMs: 200 })),
+      .map((status) => supervisor.stop(status.id, { graceMs: 200 }).catch(() => {})),
   );
 });
 
@@ -172,6 +173,50 @@ describe("stopping a process", () => {
     }
   });
 
+  it("never signals a group again once the kernel may have reclaimed its pid", async () => {
+    const started = await supervisor.start(child("dangling", SELF_EXIT));
+    const groupId = -(started.pid as number);
+    const signalled: (string | number)[] = [];
+    const restore = interceptGroupSignals(groupId, (signal) => {
+      signalled.push(signal);
+      /* The group is already empty, and naming it fails for a reason that says
+         nothing about whether it was ever ours. */
+      throw errno(signal === 0 ? "ESRCH" : "EACCES");
+    });
+
+    try {
+      await expect.poll(() => signalled.length, { timeout: PROCESS_TIMEOUT_MS }).toBeGreaterThan(0);
+      const attempted = signalled.length;
+
+      /* The leader was reaped before that teardown ran, so it was the last one
+         allowed to name the pid: a later stop replays its failure instead. */
+      await rejectsWith(() => supervisor.stop("dangling"), "capability-missing");
+
+      expect(signalled).toHaveLength(attempted);
+    } finally {
+      restore();
+    }
+  });
+
+  it("retries a failed teardown while its leader still holds the pid", async () => {
+    const started = await supervisor.start(child("held", KEEPALIVE));
+    const restore = interceptGroupSignals(-(started.pid as number), () => {
+      throw errno("EACCES");
+    });
+
+    try {
+      await rejectsWith(() => supervisor.stop("held", { graceMs: 100 }), "capability-missing");
+      /* Nothing was confirmed gone, so the process is still what it was. */
+      expect(supervisor.status("held")).toMatchObject({ state: "running" });
+    } finally {
+      restore();
+    }
+
+    await supervisor.stop("held", { graceMs: 100 });
+
+    expect(supervisor.status("held")).toMatchObject({ state: "exited" });
+  });
+
   it("is a no-op for an unknown id and for one that has already exited", async () => {
     await expect(supervisor.stop("never-started")).resolves.toBeUndefined();
 
@@ -230,6 +275,31 @@ async function pidFrom(path: string): Promise<number> {
     })
     .not.toBe("");
   return Number(await readFile(path, "utf8"));
+}
+
+/**
+ * Hands every signal aimed at `groupId` to `handler`, passing everything else
+ * to the kernel. Returns the undo, which the caller owes even on failure.
+ */
+function interceptGroupSignals(
+  groupId: number,
+  handler: (signal: string | number) => void,
+): () => void {
+  const real = process.kill.bind(process);
+  const spy = vi.spyOn(process, "kill").mockImplementation((target, signal) => {
+    if (target !== groupId) return real(target, signal);
+    handler(signal ?? "SIGTERM");
+    return true;
+  });
+  return () => {
+    spy.mockRestore();
+  };
+}
+
+function errno(code: string): NodeJS.ErrnoException {
+  const error: NodeJS.ErrnoException = new Error(`kill ${code}`);
+  error.code = code;
+  return error;
 }
 
 function killIfAlive(pid: number | undefined): void {
