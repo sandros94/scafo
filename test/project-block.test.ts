@@ -7,6 +7,7 @@ import { createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { readDesired } from "../src/daemon/_desired.ts";
 import {
+  acquireLease,
   blockProject,
   claimDomain,
   createBuild,
@@ -14,6 +15,7 @@ import {
   createProject,
   registerNode,
   unblockProject,
+  writePlacement,
 } from "../src/core/registry/index.ts";
 import type { RegistryContext } from "../src/core/registry/context.ts";
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
@@ -43,11 +45,14 @@ beforeEach(async () => {
     publicKey: { kty: "OKP", crv: "Ed25519", x: "AAAA" },
     addresses: { internal: "10.0.0.4", apiPort: 7400 },
   });
+  const lease = await acquireLease(registry, NODE_ID);
+  if (lease === null) throw new Error("the fixture could not take the lease");
   for (const slug of [PROJECT, NEIGHBOUR]) {
     await createProject(registry, { slug });
     await createEnvironment(registry, slug, { name: ENVIRONMENT });
     await createBuild(registry, slug, { id: BUILD });
     await recordDeployment(registry, slug, ENVIRONMENT, BUILD);
+    await writePlacement(registry, slug, ENVIRONMENT, [NODE_ID], lease);
   }
   await claimDomain(registry, CUSTOM_DOMAIN, PROJECT, ENVIRONMENT);
 
@@ -64,10 +69,7 @@ describe("what a node reads as its work", () => {
   it("drops every environment of a blocked project, and nobody else's", async () => {
     await blockProject(registry, PROJECT);
 
-    const state = await readDesired(registry, {
-      nodeId: NODE_ID,
-      mode: "legacy-fallback",
-    });
+    const state = await readDesired(registry, { nodeId: NODE_ID });
 
     expect(state.environments.map((entry) => entry.project)).toEqual([NEIGHBOUR]);
     expect(state.failures).toEqual([]);
@@ -76,23 +78,17 @@ describe("what a node reads as its work", () => {
   it("reports no placement view for it, so its rows leave the node's state too", async () => {
     await blockProject(registry, PROJECT);
 
-    const state = await readDesired(registry, {
-      nodeId: NODE_ID,
-      mode: "legacy-fallback",
-    });
+    const state = await readDesired(registry, { nodeId: NODE_ID });
 
     expect(state.placements.map((entry) => entry.project)).not.toContain(PROJECT);
   });
 
   it("brings it all back on the next pass, from records nothing touched", async () => {
     await blockProject(registry, PROJECT);
-    await readDesired(registry, { nodeId: NODE_ID, mode: "legacy-fallback" });
+    await readDesired(registry, { nodeId: NODE_ID });
 
     await unblockProject(registry, PROJECT);
-    const state = await readDesired(registry, {
-      nodeId: NODE_ID,
-      mode: "legacy-fallback",
-    });
+    const state = await readDesired(registry, { nodeId: NODE_ID });
 
     expect(state.environments.map((entry) => entry.project).sort()).toEqual([NEIGHBOUR, PROJECT]);
     expect(state.environments.find((entry) => entry.project === PROJECT)?.env.name).toBe(

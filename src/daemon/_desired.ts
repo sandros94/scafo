@@ -45,30 +45,26 @@ export interface DesiredFailure {
 export interface DesiredState {
   /** Deployed environments this node should serve. */
   environments: DesiredEnvironment[];
-  /** Placement decisions read. Missing placement is pending for production mode. */
+  /** Placement decisions read. An environment without one is pending, never implied. */
   placements: PlacementView[];
   /** Resolution failures for environments that remain otherwise desired. */
   failures: DesiredFailure[];
 }
 
-/** The caller states whether it is a new daemon or the rolling-upgrade reader. */
-export type PlacementReadMode = "required" | "legacy-fallback";
-
-/** Reads desired environments for one node. Production requires explicit
- * placement; legacy fallback applies only to unconstrained environments. All
- * registry reads share one concurrency gate and retain listing order. */
+/** Reads desired environments for one node. Nothing is served without an
+ * explicit placement naming it. The record reads share one concurrency gate
+ * across every project and retain listing order. */
 export async function readDesired(
   registry: RegistryContext,
-  opts: { nodeId: string; mode: PlacementReadMode; concurrency?: number },
+  opts: { nodeId: string; concurrency?: number },
 ): Promise<DesiredState> {
   const projects = await listProjects(registry);
   const gate = createConcurrencyGate(opts.concurrency);
 
-  /* Gate only store reads: gating project tasks themselves could deadlock. */
+  /* The projects run ungated and take slots only for the reads inside them: a
+     project task holding a slot while it waits on the same gate would deadlock. */
   const perProject = await Promise.all(
-    projects.map(async (project) =>
-      readProject(registry, project, opts.nodeId, gate, opts.mode === "required"),
-    ),
+    projects.map(async (project) => readProject(registry, project, opts.nodeId, gate)),
   );
   return {
     environments: perProject.flatMap((entry) => entry.environments),
@@ -106,9 +102,8 @@ async function readProject(
   project: string,
   nodeId: string,
   gate: ConcurrencyGate,
-  requirePlacement: boolean,
 ): Promise<DesiredState> {
-  /* Blocked projects contribute no desired state and avoid further listings. */
+  /* A blocked project is served nowhere, so its listings are never read. */
   if (await gate.run(() => isProjectBlocked(registry, project))) {
     return { environments: [], placements: [], failures: [] };
   }
@@ -121,7 +116,7 @@ async function readProject(
 
   /* Resolve environments concurrently, preserving listed order in `parts`. */
   const parts = await mapConcurrent(names, gate, async (name) =>
-    readEnvironment(registry, project, name, nodeId, placements.get(name), requirePlacement),
+    readEnvironment(registry, project, name, nodeId, placements.get(name)),
   );
 
   const state: DesiredState = { environments: [], placements: [], failures: [] };
@@ -140,9 +135,11 @@ async function readEnvironment(
   name: string,
   nodeId: string,
   placement: PlacementRecord | undefined,
-  requirePlacement: boolean,
 ): Promise<DesiredState> {
   const state: DesiredState = { environments: [], placements: [], failures: [] };
+  /* Unplaced is not a state this node may resolve on its own: only the
+     coordinator says where an environment runs. */
+  if (placement === undefined) return state;
 
   /* One record answers placement view, selector, and deployment state. */
   const found = await readJson<EnvironmentRecord>(registry, environmentKey(project, name));
@@ -150,34 +147,20 @@ async function readEnvironment(
   if (found === null) return state;
   const environment = found.value;
 
-  if (placement !== undefined) {
-    state.placements.push({
-      project,
-      env: name,
-      nodes: [...placement.nodes],
-      self: placement.nodes.includes(nodeId),
-      ...(environment.nodeSelector === undefined
-        ? {}
-        : { selector: { ...environment.nodeSelector } }),
-    });
-  }
-  if (!servedHere(placement, environment, nodeId, requirePlacement)) return state;
+  state.placements.push({
+    project,
+    env: name,
+    nodes: [...placement.nodes],
+    self: placement.nodes.includes(nodeId),
+    ...(environment.nodeSelector === undefined
+      ? {}
+      : { selector: { ...environment.nodeSelector } }),
+  });
+  if (!placement.nodes.includes(nodeId)) return state;
 
   const wanted = resolveEnvironmentDeployment(project, environment);
   if (wanted !== null) state.environments.push(wanted);
   return state;
-}
-
-/** Placement decisions override fallback. Legacy fallback never bypasses a selector. */
-function servedHere(
-  placement: PlacementRecord | undefined,
-  environment: EnvironmentRecord,
-  nodeId: string,
-  requirePlacement: boolean,
-): boolean {
-  if (placement !== undefined) return placement.nodes.includes(nodeId);
-  if (requirePlacement) return false;
-  return environment.nodeSelector === undefined;
 }
 
 /** Resolves a deployable, non-retired environment from its deployment notice. */
@@ -185,7 +168,7 @@ export function resolveEnvironmentDeployment(
   project: string,
   env: EnvironmentRecord,
 ): DesiredEnvironment | null {
-  /* Retirement overrides both explicit placement and legacy fallback. */
+  /* Retirement outranks the placement that still names this node. */
   if (env.retiredAt !== undefined) return null;
   const revision = deploymentRevision(env);
   if (revision === null) return null;

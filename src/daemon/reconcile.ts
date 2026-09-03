@@ -115,10 +115,7 @@ export function createReconciler(
     let placements: PlacementView[] = [];
     try {
       /* Other nodes' placements are not desired locally and are stopped if present. */
-      const state = await readDesired(registry, {
-        nodeId: daemon.nodeId,
-        mode: "required",
-      });
+      const state = await readDesired(registry, { nodeId: daemon.nodeId });
       const desired = state.environments;
       placements = state.placements;
       /* Preserve read failures beside actions for the resolvable environments. */

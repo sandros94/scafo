@@ -46,24 +46,12 @@ beforeEach(async () => {
 });
 
 describe("an environment nobody has placed", () => {
-  it("is not served by a current daemon until placement is explicit", async () => {
-    const state = await readDesired(registry, { nodeId: SELF, mode: "required" });
-
-    expect(state.environments).toEqual([]);
-    expect(state.placements).toEqual([]);
-  });
-
-  it("is served only when the caller explicitly selects legacy fallback", async () => {
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
-
-    expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
-    expect(state.placements).toEqual([]);
-  });
-
-  it("is served by every node at once, which is what it did before placement existed", async () => {
+  it("is served nowhere, and reported nowhere either", async () => {
     for (const nodeId of [SELF, PEER, "node-c"]) {
-      const state = await readDesired(registry, { nodeId, mode: "legacy-fallback" });
-      expect(state.environments, nodeId).toHaveLength(1);
+      const state = await readDesired(registry, { nodeId });
+
+      expect(state.environments, nodeId).toEqual([]);
+      expect(state.placements, nodeId).toEqual([]);
     }
   });
 });
@@ -72,7 +60,7 @@ describe("an environment that has been placed", () => {
   it("is served here when the decision names this node", async () => {
     await writePlacement(registry, PROJECT, "prod", [SELF, PEER], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
+    const state = await readDesired(registry, { nodeId: SELF });
 
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
     expect(state.placements).toEqual([
@@ -83,7 +71,7 @@ describe("an environment that has been placed", () => {
   it("is NOT served here when the decision names other nodes", async () => {
     await writePlacement(registry, PROJECT, "prod", [PEER], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
+    const state = await readDesired(registry, { nodeId: SELF });
 
     expect(state.environments).toEqual([]);
     expect(state.placements).toEqual([
@@ -96,7 +84,7 @@ describe("an environment that has been placed", () => {
     await writePlacement(registry, PROJECT, "prod", [SELF], lease);
     await writePlacement(registry, PROJECT, "staging", [PEER], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
+    const state = await readDesired(registry, { nodeId: SELF });
 
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
     expect(state.placements).toEqual([
@@ -108,7 +96,7 @@ describe("an environment that has been placed", () => {
   it("is served nowhere when the decision names nobody", async () => {
     await writePlacement(registry, PROJECT, "prod", [], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
+    const state = await readDesired(registry, { nodeId: SELF });
 
     expect(state.environments).toEqual([]);
     expect(state.placements[0]).toMatchObject({ nodes: [], self: false });
@@ -119,7 +107,7 @@ describe("an environment that has been placed", () => {
     await writePlacement(registry, PROJECT, "prod", [PEER], lease);
     await writePlacement(registry, OTHER_PROJECT, "prod", [SELF], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
+    const state = await readDesired(registry, { nodeId: SELF });
 
     expect(state.environments.map((entry) => entry.project)).toEqual([OTHER_PROJECT]);
     expect(
@@ -135,7 +123,7 @@ describe("an environment that carries a node selector", () => {
     await setNodeSelector(registry, PROJECT, "prod", FAST);
 
     for (const nodeId of [SELF, PEER, "node-c"]) {
-      const state = await readDesired(registry, { nodeId, mode: "legacy-fallback" });
+      const state = await readDesired(registry, { nodeId });
       expect(state.environments, nodeId).toEqual([]);
       expect(state.placements, nodeId).toEqual([]);
     }
@@ -145,7 +133,7 @@ describe("an environment that carries a node selector", () => {
     await setNodeSelector(registry, PROJECT, "prod", FAST);
     await writePlacement(registry, PROJECT, "prod", [SELF], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
+    const state = await readDesired(registry, { nodeId: SELF });
 
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
     expect(state.placements).toEqual([
@@ -157,7 +145,7 @@ describe("an environment that carries a node selector", () => {
     await setNodeSelector(registry, PROJECT, "prod", FAST);
     await writePlacement(registry, PROJECT, "prod", [PEER], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
+    const state = await readDesired(registry, { nodeId: SELF });
 
     expect(state.environments).toEqual([]);
     expect(state.placements[0]).toMatchObject({ self: false, selector: FAST });
@@ -169,7 +157,7 @@ describe("an environment that carries a node selector", () => {
     await writePlacement(registry, PROJECT, "prod", [SELF], lease);
     await writePlacement(registry, PROJECT, "staging", [SELF, PEER], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
+    const state = await readDesired(registry, { nodeId: SELF });
 
     expect(state.placements).toEqual([
       { project: PROJECT, env: "prod", nodes: [SELF], self: true, selector: FAST },
@@ -177,49 +165,47 @@ describe("an environment that carries a node selector", () => {
     ]);
   });
 
-  it("returns to the legacy run-everywhere fallback when the selector is cleared", async () => {
+  it("keeps serving what the decision says once the selector is cleared", async () => {
     await setNodeSelector(registry, PROJECT, "prod", FAST);
-    expect(
-      (await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" })).environments,
-    ).toEqual([]);
+    await writePlacement(registry, PROJECT, "prod", [SELF], lease);
 
     await setNodeSelector(registry, PROJECT, "prod", null);
 
-    for (const nodeId of [SELF, PEER]) {
-      const state = await readDesired(registry, { nodeId, mode: "legacy-fallback" });
-      expect(
-        state.environments.map((entry) => entry.env.name),
-        nodeId,
-      ).toEqual(["prod"]);
-    }
+    const state = await readDesired(registry, { nodeId: SELF });
+    expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
+    expect(state.placements).toEqual([
+      { project: PROJECT, env: "prod", nodes: [SELF], self: true },
+    ]);
   });
 
   it("leaves the environments beside it entirely alone", async () => {
     await deployed(PROJECT, "staging");
     await setNodeSelector(registry, PROJECT, "prod", FAST);
+    await writePlacement(registry, PROJECT, "staging", [SELF], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
+    const state = await readDesired(registry, { nodeId: SELF });
 
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["staging"]);
   });
 });
 
 describe("what is left out for reasons other than placement", () => {
-  it("leaves out an environment without a deployment notice, placed or not", async () => {
+  it("leaves out an environment without a deployment notice, squarely placed as it is", async () => {
     await createEnvironment(registry, PROJECT, { name: "fresh" });
     await writePlacement(registry, PROJECT, "fresh", [SELF], lease);
+    await writePlacement(registry, PROJECT, "prod", [SELF], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
+    const state = await readDesired(registry, { nodeId: SELF });
 
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
-    expect(state.placements.map((view) => view.env)).toEqual(["fresh"]);
+    expect(state.placements.map((view) => view.env)).toEqual(["fresh", "prod"]);
   });
 
   it("leaves out a RETIRED environment, however squarely it is placed here", async () => {
     await writePlacement(registry, PROJECT, "prod", [SELF], lease);
     await retireEnvironment(registry, PROJECT, "prod");
 
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
+    const state = await readDesired(registry, { nodeId: SELF });
 
     expect(state.environments).toEqual([]);
     expect(state.placements).toEqual([
@@ -228,26 +214,23 @@ describe("what is left out for reasons other than placement", () => {
   });
 
   it("takes it straight back the moment it is unretired", async () => {
+    await writePlacement(registry, PROJECT, "prod", [SELF], lease);
     await retireEnvironment(registry, PROJECT, "prod");
-    expect(
-      (await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" })).environments,
-    ).toEqual([]);
+    expect((await readDesired(registry, { nodeId: SELF })).environments).toEqual([]);
 
     await unretireEnvironment(registry, PROJECT, "prod");
 
-    const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
+    const state = await readDesired(registry, { nodeId: SELF });
     expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
     expect(state.environments[0].env.deployment?.revision).toBe(1);
   });
 
   it("leaves a retired environment out on every node, not just this one", async () => {
+    await writePlacement(registry, PROJECT, "prod", [SELF, PEER, "node-c"], lease);
     await retireEnvironment(registry, PROJECT, "prod");
 
     for (const nodeId of [SELF, PEER, "node-c"]) {
-      expect(
-        (await readDesired(registry, { nodeId, mode: "legacy-fallback" })).environments,
-        nodeId,
-      ).toEqual([]);
+      expect((await readDesired(registry, { nodeId })).environments, nodeId).toEqual([]);
     }
   });
 
@@ -257,7 +240,7 @@ describe("what is left out for reasons other than placement", () => {
     await deletePlacement(registry, PROJECT, "prod", lease);
 
     for (const nodeId of [SELF, PEER, "node-c"]) {
-      const state = await readDesired(registry, { nodeId, mode: "legacy-fallback" });
+      const state = await readDesired(registry, { nodeId });
       expect(state.environments, nodeId).toEqual([]);
       expect(state.placements, nodeId).toEqual([]);
     }
@@ -266,7 +249,7 @@ describe("what is left out for reasons other than placement", () => {
   it("reads nothing at all out of an empty registry", async () => {
     const empty = ctxWith(new MemoryCasStore()).ctx;
 
-    expect(await readDesired(empty, { nodeId: SELF, mode: "legacy-fallback" })).toEqual({
+    expect(await readDesired(empty, { nodeId: SELF })).toEqual({
       environments: [],
       placements: [],
       failures: [],
@@ -278,6 +261,7 @@ describe("an old ephemeral environment", () => {
   it("remains desired indefinitely", async () => {
     await createEnvironment(registry, PROJECT, { name: PREVIEW, ephemeral: true });
     await recordDeployment(registry, PROJECT, PREVIEW, BUILD);
+    await writePlacement(registry, PROJECT, PREVIEW, [SELF], lease);
     clock.tick(365 * 24 * 60 * 60 * 1000);
 
     expect(await isDesired(PREVIEW)).toBe(true);
@@ -289,7 +273,7 @@ describe("how a pass reads all of that", () => {
     const { ctx, observing } = await watchedInstallation();
     observing.reset();
 
-    await readDesired(ctx, { nodeId: SELF, mode: "legacy-fallback" });
+    await readDesired(ctx, { nodeId: SELF });
 
     expect(observing.peakReads).toBeGreaterThan(1);
     expect(observing.peakReads).toBeLessThanOrEqual(DEFAULT_CONCURRENCY);
@@ -300,7 +284,7 @@ describe("how a pass reads all of that", () => {
 
     for (const concurrency of [1, 3]) {
       observing.reset();
-      await readDesired(ctx, { nodeId: SELF, mode: "legacy-fallback", concurrency });
+      await readDesired(ctx, { nodeId: SELF, concurrency });
       expect(observing.peakReads, `bounded to ${String(concurrency)}`).toBe(concurrency);
     }
   });
@@ -309,10 +293,9 @@ describe("how a pass reads all of that", () => {
     const { ctx, observing, names } = await watchedInstallation();
     observing.delays.set(environmentKey(PROJECT, names[0]), 20);
 
-    const overlapped = await readDesired(ctx, { nodeId: SELF, mode: "legacy-fallback" });
+    const overlapped = await readDesired(ctx, { nodeId: SELF });
     const sequential = await readDesired(ctx, {
       nodeId: SELF,
-      mode: "legacy-fallback",
       concurrency: 1,
     });
 
@@ -327,12 +310,8 @@ describe("how a pass reads all of that", () => {
     observing.faults.set(environmentKey(PROJECT, names[1]), new Error("the second"));
     observing.faults.set(environmentKey(PROJECT, names[5]), new Error("the sixth"));
 
-    await expect(readDesired(ctx, { nodeId: SELF, mode: "legacy-fallback" })).rejects.toThrow(
-      "the second",
-    );
-    await expect(
-      readDesired(ctx, { nodeId: SELF, mode: "legacy-fallback", concurrency: 1 }),
-    ).rejects.toThrow("the second");
+    await expect(readDesired(ctx, { nodeId: SELF })).rejects.toThrow("the second");
+    await expect(readDesired(ctx, { nodeId: SELF, concurrency: 1 })).rejects.toThrow("the second");
   });
 });
 
@@ -344,7 +323,7 @@ async function deployed(project: string, name: string): Promise<void> {
 
 /** Whether this node would run `name`. */
 async function isDesired(name: string): Promise<boolean> {
-  const state = await readDesired(registry, { nodeId: SELF, mode: "legacy-fallback" });
+  const state = await readDesired(registry, { nodeId: SELF });
   return state.environments.some((entry) => entry.env.name === name);
 }
 
