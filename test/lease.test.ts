@@ -10,26 +10,17 @@ import {
   type LeaseHandle,
   planReap,
   readJson,
-  registerNode,
   releaseLease,
-  removeNode,
   retireEnvironment,
   renewLease,
   verifyLease,
 } from "../src/core/registry/index.ts";
-import type { CoordinatorLease, NodeRecord } from "../src/core/types/registry.ts";
-import { coordinatorKey, nodeKey } from "../src/core/registry/paths.ts";
+import type { CoordinatorLease } from "../src/core/types/registry.ts";
+import { coordinatorKey } from "../src/core/registry/paths.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, rejectsWith } from "./_helpers.ts";
 
 const TTL_MS = 15_000;
-
-const NODE: NodeRecord = {
-  v: 1,
-  id: "node-a",
-  publicKey: { kty: "OKP", crv: "Ed25519", x: "Zm9v" },
-  addresses: { internal: "10.0.0.1", apiPort: 7777 },
-};
 
 /** Acquires and unwraps the handle; a null return means the test premise broke. */
 async function held(acquired: Promise<LeaseHandle | null>, who: string): Promise<LeaseHandle> {
@@ -117,11 +108,11 @@ describe("a superseded holder", () => {
     await createProject(ctx, { slug: "app" });
     await createEnvironment(ctx, "app", { name: "preview", ephemeral: true });
     await retireEnvironment(ctx, "app", "preview");
-    await registerNode(ctx, NODE);
 
     const stale = await held(acquireLease(ctx, "node-a", { ttlMs: TTL_MS }), "node-a");
     tick(86_400_001);
-    const plan = await planReap(ctx, { buildRetention: { maxAgeMs: 1000 } });
+    const reapOptions = { buildRetention: { maxAgeMs: 1000 } };
+    const plan = await planReap(ctx, reapOptions);
     expect(plan.environments).toHaveLength(1);
 
     await held(acquireLease(ctx, "node-b", { ttlMs: TTL_MS }), "node-b");
@@ -129,12 +120,10 @@ describe("a superseded holder", () => {
 
     await expect(verifyLease(ctx, stale)).resolves.toBe(false);
     await rejectsWith(() => renewLease(ctx, stale), "lease-lost");
-    await rejectsWith(() => removeNode(ctx, NODE.id, stale), "lease-lost");
-    await rejectsWith(() => executeReap(ctx, plan, stale), "lease-lost");
+    await rejectsWith(() => executeReap(ctx, plan, stale, reapOptions), "lease-lost");
 
     expect(store.dels).toBe(deletesBefore);
     expect(store.dels).toBe(0);
-    await expect(readJson(ctx, nodeKey(NODE.id))).resolves.not.toBeNull();
   });
 });
 

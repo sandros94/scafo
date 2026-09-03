@@ -86,12 +86,12 @@ export async function executeReap(
   ctx: RegistryContext,
   plan: ReapPlan,
   initial: LeaseHandle,
-  opts?: ReapOptions,
+  opts: ReapOptions,
 ): Promise<ReapResult> {
   const result: ReapResult = { deleted: [], skipped: [] };
   /* The handle each deletion is verified against, refreshed as the reap goes on. */
   let lease = initial;
-  const keepAlive = opts?.keepAlive;
+  const keepAlive = opts.keepAlive;
 
   for (const target of plan.environments) {
     if (keepAlive !== undefined) lease = await keepAlive();
@@ -123,7 +123,7 @@ export async function executeReap(
     );
   }
 
-  const maxAgeMs = opts?.buildRetention?.maxAgeMs;
+  const maxAgeMs = opts.buildRetention?.maxAgeMs;
   for (const target of plan.builds) {
     if (keepAlive !== undefined) lease = await keepAlive();
     await assertLease(ctx, lease);
