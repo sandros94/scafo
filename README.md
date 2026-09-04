@@ -2,63 +2,35 @@
 
 Self-hosted serverless deployment platform for JavaScript applications.
 
-Scafo stores its registry as JSON objects in an S3-compatible bucket and mutates them with conditional writes. It has no database or consensus protocol. One binary provides both the node daemon and the CLI.
+Scafo stores its registry as JSON objects in an S3-compatible bucket and mutates them with conditional writes. It has no database or consensus protocol. One binary provides both the node daemon (`scafo sail`) and the CLI. [Celld](https://github.com/denoland/celld) runs the deployed code; Caddy or Traefik pulls the fleet's routing from the node next to it.
 
-## Vocabulary
+Documentation: **[scafo.dev](https://scafo.dev)**
 
-A Scafo fleet is one installation: one registry and its Scafo nodes (machines running `scafo sail`). A Scafo node can supervise Celld node processes for its assigned environments; each environment has its own Celld fleet. Unqualified `fleet` and `node` refer to Scafo's machine-level concepts.
+- [Docs](https://scafo.dev/docs) — concepts, installation, guides, operations
+- [Configuration](https://scafo.dev/config) — every setting, environment variable and flag
+- [Deploy](https://scafo.dev/deploy) — Docker Compose, bare metal, VPS mesh, K3s/RKE2, Coolify, Dokploy, container image
+- [Reference](https://scafo.dev/reference) — CLI, node API, ingress protocol, Caddy modules, registry layout, errors
 
 ## Install
-
-Install the CLI with a package manager:
 
 ```sh
 npm install --global scafo
 ```
 
-For a Linux node, download the installer. It selects the latest release unless `SCAFO_VERSION` names an exact one:
-
-```sh
-curl -fsSLO https://raw.githubusercontent.com/sandros94/scafo/main/scripts/install.sh
-sh install.sh
-```
-
-The container image is `ghcr.io/sandros94/scafo:<version>`.
+Linux node: [`scripts/install.sh`](./scripts/install.sh) downloads and verifies Scafo, Celld, Caddy and esbuild, and writes systemd units and `/etc/scafo` when run as root. Container image: `ghcr.io/sandros94/scafo:<version>` (`:edge` tracks `main`).
 
 ## Quickstart
 
-Use the self-contained playgrounds for local evaluation:
+The self-contained playgrounds need no external DNS or cloud credentials:
 
-- [`playgrounds/single-node/`](./playgrounds/single-node/README.md) — deployment, routing, replacement, and observations.
-- [`playgrounds/multi-node/`](./playgrounds/multi-node/README.md) — coordination, placement, cell ownership, and draining.
+- [`playgrounds/single-node/`](./playgrounds/single-node/README.md) — deployment, routing, replacement, observations.
+- [`playgrounds/multi-node/`](./playgrounds/multi-node/README.md) — coordination, placement, cell ownership, draining.
 
-They use mock `*.scafo.test` hosts and a SeaweedFS container as the S3-compatible store. They do not require external DNS or cloud credentials.
-
-`/.well-known/scafo/health` is the Scafo node/API health endpoint. `/.well-known/celld/health` is the deployed application's Celld health endpoint.
-
-`scafo health` asks the node on the machine it runs on. It resolves the listener from the same environment and config file the node boots from, so it follows a listener moved onto the tunnel or any other address; it is the container image's healthcheck. A listener chosen with `sail --listen` is not in either source, so pass the same flag or set `SCAFO_LISTEN`.
-
-## Production use
-
-- **Linux host:** [`scripts/install.sh`](./scripts/install.sh) downloads and SHA-256 verifies Scafo, Celld, Caddy, and esbuild, then writes systemd units and `/etc/scafo` when run as root. It does not start a node; configure bucket credentials first.
-
-  The default ingress is `scafo-caddy`, built from [scafo-ingress](https://github.com/sandros94/scafo-ingress). It carries two Caddy modules: `caddy.storage.scafo` keeps certificates, ACME account material, and locks in the bucket through the node's loopback `/v1/storage` API, and `http.reverse_proxy.upstreams.scafo` reads the fleet's routing from the node's `/v1/ingress/routes` and resolves each request's host to the processes currently running for it. Caddy pulls, the way Traefik does; the node configures no ingress. It receives only the node's ingress bearer token, not bucket credentials. `wireguard-tools` remains an operating-system prerequisite.
-
-  The ingress token is owner-readable state. The installed Caddy unit receives it through systemd `LoadCredential=`; it may initially retry until the node creates the token.
-
-- **Uninstall:** [`scripts/uninstall.sh`](./scripts/uninstall.sh) removes units, executables, and `/etc/scafo`, while preserving `/var/lib/scafo` by default. `--purge` also removes local state; `--dry-run` changes nothing. Neither mode changes bucket data.
-
-- **Binary:** `pnpm compile` produces `build/scafo-linux-amd64` and `build/scafo-linux-arm64`, each with a `.sha256` file. Celld, an ingress, and WireGuard tools are separate prerequisites.
-
-- **Image:** `ghcr.io/sandros94/scafo:<version>` includes Scafo, Celld, and esbuild. `:edge` tracks every commit on `main`; version tags are releases. Nodes need esbuild only to bundle Worker entries; `scafo deploy --no-bundle` ships a pre-bundled entry and skips it. Keep the direct Node entrypoint as PID 1 in a private PID namespace; do not use host PID mode or a persistent wrapper. Configure at least 50 seconds of shutdown grace. If `CELLD_SHUTDOWN_TOTAL_MS` is set, use that value plus at least 10 seconds.
-
-- **Production examples:** [`examples/compose.yaml`](./examples/compose.yaml) and [`examples/k3s/`](./examples/k3s/) use external S3-compatible storage and real DNS. A fleet runs the same node on each host against the same bucket and prefix.
+Production recipes live in [`examples/`](./examples/README.md). The Caddy ingress is [scafo-ingress](https://github.com/sandros94/scafo-ingress).
 
 ## Security
 
-Read [SECURITY.md](./SECURITY.md) before production use. It defines the trusted workload model, public and private API surfaces, Celld limitations, bucket and lease requirements, and deployment containment requirements.
-
-Celld 0.4.0 has a lease-retry limitation during intermittent object-store failures. Scafo preserves Celld's default. `CELLD_TTL_MS=30000`, set consistently on every node, is an optional workaround with slower failure detection; see [Deploy safely](./SECURITY.md#deploy-safely) and [Celld issue #182](https://github.com/denoland/celld/issues/182).
+Read [SECURITY.md](./SECURITY.md) before production use: trusted workload model, public and private API surfaces, Celld limitations, bucket and lease requirements.
 
 ## Development
 
