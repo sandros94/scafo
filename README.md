@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./.github/assets/logo.svg" width="128" alt="">
+</p>
+
 # scafo
 
 Self-hosted serverless deployment platform for JavaScript applications.

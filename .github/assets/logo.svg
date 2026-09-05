@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Scafo — Saffron bow carrying cells</title>
+  <desc id="desc">A cropped right-facing saffron ship bow carrying green rounded cells with visible cores. Seven cells sit in tightly packed rows with a half-cell stagger on a level deck, ending where the bow begins to rise. Cargo continues beyond the left edge, above cyan waves and deep blue water.</desc>
+  <defs><clipPath id="frame"><rect width="512" height="512" rx="112"/></clipPath></defs>
+  <g clip-path="url(#frame)"><path fill="#C7E8F0" d="M0 0H512V512H0Z"/>
+    <g id="cells"><g transform="translate(-18.5 120.5)">
+  <rect width="66" height="66" rx="19" fill="#73CDA0"/>
+  <path d="M4 43Q4 62 23 62H43Q62 62 62 43V35Q54 51 35 52H20Q10 52 4 43Z" fill="#3B9C7B"/>
+  <rect width="66" height="66" rx="19" fill="none" stroke="#193A50" stroke-width="7"/>
+  <rect x="23" y="23" width="20" height="20" rx="6" fill="#E8F5D7" stroke="#193A50" stroke-width="4"/>
+ </g><g transform="translate(54.5 120.5)">
+  <rect width="66" height="66" rx="19" fill="#73CDA0"/>
+  <path d="M4 43Q4 62 23 62H43Q62 62 62 43V35Q54 51 35 52H20Q10 52 4 43Z" fill="#3B9C7B"/>
+  <rect width="66" height="66" rx="19" fill="none" stroke="#193A50" stroke-width="7"/>
+  <rect x="23" y="23" width="20" height="20" rx="6" fill="#E8F5D7" stroke="#193A50" stroke-width="4"/>
+ </g><g transform="translate(127.5 120.5)">
+  <rect width="66" height="66" rx="19" fill="#73CDA0"/>
+  <path d="M4 43Q4 62 23 62H43Q62 62 62 43V35Q54 51 35 52H20Q10 52 4 43Z" fill="#3B9C7B"/>
+  <rect width="66" height="66" rx="19" fill="none" stroke="#193A50" stroke-width="7"/>
+  <rect x="23" y="23" width="20" height="20" rx="6" fill="#E8F5D7" stroke="#193A50" stroke-width="4"/>
+ </g><g transform="translate(200.5 120.5)">
+  <rect width="66" height="66" rx="19" fill="#73CDA0"/>
+  <path d="M4 43Q4 62 23 62H43Q62 62 62 43V35Q54 51 35 52H20Q10 52 4 43Z" fill="#3B9C7B"/>
+  <rect width="66" height="66" rx="19" fill="none" stroke="#193A50" stroke-width="7"/>
+  <rect x="23" y="23" width="20" height="20" rx="6" fill="#E8F5D7" stroke="#193A50" stroke-width="4"/>
+ </g><g transform="translate(18 49)">
+  <rect width="66" height="66" rx="19" fill="#73CDA0"/>
+  <path d="M4 43Q4 62 23 62H43Q62 62 62 43V35Q54 51 35 52H20Q10 52 4 43Z" fill="#3B9C7B"/>
+  <rect width="66" height="66" rx="19" fill="none" stroke="#193A50" stroke-width="7"/>
+  <rect x="23" y="23" width="20" height="20" rx="6" fill="#E8F5D7" stroke="#193A50" stroke-width="4"/>
+ </g><g transform="translate(91 49)">
+  <rect width="66" height="66" rx="19" fill="#73CDA0"/>
+  <path d="M4 43Q4 62 23 62H43Q62 62 62 43V35Q54 51 35 52H20Q10 52 4 43Z" fill="#3B9C7B"/>
+  <rect width="66" height="66" rx="19" fill="none" stroke="#193A50" stroke-width="7"/>
+  <rect x="23" y="23" width="20" height="20" rx="6" fill="#E8F5D7" stroke="#193A50" stroke-width="4"/>
+ </g><g transform="translate(164 49)">
+  <rect width="66" height="66" rx="19" fill="#73CDA0"/>
+  <path d="M4 43Q4 62 23 62H43Q62 62 62 43V35Q54 51 35 52H20Q10 52 4 43Z" fill="#3B9C7B"/>
+  <rect width="66" height="66" rx="19" fill="none" stroke="#193A50" stroke-width="7"/>
+  <rect x="23" y="23" width="20" height="20" rx="6" fill="#E8F5D7" stroke="#193A50" stroke-width="4"/>
+ </g></g>
+    <g fill="none" stroke="#193A50" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M-24 175H276Q309 175 338 158L388 137"/>
+      <path d="M52 176V196M130 176V196M208 176V196M286 175V195M360 149V171"/>
+    </g>
+    <path d="M-32 201H270C317 201 361 165 432 148C417 230 392 288 334 336C278 382 223 396 148 400H-32Z" fill="#E4AD3C" stroke="#193A50" stroke-width="13" stroke-linejoin="round"/>
+    <path d="M-32 323C102 350 285 340 393 250C365 320 286 392 148 400H-32Z" fill="#AF7628"/>
+    <path d="M-24 213H268C317 213 357 182 414 165" fill="none" stroke="#F5D27C" stroke-width="9" stroke-linecap="round"/>
+    <path d="M-32 201H270C317 201 361 165 432 148C417 230 392 288 334 336C278 382 223 396 148 400H-32" fill="none" stroke="#193A50" stroke-width="13" stroke-linejoin="round"/>
+    <path d="M-24 198H270C317 198 361 162 432 145" fill="none" stroke="#193A50" stroke-width="16" stroke-linecap="round"/>
+    <circle cx="338" cy="229" r="18" fill="#193A50"/>
+    <circle cx="338" cy="229" r="8" fill="#C7E8F0"/>
+    <path d="M-24 362C43 320 91 332 152 356S245 399 311 359S414 310 536 344V540H-24Z" fill="#429FB5"/>
+    <path d="M-24 389C37 359 79 359 142 383S244 419 309 384S427 362 536 384V540H-24Z" fill="#173B56"/>
+    <path d="M294 368C318 356 335 342 359 338" fill="none" stroke="#F3FBF5" stroke-width="9" stroke-linecap="round"/>
+    <path d="M379 336L391 337" fill="none" stroke="#F3FBF5" stroke-width="9" stroke-linecap="round"/>
+   </g>
+</svg>
