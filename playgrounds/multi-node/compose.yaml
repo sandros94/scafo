@@ -3,7 +3,7 @@ name: scafo-multi-node
 
 services:
   seaweedfs:
-    image: chrislusf/seaweedfs:4.42
+    image: chrislusf/seaweedfs:4.45@sha256:fc9f76fa993ad69966ffeb2f65d0318fcae39c6f8e20cf68ef7b3a5cb97769e5
     command: ["server", "-s3"]
     ports:
       - "127.0.0.1:${SCAFO_STORE_PORT:-8333}:8333"
@@ -11,7 +11,7 @@ services:
       - store:/data
 
   bucket:
-    image: curlimages/curl:8.18.0
+    image: curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
     depends_on:
       - seaweedfs
     command:
