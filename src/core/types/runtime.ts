@@ -70,8 +70,6 @@ export interface RuntimeSpecInput {
    * environment it happens to be running in.
    */
   baseEnv?: Record<string, string>;
-  /** Variables merged last. Names the driver reserves for itself are refused. */
-  extraEnv?: Record<string, string>;
 }
 
 /** Runs one environment's Celld process on a node. */

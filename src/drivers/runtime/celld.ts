@@ -42,21 +42,6 @@ export const OPERATOR_RESERVED_ENV: string[] = [
   "CELLD_VARS_FILE",
 ];
 
-/** Variables one environment may not use to change node-wide Celld policy. */
-export const RESERVED_ENV: string[] = [
-  ...OPERATOR_RESERVED_ENV,
-  "CELLD_SHUTDOWN_DRAIN_MS",
-  "CELLD_SHUTDOWN_TOTAL_MS",
-  "CELLD_DURABILITY",
-  "CELLD_IDLE_EVICT_S",
-  "CELLD_LTX_S3_BUCKET",
-  "CELLD_LTX_S3_ENDPOINT",
-  "CELLD_NODE",
-  "CELLD_CLOUD",
-  "CELLD_CONTROL_URL",
-  "CELLD_UNSAFE_PUBLIC_ADVERTISE",
-];
-
 export interface CelldDriverOptions {
   /** Executable to run; resolved against `PATH` unless it is a path. */
   binPath?: string;
@@ -109,8 +94,8 @@ function processEnv(
   input: RuntimeSpecInput,
   operatorEnv?: Record<string, string>,
 ): Record<string, string> {
-  /* Base environment, then node configuration; derived variables cannot be
-     overridden by an environment. */
+  /* Base environment, then node configuration; the driver derives the rest last,
+     so neither layer can displace a value Scafo owns. */
   const env: Record<string, string> = { ...input.baseEnv, ...operatorEnv };
 
   env.AWS_ACCESS_KEY_ID = input.node.accessKey;
@@ -127,8 +112,6 @@ function processEnv(
   for (const [name, entry] of Object.entries(input.vars ?? {})) {
     if (name !== "") env[`CELLD_VAR_${name}`] = entry.value;
   }
-
-  Object.assign(env, checkedExtraEnv(input.extraEnv));
 
   return env;
 }
@@ -153,21 +136,6 @@ function invalidShutdownTotal(value: string): ScafoError {
       `"CELLD_SHUTDOWN_TOTAL_MS" must be a positive integer no greater than ` +
       `${String(MAX_TIMER_MS - STOP_HEADROOM_MS)}, got ${JSON.stringify(value)}`,
   });
-}
-
-/** Rejects environment-scoped overrides of node-wide or derived values. */
-function checkedExtraEnv(extraEnv?: Record<string, string>): Record<string, string> {
-  if (extraEnv === undefined) return {};
-
-  const reserved = RESERVED_ENV.filter((name) => name in extraEnv);
-  if (reserved.length > 0) {
-    throw new ScafoError("invalid-input", "Reserved environment variable", {
-      detail:
-        `${reserved.join(", ")} is derived by the driver or reserved for node-wide ` +
-        `Celld policy, and cannot be set by one environment`,
-    });
-  }
-  return extraEnv;
 }
 
 /** Joins the installation's key prefix to a fleet prefix. */

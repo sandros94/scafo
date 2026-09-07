@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createCelldDriver, RESERVED_ENV } from "../src/drivers/runtime/celld.ts";
+import { createCelldDriver } from "../src/drivers/runtime/celld.ts";
 import type { RuntimeSpecInput } from "../src/core/types/runtime.ts";
 
 describe("celld process specs", () => {
@@ -74,19 +74,6 @@ describe("celld process specs", () => {
     }).processSpec(specInput());
     expect(spec.env).not.toHaveProperty("CELLD_VARS_FILE");
     expect(spec.env).toHaveProperty("CELLD_VAR_TOKEN", "secret-token");
-  });
-
-  it("refuses caller values reserved for node policy", () => {
-    for (const name of RESERVED_ENV) {
-      expect(() =>
-        createCelldDriver({}).processSpec(specInput({ extraEnv: { [name]: "override" } })),
-      ).toThrow(expect.objectContaining({ code: "invalid-input" }));
-    }
-    expect(RESERVED_ENV).toContain("CELLD_VARS_FILE");
-    expect(RESERVED_ENV).toContain("CELLD_DURABILITY");
-    expect(RESERVED_ENV).toContain("CELLD_IDLE_EVICT_S");
-    expect(RESERVED_ENV).not.toContain("CELLD_MAX_RSS_MB");
-    expect(RESERVED_ENV).not.toContain("CELLD_MAX_RESIDENT_CELLS");
   });
 });
 
