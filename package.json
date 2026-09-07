@@ -100,18 +100,18 @@
   "devDependencies": {
     "@kubernetes/client-node": "^2.0.0",
     "@testcontainers/k3s": "12.1.0",
-    "@types/node": "^24",
-    "@vitest/coverage-v8": "^4.1.10",
+    "@types/node": "^24.13.3",
+    "@vitest/coverage-v8": "^4.1.11",
     "automd": "^0.4.3",
     "esbuild": "^0.28.2",
     "obuild": "^0.4.38",
     "oxfmt": "^0.63.0",
-    "oxlint": "^1.78.0",
+    "oxlint": "^1.81.0",
     "oxlint-tsgolint": "^7.0.2001",
-    "simple-git-hooks": "^2.13.1",
+    "simple-git-hooks": "^2.14.0",
     "testcontainers": "^12.1.0",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   },
   "simple-git-hooks": {
     "pre-commit": "pnpm build --stub && pnpm lint && pnpm typecheck"
