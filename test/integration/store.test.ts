@@ -85,7 +85,7 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
   }, SLOW_TIMEOUT_MS);
 
   describe("conditional writes", () => {
-    it("passes the five-step conformance probe", async () => {
+    it("passes the six-step conformance probe", async () => {
       await expect(probeStore(store)).resolves.toBeUndefined();
     });
 
@@ -131,6 +131,17 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
 
       await expect(store.getBytes(key)).resolves.toEqual(written);
       await expect(store.getBytes(`${key}.missing`)).resolves.toBeNull();
+    });
+
+    it("answers a ranged read with that range and nothing else", async () => {
+      /* What celld asks of the bucket since 0.4.1: a bucket that ignores
+         `Range` and hands back the whole object stops the runtime process. */
+      const key = `v1/range-${randomHex(4)}.json`;
+      await store.put(key, `{"probe":3}`);
+
+      await expect(store.getBytes(key, { range: { start: 2, end: 6 } })).resolves.toEqual(
+        new TextEncoder().encode("probe"),
+      );
     });
 
     it("lists every key under a prefix, and nothing outside it", async () => {

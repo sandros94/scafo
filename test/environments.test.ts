@@ -88,7 +88,7 @@ describe("deployment revision", () => {
     let collide = true;
     clock.ctx.store = {
       get: (key) => inner.get(key),
-      getBytes: (key) => inner.getBytes(key),
+      getBytes: (key, opts) => inner.getBytes(key, opts),
       put: async (key, body, cas) => {
         if (
           collide &&

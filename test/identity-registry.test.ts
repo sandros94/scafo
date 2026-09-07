@@ -10,7 +10,7 @@ import {
 } from "../src/core/registry/operators.ts";
 import { identityKey, nodeKey, operatorKey } from "../src/core/registry/paths.ts";
 import type { IdentityReservation, NodeRecord } from "../src/core/types/registry.ts";
-import type { CasHeaders, CasStore, StoredObject } from "../src/core/types/store.ts";
+import type { ByteRange, CasHeaders, CasStore, StoredObject } from "../src/core/types/store.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, rejectsWith } from "./_helpers.ts";
 
@@ -195,8 +195,8 @@ class ReservationBarrierStore implements CasStore {
   get(key: string): Promise<StoredObject | null> {
     return this.#inner.get(key);
   }
-  getBytes(key: string): Promise<Uint8Array | null> {
-    return this.#inner.getBytes(key);
+  getBytes(key: string, opts?: { range: ByteRange }): Promise<Uint8Array | null> {
+    return this.#inner.getBytes(key, opts);
   }
   async put(key: string, body: string | Uint8Array, cas?: CasHeaders): Promise<{ etag: string }> {
     if (key === identityKey(ID) && cas?.ifNoneMatch === "*") {

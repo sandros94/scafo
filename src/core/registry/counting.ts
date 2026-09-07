@@ -13,7 +13,7 @@
  */
 
 import type { RegistryContext } from "./context.ts";
-import type { CasHeaders, CasStore, StoredObject } from "../types/store.ts";
+import type { ByteRange, CasHeaders, CasStore, StoredObject } from "../types/store.ts";
 
 /** Store operations dispatched, by kind, since the counter was created. */
 export interface StoreOpCounts {
@@ -59,9 +59,9 @@ export function createCountingStore(inner: CasStore): CountingStore {
 
     /* Counted as a read, because that is what it costs: the same round trip,
        answered without the text decode. */
-    getBytes(key: string): Promise<Uint8Array | null> {
+    getBytes(key: string, opts?: { range: ByteRange }): Promise<Uint8Array | null> {
       counts.get++;
-      return inner.getBytes(key);
+      return inner.getBytes(key, opts);
     },
 
     put(key: string, body: string, cas?: CasHeaders): Promise<{ etag: string }> {

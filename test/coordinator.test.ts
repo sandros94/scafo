@@ -209,7 +209,7 @@ describe("createCoordinator", () => {
         clock.tick(TTL_MS / 2);
         return inner.get(key);
       },
-      getBytes: (key) => inner.getBytes(key),
+      getBytes: (key, opts) => inner.getBytes(key, opts),
       put: (key, body, cas) => inner.put(key, body, cas),
       del: (key) => inner.del(key),
       list: (prefix) => inner.list(prefix),
@@ -232,7 +232,7 @@ describe("createCoordinator", () => {
        pass that decides who coordinates is still in the middle of deciding. */
     clock.ctx.store = {
       get: (key) => inner.get(key),
-      getBytes: (key) => inner.getBytes(key),
+      getBytes: (key, opts) => inner.getBytes(key, opts),
       put: async (key, body, cas) => {
         if (key === coordinatorKey() && !stalled) {
           stalled = true;

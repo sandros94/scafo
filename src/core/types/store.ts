@@ -8,6 +8,18 @@ export interface CasHeaders {
   ifNoneMatch?: "*";
 }
 
+/**
+ * A span of an object, as HTTP means it: `Range: bytes=start-end`, zero-based,
+ * with BOTH ENDS INCLUSIVE. The same shape uns3 takes, so a driver hands it
+ * straight through rather than translating an off-by-one at every call.
+ */
+export interface ByteRange {
+  /** Zero-based offset of the first byte wanted. */
+  start: number;
+  /** Zero-based offset of the last byte wanted, inclusive. */
+  end: number;
+}
+
 /** An object body together with the ETag needed to condition the next write. */
 export interface StoredObject {
   /**
@@ -34,8 +46,15 @@ export interface CasStore {
    * conditioned on anything, and would be destroyed by the UTF-8 decode `get`
    * applies — a Parquet file through a `TextDecoder` is no longer one. Nothing
    * needs both, so nothing pays for both.
+   *
+   * With a `range`, the answer is EXACTLY the bytes it asked for — the store's
+   * own `206`, not a slice taken here. A store that ignores `Range` answers the
+   * whole object with a `200` instead, and a driver that let that through would
+   * hand back bytes the caller then reads as the range it wanted; it MUST throw
+   * `ScafoError("store-nonconforming")` instead. Cell runtimes read their
+   * artifacts by range, so a store that cannot do this cannot serve them.
    */
-  getBytes(key: string): Promise<Uint8Array | null>;
+  getBytes(key: string, opts?: { range: ByteRange }): Promise<Uint8Array | null>;
   /*
    * MUST throw ScafoError("cas-conflict") when a condition fails (HTTP 412).
    *

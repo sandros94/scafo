@@ -71,6 +71,16 @@ describe("what it passes through", () => {
     expect(second.etag).not.toBe(first.etag);
   });
 
+  it("forwards a ranged read, and counts it as the one round trip it is", async () => {
+    const store = createCountingStore(new MemoryCasStore());
+    await store.put("obs.parquet", new Uint8Array([0, 1, 2, 3, 4]));
+
+    const ranged = await store.getBytes("obs.parquet", { range: { start: 1, end: 3 } });
+
+    expect(ranged).toEqual(new Uint8Array([1, 2, 3]));
+    expect(store.counts()).toEqual({ get: 1, put: 1, del: 0, list: 0 });
+  });
+
   it("deletes through, and a delete of nothing is still not a failure", async () => {
     const store = createCountingStore(new MemoryCasStore());
     await store.put("shop.json", "{}");

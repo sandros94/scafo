@@ -17,7 +17,7 @@ import type {
   DomainClaim,
   EnvironmentRecord,
 } from "../src/core/types/registry.ts";
-import type { CasHeaders, CasStore, StoredObject } from "../src/core/types/store.ts";
+import type { ByteRange, CasHeaders, CasStore, StoredObject } from "../src/core/types/store.ts";
 import { SLUG_MAX_LENGTH } from "../src/core/utils/slug.ts";
 
 /** xorshift32; returns floats in `[0, 1)`. The same seed always replays the same run. */
@@ -127,9 +127,9 @@ export class FaultStore implements CasStore {
     return this.#inner.get(key);
   }
 
-  getBytes(key: string): Promise<Uint8Array | null> {
+  getBytes(key: string, opts?: { range: ByteRange }): Promise<Uint8Array | null> {
     this.gets++;
-    return this.#inner.getBytes(key);
+    return this.#inner.getBytes(key, opts);
   }
 
   async put(key: string, body: string, cas?: CasHeaders): Promise<{ etag: string }> {
@@ -208,8 +208,8 @@ export class ObservingStore implements CasStore {
 
   /* Not instrumented: the delays and faults above are about the registry's own
      reads, and nothing observed here reads an object as bytes. */
-  getBytes(key: string): Promise<Uint8Array | null> {
-    return this.#inner.getBytes(key);
+  getBytes(key: string, opts?: { range: ByteRange }): Promise<Uint8Array | null> {
+    return this.#inner.getBytes(key, opts);
   }
 
   put(key: string, body: string, cas?: CasHeaders): Promise<{ etag: string }> {

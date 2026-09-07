@@ -1,6 +1,6 @@
 import { S3Error, type S3Client } from "uns3";
 import { ScafoError } from "../../core/error.ts";
-import type { CasStore, StoredObject } from "../../core/types/store.ts";
+import type { ByteRange, CasStore, StoredObject } from "../../core/types/store.ts";
 
 export interface Uns3StoreOptions {
   bucket: string;
@@ -17,11 +17,28 @@ export function createUns3Store(client: S3Client, opts: Uns3StoreOptions): CasSt
     objectKey.startsWith(prefix) ? objectKey.slice(prefix.length) : objectKey;
 
   /** One GET, with a missing key answered as null rather than raised. */
-  const fetchObject = async (objectKey: string): Promise<Response | null> => {
+  const fetchObject = async (objectKey: string, range?: ByteRange): Promise<Response | null> => {
     try {
-      return await client.get({ bucket, key: objectKey });
+      return await client.get({
+        bucket,
+        key: objectKey,
+        range,
+        /* A ranged read is only answered by a `206`. Demanding it is what turns
+           a store that ignores `Range` into a failure: it replies `200` with
+           the whole object, which uns3 then raises because the status was not
+           the one asked for, rather than handing back bytes the caller would
+           read as the range it wanted. */
+        expectedStatus: range === undefined ? undefined : 206,
+      });
     } catch (error) {
-      if (statusOf(error) === 404) return null;
+      const status = statusOf(error);
+      if (status === 404) return null;
+      if (range !== undefined && status === 200) {
+        throw new ScafoError("store-nonconforming", "Store does not honour ranged reads", {
+          detail: `"${objectKey}" was answered whole (HTTP 200) instead of the range that was asked for`,
+          cause: error,
+        });
+      }
       throw error;
     }
   };
@@ -34,8 +51,8 @@ export function createUns3Store(client: S3Client, opts: Uns3StoreOptions): CasSt
       return { body: await response.text(), etag: etagOf(response, objectKey) };
     },
 
-    async getBytes(key: string): Promise<Uint8Array | null> {
-      const response = await fetchObject(toObjectKey(key));
+    async getBytes(key: string, opts?: { range: ByteRange }): Promise<Uint8Array | null> {
+      const response = await fetchObject(toObjectKey(key), opts?.range);
       if (response === null) return null;
       /* No ETag is read here on purpose: the only bodies this answers are the
          observation flushes, which are plain puts nothing ever conditions on. */

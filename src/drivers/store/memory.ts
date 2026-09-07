@@ -1,5 +1,5 @@
 import { ScafoError } from "../../core/error.ts";
-import type { CasHeaders, CasStore, StoredObject } from "../../core/types/store.ts";
+import type { ByteRange, CasHeaders, CasStore, StoredObject } from "../../core/types/store.ts";
 
 /** In-process `CasStore` matching S3 conditional-write semantics; not persistent. */
 /** An object as it was written, before a reader asked for it as text. */
@@ -27,12 +27,15 @@ export class MemoryCasStore implements CasStore {
     });
   }
 
-  /** Original bytes, or null when absent. */
-  getBytes(key: string): Promise<Uint8Array | null> {
+  /** Original bytes, or null when absent; a `range` is answered as a 206 is. */
+  getBytes(key: string, opts?: { range: ByteRange }): Promise<Uint8Array | null> {
     const found = this.#objects.get(key);
     if (found === undefined) return Promise.resolve(null);
+    const bytes =
+      typeof found.body === "string" ? new TextEncoder().encode(found.body) : found.body;
+    /* Both ends inclusive, which is one past the end for `subarray`. */
     return Promise.resolve(
-      typeof found.body === "string" ? new TextEncoder().encode(found.body) : found.body,
+      opts === undefined ? bytes : bytes.subarray(opts.range.start, opts.range.end + 1),
     );
   }
 
