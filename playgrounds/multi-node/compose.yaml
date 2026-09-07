@@ -3,7 +3,7 @@ name: scafo-multi-node
 
 services:
   seaweedfs:
-    image: chrislusf/seaweedfs:4.42
+    image: chrislusf/seaweedfs:4.42@sha256:f7cbc8bdbbf60a1aaba7d61784a3bdff3ec1e0657f6ad0b26d5b6ab2cd9d0dc6
     command: ["server", "-s3"]
     ports:
       - "127.0.0.1:${SCAFO_STORE_PORT:-8333}:8333"
@@ -11,7 +11,7 @@ services:
       - store:/data
 
   bucket:
-    image: curlimages/curl:8.18.0
+    image: curlimages/curl:8.18.0@sha256:d94d07ba9e7d6de898b6d96c1a072f6f8266c687af78a74f380087a0addf5d17
     depends_on:
       - seaweedfs
     command:
@@ -66,7 +66,7 @@ services:
       start_period: 10s
 
   caddy-a:
-    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:edge}
+    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:edge@sha256:917b2f49577bc24aaea4686e005d933688bb3fc2cc589043a5df4768caa47ceb}
     # Shared loopback keeps runtime ports private.
     network_mode: "service:node-a"
     depends_on:
@@ -135,7 +135,7 @@ services:
       start_period: 10s
 
   caddy-b:
-    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:edge}
+    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:edge@sha256:917b2f49577bc24aaea4686e005d933688bb3fc2cc589043a5df4768caa47ceb}
     network_mode: "service:node-b"
     depends_on:
       node-b:
