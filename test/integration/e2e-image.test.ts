@@ -38,6 +38,14 @@ import {
 
 const E2E = process.env.SCAFO_E2E === "1";
 
+/** The Celld release the Dockerfile pins; the image must carry that one and no other. */
+async function pinnedCelldVersion(): Promise<string> {
+  const dockerfile = await readFile(join(REPO_ROOT, "Dockerfile"), "utf8");
+  const pin = /^FROM ghcr\.io\/denoland\/celld:(\S+?)@sha256:/m.exec(dockerfile)?.[1];
+  if (pin === undefined) throw new Error("the Dockerfile pins no Celld release");
+  return pin;
+}
+
 /**
  * Caddy with both `scafo` modules compiled in; it reads this node rather than
  * being written to. Point the variable at a locally built tag to run against
@@ -173,7 +181,7 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
       const pinned = await node.exec(["sh", "-c", "echo $CELLD_ESBUILD"]);
 
       expect(celld.exitCode, celld.output).toBe(0);
-      expect(celld.output).toContain("0.4.0");
+      expect(celld.output).toContain(await pinnedCelldVersion());
       expect(esbuild.exitCode, esbuild.output).toBe(0);
       expect(pinned.output.trim()).not.toBe("");
 

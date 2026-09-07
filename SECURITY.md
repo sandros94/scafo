@@ -16,11 +16,10 @@ Do not use one installation for arbitrary customer code, public build submission
 
 ## Limitations
 
-- Builds and runtime processes are not OS-sandboxed from the daemon or each other. Worker egress can reach addresses visible to its network namespace.
+- Builds and runtime processes are not OS-sandboxed from the daemon or each other. Worker egress, HTTP and raw TCP through `cloudflare:sockets` alike, can reach any address visible to its network namespace.
 - Celld's internal operator API is mostly unauthenticated. Keep it on a private network or overlay; do not expose it publicly. See Celld's [security guidance](https://github.com/denoland/celld/blob/main/docs/security.md).
 - Celld and bucket credentials are administrative authority. Celld child processes receive fleet credentials; Scafo provides no OS credential boundary against trusted-workload compromise or native escape.
-- The bucket is both durable registry and availability boundary. It must support conditional writes and provide reliable, low-latency lease traffic. Scafo cannot make an unreliable object store highly available.
-- Celld 0.4.0 can self-fence during intermittent store failures: after an ambiguous renewal that reads the unchanged lease, it waits a third of the lease lifetime before retrying. Track [Celld issue #182](https://github.com/denoland/celld/issues/182).
+- The bucket is both durable registry and availability boundary. It must support conditional writes and ranged reads, and provide reliable, low-latency lease traffic. Scafo cannot make an unreliable object store highly available.
 - Deploy admission bounds artifact bytes and entries, retained builder output, node/project concurrency and queue depth, staged bytes, and receive/queue/task deadlines. These are scheduling bounds, not OS resource admission. Apply host or container CPU, memory, process, filesystem, and network limits.
 - `scafo sail` closes deploy intake, cancels deploy work, joins builder cleanup, then drains runtimes on `SIGINT`/`SIGTERM`. For bare-host production, use the installer systemd unit or an equivalent cgroup-owning supervisor that terminates the daemon first, removes remaining builders on exit or timeout, and allows at least 50 seconds of shutdown grace. If `CELLD_SHUTDOWN_TOTAL_MS` is larger, allow at least 10 additional seconds.
 - In containers, keep the direct Node entrypoint as PID 1 in a private PID namespace. Do not use host PID mode or a persistent wrapper. Physical-host failure remains outside process-code guarantees.
@@ -32,12 +31,12 @@ Do not use one installation for arbitrary customer code, public build submission
 - Protect bucket, node, ingress-token, and deployment credentials as administrative secrets. Use a bucket scoped to one installation.
 - Test object-store conditional writes, latency, and failure behavior before production use.
 - Configure Celld runtime policy through `runtime.celldEnv`, `--celld-env`, or `SCAFO_CELLD_ENV`; Scafo adds no Celld policy defaults.
-- If intermittent multi-second stalls are acceptable with slower failure detection, set `CELLD_TTL_MS=30000` consistently on every Scafo node. Celld then renews every 10 seconds and unplanned takeover can take up to 30 seconds. Re-evaluate when [Celld issue #182](https://github.com/denoland/celld/issues/182) is fixed.
+- Change `CELLD_TTL_MS` consistently on every Scafo node. A runtime process renews every third of the lifetime and retries a failed renewal inside what remains of it; an unplanned takeover waits up to the lifetime.
 - Pin and review the Scafo build and current Celld release. Review Celld's [security](https://github.com/denoland/celld/blob/main/docs/security.md), [limitations](https://github.com/denoland/celld/blob/main/docs/limitations.md), and [Cloudflare compatibility](https://github.com/denoland/celld/blob/main/docs/cloudflare-compat.md) notes before upgrading.
 
 ## Celld boundary
 
-Scafo requires Celld 0.4.0 and creates one Celld fleet per environment. Celld owns deployment adoption, application health, cells, and runtime resource policy; Scafo owns registry, authorization, placement, supervision, deploy intake, and the routing every ingress reads.
+Scafo requires Celld 0.4.1 and creates one Celld fleet per environment. Celld owns deployment adoption, application health, cells, and runtime resource policy; Scafo owns registry, authorization, placement, supervision, deploy intake, and the routing every ingress reads.
 
 Celld exposes one current deployment per fleet. Scafo records a monotonic deployment revision, not a selected version; it provides no old-build routing or historical deployment selector. See [Celld issue #181](https://github.com/denoland/celld/issues/181).
 

@@ -12,7 +12,7 @@ export const DEFAULT_CELLD_BIN: string = "celld";
 /** Default loopback bind; wider peer exposure requires an explicit network decision. */
 export const DEFAULT_BIND_HOST: string = "127.0.0.1";
 
-/** celld 0.4.0's complete process shutdown bound when the operator does not set one. */
+/** celld 0.4.1's complete process shutdown bound when the operator does not set one. */
 export const DEFAULT_CELLD_SHUTDOWN_TOTAL_MS: number = 40_000;
 
 /** Time kept between celld's complete shutdown bound and the supervisor's hard kill. */
