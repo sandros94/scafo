@@ -33,7 +33,11 @@ import { createCelldDeployRunner } from "../../drivers/deploy/celld.ts";
 import { createFileArtifactStager } from "../../drivers/artifact/file.ts";
 import { type AccessLogTailer, createAccessLogTailer } from "../../drivers/observe/access-log.ts";
 import { DEFAULT_ENTRY_POINT, renderTraefikConfig } from "../../drivers/ingress/traefik.ts";
-import { createCelldDriver, TELEMETRY_ENV } from "../../drivers/runtime/celld.ts";
+import {
+  createCelldDriver,
+  probeCelldVersion,
+  TELEMETRY_ENV,
+} from "../../drivers/runtime/celld.ts";
 import { createChildSupervisor } from "../../drivers/supervisor/child.ts";
 import {
   assertTransportConfigured,
@@ -190,6 +194,18 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   const state = await loadNodeIdentity(config);
   const ingressTokens = await loadIngressTokens(config);
   const varsetKey = await loadVarsetKey(config);
+
+  /*
+   * BEFORE THE BUCKET IS EVEN OPENED. A node whose Celld is older than this
+   * build supports must not touch the registry, let alone register itself as a
+   * machine work can be placed on: the versions it would publish are the fleet's
+   * only account of what is running where.
+   */
+  const celldBin = config.runtime.binPath;
+  const celldVersion = await probeCelldVersion(celldBin);
+  const version = await readPackageVersion();
+  console.log(`scafo: celld ${celldVersion} at "${celldBin}"`);
+
   const registry = createRegistry(config);
 
   /* The first node to arrive bootstraps the registry, which also proves the
@@ -201,6 +217,7 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   await registerThisNode(registry, {
     config,
     state,
+    versions: { scafo: version, celld: celldVersion },
     ...(wireguard === undefined ? {} : { wireguard }),
   });
 
@@ -210,7 +227,6 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
     console.error(`scafo: process "${status.id}" exited with code ${String(status.exitCode)}`);
   });
 
-  const version = await readPackageVersion();
   const daemon: DaemonContext = {
     config,
     nodeId: state.id,
@@ -299,7 +315,7 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   daemon.deploys = createDeployService(
     daemon,
     createCelldDeployRunner({
-      binPath: config.runtime.binPath,
+      binPath: celldBin,
       baseEnv: deployBaseEnv(process.env),
       artifactBytes: config.deploy?.artifactBytes ?? DEFAULT_ARTIFACT_BYTES,
       archiveEntries: config.deploy?.archiveEntries ?? DEFAULT_ARCHIVE_ENTRIES,
@@ -325,7 +341,7 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   daemon.artifactStager = createFileArtifactStager();
 
   const driver = createCelldDriver({
-    binPath: config.runtime.binPath,
+    binPath: celldBin,
     ...(config.runtime.celldEnv === undefined ? {} : { operatorEnv: config.runtime.celldEnv }),
   });
   const reconciler = createReconciler(daemon, driver, {

@@ -101,6 +101,16 @@ export interface NodeRecord {
   /** Selector labels, replaced from node boot configuration at registration. */
   labels?: Record<string, string>;
   /**
+   * The binaries this node's daemon is running, written at registration from
+   * what it actually started with and refreshed on every boot. The heartbeat
+   * never touches it, so the field says what the running daemon started as and
+   * not what a beat found later.
+   *
+   * Absent on a record written by a build that predates the field, which is why
+   * a reader prints it as unreported rather than guessing a version.
+   */
+  versions?: NodeVersions;
+  /**
    * What this node is serving right now, refreshed with the heartbeat: every
    * environment `project/env` it runs a process for, and the port that process
    * takes public traffic on at `addresses.internal`. This is what the fleet's
@@ -112,6 +122,12 @@ export interface NodeRecord {
 
 /** Environments a node serves, by `project/env`, and where each one listens. */
 export type NodeServing = Record<string, { port: number }>;
+
+/** What a node is running: this build's own version, and the Celld it started. */
+export interface NodeVersions {
+  scafo: string;
+  celld: string;
+}
 
 /** A project namespace. Key: `_scafo/projects/<slug>/project.json`. */
 export interface ProjectRecord {

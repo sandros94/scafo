@@ -1,5 +1,7 @@
 /* Materializes one environment-owned Celld process and its start-time config. */
 
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { ScafoError } from "../../core/error.ts";
 import { formatProcessId } from "../../core/placement/ids.ts";
 import { fleetPrefix } from "../../core/registry/paths.ts";
@@ -8,6 +10,21 @@ import type { ProcessSpec } from "../../core/types/supervisor.ts";
 
 /** Command run when the caller does not name one. */
 export const DEFAULT_CELLD_BIN: string = "celld";
+
+/**
+ * Oldest Celld this build runs against, and the one place that floor is written
+ * down: the image, the installer and the docs all quote this.
+ *
+ * A HARD FLOOR, because 0.4.1 changed three things Scafo builds on — the lease
+ * retry, the storage contract, and the bucket format a paged restore reads — so
+ * an older binary in a fleet is not a missing feature but a silent hazard: it
+ * starts, it serves, and it loses work in ways nothing here would report.
+ *
+ * CHECKED ONLY WHERE A DAEMON STARTS, which is exactly what lets a fleet be
+ * upgraded one machine at a time: a node already running keeps serving whatever
+ * it started with, and the restart is where an old binary is refused.
+ */
+export const MIN_CELLD_VERSION: string = "0.4.1";
 
 /** Default loopback bind; wider peer exposure requires an explicit network decision. */
 export const DEFAULT_BIND_HOST: string = "127.0.0.1";
@@ -89,6 +106,83 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
   };
 }
 
+/** How long `--version` may take before the binary counts as unreadable. */
+const VERSION_TIMEOUT_MS = 10_000;
+
+/** Output quoted back in a refusal, so a chatty or broken binary cannot flood a log. */
+const VERSION_OUTPUT_CHARS = 200;
+
+/** What the binary prints: `celld 0.4.1`, and `celld 0.4.1 (debug)` from a debug build. */
+const VERSION_RE = /^celld (\d+)\.(\d+)\.(\d+)\b/;
+
+const run = promisify(execFile);
+
+/**
+ * Runs `<binPath> --version` and answers the `X.Y.Z` it named, refusing anything
+ * this build cannot run with `ScafoError("capability-missing")`.
+ *
+ * Three distinct refusals, because they are three different things to do about
+ * it: a binary that could not be STARTED is a path or a permission problem, one
+ * whose version is UNREADABLE is not the binary anybody meant, and one that is
+ * TOO OLD is an upgrade that has not happened yet. {@link MIN_CELLD_VERSION} says
+ * why the last of those is worth refusing to start over.
+ */
+export async function probeCelldVersion(
+  binPath: string,
+  opts?: { timeoutMs?: number },
+): Promise<string> {
+  const timeoutMs = opts?.timeoutMs ?? VERSION_TIMEOUT_MS;
+  const command = `${binPath} --version`;
+  let printed: string;
+
+  try {
+    ({ stdout: printed } = await run(binPath, ["--version"], { timeout: timeoutMs }));
+  } catch (error) {
+    if (!neverStarted(error)) throw unreadable(command, timeoutMs, error);
+    throw new ScafoError("capability-missing", "Celld could not be run", {
+      detail: `"${command}" could not be started on this node`,
+      cause: error,
+    });
+  }
+
+  const output = printed.trim();
+  const found = VERSION_RE.exec(output);
+  if (found === null) {
+    throw new ScafoError("capability-missing", "Celld version is unreadable", {
+      detail: `"${command}" printed ${quoteOutput(output)}, not a "celld X.Y.Z" line`,
+    });
+  }
+
+  const version = found.slice(1, 4).join(".");
+  if (compareVersions(version, MIN_CELLD_VERSION) < 0) {
+    throw new ScafoError("capability-missing", "Celld is too old", {
+      detail: `"${binPath}" is celld ${version}; this build requires ${MIN_CELLD_VERSION} or newer`,
+    });
+  }
+  return version;
+}
+
+/**
+ * Compares two `X.Y.Z` versions by their numbers: negative when `a` is older
+ * than `b`, zero when they name the same release.
+ *
+ * By number rather than by text, because text puts `0.4.10` before `0.4.9` —
+ * which would let the gate admit a binary older than the floor, and would order
+ * a fleet listing backwards at exactly the moment an operator is reading it to
+ * see how far an upgrade has got. A part that is not a number counts as older
+ * than any number, so a record carrying something unexpected sorts last instead
+ * of shuffling the rest.
+ */
+export function compareVersions(a: string, b: string): number {
+  const left = triple(a);
+  const right = triple(b);
+  for (let i = 0; i < 3; i++) {
+    const diff = left[i] - right[i];
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
 /** Environment of one runtime process, in the order the parts override each other. */
 function processEnv(
   input: RuntimeSpecInput,
@@ -136,6 +230,63 @@ function invalidShutdownTotal(value: string): ScafoError {
       `"CELLD_SHUTDOWN_TOTAL_MS" must be a positive integer no greater than ` +
       `${String(MAX_TIMER_MS - STOP_HEADROOM_MS)}, got ${JSON.stringify(value)}`,
   });
+}
+
+/**
+ * Whether the child never ran at all. Node says so with a system error — a
+ * string errno and the syscall that failed — while a child that ran and failed
+ * carries an exit code, a signal, and whatever it managed to print.
+ */
+function neverStarted(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const failure = error as { code?: unknown; syscall?: unknown };
+  return typeof failure.syscall === "string" && typeof failure.code === "string";
+}
+
+/** A binary that ran and said nothing usable: a bad exit, a signal, or a timeout. */
+function unreadable(command: string, timeoutMs: number, error: unknown): ScafoError {
+  const failure = (typeof error === "object" && error !== null ? error : {}) as {
+    code?: unknown;
+    signal?: unknown;
+    killed?: unknown;
+    stdout?: unknown;
+    stderr?: unknown;
+  };
+  const said = outputText(failure.stderr) === "" ? failure.stdout : failure.stderr;
+  const how =
+    failure.killed === true
+      ? `did not answer within ${String(timeoutMs)}ms`
+      : typeof failure.signal === "string"
+        ? `was killed by ${failure.signal}`
+        : `exited with code ${String(failure.code)}`;
+
+  return new ScafoError("capability-missing", "Celld version is unreadable", {
+    detail: `"${command}" ${how} and printed ${quoteOutput(outputText(said))}`,
+    cause: error,
+  });
+}
+
+function outputText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/** The tail of what the binary printed, bounded so a chatty one cannot flood a log. */
+function quoteOutput(output: string): string {
+  if (output === "") return "nothing";
+  const tail =
+    output.length <= VERSION_OUTPUT_CHARS ? output : `…${output.slice(-VERSION_OUTPUT_CHARS)}`;
+  return JSON.stringify(tail);
+}
+
+/** The three numbers of a version; anything unparseable reads as older than any of them. */
+function triple(version: string): [number, number, number] {
+  const parts = version.split(".");
+  return [versionPart(parts[0]), versionPart(parts[1]), versionPart(parts[2])];
+}
+
+function versionPart(value: string | undefined): number {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : -1;
 }
 
 /** Joins the installation's key prefix to a fleet prefix. */

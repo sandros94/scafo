@@ -8,7 +8,7 @@ import { updateJson } from "../core/registry/cas.ts";
 import { nowIso, type RegistryContext } from "../core/registry/context.ts";
 import { drainNode, registerNode, registerNodeIfAbsent } from "../core/registry/nodes.ts";
 import { nodeKey } from "../core/registry/paths.ts";
-import type { NodeRecord, NodeWireguard } from "../core/types/registry.ts";
+import type { NodeRecord, NodeVersions, NodeWireguard } from "../core/types/registry.ts";
 import { withRetry } from "../core/utils/backoff.ts";
 import { isLoopbackHost } from "../core/utils/host.ts";
 import { createUns3Store } from "../drivers/store/uns3.ts";
@@ -155,7 +155,7 @@ export function nodeStateDir(config: DaemonConfig, opts?: NodeIdentityOptions): 
   return config.node.stateDir ?? opts?.defaultStateDir ?? resolveDefaultStateDir();
 }
 
-export interface RegisterNodeOptions {
+export interface NodeRecordOptions {
   config: DaemonConfig;
   state: NodeState;
   /**
@@ -165,6 +165,20 @@ export interface RegisterNodeOptions {
    * installation share.
    */
   wireguard?: NodeWireguard;
+  /**
+   * What the daemon is running. Left out only where nothing has been started
+   * yet: `scafo wg init` writes a record before any binary of this node has
+   * been probed, and the next boot fills the field in.
+   */
+  versions?: NodeVersions;
+}
+
+export interface RegisterNodeOptions extends NodeRecordOptions {
+  /**
+   * Required here, because a booting node knows both: it has just read its own
+   * version and refused to start on a Celld it could not read.
+   */
+  versions: NodeVersions;
 }
 
 /**
@@ -179,6 +193,13 @@ export interface RegisterNodeOptions {
  * Registering counts as the node's first heartbeat, so it is eligible for work
  * from the moment it exists rather than from its first refresh a heartbeat
  * interval later.
+ *
+ * The VERSIONS it started with are written here for the same reason, and are
+ * only ever written here: a heartbeat says a node is still there, not what it is
+ * running, so a record's versions are what its daemon booted with until it boots
+ * again. That is also what makes a rolling Celld upgrade visible — a node that
+ * has been restarted says so, and one that has not still says what it started
+ * with.
  *
  * The node's LABELS are written here for the same reason, and REPLACED here for
  * a sharper one: they are boot configuration rather than runtime state, so the
@@ -196,7 +217,7 @@ export async function registerThisNode(
   return record;
 }
 
-function nodeRecord(registry: RegistryContext, opts: RegisterNodeOptions): NodeRecord {
+function nodeRecord(registry: RegistryContext, opts: NodeRecordOptions): NodeRecord {
   const reachable = advertisedAddress(opts.config.node);
   return {
     v: 1,
@@ -206,6 +227,7 @@ function nodeRecord(registry: RegistryContext, opts: RegisterNodeOptions): NodeR
     heartbeatAt: nowIso(registry),
     ...(opts.wireguard === undefined ? {} : { wireguard: opts.wireguard }),
     ...(opts.config.node.labels === undefined ? {} : { labels: { ...opts.config.node.labels } }),
+    ...(opts.versions === undefined ? {} : { versions: { ...opts.versions } }),
   };
 }
 
@@ -284,7 +306,7 @@ export async function drainThisNode(
  */
 export async function publishWireguard(
   registry: RegistryContext,
-  opts: RegisterNodeOptions & { wireguard: NodeWireguard },
+  opts: NodeRecordOptions & { wireguard: NodeWireguard },
 ): Promise<NodeRecord> {
   const key = nodeKey(opts.state.id);
   const record = nodeRecord(registry, opts);

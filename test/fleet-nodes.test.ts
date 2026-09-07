@@ -16,7 +16,10 @@ import { ctxWith, type ManualClock } from "./_helpers.ts";
 describe("what the listing reads", () => {
   it("names every registered node, in id order, with its address and its labels", async () => {
     const clock = ctxWith(new MemoryCasStore());
-    await register(clock, "node-b", { labels: { tier: "fast", region: "eu-west-1" } });
+    await register(clock, "node-b", {
+      labels: { tier: "fast", region: "eu-west-1" },
+      versions: { scafo: "0.0.0", celld: "0.4.1" },
+    });
     await register(clock, "node-a", {});
 
     const listing = await listFleetNodes(clock.ctx, { now: new Date(clock.nowMs()) });
@@ -26,7 +29,10 @@ describe("what the listing reads", () => {
       internal: "10.0.0.2",
       apiPort: 7400,
       labels: { region: "eu-west-1", tier: "fast" },
+      /* Carried through untouched, so `--json` says which binaries are where. */
+      versions: { scafo: "0.0.0", celld: "0.4.1" },
     });
+    expect(listing[0]?.versions).toBeUndefined();
   });
 
   it("counts a node live for exactly as long as placement does", async () => {
@@ -89,6 +95,27 @@ describe("what the listing prints", () => {
     expect(printed).toContain("tier=fast");
     expect(printed).toContain("30s ago");
     expect(printed).toContain("never");
+    /* Nothing here was written by a daemon that records versions. */
+    expect(printed).toContain("celld: unreported on 2 nodes");
+    expect(printed).toContain("scafo: unreported on 2 nodes");
+  });
+
+  it("says what each machine runs, and rolls the fleet up by binary", async () => {
+    const clock = ctxWith(new MemoryCasStore());
+    await register(clock, "node-a", { versions: { scafo: "0.0.0", celld: "0.4.1" } });
+    await register(clock, "node-b", { versions: { scafo: "0.0.0", celld: "0.4.1" } });
+    await register(clock, "node-c", { versions: { scafo: "0.0.0", celld: "0.4.0" } });
+    await register(clock, "node-d", {});
+    const now = new Date(clock.nowMs());
+
+    const printed = formatNodeTable(await listFleetNodes(clock.ctx, { now }), now);
+
+    expect(printed).toContain("CELLD  SCAFO  LABELS");
+    /* Newest first: mid-upgrade, the question is how much of the fleet has moved. */
+    expect(printed).toContain("celld: 0.4.1 on 2 nodes, 0.4.0 on 1, unreported on 1");
+    expect(printed).toContain("scafo: 0.0.0 on 3 nodes, unreported on 1");
+    /* A record from a build that kept no versions reads as a dash, not a guess. */
+    expect(printed).toMatch(/^ {2}node-d\s+lost\s+never\s+\S+\s+-\s+-$/m);
   });
 
   it("says plainly when the bucket holds no node, and how a machine joins", async () => {

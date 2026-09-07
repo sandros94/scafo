@@ -20,7 +20,7 @@ import {
   WG_PRIVATE_KEY_FILE,
   WG_PUBLIC_KEY_FILE,
 } from "../src/cli/_wireguard.ts";
-import { getNode, registerNode } from "../src/core/registry/nodes.ts";
+import { drainNode, getNode, heartbeatNode, registerNode } from "../src/core/registry/nodes.ts";
 import { nodeKey } from "../src/core/registry/paths.ts";
 import type { RegistryContext } from "../src/core/registry/context.ts";
 import type { NodeRecord } from "../src/core/types/registry.ts";
@@ -45,6 +45,9 @@ const STORED_PUBLIC = wgKey(0x44);
 const NODE_A = "node-a";
 const NODE_B = "node-b";
 const NODE_C = "node-c";
+
+/** What a booting daemon has just read about itself and about the binary it runs. */
+const VERSIONS = { scafo: "0.0.0", celld: "0.4.1" };
 
 const roots: string[] = [];
 
@@ -368,6 +371,7 @@ describe("what a node publishes about its place on the tunnel", () => {
     const record = await registerThisNode(ctx, {
       config,
       state: nodeState(NODE_A),
+      versions: VERSIONS,
       wireguard: {
         publicKey: STORED_PUBLIC,
         endpoint: "203.0.113.7:51820",
@@ -388,7 +392,11 @@ describe("what a node publishes about its place on the tunnel", () => {
     const { ctx } = ctxWith(new MemoryCasStore());
     const config = await loadDaemonConfig({ env: REQUIRED_ENV });
 
-    const record = await registerThisNode(ctx, { config, state: nodeState(NODE_A) });
+    const record = await registerThisNode(ctx, {
+      config,
+      state: nodeState(NODE_A),
+      versions: VERSIONS,
+    });
 
     expect("wireguard" in record).toBe(false);
   });
@@ -401,6 +409,7 @@ describe("what a node publishes about its place on the tunnel", () => {
     const before = await registerThisNode(ctx, {
       config: running,
       state: nodeState(NODE_A),
+      versions: VERSIONS,
     });
 
     const elsewhere = await loadDaemonConfig({ env: REQUIRED_ENV });
@@ -432,6 +441,7 @@ describe("what a node publishes about its place on the tunnel", () => {
     const sailOptions = {
       config: running,
       state: nodeState(NODE_A),
+      versions: VERSIONS,
     } satisfies Parameters<typeof registerThisNode>[1];
     let sailed: NodeRecord | null = null;
     store.onBeforePut = async (key): Promise<void> => {
@@ -461,6 +471,24 @@ describe("what a node publishes about its place on the tunnel", () => {
     });
     expect(after.addresses).toEqual({ internal: "10.0.0.4", apiPort: 9000 });
     expect(after.labels).toEqual({ tier: "fast", region: "eu-west-1" });
+  });
+
+  it("writes the binaries the daemon booted with, and nothing later takes them away", async () => {
+    const { ctx } = ctxWith(new MemoryCasStore());
+    const config = await loadDaemonConfig({ env: REQUIRED_ENV });
+
+    const record = await registerThisNode(ctx, {
+      config,
+      state: nodeState(NODE_A),
+      versions: VERSIONS,
+    });
+    await heartbeatNode(ctx, NODE_A);
+    await drainNode(ctx, NODE_A);
+
+    expect(record.versions).toEqual(VERSIONS);
+    /* Neither a beat nor a drain says anything about which binaries are running,
+       so neither may quietly drop what the boot wrote down. */
+    expect((await getNode(ctx, NODE_A)).versions).toEqual(VERSIONS);
   });
 
   it("registers a node outright when it has no record yet", async () => {

@@ -16,8 +16,9 @@
 
 import type { RegistryContext } from "../core/registry/context.ts";
 import { isNodeLive, listNodeRecords, NODE_LIVENESS_WINDOW_MS } from "../core/registry/nodes.ts";
-import type { NodeRecord } from "../core/types/registry.ts";
+import type { NodeRecord, NodeVersions } from "../core/types/registry.ts";
 import { formatLabels } from "../core/utils/labels.ts";
+import { compareVersions } from "../drivers/runtime/celld.ts";
 
 /**
  * What a node is, for placement.
@@ -39,6 +40,8 @@ export interface NodeListing {
   apiPort: number;
   /** What the operator said this machine IS, as an environment's selector matches it. */
   labels: Record<string, string>;
+  /** The binaries its daemon booted with. Absent on a record written before they were kept. */
+  versions?: NodeVersions;
   /** When it said it was leaving. Only ever set on a `draining` node. */
   drainingAt?: string;
 }
@@ -63,6 +66,7 @@ export function readNode(record: NodeRecord, now: Date): NodeListing {
     internal: record.addresses.internal,
     apiPort: record.addresses.apiPort,
     labels: record.labels ?? {},
+    ...(record.versions === undefined ? {} : { versions: record.versions }),
     ...(record.drainingAt === undefined ? {} : { drainingAt: record.drainingAt }),
   };
 }
@@ -89,9 +93,13 @@ export function formatNodeTable(nodes: NodeListing[], now: Date = new Date()): s
     node.state,
     describeSeen(node.seenAt, now),
     `${node.internal}:${String(node.apiPort)}`,
+    node.versions?.celld ?? UNREPORTED,
+    node.versions?.scafo ?? UNREPORTED,
+    /* Last, because it is the ragged column: anything after it would be a
+       different distance from the left on every row. */
     formatLabels(node.labels),
   ]);
-  const head = ["NODE", "STATE", "SEEN", "API", "LABELS"];
+  const head = ["NODE", "STATE", "SEEN", "API", "CELLD", "SCAFO", "LABELS"];
   const width = head.map((_, column) =>
     Math.max(...[head, ...rows].map((row) => (row[column] as string).length)),
   );
@@ -100,6 +108,8 @@ export function formatNodeTable(nodes: NodeListing[], now: Date = new Date()): s
     `scafo: ${String(nodes.length)} node${nodes.length === 1 ? "" : "s"}, ${String(live)} live ` +
       `(a node counts as live for ${String(NODE_LIVENESS_WINDOW_MS / 1000)}s after it last ` +
       `said so)`,
+    formatVersionRoll("celld", nodes, (versions) => versions.celld),
+    formatVersionRoll("scafo", nodes, (versions) => versions.scafo),
     "",
     ...[head, ...rows].map((row) => `  ${row.map(pad(width)).join("  ").trimEnd()}`),
   ];
@@ -107,6 +117,48 @@ export function formatNodeTable(nodes: NodeListing[], now: Date = new Date()): s
 }
 
 /* ---------------------------------------------------------------- internals */
+
+/** What a node that has not said which binaries it runs reads as, in a cell and in a roll. */
+const UNREPORTED = "-";
+
+/**
+ * One binary's spread over the fleet, newest first: `celld: 0.4.1 on 2 nodes,
+ * 0.4.0 on 1`.
+ *
+ * A ROLLING UPGRADE IS THE QUESTION THIS ANSWERS. The column below says what
+ * each machine runs, which is what an operator needs once they know something is
+ * wrong; this says how far the fleet has moved, which is what they are asking
+ * while the upgrade is still running. Newest first, because that is the half
+ * that is finished. A record from a build older than the field itself counts as
+ * `unreported` rather than as a version, since nothing in it says one.
+ */
+function formatVersionRoll(
+  label: string,
+  nodes: NodeListing[],
+  of: (versions: NodeVersions) => string,
+): string {
+  const counts = new Map<string, number>();
+  let unreported = 0;
+  for (const node of nodes) {
+    if (node.versions === undefined) unreported += 1;
+    else {
+      const version = of(node.versions);
+      counts.set(version, (counts.get(version) ?? 0) + 1);
+    }
+  }
+
+  const spread = [...counts].sort(([a], [b]) => compareVersions(b, a));
+  if (unreported > 0) spread.push(["unreported", unreported]);
+
+  /* The noun is said once, on the first count; the rest are bare numbers, so a
+     line about six versions still reads as one sentence. */
+  const parts = spread.map(([name, count], index) =>
+    index === 0
+      ? `${name} on ${String(count)} node${count === 1 ? "" : "s"}`
+      : `${name} on ${String(count)}`,
+  );
+  return `${label}: ${parts.join(", ")}`;
+}
 
 function pad(width: number[]): (cell: string, column: number) => string {
   return (cell, column) => cell.padEnd(width[column] as number);
