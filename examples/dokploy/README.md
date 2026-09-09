@@ -49,14 +49,44 @@ A deployed environment answers at its own host the same way. Until then only the
 
 ## First deploy
 
-The node holds no operator key, and the container is not where one is minted: install the CLI on your own machine, export the same `SCAFO_S3_*` values you gave the node — the ones in the Dokploy service's environment panel — and register the first key against the bucket.
+The node holds no operator key, and the container is not where one is minted: the first key is minted on your own machine.
 
-```sh
-scafo remote add prod --endpoint https://apps.example.com --register
-scafo deploy ./my-app --project shop --env production
-```
+1. Install the CLI:
 
-See [First deploy](https://scafo.dev/deploy/dokploy#first-deploy) for what `--register` does, and for the `scafo trust set` policy a CI job deploys through.
+   ```sh
+   npm install --global scafo
+   ```
+
+2. Give that shell the node's bucket values — the ones in the Dokploy service's environment panel. `SCAFO_S3_PREFIX` must be the node's: a different prefix is a different, empty installation, and Dokploy keeps `scafo` with the service even after the line is removed from `compose.yaml`.
+
+   ```sh
+   export SCAFO_S3_ENDPOINT="https://s3.example.com"
+   export SCAFO_S3_BUCKET="scafo"
+   export SCAFO_S3_ACCESS_KEY="<access key>"
+   export SCAFO_S3_SECRET_KEY="<secret key>"
+   export SCAFO_S3_REGION="us-east-1"
+   export SCAFO_S3_PREFIX="scafo"
+   ```
+
+3. Mint and register the first admin key:
+
+   ```sh
+   scafo remote add prod --endpoint https://apps.example.com --register
+   ```
+
+4. Confirm the node is there, with its CELLD and SCAFO versions:
+
+   ```sh
+   scafo fleet nodes
+   ```
+
+5. Deploy:
+
+   ```sh
+   scafo deploy ./my-app --project shop --env production
+   ```
+
+See [First deploy](https://scafo.dev/deploy/dokploy#first-deploy) for what each step does, and for the `scafo trust set` policy a CI job deploys through.
 
 ## Certificates
 

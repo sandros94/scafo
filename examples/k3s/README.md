@@ -69,15 +69,51 @@ A deployed environment answers at its own host the same way. Until a project is 
 - The StatefulSet gives each node a retained `1Gi` claim through K3s's default StorageClass. This preserves its identity across replacement; size the claim and retention policy for the operator's recovery plan.
 - The StatefulSet starts with one replica and scales out: the routing Traefik polls names every pod serving a host, so a new node joins the edge as soon as it runs something.
 
-Use `kubectl -n scafo port-forward svc/scafo-nodes 7400:7400` for deploy and operator commands. Application traffic enters through K3s Traefik, not the node API.
+Application traffic enters through K3s Traefik, not the node API.
 
 ## First deploy
 
-No pod holds an operator key, and `kubectl exec` is not where one is minted: install the CLI on your own machine, export the same `SCAFO_S3_*` values the pods read — from the `scafo-node` ConfigMap and the `scafo-bucket` Secret — and register the first key against the bucket.
+No pod holds an operator key, and `kubectl exec` is not where one is minted: the first key is minted on your own machine.
 
-```sh
-scafo remote add prod --endpoint https://apps.example.com --register
-scafo deploy ./my-app --project shop --env production
-```
+1. Install the CLI:
 
-See [Deploying](https://scafo.dev/deploy/k3s#deploying) for what `--register` does, and for the `scafo trust set` policy a CI job deploys through.
+   ```sh
+   npm install --global scafo
+   ```
+
+2. Give that shell the pods' bucket values — endpoint, bucket, region and prefix from the `scafo-node` ConfigMap, credentials from the `scafo-bucket` Secret. `SCAFO_S3_PREFIX` must be the ConfigMap's, `production` in this manifest: a different prefix is a different, empty installation.
+
+   ```sh
+   kubectl -n scafo get configmap scafo-node -o yaml
+   kubectl -n scafo get secret scafo-bucket -o jsonpath='{.data.SCAFO_S3_ACCESS_KEY}' | base64 -d; echo
+   kubectl -n scafo get secret scafo-bucket -o jsonpath='{.data.SCAFO_S3_SECRET_KEY}' | base64 -d; echo
+
+   export SCAFO_S3_ENDPOINT="https://s3.example.com"
+   export SCAFO_S3_BUCKET="scafo"
+   export SCAFO_S3_ACCESS_KEY="<access key>"
+   export SCAFO_S3_SECRET_KEY="<secret key>"
+   export SCAFO_S3_REGION="us-east-1"
+   export SCAFO_S3_PREFIX="production"
+   ```
+
+3. Mint and register the first admin key:
+
+   ```sh
+   scafo remote add prod --endpoint https://apps.example.com --register
+   ```
+
+4. Confirm the pods are there, with their CELLD and SCAFO versions:
+
+   ```sh
+   scafo fleet nodes
+   ```
+
+5. Deploy:
+
+   ```sh
+   scafo deploy ./my-app --project shop --env production
+   ```
+
+Without the apex, forward the node API instead: `kubectl -n scafo port-forward svc/scafo-nodes 7400:7400` and add `--node http://127.0.0.1:7400` to each command.
+
+See [Deploying](https://scafo.dev/deploy/k3s#deploying) for what each step does, and for the `scafo trust set` policy a CI job deploys through.
