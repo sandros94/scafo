@@ -70,3 +70,14 @@ A deployed environment answers at its own host the same way. Until a project is 
 - The StatefulSet starts with one replica and scales out: the routing Traefik polls names every pod serving a host, so a new node joins the edge as soon as it runs something.
 
 Use `kubectl -n scafo port-forward svc/scafo-nodes 7400:7400` for deploy and operator commands. Application traffic enters through K3s Traefik, not the node API.
+
+## First deploy
+
+No pod holds an operator key, and `kubectl exec` is not where one is minted: install the CLI on your own machine, export the same `SCAFO_S3_*` values the pods read — from the `scafo-node` ConfigMap and the `scafo-bucket` Secret — and register the first key against the bucket.
+
+```sh
+scafo remote add prod --endpoint https://apps.example.com --register
+scafo deploy ./my-app --project shop --env production
+```
+
+See [Deploying](https://scafo.dev/deploy/k3s#deploying) for what `--register` does, and for the `scafo trust set` policy a CI job deploys through.
