@@ -7,6 +7,10 @@ on:
   pull_request:
     branches:
       - main
+  # A manual run is the escape hatch for the path gates below: it runs every
+  # job, whatever the diff touched, so the container suites stay verifiable
+  # against a tree that did not change them.
+  workflow_dispatch:
 
 # Jobs opt in to exactly the scopes they need.
 permissions: {}
@@ -19,10 +23,77 @@ env:
   IMAGE: ghcr.io/sandros94/scafo
 
 jobs:
-  lint:
+  changes:
+    # The container suites are the expensive half of this workflow and the half
+    # that depends on the narrowest slice of the tree, so they ask here first.
+    # Everything else stays unconditional: it is cheap and it covers everything.
+    name: detect changes
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
+    outputs:
+      # A dispatch is a deliberate "run it all", so it answers before the filter
+      # is even consulted.
+      docker: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.docker == 'true' }}
+      k3s: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.k3s == 'true' }}
+
+    steps:
+      - name: Checkout code
+        # A push is diffed with git and needs the worktree; a pull request is
+        # diffed through the API and does not.
+        if: github.event_name == 'push'
+        uses: actions/checkout@v7
+
+      - name: Detect changed paths
+        id: filter
+        if: github.event_name != 'workflow_dispatch'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          # Ignored on pull_request, where the PR's own base decides; on a push
+          # to main it selects the commit that was the tip before the push.
+          base: main
+          # The default quantifier makes a leading "!" match every other file
+          # instead of excluding one, which would leave the docker filter always
+          # true. This one is the intended "matches an include and no exclude".
+          predicate-quantifier: some-with-excludes
+          filters: |
+            docker:
+              - '.github/workflows/ci.yml'
+              - 'src/**'
+              - 'Dockerfile*'
+              - '.dockerignore'
+              - 'build.config.ts'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'tsconfig*.json'
+              - 'vitest*.ts'
+              - 'test/integration/**'
+              - '!test/integration/e2e-k3s.test.ts'
+              - '!test/integration/store.test.ts'
+            k3s:
+              - '.github/workflows/ci.yml'
+              - 'src/**'
+              - 'Dockerfile*'
+              - '.dockerignore'
+              - 'build.config.ts'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'tsconfig*.json'
+              - 'vitest*.ts'
+              - 'examples/k3s/**'
+              - 'test/integration/e2e-k3s.test.ts'
+              - 'test/integration/_harness.ts'
+
+  test-pure:
+    # Lint, typecheck and the pure suites share one runner: as separate jobs
+    # they each round their billed minute up, and they want the same install.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
 
     steps:
       - name: Checkout code
@@ -46,57 +117,8 @@ jobs:
       - name: Lint
         run: pnpm lint
 
-  typecheck:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24.17.0
-          cache: "pnpm"
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Prepare development build
-        run: pnpm dev:prepare
-
       - name: Typecheck code
         run: pnpm typecheck
-
-  test-pure:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    timeout-minutes: 10
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24.17.0
-          cache: "pnpm"
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Prepare development build
-        run: pnpm dev:prepare
 
       - name: Test pure code
         run: >-
@@ -140,6 +162,10 @@ jobs:
           pnpm vitest run test/integration/store.test.ts --slowTestThreshold=1000
 
   test-docker-e2e:
+    # Three shards, each building the node image: only run them when something
+    # they read changed. See the `docker` filter for what that means.
+    needs: changes
+    if: needs.changes.outputs.docker == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -190,6 +216,10 @@ jobs:
           pnpm vitest run --config vitest.no-store.config.ts --no-file-parallelism --slowTestThreshold=1000 ${{ matrix.files }}
 
   test-k3s-e2e:
+    # The most expensive job in the workflow: a K3s cluster around a full build
+    # of the runtime image. Gated on the same terms, see the `k3s` filter.
+    needs: changes
+    if: needs.changes.outputs.k3s == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -219,16 +249,20 @@ jobs:
           pnpm vitest run --config vitest.no-store.config.ts test/integration/e2e-k3s.test.ts --slowTestThreshold=1000
 
   preview:
-    # Publish previews only after the same commit passes every CI job.
+    # Publish previews only after the same commit passes every CI job, and only
+    # for pull requests: a push to main already ships the same tree as :edge.
     permissions:
       contents: read
     needs:
-      - lint
-      - typecheck
       - test-pure
       - test-store-integration
       - test-docker-e2e
       - test-k3s-e2e
+    # A gated job the diff skipped must not take this one down with it, so the
+    # implicit success() is spelled out as "nothing above failed or was
+    # cancelled" — which a skipped job satisfies.
+    if: >-
+      ${{ !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -261,15 +295,15 @@ jobs:
     # for its own tags through the same script.
     name: compute tags
     needs:
-      - lint
-      - typecheck
       - test-pure
       - test-store-integration
       - test-docker-e2e
       - test-k3s-e2e
     # success() is spelled out because a custom if replaces the implicit one a
-    # "needs" would otherwise carry.
-    if: success() && github.event_name == 'push'
+    # "needs" would otherwise carry — and spelled out per result, because
+    # success() is false when a gated job above was skipped by the path filter.
+    if: >-
+      ${{ !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && github.event_name == 'push' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

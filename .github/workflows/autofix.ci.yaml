@@ -1,9 +1,8 @@
 name: autofix.ci
 
+# autofix.ci only ever pushes its fixes back to a pull request, so a push to
+# main would install, build and format for a result it cannot commit anywhere.
 on:
-  push:
-    branches:
-      - main
   pull_request:
 
 permissions:
