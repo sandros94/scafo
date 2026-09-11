@@ -21,7 +21,12 @@ export const FIXTURES: string = join(HERE, "_e2e-fixtures");
 export const CLI: string = join(REPO_ROOT, "dist/cli/index.mjs");
 
 export const STORE_IMAGE: string = "chrislusf/seaweedfs:4.42";
-/** The `probe` target of the repo Dockerfile: `docker build --target probe -t scafo-probe .` */
+/**
+ * The `probe` target of the repo Dockerfile: node24 with the Celld and esbuild
+ * the image ships and no application. Built locally with
+ * `docker build --target probe -t scafo-probe .`; in CI it is built once with
+ * the node image and loaded into each job's daemon under this same name.
+ */
 export const NODE_IMAGE: string = "scafo-probe";
 /** S3 port inside the store container. */
 export const STORE_PORT: number = 8333;

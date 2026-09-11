@@ -27,6 +27,12 @@ on:
         required: false
         default: ""
         type: string
+      image-artifacts:
+        description: >-
+          Push the `image-linux-*` OCI archives this run already built instead of building the image here. A caller that tested those exact bits publishes them rather than a rebuild of the same source; a caller that has none (a tagged release) leaves this false and the build matrix below runs.
+        required: false
+        default: false
+        type: boolean
 
 # Jobs opt in to exactly the scopes they need. The calling job has to grant at
 # least this union, since permissions can only be reduced down a call chain.
@@ -45,6 +51,10 @@ jobs:
     # only; the tags are attached later by the merge job, which is what keeps a
     # tag from ever pointing at a half-published image.
     name: build ${{ matrix.platform }}
+    # Nothing to build when the caller brings its own archives; the merge job
+    # pushes those instead, from the same digests-directory contract this job
+    # would otherwise fill.
+    if: ${{ !inputs.image-artifacts }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -111,19 +121,40 @@ jobs:
   merge:
     # Collects the per-architecture digests into one multi-platform manifest
     # list, puts the human-facing tags on it, and attests its provenance.
+    #
+    # Either half of the run may have produced those digests: the build matrix
+    # above, or a caller whose own jobs built and tested the images. Both leave
+    # one empty file per digest in the same directory, and everything from the
+    # manifest list down reads only that.
     name: publish manifest
     runs-on: ubuntu-24.04
     needs: build
+    # success() is spelled out because the build matrix is skipped, not run,
+    # when the caller brings its own archives.
+    if: >-
+      ${{ !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     permissions:
       packages: write
       id-token: write
       attestations: write
     steps:
       - name: Download digests
+        if: ${{ !inputs.image-artifacts }}
         uses: actions/download-artifact@v4
         with:
           path: ${{ runner.temp }}/digests
           pattern: digests-*
+          merge-multiple: true
+
+      # Artifacts belong to the workflow run, and a called workflow's jobs are
+      # part of the run that called it, so these are the caller's uploads. The
+      # `image-linux-*` pattern leaves the caller's test-only images alone.
+      - name: Download image archives
+        if: ${{ inputs.image-artifacts }}
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/images
+          pattern: image-linux-*
           merge-multiple: true
 
       - uses: docker/setup-buildx-action@v3
@@ -133,6 +164,43 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image archives by digest
+        if: ${{ inputs.image-artifacts }}
+        env:
+          IMAGES: ${{ runner.temp }}/images
+          DIGESTS: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          # Each archive is an OCI layout holding one image manifest, and that
+          # manifest's digest is the name it is published under -- the same
+          # push-by-digest the build matrix does, one step later in the run.
+          # --preserve-digests makes that a guarantee: skopeo fails rather than
+          # re-encode anything, so the bits pushed are the bits tested.
+          mkdir -p "$DIGESTS"
+          shopt -s nullglob
+          archives=("$IMAGES"/*.tar)
+          if [ "${#archives[@]}" -eq 0 ]; then
+            echo "publish: image-artifacts is set but the run uploaded no archives" >&2
+            exit 1
+          fi
+          for archive in "${archives[@]}"; do
+            digest="$(tar -xOf "$archive" index.json \
+              | jq -r '.manifests | select(length == 1) | .[0].digest')"
+            case "$digest" in
+              sha256:*) ;;
+              *)
+                echo "publish: $archive holds no single image manifest" >&2
+                exit 1
+                ;;
+            esac
+            # The registry credentials docker/login-action just wrote; skopeo
+            # reads a docker config file as well as its own.
+            skopeo copy --preserve-digests \
+              --dest-authfile "$HOME/.docker/config.json" \
+              "oci-archive:$archive" "docker://${IMAGE}@${digest}"
+            touch "$DIGESTS/${digest#sha256:}"
+          done
 
       - name: Create manifest list and push
         id: push

@@ -42,6 +42,19 @@ import {
 const E2E = process.env.SCAFO_K3S_E2E === "1";
 const K3S_IMAGE = "rancher/k3s:v1.36.3-k3s1";
 const IMAGE_TAG = "scafo-e2e-k3s";
+
+/*
+ * An image reference already in the local daemon, which this suite then saves
+ * into the cluster instead of building the Dockerfile itself.
+ *
+ * CI builds the node image once at the start of the run, loads that one archive
+ * into each job's daemon and names it here, so the cluster runs the bits the run
+ * publishes rather than a rebuild of the same source. Unset, which is every
+ * local run, the suite builds, as it always has.
+ */
+const PREBUILT_IMAGE: string = process.env.SCAFO_E2E_IMAGE ?? "";
+/** What is saved into the cluster, and what the manifest's containers name. */
+const IMAGE_REF: string = PREBUILT_IMAGE === "" ? IMAGE_TAG : PREBUILT_IMAGE;
 const NAMESPACE = "scafo-e2e";
 const PLATFORM_DOMAIN = "scafo.k3s.test";
 /** What the cluster's Traefik presents to the fleet; both Secrets carry it. */
@@ -98,16 +111,17 @@ const tmpDirs: string[] = [];
 describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
   beforeAll(async () => {
     await buildRepo();
-    await GenericContainer.fromDockerfile(REPO_ROOT, "Dockerfile")
-      .withCache(true)
-      .build(IMAGE_TAG, { deleteOnExit: false });
+    if (PREBUILT_IMAGE === "")
+      await GenericContainer.fromDockerfile(REPO_ROOT, "Dockerfile")
+        .withCache(true)
+        .build(IMAGE_TAG, { deleteOnExit: false });
 
     const imageDir = await mkdtemp(join(tmpdir(), "scafo-k3s-image-"));
     tmpDirs.push(imageDir);
     const imageTar = join(imageDir, "scafo.tar");
     const saved = await run(
       "docker",
-      ["image", "save", "--output", imageTar, IMAGE_TAG],
+      ["image", "save", "--output", imageTar, IMAGE_REF],
       REPO_ROOT,
       {
         PATH: process.env.PATH ?? "",
@@ -517,7 +531,7 @@ async function applyManifest(): Promise<void> {
         throw new Error("the manifest's node StatefulSet has no node container");
       // The production example is one node; this scenario exercises its multi-node limit.
       spec.replicas = 2;
-      node.image = IMAGE_TAG;
+      node.image = IMAGE_REF;
       node.imagePullPolicy = "IfNotPresent";
     }
     await apply(object as unknown as k8s.KubernetesObject & Record<string, unknown>);

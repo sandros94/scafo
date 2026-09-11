@@ -65,6 +65,20 @@ const INGRESS_TOKEN = "e2e-image-ingress-token";
  */
 const IMAGE_TAG = "scafo-e2e-image";
 
+/*
+ * An image reference already in the local daemon, which this suite then uses
+ * instead of building the Dockerfile itself.
+ *
+ * CI builds the node image once at the start of the run, loads that one archive
+ * into each job's daemon and names it here, so what this suite proves about the
+ * packaging is proven about the bits the run publishes — not about a rebuild of
+ * the same source. Unset, which is every local run, the suite builds, as it
+ * always has.
+ */
+const PREBUILT_IMAGE: string = process.env.SCAFO_E2E_IMAGE ?? "";
+/** What the container is started from, and what `docker inspect` is asked about. */
+const IMAGE_REF: string = PREBUILT_IMAGE === "" ? IMAGE_TAG : PREBUILT_IMAGE;
+
 const CADDY_HTTP_PORT = 80;
 /** Published on the Caddy container, because the node shares its namespace. */
 const NODE_PORT = 7400;
@@ -114,10 +128,14 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
     await buildRepo();
 
     const started = Date.now();
-    const image = await GenericContainer.fromDockerfile(REPO_ROOT, "Dockerfile")
-      .withCache(true)
-      .build(IMAGE_TAG, { deleteOnExit: false });
-    observed.imageBuildMs = Date.now() - started;
+    const image =
+      PREBUILT_IMAGE === ""
+        ? await GenericContainer.fromDockerfile(REPO_ROOT, "Dockerfile")
+            .withCache(true)
+            .build(IMAGE_TAG, { deleteOnExit: false })
+        : new GenericContainer(PREBUILT_IMAGE);
+    observed.imageRef = IMAGE_REF;
+    observed.imageBuildMs = PREBUILT_IMAGE === "" ? Date.now() - started : null;
 
     store = await startStore(BUCKET);
 
@@ -212,7 +230,7 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
         "inspect",
         "--format",
         "{{json .Config.Healthcheck}}",
-        IMAGE_TAG,
+        IMAGE_REF,
       ]);
       expect(inspected.code, inspected.output).toBe(0);
       const healthcheck = JSON.parse(inspected.output) as {

@@ -87,6 +87,127 @@ jobs:
               - 'test/integration/e2e-k3s.test.ts'
               - 'test/integration/_harness.ts'
 
+  build-image:
+    # The node image is built once per run, here, and every consumer downstream
+    # takes those exact bits: the container suites load the archive into their
+    # own daemon, and the publish path pushes the very manifest the suites ran
+    # against. Building per job would test one image and ship another.
+    #
+    # A push builds whatever the diff touched, because `publish` has no other
+    # source for what it ships — on a docs-only push the suites below are
+    # skipped and these archives are still what reaches ghcr.
+    #
+    # Runners are pinned to the newest STABLE image pair rather than riding
+    # ubuntu-latest: the amd64 and arm64 legs must move between OS versions
+    # together, and -latest migrates only one of them.
+    name: build image (${{ matrix.platform }})
+    needs: changes
+    # success() is spelled out because a custom if replaces the implicit one a
+    # "needs" would otherwise carry.
+    if: >-
+      ${{ success() && (needs.changes.outputs.docker == 'true' || needs.changes.outputs.k3s == 'true' || github.event_name == 'push') }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            # Only the architecture the suites run on needs the test host image.
+            probe: true
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            probe: false
+
+    steps:
+      - name: Prepare
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          # Artifact names cannot contain "/", so linux/amd64 becomes linux-amd64.
+          echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+          mkdir -p "${{ runner.temp }}/image"
+
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the node image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          # No inline provenance: BuildKit would turn the archive's single image
+          # manifest into an index, and the digest this run publishes is that
+          # manifest's. Provenance is attested once, over the merged manifest
+          # list, in publish.yml.
+          provenance: false
+          # An OCI layout rather than a docker archive: it is the only export
+          # that carries the manifest digest the registry will store, which is
+          # what lets the publish path push these bits without rebuilding them.
+          outputs: type=oci,dest=${{ runner.temp }}/image/scafo-${{ env.PLATFORM_PAIR }}.tar
+
+      - name: Build the test host image
+        if: matrix.probe
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          # The stage the Docker suites bind-mount a worktree's build into; it
+          # shares every layer above with the build that just ran.
+          target: probe
+          provenance: false
+          outputs: type=oci,dest=${{ runner.temp }}/image/scafo-probe.tar
+
+      - name: Report the image digest
+        env:
+          ARCHIVE: ${{ runner.temp }}/image/scafo-${{ env.PLATFORM_PAIR }}.tar
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          # The archive carries its own digest, so nothing has to be handed
+          # downstream as a job output: whoever opens it reads the same number.
+          # Asserting the shape here — one image manifest, not an index — fails
+          # a change in what buildx exports at the build and not at the push.
+          digest="$(tar -xOf "$ARCHIVE" index.json \
+            | jq -r '.manifests | select(length == 1) | .[0].digest')"
+          case "$digest" in
+            sha256:*) ;;
+            *)
+              echo "build-image: $ARCHIVE holds no single image manifest" >&2
+              exit 1
+              ;;
+          esac
+          echo "$PLATFORM $digest"
+          echo "- \`$PLATFORM\` \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the node image
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/image/scafo-${{ env.PLATFORM_PAIR }}.tar
+          # The layers inside are already compressed; zipping them again costs
+          # a minute of CPU per leg and saves nothing.
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload the test host image
+        if: matrix.probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-probe
+          path: ${{ runner.temp }}/image/scafo-probe.tar
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+
   test-pure:
     # Lint, typecheck and the pure suites share one runner: as separate jobs
     # they each round their billed minute up, and they want the same install.
@@ -162,10 +283,12 @@ jobs:
           pnpm vitest run test/integration/store.test.ts --slowTestThreshold=1000
 
   test-docker-e2e:
-    # Three shards, each building the node image: only run them when something
-    # they read changed. See the `docker` filter for what that means.
-    needs: changes
-    if: needs.changes.outputs.docker == 'true'
+    # Three shards over the images `build-image` produced: only run them when
+    # something they read changed. See the `docker` filter for what that means.
+    needs: [changes, build-image]
+    # success() is spelled out because a custom if replaces the implicit one a
+    # "needs" would otherwise carry — a failed build must not reach the suites.
+    if: ${{ success() && needs.changes.outputs.docker == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -175,19 +298,27 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Every shard runs daemons out of the `probe` image; only this one
+          # also exercises the product image, so only it loads that archive.
           - shard: product-image
+            node-image: scafo-e2e-image
             files: >-
               test/integration/e2e.test.ts test/integration/e2e-image.test.ts
           - shard: traefik-tls
+            node-image: ""
             files: >-
               test/integration/e2e-traefik.test.ts test/integration/e2e-tls.test.ts
           - shard: multinode
+            node-image: ""
             files: test/integration/e2e-multinode.test.ts
 
     name: test-docker-e2e (${{ matrix.shard }})
 
     env:
       SCAFO_E2E: "1"
+      # Empty for the shards that never start the product image, which is what
+      # tells the suite to build the Dockerfile itself, as a local run does.
+      SCAFO_E2E_IMAGE: ${{ matrix.node-image }}
 
     steps:
       - name: Checkout code
@@ -208,18 +339,52 @@ jobs:
       - name: Build packages
         run: pnpm build
 
-      - name: Build the node host image
-        run: docker build --target probe -t scafo-probe .
+      - name: Download the test host image
+        uses: actions/download-artifact@v4
+        with:
+          name: image-probe
+          path: ${{ runner.temp }}/images
+
+      - name: Download the node image
+        if: matrix.node-image != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: image-linux-amd64
+          path: ${{ runner.temp }}/images
+
+      - name: Load the images into the daemon
+        env:
+          IMAGES: ${{ runner.temp }}/images
+          NODE_IMAGE: ${{ matrix.node-image }}
+        run: |
+          set -euo pipefail
+          # What arrives is an OCI layout, which `docker load` reads only with
+          # the containerd image store this daemon does not use, so skopeo --
+          # the tool publish.yml pushes the very same archives with -- rewrites
+          # each as the docker archive `docker load` does read. A file rather
+          # than skopeo's docker-daemon transport, which negotiates an Engine
+          # API version and fails on a daemon newer than it knows.
+          load() {
+            skopeo copy "oci-archive:$IMAGES/$1" "docker-archive:$IMAGES/load.tar:$2:latest"
+            docker load --input "$IMAGES/load.tar"
+            rm "$IMAGES/load.tar"
+          }
+          load scafo-probe.tar scafo-probe
+          if [ -n "$NODE_IMAGE" ]; then
+            load scafo-linux-amd64.tar "$NODE_IMAGE"
+          fi
 
       - name: Test Docker end to end
         run: >-
           pnpm vitest run --config vitest.no-store.config.ts --no-file-parallelism --slowTestThreshold=1000 ${{ matrix.files }}
 
   test-k3s-e2e:
-    # The most expensive job in the workflow: a K3s cluster around a full build
-    # of the runtime image. Gated on the same terms, see the `k3s` filter.
-    needs: changes
-    if: needs.changes.outputs.k3s == 'true'
+    # The most expensive job in the workflow: a K3s cluster around the runtime
+    # image this run built. Gated on the same terms, see the `k3s` filter.
+    needs: [changes, build-image]
+    # success() is spelled out because a custom if replaces the implicit one a
+    # "needs" would otherwise carry — a failed build must not reach the suite.
+    if: ${{ success() && needs.changes.outputs.k3s == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -227,6 +392,7 @@ jobs:
 
     env:
       SCAFO_K3S_E2E: "1"
+      SCAFO_E2E_IMAGE: scafo-e2e-k3s
 
     steps:
       - name: Checkout code
@@ -244,6 +410,25 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Download the node image
+        uses: actions/download-artifact@v4
+        with:
+          name: image-linux-amd64
+          path: ${{ runner.temp }}/images
+
+      - name: Load the node image into the daemon
+        env:
+          IMAGES: ${{ runner.temp }}/images
+        run: |
+          set -euo pipefail
+          # The suite saves this out of the daemon again to import it into the
+          # cluster; see the load step in test-docker-e2e for why it arrives
+          # through skopeo and a docker archive.
+          skopeo copy "oci-archive:$IMAGES/scafo-linux-amd64.tar" \
+            "docker-archive:$IMAGES/load.tar:${SCAFO_E2E_IMAGE}:latest"
+          docker load --input "$IMAGES/load.tar"
+          rm "$IMAGES/load.tar"
+
       - name: Test K3s end to end
         run: >-
           pnpm vitest run --config vitest.no-store.config.ts test/integration/e2e-k3s.test.ts --slowTestThreshold=1000
@@ -254,6 +439,7 @@ jobs:
     permissions:
       contents: read
     needs:
+      - build-image
       - test-pure
       - test-store-integration
       - test-docker-e2e
@@ -295,6 +481,7 @@ jobs:
     # for its own tags through the same script.
     name: compute tags
     needs:
+      - build-image
       - test-pure
       - test-store-integration
       - test-docker-e2e
@@ -332,7 +519,7 @@ jobs:
     # steps of its own; each job inside publish.yml declares the narrower set
     # it actually uses.
     name: publish
-    needs: tags
+    needs: [tags, build-image]
     if: success() && github.event_name == 'push'
     permissions:
       contents: write
@@ -343,3 +530,6 @@ jobs:
     with:
       ref: ${{ github.sha }}
       image-tags: ${{ needs.tags.outputs.image-tags }}
+      # What reaches ghcr is what `build-image` produced and every job above
+      # tested, pushed by its own digest rather than built a second time.
+      image-artifacts: true
