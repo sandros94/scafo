@@ -757,10 +757,10 @@ describe("JSON request limit", () => {
 describe("the variables an operator hands every runtime process", () => {
   it("reads the comma syntax a flag and an environment variable carry", async () => {
     const config = await loadDaemonConfig({
-      env: { ...REQUIRED_ENV, SCAFO_CELLD_ENV: " CELLD_OTEL=1, CELLD_OTEL_SINK = bucket ,," },
+      env: { ...REQUIRED_ENV, SCAFO_CELLD_ENV: " CELLD_OTEL=1, CELLD_IDLE_EVICT_S = 900 ,," },
     });
 
-    expect(config.runtime.celldEnv).toEqual({ CELLD_OTEL: "1", CELLD_OTEL_SINK: "bucket" });
+    expect(config.runtime.celldEnv).toEqual({ CELLD_OTEL: "1", CELLD_IDLE_EVICT_S: "900" });
   });
 
   it("reads the object the config file writes them as", async () => {
@@ -833,23 +833,26 @@ describe("the variables an operator hands every runtime process", () => {
     });
   });
 
-  it.each(["CELLD_VARS_FILE"])("refuses reserved %s written in the config file", async (name) => {
-    const error = await rejectsWith(
-      () =>
-        loadDaemonConfig({
-          configPath: CONFIG_PATH,
-          readFile: fileAt(
-            CONFIG_PATH,
-            JSON.stringify({ runtime: { celldEnv: { [name]: "unsafe" } } }),
-          ),
-          env: REQUIRED_ENV,
-        }),
-      "invalid-input",
-    );
+  it.each(["AWS_ACCESS_KEY_ID", "CELLD_TRUST_FORWARDED_HEADERS"])(
+    "refuses reserved %s written in the config file",
+    async (name) => {
+      const error = await rejectsWith(
+        () =>
+          loadDaemonConfig({
+            configPath: CONFIG_PATH,
+            readFile: fileAt(
+              CONFIG_PATH,
+              JSON.stringify({ runtime: { celldEnv: { [name]: "unsafe" } } }),
+            ),
+            env: REQUIRED_ENV,
+          }),
+        "invalid-input",
+      );
 
-    expect(error.detail).toContain(name);
-    expect(error.detail).toContain("runtime.celldEnv");
-  });
+      expect(error.detail).toContain(name);
+      expect(error.detail).toContain("runtime.celldEnv");
+    },
+  );
 
   it("passes celld's own memory limits through to every runtime", async () => {
     const config = await loadDaemonConfig({
@@ -1206,13 +1209,13 @@ describe("the runtime telemetry switch the node's own composes", () => {
       configPath: CONFIG_PATH,
       readFile: fileAt(
         CONFIG_PATH,
-        JSON.stringify({ runtime: { celldEnv: { CELLD_OTEL: "2", CELLD_OTEL_SINK: "bucket" } } }),
+        JSON.stringify({ runtime: { celldEnv: { CELLD_OTEL: "2", CELLD_IDLE_EVICT_S: "900" } } }),
       ),
       env: { ...REQUIRED_ENV, SCAFO_OBSERVABILITY: "1" },
     });
 
     expect(turnedOff.runtime.celldEnv).toEqual({ CELLD_OTEL: "0" });
-    expect(tuned.runtime.celldEnv).toEqual({ CELLD_OTEL: "2", CELLD_OTEL_SINK: "bucket" });
+    expect(tuned.runtime.celldEnv).toEqual({ CELLD_OTEL: "2", CELLD_IDLE_EVICT_S: "900" });
   });
 
   it("adds nothing at all while the switch is off", async () => {

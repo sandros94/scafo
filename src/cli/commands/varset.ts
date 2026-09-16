@@ -1,20 +1,30 @@
-/* `scafo varset`: seal an environment's variables into the registry, and list what it carries. */
+/*
+ * `scafo varset`: the named variable sets of a project, and what carries them.
+ *
+ * A varset is edited in place and reaches an application through a deploy, so
+ * every subcommand that changes one says which environments point at it and
+ * that the change lands at their next deploy.
+ */
 
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import { loadDaemonConfig } from "../../daemon/config.ts";
 import { ScafoError } from "../../core/error.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
-import { createRegistry } from "../_bootstrap.ts";
-import { flagList } from "../_flags.ts";
-import { readTextFile, reportFailure } from "../_utils.ts";
-import { readVarsetKeyFile, VARSET_KEY_FORMS } from "../_varset-key.ts";
 import {
+  deleteVarset,
+  environmentsUsingVarset,
+  getVarset,
+  listVarsets,
+  putVarset,
+} from "../../core/registry/varsets.ts";
+import { createRegistry } from "../_bootstrap.ts";
+import { readTextFile, reportFailure } from "../_utils.ts";
+import {
+  describeVarsetUse,
+  describeVarsetWrite,
   DOTENV_SYNTAX,
-  formatVarset,
+  formatVarsetVars,
   parseDotenv,
-  setVarset,
-  showVarset,
-  toPlainVarset,
 } from "../_varset.ts";
 
 /* The bucket the registry lives in, exactly as `scafo sail` takes it. */
@@ -28,37 +38,35 @@ const bucketArgs: ArgsDef = {
   "secret-key": { type: "string", description: "Bucket secret access key" },
 };
 
-const targetArgs: ArgsDef = {
-  "project": { type: "string", description: "Project the environment belongs to", required: true },
-  "env": { type: "string", description: "Environment to seal the variables for", required: true },
-  "key-file": {
-    type: "string",
-    description: `File holding the varset key (${VARSET_KEY_FORMS})`,
-  },
+const projectArgs: ArgsDef = {
+  ...bucketArgs,
+  project: { type: "string", description: "Project the varset belongs to", required: true },
+};
+
+const namedArgs: ArgsDef = {
+  ...projectArgs,
+  name: { type: "string", description: "Varset to act on", required: true },
 };
 
 const setArgs: ArgsDef = {
-  ...targetArgs,
-  ...bucketArgs,
+  ...namedArgs,
   file: {
     type: "string",
-    description: `Variable file to seal: ${DOTENV_SYNTAX}`,
+    description: `Variable file to store: ${DOTENV_SYNTAX}`,
     required: true,
-  },
-  /* Comma-separated rather than repeated: the parser keeps only the last
-     occurrence of a repeated flag, and a `--public` that read one would seal the
-     variables an operator asked to publish and never say it had. */
-  public: {
-    type: "string",
-    description:
-      "Variable to store in the clear; comma-separated for several. Everything else is secret",
   },
 };
 
-const showArgs: ArgsDef = { ...targetArgs, ...bucketArgs };
+const showArgs: ArgsDef = {
+  ...namedArgs,
+  reveal: {
+    type: "boolean",
+    description: "Print the values too; without it only the variable names are listed",
+  },
+};
 
 const set: CommandDef = defineCommand({
-  meta: { name: "set", description: "Seal a variable file and point an environment at it" },
+  meta: { name: "set", description: "Create or replace a varset from a variable file" },
   args: setArgs,
   async run({ args }): Promise<void> {
     try {
@@ -70,7 +78,7 @@ const set: CommandDef = defineCommand({
 });
 
 const show: CommandDef = defineCommand({
-  meta: { name: "show", description: "List the variables an environment carries" },
+  meta: { name: "show", description: "List the variables a varset holds" },
   args: showArgs,
   async run({ args }): Promise<void> {
     try {
@@ -81,13 +89,38 @@ const show: CommandDef = defineCommand({
   },
 });
 
+const list: CommandDef = defineCommand({
+  meta: { name: "list", description: "List a project's varsets and what carries them" },
+  args: projectArgs,
+  async run({ args }): Promise<void> {
+    try {
+      await runList(args as Record<string, unknown>);
+    } catch (error) {
+      reportFailure(error);
+    }
+  },
+});
+
+const remove: CommandDef = defineCommand({
+  meta: { name: "delete", description: "Delete a varset no environment points at" },
+  args: namedArgs,
+  async run({ args }): Promise<void> {
+    try {
+      await runDelete(args as Record<string, unknown>);
+    } catch (error) {
+      reportFailure(error);
+    }
+  },
+});
+
 export const varset: CommandDef = defineCommand({
-  meta: { name: "varset", description: "Manage the variables an environment is configured with" },
-  subCommands: { set, show },
+  meta: { name: "varset", description: "Manage the named variable sets of a project" },
+  subCommands: { set, show, list, delete: remove },
 });
 
 async function runSet(flags: Record<string, unknown>): Promise<void> {
-  const target = await resolveTarget(flags);
+  const project = required(flags, "project");
+  const name = required(flags, "name");
   const path = required(flags, "file");
 
   const contents = await readTextFile(path);
@@ -97,67 +130,79 @@ async function runSet(flags: Record<string, unknown>): Promise<void> {
     });
   }
 
-  const plain = toPlainVarset(parseDotenv(contents, path), flagList(flags.public));
-  const result = await setVarset(target.registry, {
-    project: target.project,
-    env: target.env,
-    plain,
-    key: target.key,
+  const registry = await openRegistry(flags);
+  const stored = await putVarset(registry, project, {
+    name,
+    vars: parseDotenv(contents, path),
   });
 
-  const count = Object.keys(plain).length;
   console.log(
-    `scafo: sealed ${String(count)} variable${count === 1 ? "" : "s"} as varset "${result.id}" ` +
-      `for "${target.project}/${target.env}"`,
+    describeVarsetWrite({
+      project,
+      name,
+      variables: Object.keys(stored.vars).length,
+      environments: await environmentsUsingVarset(registry, project, name),
+    }),
   );
 }
 
 async function runShow(flags: Record<string, unknown>): Promise<void> {
-  const target = await resolveTarget(flags);
-  const shown = await showVarset(target.registry, {
-    project: target.project,
-    env: target.env,
-    key: target.key,
-  });
+  const project = required(flags, "project");
+  const name = required(flags, "name");
 
-  /* Secret values are never printed, key in hand or not: this output is read
-     over shoulders, pasted into issues and captured by CI logs. */
-  console.log(`scafo: "${target.project}/${target.env}" uses varset "${shown.id}"`);
-  const listed = formatVarset(shown.described);
-  if (listed !== "") console.log(listed);
+  const stored = await getVarset(await openRegistry(flags), project, name);
+  const printed = formatVarsetVars(stored.vars, { reveal: flags.reveal === true });
+
+  if (printed === "") {
+    console.log(`scafo: varset "${name}" of "${project}" holds no variables`);
+    return;
+  }
+  console.log(printed);
 }
 
-interface Target {
-  registry: RegistryContext;
-  project: string;
-  env: string;
-  key: CryptoKey;
+async function runList(flags: Record<string, unknown>): Promise<void> {
+  const project = required(flags, "project");
+  const registry = await openRegistry(flags);
+
+  const names = await listVarsets(registry, project);
+  if (names.length === 0) {
+    console.log(`scafo: "${project}" has no varsets`);
+    return;
+  }
+
+  for (const name of names) {
+    const [stored, environments] = await Promise.all([
+      getVarset(registry, project, name),
+      environmentsUsingVarset(registry, project, name),
+    ]);
+    console.log(
+      describeVarsetUse({
+        project,
+        name,
+        variables: Object.keys(stored.vars).length,
+        environments,
+      }),
+    );
+  }
 }
 
-/** Everything both subcommands need: the bucket, the environment and the key. */
-async function resolveTarget(flags: Record<string, unknown>): Promise<Target> {
+async function runDelete(flags: Record<string, unknown>): Promise<void> {
+  const project = required(flags, "project");
+  const name = required(flags, "name");
+
+  await deleteVarset(await openRegistry(flags), project, name);
+  console.log(`scafo: deleted varset "${name}" of "${project}"`);
+}
+
+/** The bucket these subcommands write straight into; no node holds a varset. */
+async function openRegistry(flags: Record<string, unknown>): Promise<RegistryContext> {
   const config = await loadDaemonConfig({
     configPath: text(flags.config),
     flags: stringFlags(flags),
     env: process.env,
     readFile: readTextFile,
   });
-
-  const keyFile = text(flags["key-file"]) ?? config.varsets?.keyFile;
-  if (keyFile === undefined) {
-    throw new ScafoError("invalid-input", "Missing required configuration", {
-      detail:
-        `"varsets.keyFile" has no value: pass --key-file, set SCAFO_VARSET_KEY_FILE in the ` +
-        `environment, or set it in the config file`,
-    });
-  }
-
-  return {
-    registry: createRegistry(config),
-    project: required(flags, "project"),
-    env: required(flags, "env"),
-    key: await readVarsetKeyFile(keyFile),
-  };
+  return createRegistry(config);
 }
 
 function required(flags: Record<string, unknown>, name: string): string {

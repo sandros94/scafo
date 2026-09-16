@@ -6,7 +6,7 @@ import { acquireLease } from "../src/core/registry/lease.ts";
 import { getNode, registerNode } from "../src/core/registry/nodes.ts";
 import { writePlacement } from "../src/core/registry/placement.ts";
 import { createProject } from "../src/core/registry/projects.ts";
-import { importVarsetKey, putVarset, sealVarset } from "../src/core/registry/varsets.ts";
+import { putVarset } from "../src/core/registry/varsets.ts";
 import type { RuntimeDriver, RuntimeSpecInput } from "../src/core/types/runtime.ts";
 import type { ProcessSpec, ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import type { RoutingAttribution } from "../src/daemon/access-counters.ts";
@@ -37,7 +37,6 @@ describe("environment-owned reconciliation", () => {
     expect(world.events).toEqual(["spec", "start", "ingress:2"]);
     expect(world.reconciler.status().processes[0]).toMatchObject({
       processId: "shop--production",
-      configuredVarset: null,
     });
   });
 
@@ -53,47 +52,22 @@ describe("environment-owned reconciliation", () => {
     expect(world.supervisor.started).toHaveLength(1);
   });
 
-  it("prepares a changed varset before stopping, then restarts on the same ports", async () => {
+  it("takes no runtime action when the environment's varset changes", async () => {
+    /* A varset travels with the next deploy, so nothing running is touched. */
     const world = await seededWorld();
     await world.reconciler.runOnce();
     world.events.length = 0;
-    const id = await attachVarset(world, "next");
+    await putVarset(world.daemon.registry, PROJECT, { name: "shared", vars: { TOKEN: "next" } });
+    await setEnvironmentVarset(world.daemon.registry, PROJECT, ENV, "shared");
 
-    expect(await world.reconciler.runOnce()).toEqual([
-      {
-        type: "restart",
-        processId: "shop--production",
-        project: PROJECT,
-        env: ENV,
-        ports: { public: 42_000, internal: 42_001 },
-      },
-    ]);
-    expect(world.events).toEqual(["spec", "stop", "start", "ingress:2"]);
-    expect(world.driver.inputs.at(-1)).toMatchObject({
-      ports: { public: 42_000, internal: 42_001 },
-      vars: { TOKEN: { value: "next", secret: true } },
-    });
-    expect(world.reconciler.status().processes[0]?.configuredVarset).toBe(id);
-  });
-
-  it("does not stop the old process when replacement configuration cannot be opened", async () => {
-    const world = await seededWorld();
-    await world.reconciler.runOnce();
-    world.events.length = 0;
-    await attachVarset(world, "next");
-    delete world.daemon.varsetKey;
-
-    await world.reconciler.runOnce();
+    expect(await world.reconciler.runOnce()).toEqual([]);
     expect(world.events).toEqual(["ingress:2"]);
+    expect(world.supervisor.started).toHaveLength(1);
     expect(world.supervisor.stopped).toEqual([]);
-    expect(world.reconciler.status().processes).toHaveLength(1);
-    expect(world.reconciler.status().failures[0]).toMatchObject({ action: "restart" });
   });
 
-  it("stops a replacement whose spawn completes after reconciliation shuts down", async () => {
+  it("stops a process whose spawn completes after reconciliation shuts down", async () => {
     const world = await seededWorld();
-    await world.reconciler.runOnce();
-    await attachVarset(world, "next");
 
     let entered!: () => void;
     let release!: () => void;
@@ -107,18 +81,24 @@ describe("environment-owned reconciliation", () => {
     release();
     await Promise.all([pass, shutdown]);
 
-    expect(world.supervisor.stopped).toEqual(["shop--production", "shop--production"]);
+    expect(world.supervisor.stopped).toEqual(["shop--production"]);
     expect(world.supervisor.list()).toEqual([]);
   });
 
-  it("quarantines a failed stop before considering another restart", async () => {
+  it("quarantines a failed stop and retries it before serving again", async () => {
     const world = await seededWorld();
     await world.reconciler.runOnce();
-    await attachVarset(world, "next");
+    const lease = await acquireLease(world.daemon.registry, "coordinator");
+    if (lease === null) throw new Error("lease unavailable");
+    await writePlacement(world.daemon.registry, PROJECT, ENV, ["node-b"], lease);
     world.supervisor.stopFailures = 1;
 
     await world.reconciler.runOnce();
     expect(world.reconciler.status().processes[0]).toMatchObject({ teardownPending: true });
+
+    /* Placed here again while the stop is still owed: the teardown is retried
+       before anything else, and only then may the environment be served. */
+    await writePlacement(world.daemon.registry, PROJECT, ENV, ["node-a"], lease);
     expect((await world.reconciler.runOnce())[0]).toMatchObject({
       type: "stop",
       reason: "runtime teardown is pending",
@@ -293,20 +273,9 @@ async function seededWorld() {
       },
     },
   };
-  daemon.varsetKey = await importVarsetKey(new Uint8Array(32).fill(7));
   const reconciler = createReconciler(daemon, driver, { baseEnv: { PATH: "/bin" } });
   daemon.reconciler = reconciler;
   return { daemon, reconciler, supervisor, driver, events };
-}
-
-async function attachVarset(world: Awaited<ReturnType<typeof seededWorld>>, value: string) {
-  const sealed = await sealVarset(
-    { TOKEN: { value, secret: true } },
-    world.daemon.varsetKey as CryptoKey,
-  );
-  await putVarset(world.daemon.registry, PROJECT, sealed);
-  await setEnvironmentVarset(world.daemon.registry, PROJECT, ENV, sealed.id);
-  return sealed.id;
 }
 
 interface FakeSupervisor extends Supervisor {

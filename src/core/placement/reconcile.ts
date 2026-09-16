@@ -7,7 +7,6 @@ import type { RuntimeProcess } from "../types/runtime.ts";
 export interface DesiredEnvironment {
   project: string;
   env: EnvironmentRecord;
-  varsetId?: string;
 }
 
 export interface PortView {
@@ -27,16 +26,9 @@ export type ReconcileAction =
       env: string;
       ports: { public: number; internal: number };
     }
-  | {
-      type: "restart";
-      processId: string;
-      project: string;
-      env: string;
-      ports: { public: number; internal: number };
-    }
   | { type: "stop"; processId: string; reason: string };
 
-/** Plans starts and configuration restarts before unrelated placement stops. */
+/** Plans starts before unrelated placement stops. */
 export function planReconcile(input: ReconcileInput): ReconcileAction[] {
   const moves: ReconcileAction[] = [];
   const stops: ReconcileAction[] = [];
@@ -65,17 +57,6 @@ export function planReconcile(input: ReconcileInput): ReconcileAction[] {
         type: "stop",
         processId: process.processId,
         reason: "runtime teardown is pending",
-      });
-    } else if (process.configuredVarset !== (wanted.varsetId ?? null)) {
-      moves.push({
-        type: "restart",
-        processId: process.processId,
-        project,
-        env,
-        ports:
-          process.port > 0 && process.internalPort > 0
-            ? { public: process.port, internal: process.internalPort }
-            : input.ports.nextPorts(),
       });
     }
   }

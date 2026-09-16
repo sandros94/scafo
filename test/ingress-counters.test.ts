@@ -364,7 +364,6 @@ function process_(project: string, env: string, _build: string, port: number): R
     processId: `${project}--${env}`,
     project,
     env,
-    configuredVarset: null,
     port,
     internalPort: port + 1,
   };

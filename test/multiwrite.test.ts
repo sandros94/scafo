@@ -1,6 +1,6 @@
 /* Fault injection proves multi-write flows remain referentially safe and retryable. */
 
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import {
   acquireLease,
@@ -12,16 +12,13 @@ import {
   executeReap,
   getBuild,
   getEnvironment,
-  importVarsetKey,
   planReap,
   putVarset,
   retireEnvironment,
   type ReapOptions,
-  sealVarset,
   setEnvironmentVarset,
 } from "../src/core/registry/index.ts";
 import { fleetPrefix } from "../src/core/registry/paths.ts";
-import type { VarsetEnvelope } from "../src/core/types/registry.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import {
   ctxWith,
@@ -49,13 +46,6 @@ interface Flow {
 }
 
 const REAP_OPTIONS: ReapOptions = { buildRetention: { maxAgeMs: HOUR_MS } };
-
-let sealed: { id: string; envelope: VarsetEnvelope };
-
-beforeAll(async () => {
-  const key = await importVarsetKey(crypto.getRandomValues(new Uint8Array(32)));
-  sealed = await sealVarset({ TOKEN: { value: "opaque", secret: true } }, key);
-});
 
 const FLOWS: Flow[] = [
   {
@@ -95,15 +85,15 @@ const FLOWS: Flow[] = [
     name: "createEnvironment then setEnvironmentVarset",
     seed: async ({ ctx }) => {
       await createProject(ctx, { slug: PROJECT });
-      await putVarset(ctx, PROJECT, sealed);
+      await putVarset(ctx, PROJECT, { name: "shared", vars: { TOKEN: "opaque" } });
     },
     run: async ({ ctx }) => {
       await createEnvironment(ctx, PROJECT, { name: "preview" });
-      await setEnvironmentVarset(ctx, PROJECT, "preview", sealed.id);
+      await setEnvironmentVarset(ctx, PROJECT, "preview", "shared");
     },
     settled: async ({ ctx }) => {
       await expect(getEnvironment(ctx, PROJECT, "preview")).resolves.toMatchObject({
-        varset: sealed.id,
+        varset: "shared",
       });
     },
   },

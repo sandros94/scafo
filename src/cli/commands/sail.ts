@@ -45,7 +45,6 @@ import {
   drainThisNode,
   loadNodeIdentity,
   loadIngressTokens,
-  loadVarsetKey,
   loadWireguardRecord,
   nodeStateDir,
   registerThisNode,
@@ -81,7 +80,6 @@ export const sailArgs: ArgsDef = {
   },
   "wg-port": { type: "string", description: "UDP port the tunnel interface listens on (51820)" },
   "platform-domains": { type: "string", description: "Comma-separated apex domains to serve" },
-  "varset-key-file": { type: "string", description: "File holding the varset encryption key" },
   "ingress-token": {
     type: "string",
     description:
@@ -193,7 +191,6 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
 
   const state = await loadNodeIdentity(config);
   const ingressTokens = await loadIngressTokens(config);
-  const varsetKey = await loadVarsetKey(config);
 
   /*
    * BEFORE THE BUCKET IS EVEN OPENED. A node whose Celld is older than this
@@ -236,7 +233,6 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
     /* Kept for the node tokens this node will sign for calls to its peers. */
     signingKey: state.privateKey,
   };
-  if (varsetKey !== undefined) daemon.varsetKey = varsetKey;
 
   /*
    * ATTACHED ONLY WHILE IT IS ON, and that is the whole of what the switch costs

@@ -27,6 +27,8 @@ import {
 import { resolveOperatorHome } from "../_home.ts";
 import { OPERATOR_KEY_FORMS, operatorFlags, resolveOperator } from "../_operator.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
+import { describeEnvironmentVarset, readVarsetFlags } from "../_varset.ts";
+import { setEnvironmentVarset } from "../../core/registry/environments.ts";
 
 /* The bucket the registry lives in, exactly as `scafo sail` takes it. Only read
    when no --node is given: with one, the node holds the bucket credentials and
@@ -61,6 +63,14 @@ const deleteArgs: ArgsDef = {
     type: "boolean",
     description: "Delete whatever state it is in, skipping the ephemeral and grace requirements",
   },
+};
+
+const varsetArgs: ArgsDef = {
+  ...bucketArgs,
+  project: { type: "string", description: "Project the environment belongs to", required: true },
+  env: { type: "string", description: "Environment to act on", required: true },
+  name: { type: "string", description: "Varset of the project its deploys should carry" },
+  none: { type: "boolean", description: "Stop it carrying a varset at all" },
 };
 
 const selectorArgs: ArgsDef = {
@@ -120,12 +130,24 @@ const selector: CommandDef = defineCommand({
   },
 });
 
+const varset: CommandDef = defineCommand({
+  meta: { name: "varset", description: "Choose which variables an environment's deploys carry" },
+  args: varsetArgs,
+  async run({ args }): Promise<void> {
+    try {
+      await runVarset(args as Record<string, unknown>);
+    } catch (error) {
+      reportFailure(error);
+    }
+  },
+});
+
 export const env: CommandDef = defineCommand({
   meta: {
     name: "env",
     description: "Retire, restore, target and delete environments",
   },
-  subCommands: { retire, unretire, selector, delete: remove },
+  subCommands: { retire, unretire, selector, varset, delete: remove },
 });
 
 async function runRetire(flags: Record<string, unknown>): Promise<void> {
@@ -158,6 +180,25 @@ async function runSelector(flags: Record<string, unknown>): Promise<void> {
   const ops = await opsFor(flags);
 
   console.log(describeSelectorChange(target, await ops.setSelector(target, wanted)));
+}
+
+/* Written straight into the bucket, as `scafo varset` is: a varset is registry
+   configuration a deploy reads, so no node has to be running to point at one. */
+async function runVarset(flags: Record<string, unknown>): Promise<void> {
+  const target = environmentTarget(flags);
+  /* Read before the bucket is opened, so a command that states both intentions
+     or neither costs no request. */
+  const wanted = readVarsetFlags({ name: text(flags.name), none: flags.none === true });
+
+  const config = await loadDaemonConfig({
+    configPath: text(flags.config),
+    flags: stringFlags(flags),
+    env: process.env,
+    readFile: readTextFile,
+  });
+  await setEnvironmentVarset(createRegistry(config), target.project, target.env, wanted);
+
+  console.log(describeEnvironmentVarset(target, wanted));
 }
 
 async function runDelete(flags: Record<string, unknown>): Promise<void> {

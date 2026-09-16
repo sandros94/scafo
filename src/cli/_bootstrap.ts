@@ -15,7 +15,6 @@ import { createUns3Store } from "../drivers/store/uns3.ts";
 import { loadOrCreateNodeState, type NodeState } from "./_node-state.ts";
 import { loadOrCreateIngressToken, writeIngressToken } from "./_ingress-token.ts";
 import { resolveDefaultStateDir } from "./_utils.ts";
-import { readVarsetKeyFile } from "./_varset-key.ts";
 import {
   readWireguardKeys,
   resolveWireguardSettings,
@@ -318,16 +317,6 @@ export async function publishWireguard(
     wireguard: opts.wireguard,
   }));
   return updated.value;
-}
-
-/**
- * The key this node opens its environments' variables with, or undefined when no
- * key file is configured. A node without one may only serve environments that
- * point at no varset.
- */
-export async function loadVarsetKey(config: DaemonConfig): Promise<CryptoKey | undefined> {
-  const keyFile = config.varsets?.keyFile;
-  return keyFile === undefined ? undefined : readVarsetKeyFile(keyFile);
 }
 
 /** The specifics a scafo failure carries are the useful half; keep both. */

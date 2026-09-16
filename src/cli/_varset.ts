@@ -1,21 +1,14 @@
-/* Parses dotenv input, seals varsets, and describes names without exposing
-   secret values. */
+/*
+ * Internal: the variable file `scafo varset set` reads, and every line the
+ * varset commands put on the terminal.
+ *
+ * A varset is carried by deploys, not by running processes, so each line that
+ * reports a change also says when the change lands: at the next deploy of the
+ * environments that point at it.
+ */
 
 import { ScafoError } from "../core/error.ts";
-import type { RegistryContext } from "../core/registry/context.ts";
-import { getEnvironment, setEnvironmentVarset } from "../core/registry/environments.ts";
-import {
-  describeVarset,
-  getVarsetEnvelope,
-  openVarset,
-  putVarset,
-  sealVarset,
-  type VarsetDescription,
-} from "../core/registry/varsets.ts";
-import type { PlainVarset } from "../core/types/registry.ts";
-
-/** What a variable name may look like: the shell's own rule, so a process can read it. */
-const VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+import { isVarsetVarName, VAR_NAME_RULE } from "../core/registry/varsets.ts";
 
 /** The dotenv dialect, as `scafo varset set --help` states it. */
 export const DOTENV_SYNTAX: string =
@@ -23,94 +16,89 @@ export const DOTENV_SYNTAX: string =
   "the value is everything after the first = with surrounding spaces trimmed, " +
   "quotes and all — there is no unquoting, so write the value you mean";
 
-export interface SetVarsetOptions {
+/** One varset as the commands report it: what it holds, and who carries it. */
+export interface VarsetUse {
   project: string;
-  env: string;
-  /** The variables, already parsed. */
-  plain: PlainVarset;
-  /** Key the envelope is sealed with. */
-  key: CryptoKey;
+  name: string;
+  /** How many variables it holds. */
+  variables: number;
+  /** Environments of the project that point at it, sorted. */
+  environments: string[];
 }
 
-export interface SetVarsetResult {
-  /** Id the sealed envelope is stored under, and what the environment now points at. */
-  id: string;
+/** How a write reads on the terminal, naming when the next deploy carries it. */
+export function describeVarsetWrite(use: VarsetUse): string {
+  const held = `scafo: varset "${use.name}" of "${use.project}" holds ${countOf(use.variables)}`;
+  if (use.environments.length === 0) return `${held}; no environment points at it yet`;
+
+  return `${held}; used by ${use.environments.join(", ")} — takes effect at their next deploy`;
 }
 
-/** Seals the variables, stores them and points the environment at them. */
-export async function setVarset(
-  registry: RegistryContext,
-  opts: SetVarsetOptions,
-): Promise<SetVarsetResult> {
-  const sealed = await sealVarset(opts.plain, opts.key);
-  await putVarset(registry, opts.project, sealed);
-
-  await setEnvironmentVarset(registry, opts.project, opts.env, sealed.id);
-  return { id: sealed.id };
-}
-
-export interface ShowVarsetOptions {
-  project: string;
-  env: string;
-  key: CryptoKey;
-}
-
-export interface ShownVarset {
-  /** Id of the envelope the environment points at. */
-  id: string;
-  described: Record<string, VarsetDescription>;
+/** One `scafo varset list` line: the name, what it holds, and who carries it. */
+export function describeVarsetUse(use: VarsetUse): string {
+  const used = use.environments.length === 0 ? "no environment" : use.environments.join(", ");
+  return `${use.name}: ${countOf(use.variables)}, used by ${used}`;
 }
 
 /**
- * Opens the varset an environment points at and describes it.
- *
- * Throws `ScafoError("not-found")` when the environment has no varset at all.
+ * The variables of a varset, one per line and sorted by name. Values are printed
+ * only when `reveal` asks for them: this output is read over shoulders, pasted
+ * into issues and captured by CI logs, and the names alone answer what is set.
  */
-export async function showVarset(
-  registry: RegistryContext,
-  opts: ShowVarsetOptions,
-): Promise<ShownVarset> {
-  const environment = await getEnvironment(registry, opts.project, opts.env);
-  const id = environment.varset;
-  if (id === undefined) {
-    throw new ScafoError("not-found", "Environment has no varset", {
-      detail: `"${opts.project}/${opts.env}" points at no variable set`,
-    });
-  }
-
-  const envelope = await getVarsetEnvelope(registry, opts.project, id);
-  return { id, described: describeVarset(await openVarset(envelope, opts.key)) };
-}
-
-/** Renders varset names only; secret values are never reconstructed. */
-export function formatVarset(described: Record<string, VarsetDescription>): string {
-  const names = Object.keys(described).sort();
-  return names
-    .map((name) => {
-      const entry = described[name];
-      return entry?.secret === false ? `${name}=${entry.value ?? ""}` : `${name} (secret)`;
-    })
+export function formatVarsetVars(
+  vars: Record<string, string>,
+  opts?: { reveal?: boolean },
+): string {
+  const reveal = opts?.reveal === true;
+  return Object.keys(vars)
+    .sort()
+    .map((name) => (reveal ? `${name}=${vars[name] ?? ""}` : name))
     .join("\n");
 }
 
-/** Builds a varset; variables are secret unless explicitly public. */
-export function toPlainVarset(
-  vars: Record<string, string>,
-  publicNames: readonly string[] = [],
-): PlainVarset {
-  const shown = new Set(publicNames);
-  const unknown = [...shown].filter((name) => !(name in vars));
-  if (unknown.length > 0) {
-    throw new ScafoError("invalid-input", "Unknown variable marked public", {
-      detail: `${unknown.map((name) => `"${name}"`).join(", ")} is not in the file being sealed`,
+/** How pointing an environment at a varset, or at none, reads on the terminal. */
+export function describeEnvironmentVarset(
+  target: { project: string; env: string },
+  name: string | null,
+): string {
+  const carries = name === null ? "carries no varset" : `carries varset "${name}"`;
+  return (
+    `scafo: "${target.project}/${target.env}" ${carries}; it takes effect at the ` +
+    `environment's next deploy`
+  );
+}
+
+/** The two ways `scafo env varset` can be told what to do. */
+export interface VarsetFlags {
+  /** Name of the varset, or undefined when `--name` was not given. */
+  name: string | undefined;
+  /** Whether `--none` was given. */
+  none: boolean;
+}
+
+/**
+ * The varset an invocation states: the name of `--name`, or null for `--none`.
+ *
+ * Exactly one of them, and `ScafoError("invalid-input")` otherwise. They are
+ * opposite intentions, so a command carrying BOTH says nothing about which was
+ * meant; and NEITHER is refused rather than read as "none", because an
+ * accidental `scafo env varset` that dropped a varset would change what the
+ * environment's next deploy carries.
+ */
+export function readVarsetFlags(flags: VarsetFlags): string | null {
+  if (flags.name !== undefined && flags.none) {
+    throw new ScafoError("invalid-input", "Conflicting arguments", {
+      detail: `--name "${flags.name}" and --none ask for opposite things; pass one of them`,
     });
   }
+  if (flags.none) return null;
+  if (flags.name !== undefined) return flags.name;
 
-  const plain: PlainVarset = {};
-  for (const [name, value] of Object.entries(vars)) {
-    plain[name] = { value, secret: !shown.has(name) };
-  }
-  return plain;
+  throw new ScafoError("invalid-input", "Missing required argument", {
+    detail:
+      `pass --name <varset> to say which variables the environment's deploys carry, ` +
+      `or --none to stop it carrying any`,
+  });
 }
 
 /** Parses dotenv syntax, refusing malformed names and duplicates by line. */
@@ -129,14 +117,16 @@ export function parseDotenv(text: string, source: string): Record<string, string
     }
 
     const name = trimmed.slice(0, separator).trim();
-    if (!VAR_NAME_RE.test(name)) {
+    if (!isVarsetVarName(name)) {
       throw invalidLine(
         at,
-        `"${name}" is not a usable variable name: letters, digits and underscores, ` +
-          `not starting with a digit (an "export " prefix is not stripped)`,
+        `"${name}" is not a usable variable name: ${VAR_NAME_RULE} ` +
+          `(an "export " prefix is not stripped)`,
       );
     }
-    if (name in vars) {
+    /* An own-property check: a plain object answers `in` for the names it
+       inherits, which would report a first `constructor=` line as a repeat. */
+    if (Object.hasOwn(vars, name)) {
       throw invalidLine(
         at,
         `"${name}" is set twice, and which one wins is not for scafo to decide`,
@@ -146,6 +136,10 @@ export function parseDotenv(text: string, source: string): Record<string, string
     vars[name] = trimmed.slice(separator + 1).trim();
   }
   return vars;
+}
+
+function countOf(variables: number): string {
+  return `${String(variables)} variable${variables === 1 ? "" : "s"}`;
 }
 
 function invalidLine(at: string, why: string): ScafoError {

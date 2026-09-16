@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createCelldDriver } from "../src/drivers/runtime/celld.ts";
+import { createCelldDriver, OPERATOR_RESERVED_ENV } from "../src/drivers/runtime/celld.ts";
 import type { RuntimeSpecInput } from "../src/core/types/runtime.ts";
 
 describe("celld process specs", () => {
@@ -9,13 +9,13 @@ describe("celld process specs", () => {
 
     expect(driver.stopGraceMs).toBe(45_000);
     expect(spec.env).not.toHaveProperty("CELLD_SHUTDOWN_TOTAL_MS");
-    expect(spec.env).not.toHaveProperty("CELLD_SHUTDOWN_DRAIN_MS");
+    expect(spec.env).not.toHaveProperty("CELLD_IDLE_EVICT_S");
   });
 
   it("derives supervisor grace from the operator's celld shutdown bound", () => {
     const operatorEnv = {
       CELLD_SHUTDOWN_TOTAL_MS: "60000",
-      CELLD_SHUTDOWN_DRAIN_MS: "25000",
+      CELLD_IDLE_EVICT_S: "900",
     };
     const driver = createCelldDriver({ operatorEnv });
     operatorEnv.CELLD_SHUTDOWN_TOTAL_MS = "120000";
@@ -24,7 +24,7 @@ describe("celld process specs", () => {
     expect(driver.stopGraceMs).toBe(65_000);
     expect(spec.env).toMatchObject({
       CELLD_SHUTDOWN_TOTAL_MS: "60000",
-      CELLD_SHUTDOWN_DRAIN_MS: "25000",
+      CELLD_IDLE_EVICT_S: "900",
     });
   });
 
@@ -37,7 +37,7 @@ describe("celld process specs", () => {
     },
   );
 
-  it("owns one stable process per environment and injects its varset", () => {
+  it("owns one stable process per environment", () => {
     const spec = createCelldDriver({ binPath: "/opt/celld" }).processSpec(specInput());
     expect(spec.id).toBe("shop--production");
     expect(spec.command).toBe("/opt/celld");
@@ -45,10 +45,19 @@ describe("celld process specs", () => {
     expect(spec.env).toMatchObject({
       AWS_ACCESS_KEY_ID: "access",
       AWS_SECRET_ACCESS_KEY: "secret",
-      CELLD_VAR_TOKEN: "secret-token",
     });
     expect(spec.env).not.toHaveProperty("CELLD_MAX_RSS_MB");
     expect(spec.env).not.toHaveProperty("CELLD_MAX_RESIDENT_CELLS");
+  });
+
+  it("hands the process no variables of its own", () => {
+    /* An environment's variables travel in its deployed configuration, so a
+       process is started with none of them in its environment. */
+    const spec = createCelldDriver({
+      operatorEnv: { CELLD_IDLE_EVICT_S: "900" },
+    }).processSpec(specInput());
+
+    expect(Object.keys(spec.env ?? {}).filter((name) => name.startsWith("CELLD_VAR_"))).toEqual([]);
   });
 
   it("passes operator-owned celld policy through unchanged", () => {
@@ -68,12 +77,15 @@ describe("celld process specs", () => {
     });
   });
 
-  it("drops an inherited vars file in favor of the environment varset", () => {
+  it("reserves only the variables it derives itself", () => {
+    /* Scafo keeps no list of names upstream has stopped reading: a variable it
+       does not derive is the operator's to set, and celld answers for its own. */
+    expect(OPERATOR_RESERVED_ENV).not.toContain("CELLD_VARS_FILE");
+
     const spec = createCelldDriver({
       operatorEnv: { CELLD_VARS_FILE: "/shared/vars" },
     }).processSpec(specInput());
-    expect(spec.env).not.toHaveProperty("CELLD_VARS_FILE");
-    expect(spec.env).toHaveProperty("CELLD_VAR_TOKEN", "secret-token");
+    expect(spec.env).toHaveProperty("CELLD_VARS_FILE", "/shared/vars");
   });
 });
 
@@ -89,7 +101,6 @@ function specInput(overrides?: Partial<RuntimeSpecInput>): RuntimeSpecInput {
       ephemeral: false,
       createdAt: "2026-01-01T00:00:00.000Z",
     },
-    vars: { TOKEN: { value: "secret-token", secret: true } },
     ports: { public: 42010, internal: 42011 },
     node: {
       endpoint: "http://store.test",

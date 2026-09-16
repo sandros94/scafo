@@ -37,62 +37,47 @@ describe("runtime-owned deployment lifecycle", () => {
     expect(
       planReconcile({
         desired: [desired("shop", "prod", 2)],
-        actual: [runtimeProcess("shop", "prod", null)],
+        actual: [runtimeProcess("shop", "prod")],
         ports: countingPorts(),
       }),
     ).toEqual([]);
   });
 
-  it("restarts with the same ports when the varset changes", () => {
-    const running = runtimeProcess("shop", "prod", "old");
+  it("takes no action for an environment whose varset changed", () => {
+    /* A varset is carried by the next deploy, not by the running process, so
+       nothing here reacts to one changing. */
     const wanted = desired("shop", "prod", 2);
-    wanted.varsetId = "new";
-    expect(planReconcile({ desired: [wanted], actual: [running], ports: countingPorts() })).toEqual(
-      [
-        {
-          type: "restart",
-          processId: running.processId,
-          project: "shop",
-          env: "prod",
-          ports: { public: RUNNING_PORT, internal: RUNNING_PORT + 1 },
-        },
-      ],
-    );
+    wanted.env.varset = "shared";
+    expect(
+      planReconcile({
+        desired: [wanted],
+        actual: [runtimeProcess("shop", "prod")],
+        ports: countingPorts(),
+      }),
+    ).toEqual([]);
   });
 
-  it("conservatively restarts a recovered process whose configuration is unknown", () => {
-    const running = runtimeProcess("shop", "prod");
+  it("retries a pending teardown before anything else", () => {
+    const running = { ...runtimeProcess("shop", "prod"), teardownPending: true as const };
     expect(
       planReconcile({
         desired: [desired("shop", "prod", 2)],
         actual: [running],
         ports: countingPorts(),
       }),
-    ).toEqual([expect.objectContaining({ type: "restart", processId: running.processId })]);
-  });
-
-  it("retries a pending teardown before a configuration restart", () => {
-    const running = {
-      ...runtimeProcess("shop", "prod", "old"),
-      teardownPending: true as const,
-    };
-    const wanted = desired("shop", "prod", 2);
-    wanted.varsetId = "new";
-    expect(planReconcile({ desired: [wanted], actual: [running], ports: countingPorts() })).toEqual(
-      [
-        {
-          type: "stop",
-          processId: running.processId,
-          reason: "runtime teardown is pending",
-        },
-      ],
-    );
+    ).toEqual([
+      {
+        type: "stop",
+        processId: running.processId,
+        reason: "runtime teardown is pending",
+      },
+    ]);
   });
 });
 
 describe("placement removal", () => {
   it("stops an environment no longer assigned to this node", () => {
-    const running = runtimeProcess("shop", "prod", null);
+    const running = runtimeProcess("shop", "prod");
     expect(planReconcile({ desired: [], actual: [running], ports: countingPorts() })).toEqual([
       {
         type: "stop",
@@ -103,7 +88,7 @@ describe("placement removal", () => {
   });
 
   it("plans starts before unrelated stops", () => {
-    const removed = runtimeProcess("archive", "old", null);
+    const removed = runtimeProcess("archive", "old");
     const plan = planReconcile({
       desired: [desired("shop", "prod", 1)],
       actual: [removed],
@@ -113,8 +98,8 @@ describe("placement removal", () => {
   });
 
   it("orders environments and leftover stops independently of input order", () => {
-    const z = runtimeProcess("zulu", "prod", null);
-    const a = runtimeProcess("alpha", "prod", null);
+    const z = runtimeProcess("zulu", "prod");
+    const a = runtimeProcess("alpha", "prod");
     const plan = planReconcile({
       desired: [desired("zulu", "new", 1), desired("alpha", "new", 1)],
       actual: [z, a],
@@ -157,12 +142,11 @@ function desired(project: string, env: string, revision: number): DesiredEnviron
   };
 }
 
-function runtimeProcess(project: string, env: string, varset?: string | null): RuntimeProcess {
+function runtimeProcess(project: string, env: string): RuntimeProcess {
   return {
     processId: formatProcessId({ project, env }),
     project,
     env,
-    ...(varset === undefined ? {} : { configuredVarset: varset }),
     port: RUNNING_PORT,
     internalPort: RUNNING_PORT + 1,
   };

@@ -3,21 +3,18 @@
 import { ScafoError } from "../error.ts";
 import { assertReplicas } from "../placement/replicas.ts";
 import { assertSelector } from "../placement/selector.ts";
-import type {
-  EnvironmentRecord,
-  NodeSelector,
-  ReplicaCount,
-  VarsetEnvelope,
-} from "../types/registry.ts";
+import type { EnvironmentRecord, NodeSelector, ReplicaCount } from "../types/registry.ts";
 import { deepEqual, isCasConflict, namesFromKeys } from "./_shared.ts";
 import { createJson, requireJson, updateJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
-import { environmentKey, environmentsPrefix, fleetPrefix, varsetKey } from "./paths.ts";
+import { environmentKey, environmentsPrefix, fleetPrefix } from "./paths.ts";
 import { getProject } from "./projects.ts";
+import { getVarset } from "./varsets.ts";
 
 export interface CreateEnvironmentInput {
   name: string;
   ephemeral?: boolean;
+  /** Name of the project varset this environment's deploys carry. */
   varset?: string;
   /**
    * How many nodes should serve it. Left absent the environment takes the
@@ -94,20 +91,31 @@ export async function listEnvironments(ctx: RegistryContext, project: string): P
 }
 
 /**
- * Points the environment at an existing varset.
+ * Points the environment at a varset of the same project by name, or at none
+ * with `null`. The varset has to exist first, so a misspelled name is refused
+ * with `not-found` instead of being stored for a deploy to trip over.
+ *
+ * Nothing running changes: a varset is carried by deploys, so the environment's
+ * next one is where this lands.
  */
 export async function setEnvironmentVarset(
   ctx: RegistryContext,
   project: string,
   env: string,
-  varsetId: string,
+  name: string | null,
 ): Promise<EnvironmentRecord> {
-  await requireJson<VarsetEnvelope>(ctx, varsetKey(project, varsetId));
+  if (name !== null) await getVarset(ctx, project, name);
 
   const updated = await updateJson<EnvironmentRecord>(
     ctx,
     environmentKey(project, env),
-    (current) => ({ ...current, varset: varsetId }),
+    (current) => {
+      if (name === null) {
+        const { varset: _varset, ...rest } = current;
+        return rest;
+      }
+      return { ...current, varset: name };
+    },
   );
 
   return updated.value;

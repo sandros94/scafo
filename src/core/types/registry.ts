@@ -199,6 +199,7 @@ export interface EnvironmentRecord {
   prefix: string;
   /** Deployment notice; `null` until the first successful deploy. Never names a version. */
   deployment: DeploymentRevision | null;
+  /** Name of the project varset whose variables this environment's deploys carry. */
   varset?: string;
   domains: string[];
   ephemeral: boolean;
@@ -242,23 +243,13 @@ export interface DomainClaim {
   claimedAt: string;
 }
 
-/** A single variable within a varset. */
-export interface VarsetEntry {
-  value: string;
-  /** Secrets are never returned in plaintext by read APIs. */
-  secret: boolean;
-}
-
-/** Decrypted varset contents, as seen after opening a {@link VarsetEnvelope}. */
-export type PlainVarset = Record<string, VarsetEntry>;
-
 /**
- * Encrypted varset as stored. `iv` and `ct` are b64url.
- * Key: `_scafo/projects/<project>/varsets/<name>.json`.
+ * Variables an environment's deploys carry, named per project and edited in
+ * place. Key: `_scafo/projects/<project>/varsets/<name>.json`.
  */
-export interface VarsetEnvelope {
+export interface VarsetRecord {
   v: 1;
-  alg: "A256GCM";
-  iv: string;
-  ct: string;
+  name: string;
+  vars: Record<string, string>;
+  updatedAt: string;
 }

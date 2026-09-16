@@ -64,7 +64,6 @@ function process(port: number): RuntimeProcess {
     processId: `${PROJECT}--production`,
     project: PROJECT,
     env: "production",
-    configuredVarset: null,
     port,
     internalPort: port + 1,
   };

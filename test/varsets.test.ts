@@ -1,199 +1,215 @@
-/* Varsets travel sealed, and nothing about their contents leaks from what is stored. */
+/* Varsets are named records, edited in place, that an environment's deploys carry. */
 
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
+  createEnvironment,
   createProject,
-  describeVarset,
-  getVarsetEnvelope,
-  importVarsetKey,
-  openVarset,
+  deleteVarset,
+  environmentsUsingVarset,
+  getEnvironment,
+  getVarset,
+  listVarsets,
   putVarset,
-  sealVarset,
+  setEnvironmentVarset,
+  varsetHash,
 } from "../src/core/registry/index.ts";
 import { varsetKey } from "../src/core/registry/paths.ts";
-import type { PlainVarset, VarsetEnvelope } from "../src/core/types/registry.ts";
 import { sha256Hex } from "../src/core/utils/hash.ts";
 import { stableStringify } from "../src/core/utils/json.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, rejectsWith } from "./_helpers.ts";
+import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
 
-const PROJECT = "app";
+const PROJECT = "shop";
+const VARS = { DATABASE_URL: "postgres://db.test/app", FEATURE_FLAGS: "beta" };
 
-const PLAIN: PlainVarset = {
-  SUPERSECRET_MARKER_NAME: { value: "SUPERSECRET_MARKER_VALUE", secret: true },
-  PUBLIC_MARKER_NAME: { value: "PUBLIC_MARKER_VALUE", secret: false },
-  UNICODE_MARKER_NAME: { value: "héllo-wörld-🌍-ünïcode", secret: true },
-  EMPTY_MARKER_NAME: { value: "", secret: true },
-};
+let store: MemoryCasStore;
+let clock: ManualClock;
 
-function freshKey(): Promise<CryptoKey> {
-  return importVarsetKey(crypto.getRandomValues(new Uint8Array(32)));
-}
+beforeEach(async () => {
+  store = new MemoryCasStore();
+  clock = ctxWith(store);
+  await createProject(clock.ctx, { slug: PROJECT });
+});
 
-describe("seal / open", () => {
-  it("round-trips a multi-key map, unicode included", async () => {
-    const key = await freshKey();
-    const sealed = await sealVarset(PLAIN, key);
+describe("varsetHash", () => {
+  it("digests the variables, in whichever order they were written", async () => {
+    const forward = await varsetHash({ A: "1", B: "2" });
+    const backward = await varsetHash({ B: "2", A: "1" });
 
-    await expect(openVarset(sealed.envelope, key)).resolves.toEqual(PLAIN);
-    expect(sealed.envelope).toMatchObject({ v: 1, alg: "A256GCM" });
+    expect(forward).toBe(backward);
+    await expect(sha256Hex(stableStringify({ A: "1", B: "2" }))).resolves.toBe(forward);
   });
 
-  it("derives the id from the stored bytes, which anyone can verify", async () => {
-    const key = await freshKey();
-    const sealed = await sealVarset(PLAIN, key);
+  it("moves the moment a value moves, which is what makes a change visible", async () => {
+    const before = await varsetHash(VARS);
+    const after = await varsetHash({ ...VARS, FEATURE_FLAGS: "stable" });
 
-    await expect(sha256Hex(stableStringify(sealed.envelope))).resolves.toBe(sealed.id);
-    expect(sealed.id).toMatch(/^[a-f\d]{64}$/);
+    expect(after).not.toBe(before);
   });
+});
 
-  it("seals the same plaintext to different ids, since the IV is random", async () => {
-    const key = await freshKey();
-    const first = await sealVarset(PLAIN, key);
-    const second = await sealVarset(PLAIN, key);
+describe("what a varset may hold", () => {
+  it.each(["1UP", "A-B", "A B", "", "__proto__", "constructor", "prototype"])(
+    "refuses %j as a variable name, naming it",
+    async (name) => {
+      const error = await rejectsWith(
+        () => putVarset(clock.ctx, PROJECT, { name: "shared", vars: { [name]: "x" } }),
+        "invalid-varset",
+      );
+      expect(error.detail).toContain(name === "" ? '""' : name);
+    },
+  );
 
-    expect(second.id).not.toBe(first.id);
-    expect(second.envelope.iv).not.toBe(first.envelope.iv);
-  });
-
-  it("rejects a key that is not 32 bytes", async () => {
+  it("refuses a value that is not text, rather than stringifying it", async () => {
     const error = await rejectsWith(
-      () => importVarsetKey(crypto.getRandomValues(new Uint8Array(16))),
+      () =>
+        putVarset(clock.ctx, PROJECT, {
+          name: "shared",
+          vars: { PORT: 8080 } as unknown as Record<string, string>,
+        }),
       "invalid-varset",
     );
-    expect(error.status).toBe(400);
+    expect(error.detail).toContain("PORT");
   });
 
-  it("rejects the wrong key", async () => {
-    const sealed = await sealVarset(PLAIN, await freshKey());
-    const other = await freshKey();
+  it("takes a varset that holds nothing at all", async () => {
+    const stored = await putVarset(clock.ctx, PROJECT, { name: "empty", vars: {} });
 
-    const error = await rejectsWith(() => openVarset(sealed.envelope, other), "invalid-varset");
-    expect(error.detail).toContain("wrong key");
-  });
-
-  it("rejects a tampered ciphertext", async () => {
-    const key = await freshKey();
-    const sealed = await sealVarset(PLAIN, key);
-    const head = sealed.envelope.ct.slice(0, 1);
-    const tampered = {
-      ...sealed.envelope,
-      ct: (head === "A" ? "B" : "A") + sealed.envelope.ct.slice(1),
-    };
-
-    const error = await rejectsWith(() => openVarset(tampered, key), "invalid-varset");
-    expect(error.status).toBe(400);
-  });
-
-  it("rejects an envelope of an unknown version or algorithm", async () => {
-    const key = await freshKey();
-    const sealed = await sealVarset(PLAIN, key);
-    const forged = (patch: Record<string, unknown>): VarsetEnvelope =>
-      ({ ...sealed.envelope, ...patch }) as unknown as VarsetEnvelope;
-
-    const wrongVersion = await rejectsWith(
-      () => openVarset(forged({ v: 2 }), key),
-      "invalid-varset",
-    );
-    expect(wrongVersion.detail).toContain("v 2");
-
-    const wrongAlg = await rejectsWith(
-      () => openVarset(forged({ alg: "A128GCM" }), key),
-      "invalid-varset",
-    );
-    expect(wrongAlg.detail).toContain("A128GCM");
+    expect(stored.vars).toEqual({});
+    await expect(getVarset(clock.ctx, PROJECT, "empty")).resolves.toMatchObject({ vars: {} });
   });
 });
 
-describe("the sealed envelope", () => {
-  it("leaks neither key names nor values, in memory or in the bucket", async () => {
-    const store = new MemoryCasStore();
-    const { ctx } = ctxWith(store);
-    await createProject(ctx, { slug: PROJECT });
-
-    const sealed = await sealVarset(PLAIN, await freshKey());
-    await putVarset(ctx, PROJECT, sealed);
-
-    const stored = await store.get(varsetKey(PROJECT, sealed.id));
-    const haystacks = [JSON.stringify(sealed.envelope), stored?.body ?? ""];
-    const markers = [
-      ...Object.keys(PLAIN),
-      ...Object.values(PLAIN).map((entry) => entry.value),
-    ].filter((marker) => marker.length > 0);
-
-    expect(markers.length).toBeGreaterThan(0);
-    for (const haystack of haystacks) {
-      expect(haystack).not.toBe("");
-      for (const marker of markers) expect(haystack).not.toContain(marker);
-    }
-  });
-
-  it("is what getVarsetEnvelope hands back, byte for byte", async () => {
-    const store = new MemoryCasStore();
-    const { ctx } = ctxWith(store);
-    await createProject(ctx, { slug: PROJECT });
-
-    const key = await freshKey();
-    const sealed = await sealVarset(PLAIN, key);
-    await putVarset(ctx, PROJECT, sealed);
-
-    const envelope = await getVarsetEnvelope(ctx, PROJECT, sealed.id);
-    expect(envelope).toEqual(sealed.envelope);
-    await expect(openVarset(envelope, key)).resolves.toEqual(PLAIN);
-  });
-});
-
-describe("describeVarset", () => {
-  it("omits secret values outright rather than masking them", () => {
-    const described = describeVarset(PLAIN);
-
-    expect("value" in described.SUPERSECRET_MARKER_NAME).toBe(false);
-    expect(described.SUPERSECRET_MARKER_NAME).toEqual({ secret: true });
-    expect("value" in described.PUBLIC_MARKER_NAME).toBe(true);
-    expect(described.PUBLIC_MARKER_NAME).toEqual({
-      secret: false,
-      value: "PUBLIC_MARKER_VALUE",
+describe("writing and reading one", () => {
+  it("stores it under its name and replaces it in place", async () => {
+    const first = await putVarset(clock.ctx, PROJECT, { name: "shared", vars: VARS });
+    expect(first).toEqual({
+      v: 1,
+      name: "shared",
+      vars: VARS,
+      updatedAt: new Date(clock.nowMs()).toISOString(),
     });
-    expect(Object.keys(described).sort()).toEqual(Object.keys(PLAIN).sort());
+    await expect(store.get(varsetKey(PROJECT, "shared"))).resolves.not.toBeNull();
+    expect(varsetKey(PROJECT, "shared")).toBe("_scafo/projects/shop/varsets/shared.json");
+
+    clock.tick(60_000);
+    const second = await putVarset(clock.ctx, PROJECT, {
+      name: "shared",
+      vars: { DATABASE_URL: "postgres://db.test/other" },
+    });
+
+    expect(second.updatedAt).not.toBe(first.updatedAt);
+    await expect(getVarset(clock.ctx, PROJECT, "shared")).resolves.toEqual(second);
+    expect(await listVarsets(clock.ctx, PROJECT)).toEqual(["shared"]);
+  });
+
+  it("refuses a name that is not a slug", async () => {
+    const error = await rejectsWith(
+      () => putVarset(clock.ctx, PROJECT, { name: "Shared Set", vars: VARS }),
+      "invalid-slug",
+    );
+    expect(error.detail).toContain("Shared Set");
+  });
+
+  it("says plainly that one was never written", async () => {
+    const error = await rejectsWith(() => getVarset(clock.ctx, PROJECT, "missing"), "not-found");
+
+    expect(error.status).toBe(404);
+  });
+
+  it("refuses one an earlier build wrote in a sealed form, naming the way back", async () => {
+    await store.put(
+      varsetKey(PROJECT, "sealed"),
+      JSON.stringify({ v: 1, alg: "A256GCM", iv: "aaaa", ct: "bbbb" }),
+    );
+
+    const error = await rejectsWith(
+      () => getVarset(clock.ctx, PROJECT, "sealed"),
+      "invalid-varset",
+    );
+    expect(error.detail).toContain("scafo varset set");
   });
 });
 
-describe("putVarset", () => {
-  it("is idempotent for the same bytes", async () => {
-    const store = new MemoryCasStore();
-    const { ctx } = ctxWith(store);
-    await createProject(ctx, { slug: PROJECT });
+describe("listVarsets", () => {
+  it("names every varset of the project, sorted", async () => {
+    for (const name of ["staging", "shared", "preview"]) {
+      await putVarset(clock.ctx, PROJECT, { name, vars: VARS });
+    }
 
-    const sealed = await sealVarset(PLAIN, await freshKey());
-    await putVarset(ctx, PROJECT, sealed);
-    const before = await store.get(varsetKey(PROJECT, sealed.id));
-
-    await expect(putVarset(ctx, PROJECT, sealed)).resolves.toBeUndefined();
-    await expect(store.get(varsetKey(PROJECT, sealed.id))).resolves.toEqual(before);
+    expect(await listVarsets(clock.ctx, PROJECT)).toEqual(["preview", "shared", "staging"]);
+    await createProject(clock.ctx, { slug: "other" });
+    expect(await listVarsets(clock.ctx, "other")).toEqual([]);
   });
+});
 
-  it("refuses different bytes under an id that is already taken", async () => {
-    const store = new MemoryCasStore();
-    const { ctx } = ctxWith(store);
-    await createProject(ctx, { slug: PROJECT });
+describe("which environments a varset is carried by", () => {
+  it("names them sorted, and none for one nothing points at", async () => {
+    await putVarset(clock.ctx, PROJECT, { name: "shared", vars: VARS });
+    await putVarset(clock.ctx, PROJECT, { name: "spare", vars: VARS });
+    for (const env of ["staging", "production"]) {
+      await createEnvironment(clock.ctx, PROJECT, { name: env });
+      await setEnvironmentVarset(clock.ctx, PROJECT, env, "shared");
+    }
 
-    const key = await freshKey();
-    const first = await sealVarset(PLAIN, key);
-    const second = await sealVarset(PLAIN, key);
-    await putVarset(ctx, PROJECT, first);
+    expect(await environmentsUsingVarset(clock.ctx, PROJECT, "shared")).toEqual([
+      "production",
+      "staging",
+    ]);
+    expect(await environmentsUsingVarset(clock.ctx, PROJECT, "spare")).toEqual([]);
+  });
+});
 
-    await rejectsWith(
-      () => putVarset(ctx, PROJECT, { id: first.id, envelope: second.envelope }),
-      "immutable",
+describe("deleteVarset", () => {
+  it("refuses while an environment still carries it, naming them", async () => {
+    await putVarset(clock.ctx, PROJECT, { name: "shared", vars: VARS });
+    await createEnvironment(clock.ctx, PROJECT, { name: "production" });
+    await setEnvironmentVarset(clock.ctx, PROJECT, "production", "shared");
+
+    const error = await rejectsWith(
+      () => deleteVarset(clock.ctx, PROJECT, "shared"),
+      "reference-held",
     );
-    await expect(getVarsetEnvelope(ctx, PROJECT, first.id)).resolves.toEqual(first.envelope);
+    expect(error.detail).toContain("production");
+    await expect(getVarset(clock.ctx, PROJECT, "shared")).resolves.toMatchObject({
+      name: "shared",
+    });
   });
 
-  it("throws not-found for a varset that was never stored", async () => {
-    const { ctx } = ctxWith(new MemoryCasStore());
-    await createProject(ctx, { slug: PROJECT });
+  it("deletes one nothing points at, and says so when it was never there", async () => {
+    await putVarset(clock.ctx, PROJECT, { name: "spare", vars: VARS });
 
-    const error = await rejectsWith(() => getVarsetEnvelope(ctx, PROJECT, "deadbeef"), "not-found");
-    expect(error.status).toBe(404);
+    await expect(deleteVarset(clock.ctx, PROJECT, "spare")).resolves.toBeUndefined();
+    await rejectsWith(() => getVarset(clock.ctx, PROJECT, "spare"), "not-found");
+    await rejectsWith(() => deleteVarset(clock.ctx, PROJECT, "spare"), "not-found");
+  });
+});
+
+describe("setEnvironmentVarset", () => {
+  beforeEach(async () => {
+    await createEnvironment(clock.ctx, PROJECT, { name: "production" });
+  });
+
+  it("requires the varset to exist before an environment points at it", async () => {
+    await rejectsWith(
+      () => setEnvironmentVarset(clock.ctx, PROJECT, "production", "missing"),
+      "not-found",
+    );
+    await expect(getEnvironment(clock.ctx, PROJECT, "production")).resolves.not.toHaveProperty(
+      "varset",
+    );
+  });
+
+  it("points at one by name, and drops the field again", async () => {
+    await putVarset(clock.ctx, PROJECT, { name: "shared", vars: VARS });
+
+    const pointed = await setEnvironmentVarset(clock.ctx, PROJECT, "production", "shared");
+    expect(pointed.varset).toBe("shared");
+
+    const cleared = await setEnvironmentVarset(clock.ctx, PROJECT, "production", null);
+    expect("varset" in cleared).toBe(false);
+    await expect(getEnvironment(clock.ctx, PROJECT, "production")).resolves.not.toHaveProperty(
+      "varset",
+    );
   });
 });

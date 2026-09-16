@@ -563,7 +563,6 @@ function bothProjectsReconciled(): Reconciler {
       processId: `${project}--${ENVIRONMENT}`,
       project,
       env: ENVIRONMENT,
-      configuredVarset: null,
       port: 42_001,
       internalPort: 42_002,
     })),

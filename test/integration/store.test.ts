@@ -10,19 +10,16 @@ import {
   createBuild,
   createEnvironment,
   createProject,
-  getVarsetEnvelope,
-  importVarsetKey,
+  getVarset,
   initRegistry,
   type LeaseHandle,
   listProjects,
-  openVarset,
   probeStore,
   putVarset,
   readMeta,
   type RegistryContext,
   releaseDomain,
   renewLease,
-  sealVarset,
   setEnvironmentVarset,
 } from "../../src/core/registry/index.ts";
 import type { CasStore } from "../../src/core/types/store.ts";
@@ -233,15 +230,14 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
         const flipped = await recordDeployment(ctx, project, "prod", buildId);
         expect(flipped.environment.deployment).toMatchObject({ revision: 1 });
 
-        const key = await importVarsetKey(crypto.getRandomValues(new Uint8Array(32)));
-        const sealed = await sealVarset({ TOKEN: { value: "s3cr3t", secret: true } }, key);
-        await putVarset(ctx, project, sealed);
-        await expect(
-          openVarset(await getVarsetEnvelope(ctx, project, sealed.id), key),
-        ).resolves.toEqual({ TOKEN: { value: "s3cr3t", secret: true } });
+        await putVarset(ctx, project, { name: "shared", vars: { TOKEN: "s3cr3t" } });
+        await expect(getVarset(ctx, project, "shared")).resolves.toMatchObject({
+          name: "shared",
+          vars: { TOKEN: "s3cr3t" },
+        });
 
-        const configured = await setEnvironmentVarset(ctx, project, "prod", sealed.id);
-        expect(configured.varset).toBe(sealed.id);
+        const configured = await setEnvironmentVarset(ctx, project, "prod", "shared");
+        expect(configured.varset).toBe("shared");
 
         await claimDomain(ctx, host, project, "prod");
         await expect(checkDomain(ctx, host)).resolves.toMatchObject({

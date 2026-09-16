@@ -93,7 +93,6 @@ export function createReconciler(
   const known = new Map<string, RuntimeProcess>();
   const executor = createExecutor({
     daemon,
-    registry,
     driver,
     baseEnv: opts?.baseEnv ?? runtimeBaseEnv(globalThis.process?.env ?? {}),
     known,

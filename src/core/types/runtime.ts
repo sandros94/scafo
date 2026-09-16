@@ -5,7 +5,7 @@
  * together.
  */
 
-import type { EnvironmentRecord, PlainVarset } from "./registry.ts";
+import type { EnvironmentRecord } from "./registry.ts";
 import type { ProcessSpec } from "./supervisor.ts";
 
 /** One runtime process of an environment, as the planner sees it. */
@@ -16,8 +16,6 @@ export interface RuntimeProcess {
   processId: string;
   project: string;
   env: string;
-  /** Varset supplied when this process started; absent for an adopted process. */
-  configuredVarset?: string | null;
   /** A failed supervisor stop must be retried before any other lifecycle action. */
   teardownPending?: true;
   /** Loopback port serving public traffic. */
@@ -57,8 +55,6 @@ export interface RuntimeNodeInput {
 export interface RuntimeSpecInput {
   project: string;
   env: EnvironmentRecord;
-  /** Opened varset of the environment; null when it has none or its key is not held. */
-  vars: PlainVarset | null;
   ports: { public: number; internal: number };
   node: RuntimeNodeInput;
   /**

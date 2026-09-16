@@ -145,8 +145,8 @@ export async function executeReap(
     result.deleted.push(key);
   }
 
-  /* TODO: varsets are shared by builds and environments, so reaping them needs
-     reference counting across both. They are deliberately left untouched. */
+  /* Varsets are named and shared on purpose, and an operator deletes one
+     explicitly once no environment points at it. Nothing here reaps them. */
   return result;
 }
 

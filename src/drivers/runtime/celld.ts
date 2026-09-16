@@ -56,7 +56,6 @@ export const OPERATOR_RESERVED_ENV: string[] = [
   "CELLD_ADVERTISE",
   /* Derived from ingress topology, not environment input. */
   "CELLD_TRUST_FORWARDED_HEADERS",
-  "CELLD_VARS_FILE",
 ];
 
 export interface CelldDriverOptions {
@@ -198,14 +197,6 @@ function processEnv(
 
   /* The node ingress terminates TLS and supplies forwarded headers. */
   env.CELLD_TRUST_FORWARDED_HEADERS = "1";
-
-  /* A shared inherited vars file could merge unrelated environment settings. */
-  delete env.CELLD_VARS_FILE;
-
-  /* Preserve each varset name after the Celld variable prefix. */
-  for (const [name, entry] of Object.entries(input.vars ?? {})) {
-    if (name !== "") env[`CELLD_VAR_${name}`] = entry.value;
-  }
 
   return env;
 }

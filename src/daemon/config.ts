@@ -67,12 +67,6 @@ export interface DaemonConfig {
    */
   ingress?: IngressConfig;
   /**
-   * Where this node reads the key that opens its environments' sealed variable
-   * sets. Absent means it holds none, and may only serve environments that point
-   * at no varset at all.
-   */
-  varsets?: VarsetsConfig;
-  /**
    * What carries traffic between this node and its peers. Absent is only legal
    * for a node that stays on loopback: see {@link TransportConfig}.
    */
@@ -126,12 +120,6 @@ export interface ApiConfig {
   public: boolean;
   /** Maximum bytes accepted by any JSON control request. */
   jsonBytes: number;
-}
-
-/** How this node gets at the variables its environments are configured with. */
-export interface VarsetsConfig {
-  /** File holding the 32-byte AES-256 key, raw or as base64url or hex text. */
-  keyFile: string;
 }
 
 /**
@@ -249,7 +237,6 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
   const ingressAccessLog = resolveIngressAccessLog(sources, observing);
   /* Operator runtime config overrides the observability telemetry default. */
   const celldEnv = withTelemetry(resolveCelldEnv(sources), observing);
-  const keyFile = resolve("varsetKeyFile", sources);
   const transport = resolveTransport(sources);
   const wireguard = resolveWireguard(sources);
 
@@ -302,7 +289,6 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
       jsonBytes: resolvePositiveSafeInteger("jsonBytes", sources, DEFAULT_JSON_BYTES),
     },
     ...(ingress === undefined ? {} : { ingress }),
-    ...(keyFile === undefined ? {} : { varsets: { keyFile } }),
     ...(transport === undefined ? {} : { transport }),
     ...(wireguard === undefined ? {} : { wireguard }),
   };
@@ -478,11 +464,6 @@ const ORIGINS = {
     flag: "traefik-entrypoints",
     env: ["SCAFO_TRAEFIK_ENTRYPOINTS"],
     file: "ingress.entryPoints",
-  },
-  varsetKeyFile: {
-    flag: "varset-key-file",
-    env: ["SCAFO_VARSET_KEY_FILE"],
-    file: "varsets.keyFile",
   },
   /* `SCAFO_STORAGE_TOKEN` is the name this had when the token only guarded storage. */
   ingressToken: {

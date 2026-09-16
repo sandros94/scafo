@@ -63,8 +63,6 @@ export interface DaemonContext {
   version: string;
   /** Node private key used for peer tokens; its public half is in the registry. */
   signingKey?: NodeSigningKey;
-  /** Opens the environments' sealed varsets; without it they cannot be served. */
-  varsetKey?: CryptoKey;
   /** The reconcile loop, when this node runs one. */
   reconciler?: Reconciler;
   /**

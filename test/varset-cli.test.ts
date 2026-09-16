@@ -1,46 +1,34 @@
 /*
- * `scafo varset`: reading a variable file, deciding what is secret, reading the key that seals
- * it, and the round trip through the registry that an environment's variables make.
+ * `scafo varset` and `scafo env varset`: reading a variable file, the surface the
+ * subcommands present, and every line they put on the terminal.
  */
 
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { type CommandDef, parseArgs } from "citty";
-import { afterAll, describe, expect, it } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
-import { loadDaemonConfig } from "../src/daemon/config.ts";
-import { flagList } from "../src/cli/_flags.ts";
+import type { ArgsDef, CommandDef } from "citty";
+import { describe, expect, it } from "vitest";
+import { env } from "../src/cli/commands/env.ts";
 import { varset } from "../src/cli/commands/varset.ts";
-import { decodeVarsetKey, readVarsetKeyFile, VARSET_KEY_BYTES } from "../src/cli/_varset-key.ts";
 import {
-  formatVarset,
+  describeEnvironmentVarset,
+  describeVarsetUse,
+  describeVarsetWrite,
+  formatVarsetVars,
   parseDotenv,
-  setVarset,
-  showVarset,
-  toPlainVarset,
+  readVarsetFlags,
 } from "../src/cli/_varset.ts";
-import { createBuild } from "../src/core/registry/builds.ts";
-import type { RegistryContext } from "../src/core/registry/context.ts";
-import { createEnvironment, getEnvironment } from "../src/core/registry/environments.ts";
-import { createProject } from "../src/core/registry/projects.ts";
-import { importVarsetKey } from "../src/core/registry/varsets.ts";
-import { toBase64Url } from "../src/core/utils/base64.ts";
-import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, rejectsWith } from "./_helpers.ts";
+import { rejectsWith } from "./_helpers.ts";
 
 const PROJECT = "shop";
-const ENVIRONMENT = "prod";
-const BUILD = "1111aaaa";
 
-/** The value every "did a secret leak" check scans for. */
+/** The value every "did a variable leak" check scans for. */
 const SECRET_MARKER = "hunter2-do-not-print";
 
-const roots: string[] = [];
-
-afterAll(async () => {
-  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
-});
+/** Declared flags of one subcommand, by the name an operator types. */
+function argsOf(command: CommandDef, name: string): ArgsDef {
+  const subCommands = command.subCommands as Record<string, CommandDef>;
+  const sub = subCommands[name];
+  if (sub === undefined) throw new Error(`no "${name}" subcommand`);
+  return sub.args as ArgsDef;
+}
 
 describe("reading a variable file", () => {
   it("takes one KEY=VALUE per line, skipping blank lines and comments", () => {
@@ -90,6 +78,9 @@ describe("reading a variable file", () => {
       ["1A=1", "usable variable name"],
       ["A B=1", "usable variable name"],
       ["A=1\nA=2", "set twice"],
+      /* Names a plain object inherits: refused as names, never reported as repeats. */
+      ["__proto__=1", "usable variable name"],
+      ["constructor=1", "usable variable name"],
     ];
 
     for (const [text, expected] of cases) {
@@ -104,309 +95,132 @@ describe("reading a variable file", () => {
   });
 });
 
-describe("deciding what is secret", () => {
-  it("marks every variable secret unless it was named public", () => {
-    const plain = toPlainVarset({ DATABASE_URL: "postgres://db.test", FEATURE_FLAGS: "beta" }, [
-      "FEATURE_FLAGS",
+describe("the surface the subcommands present", () => {
+  it("manages varsets by name, per project", () => {
+    expect(Object.keys(varset.subCommands as Record<string, CommandDef>).sort()).toEqual([
+      "delete",
+      "list",
+      "set",
+      "show",
     ]);
 
-    expect(plain).toEqual({
-      DATABASE_URL: { value: "postgres://db.test", secret: true },
-      FEATURE_FLAGS: { value: "beta", secret: false },
-    });
-  });
-
-  it("defaults to secret when nothing is named public at all", () => {
-    const plain = toPlainVarset({ A: "1", B: "2" });
-
-    expect(Object.values(plain).every((entry) => entry.secret)).toBe(true);
-  });
-
-  it("refuses to mark a variable that is not in the file public", async () => {
-    /* A misspelled --public would otherwise pass silently and leave the variable
-       the operator meant to publish sealed, which is only discovered later. */
-    const error = await rejectsWith(
-      () => Promise.resolve(toPlainVarset({ FEATURE_FLAGS: "beta" }, ["FEATURE_FLAG"])),
-      "invalid-input",
-    );
-
-    expect(error.detail).toContain("FEATURE_FLAG");
-  });
-});
-
-describe("the names one --public flag carries", () => {
-  /** The flags of `scafo varset set` exactly as citty hands them to its run. */
-  function setFlags(argv: string[]): Record<string, unknown> {
-    const subCommands = varset.subCommands as Record<string, CommandDef>;
-    /* The required flags stand in for what an operator always types; only what
-       comes after them is what these tests are about. */
-    const required = ["--project", PROJECT, "--env", ENVIRONMENT, "--file", "app.env"];
-    return parseArgs([...required, ...argv], subCommands.set?.args as never) as Record<
-      string,
-      unknown
-    >;
-  }
-
-  it("names every variable in one comma-separated flag", () => {
-    const flags = setFlags(["--public", "FEATURE_FLAGS, PUBLIC_URL,BUILD_SHA"]);
-
-    expect(flagList(flags.public)).toEqual(["FEATURE_FLAGS", "PUBLIC_URL", "BUILD_SHA"]);
-  });
-
-  it("says comma-separated in its own help, because a repeat cannot be honoured", () => {
-    /* citty keeps only the LAST occurrence of a repeated string flag: everything
-       an operator listed before it never reaches the command. A description that
-       invited the repeat would publish one variable and silently seal the rest,
-       so it asks for the one shape the parser can carry. */
-    expect(setFlags(["--public", "A", "--public", "B"]).public).toBe("B");
-
-    const args = (varset.subCommands as Record<string, CommandDef>).set?.args as Record<
-      string,
-      { description?: string }
-    >;
-    expect(args.public?.description).toContain("comma-separated");
-  });
-
-  it("honours an array, for a parser that one day hands the repeats over", () => {
-    expect(flagList(["A,B", "C"])).toEqual(["A", "B", "C"]);
-  });
-
-  it("names nothing when the flag is absent or blank", () => {
-    expect(flagList(setFlags([]).public)).toEqual([]);
-    expect(flagList(setFlags(["--public", ""]).public)).toEqual([]);
-    expect(flagList(" , ")).toEqual([]);
-  });
-});
-
-describe("reading the key file", () => {
-  it("accepts the three forms a 32-byte key arrives in, and reads the same key out of each", async () => {
-    const raw = crypto.getRandomValues(new Uint8Array(VARSET_KEY_BYTES));
-    const hex = [...raw].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-    const files = {
-      raw,
-      "hex": `${hex}\n`,
-      "hex-upper": hex.toUpperCase(),
-      "b64url": toBase64Url(raw),
-      "b64url-padded": `${toBase64Url(raw)}=\n`,
-    };
-
-    for (const [name, contents] of Object.entries(files)) {
-      const path = await keyFile(name, contents);
-
-      /* Same bytes whichever spelling: an operator who re-encodes the key does
-         not lock themselves out of their own varsets. */
-      expect([...(await keyBytes(path))], name).toEqual([...raw]);
-      await expect(readVarsetKeyFile(path)).resolves.toBeDefined();
+    const set = argsOf(varset, "set");
+    expect(Object.keys(set)).toContain("name");
+    expect(Object.keys(set)).toContain("file");
+    /* A varset belongs to a project and is carried by whichever environments
+       point at it, so neither an environment nor a key file is named here. */
+    for (const gone of ["env", "public", "key-file"]) {
+      expect(Object.keys(set), gone).not.toContain(gone);
     }
+    expect(Object.keys(argsOf(varset, "show"))).toContain("reveal");
   });
 
-  it("refuses anything that is not one of them, naming all three", async () => {
-    const cases: Record<string, Uint8Array | string> = {
-      "empty": "",
-      "short": crypto.getRandomValues(new Uint8Array(31)),
-      "long": crypto.getRandomValues(new Uint8Array(64)),
-      "prose": "this is not a key, it is a sentence",
-      "hex-of-16-bytes": "00112233445566778899aabbccddeeff",
-      "b64url-of-31-bytes": toBase64Url(crypto.getRandomValues(new Uint8Array(31))),
-    };
+  it("points an environment at one through `scafo env varset`", () => {
+    expect(Object.keys(env.subCommands as Record<string, CommandDef>)).toContain("varset");
 
-    for (const [name, contents] of Object.entries(cases)) {
-      const path = await keyFile(name, contents);
-
-      const error = await rejectsWith(() => readVarsetKeyFile(path), "invalid-input");
-      expect(error.detail, name).toContain("32 raw bytes");
-      expect(error.detail, name).toContain("hex");
-      expect(error.detail, name).toContain("base64url");
-    }
-  });
-
-  it("refuses a file that is not there, rather than serving without variables", async () => {
-    const error = await rejectsWith(
-      () => readVarsetKeyFile(join(tmpdir(), "scafo-no-such-key-file")),
-      "invalid-input",
-    );
-
-    expect(error.detail).toContain("could not be opened");
-  });
-
-  it("takes the key file from a flag, the environment or the file", async () => {
-    const required = {
-      SCAFO_S3_ENDPOINT: "http://store.test:9000",
-      SCAFO_S3_BUCKET: "registry",
-      SCAFO_S3_ACCESS_KEY: "key",
-      SCAFO_S3_SECRET_KEY: "secret",
-    };
-    const configPath = "/etc/scafo/scafo.config.jsonc";
-    const readConfig = (path: string): Promise<string | null> =>
-      Promise.resolve(path === configPath ? JSON.stringify({ varsets: { keyFile: "/f" } }) : null);
-
-    const fromFlag = await loadDaemonConfig({
-      env: { ...required, SCAFO_VARSET_KEY_FILE: "/e" },
-      flags: { "varset-key-file": "/k" },
-    });
-    const fromEnv = await loadDaemonConfig({
-      configPath,
-      readFile: readConfig,
-      env: { ...required, SCAFO_VARSET_KEY_FILE: "/e" },
-    });
-    const fromFile = await loadDaemonConfig({ configPath, readFile: readConfig, env: required });
-    const absent = await loadDaemonConfig({ env: required });
-
-    expect([
-      fromFlag.varsets?.keyFile,
-      fromEnv.varsets?.keyFile,
-      fromFile.varsets?.keyFile,
-      absent.varsets,
-    ]).toEqual(["/k", "/e", "/f", undefined]);
+    const args = Object.keys(argsOf(env, "varset"));
+    expect(args).toContain("name");
+    expect(args).toContain("none");
   });
 });
 
-describe("the round trip an environment's variables make", () => {
-  it("seals them, stores them and points the environment at what it stored", async () => {
-    const world = await seededRegistry();
-
-    const result = await setVarset(world.registry, {
-      project: PROJECT,
-      env: ENVIRONMENT,
-      plain: toPlainVarset({ DATABASE_URL: SECRET_MARKER, FEATURE_FLAGS: "beta" }, [
-        "FEATURE_FLAGS",
-      ]),
-      key: world.key,
-    });
-
-    const environment = await getEnvironment(world.registry, PROJECT, ENVIRONMENT);
-    expect(environment.varset).toBe(result.id);
-    expect(result.id).toMatch(/^[0-9a-f]{64}$/);
-  });
-
-  it("opens what it sealed, with the key read back out of a file", async () => {
-    const world = await seededRegistry();
-    const path = await keyFile("round-trip", world.raw);
-    await setVarset(world.registry, {
-      project: PROJECT,
-      env: ENVIRONMENT,
-      plain: toPlainVarset({ DATABASE_URL: SECRET_MARKER, FEATURE_FLAGS: "beta" }, [
-        "FEATURE_FLAGS",
-      ]),
-      key: world.key,
-    });
-
-    const shown = await showVarset(world.registry, {
-      project: PROJECT,
-      env: ENVIRONMENT,
-      key: await readVarsetKeyFile(path),
-    });
-
-    expect(shown.described).toEqual({
-      DATABASE_URL: { secret: true },
-      FEATURE_FLAGS: { secret: false, value: "beta" },
-    });
-  });
-
-  it("refuses the wrong key rather than reporting an environment with no variables", async () => {
-    const world = await seededRegistry();
-    await setVarset(world.registry, {
-      project: PROJECT,
-      env: ENVIRONMENT,
-      plain: toPlainVarset({ A: "1" }),
-      key: world.key,
-    });
-
-    const other = await importVarsetKey(crypto.getRandomValues(new Uint8Array(VARSET_KEY_BYTES)));
-
-    const error = await rejectsWith(
-      () => showVarset(world.registry, { project: PROJECT, env: ENVIRONMENT, key: other }),
-      "invalid-varset",
+describe("what `scafo varset set` prints", () => {
+  it("says what it holds, who carries it, and when that lands", () => {
+    expect(
+      describeVarsetWrite({
+        project: PROJECT,
+        name: "shared",
+        variables: 3,
+        environments: ["production", "staging"],
+      }),
+    ).toBe(
+      `scafo: varset "shared" of "shop" holds 3 variables; used by production, staging — ` +
+        `takes effect at their next deploy`,
     );
-
-    expect(error.detail).toContain("wrong key");
   });
 
-  it("says so plainly when the environment carries no variables at all", async () => {
-    const world = await seededRegistry();
-
-    const error = await rejectsWith(
-      () => showVarset(world.registry, { project: PROJECT, env: ENVIRONMENT, key: world.key }),
-      "not-found",
-    );
-
-    expect(error.detail).toContain(`${PROJECT}/${ENVIRONMENT}`);
+  it("says so plainly when nothing carries it yet", () => {
+    expect(
+      describeVarsetWrite({ project: PROJECT, name: "spare", variables: 1, environments: [] }),
+    ).toBe(`scafo: varset "spare" of "shop" holds 1 variable; no environment points at it yet`);
   });
 });
 
-describe("what `scafo varset show` puts on the terminal", () => {
-  it("never prints a secret value, key in hand or not", async () => {
-    const world = await seededRegistry();
-    await setVarset(world.registry, {
-      project: PROJECT,
-      env: ENVIRONMENT,
-      plain: toPlainVarset({ DATABASE_URL: SECRET_MARKER, API_TOKEN: SECRET_MARKER }, []),
-      key: world.key,
-    });
+describe("what `scafo varset show` prints", () => {
+  const vars = { DATABASE_URL: SECRET_MARKER, FEATURE_FLAGS: "beta" };
 
-    const shown = await showVarset(world.registry, {
-      project: PROJECT,
-      env: ENVIRONMENT,
-      key: world.key,
-    });
-    const printed = formatVarset(shown.described);
+  it("names the variables and nothing else, because this output is read over shoulders", () => {
+    const printed = formatVarsetVars(vars);
 
+    expect(printed).toBe("DATABASE_URL\nFEATURE_FLAGS");
     expect(printed).not.toContain(SECRET_MARKER);
-    expect(JSON.stringify(shown)).not.toContain(SECRET_MARKER);
-    /* The names are not the secret, and an operator needs them to know what is set. */
-    expect(printed.split("\n").sort()).toEqual(["API_TOKEN (secret)", "DATABASE_URL (secret)"]);
   });
 
-  it("prints a public value as it is, so it can be checked at a glance", async () => {
-    const world = await seededRegistry();
-    await setVarset(world.registry, {
-      project: PROJECT,
-      env: ENVIRONMENT,
-      plain: toPlainVarset({ FEATURE_FLAGS: "beta", TOKEN: SECRET_MARKER }, ["FEATURE_FLAGS"]),
-      key: world.key,
-    });
+  it("prints the values only when they were asked for", () => {
+    expect(formatVarsetVars(vars, { reveal: true })).toBe(
+      `DATABASE_URL=${SECRET_MARKER}\nFEATURE_FLAGS=beta`,
+    );
+  });
 
-    const shown = await showVarset(world.registry, {
-      project: PROJECT,
-      env: ENVIRONMENT,
-      key: world.key,
-    });
-
-    expect(formatVarset(shown.described)).toBe("FEATURE_FLAGS=beta\nTOKEN (secret)");
+  it("sorts by name, whichever order the file was written in", () => {
+    expect(formatVarsetVars({ B: "2", A: "1" }, { reveal: true })).toBe("A=1\nB=2");
+    expect(formatVarsetVars({})).toBe("");
   });
 });
 
-interface World {
-  registry: RegistryContext;
-  key: CryptoKey;
-  /** The same key, as its 32 bytes. */
-  raw: Uint8Array;
-}
-
-/** A registry holding one project, one deployed environment and its build history. */
-async function seededRegistry(): Promise<World> {
-  const { ctx } = ctxWith(new MemoryCasStore());
-  await createProject(ctx, { slug: PROJECT });
-  await createEnvironment(ctx, PROJECT, { name: ENVIRONMENT });
-  await createBuild(ctx, PROJECT, {
-    id: BUILD,
-    celldVersionId: `version-${BUILD}`,
+describe("what `scafo varset list` prints", () => {
+  it("gives one line per varset: what it holds and who carries it", () => {
+    expect(
+      describeVarsetUse({
+        project: PROJECT,
+        name: "shared",
+        variables: 3,
+        environments: ["production", "staging"],
+      }),
+    ).toBe("shared: 3 variables, used by production, staging");
+    expect(
+      describeVarsetUse({ project: PROJECT, name: "spare", variables: 1, environments: [] }),
+    ).toBe("spare: 1 variable, used by no environment");
   });
-  await recordDeployment(ctx, PROJECT, ENVIRONMENT, BUILD);
+});
 
-  const raw = crypto.getRandomValues(new Uint8Array(VARSET_KEY_BYTES));
-  return { registry: ctx, key: await importVarsetKey(raw), raw };
-}
+describe("what `scafo env varset` prints", () => {
+  const target = { project: PROJECT, env: "production" };
 
-/** The bytes `decodeVarsetKey` reads out of a file, whatever form it is in. */
-async function keyBytes(path: string): Promise<Uint8Array> {
-  return decodeVarsetKey(new Uint8Array(await readFile(path)), path);
-}
+  it("names the varset and says when it lands", () => {
+    expect(describeEnvironmentVarset(target, "shared")).toBe(
+      `scafo: "shop/production" carries varset "shared"; it takes effect at the environment's ` +
+        `next deploy`,
+    );
+  });
 
-async function keyFile(name: string, contents: Uint8Array | string): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "scafo-varset-key-"));
-  roots.push(root);
-  const path = join(root, name);
-  await writeFile(path, contents);
-  return path;
-}
+  it("says the same when the environment stops carrying one", () => {
+    expect(describeEnvironmentVarset(target, null)).toBe(
+      `scafo: "shop/production" carries no varset; it takes effect at the environment's ` +
+        `next deploy`,
+    );
+  });
+});
+
+describe("the two ways `scafo env varset` can be told what to do", () => {
+  it("takes exactly one of them", () => {
+    expect(readVarsetFlags({ name: "shared", none: false })).toBe("shared");
+    expect(readVarsetFlags({ name: undefined, none: true })).toBeNull();
+  });
+
+  it("refuses both at once, and neither at all", async () => {
+    const both = await rejectsWith(
+      () => Promise.resolve(readVarsetFlags({ name: "shared", none: true })),
+      "invalid-input",
+    );
+    expect(both.detail).toContain("--none");
+
+    /* Neither is not read as "--none": an accidental `scafo env varset` that
+       dropped a varset would change what the next deploy carries. */
+    const neither = await rejectsWith(
+      () => Promise.resolve(readVarsetFlags({ name: undefined, none: false })),
+      "invalid-input",
+    );
+    expect(neither.detail).toContain("--name");
+  });
+});

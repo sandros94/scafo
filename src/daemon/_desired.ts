@@ -1,6 +1,5 @@
 /* Internal: what the registry says THIS node should be serving. */
 
-import { ScafoError } from "../core/error.ts";
 import type { DesiredEnvironment } from "../core/placement/reconcile.ts";
 import { deploymentRevision } from "../core/registry/_deployment.ts";
 import { readJson } from "../core/registry/cas.ts";
@@ -9,18 +8,12 @@ import { listEnvironments } from "../core/registry/environments.ts";
 import { environmentKey } from "../core/registry/paths.ts";
 import { listPlacements } from "../core/registry/placement.ts";
 import { isProjectBlocked, listProjects } from "../core/registry/projects.ts";
-import { getVarsetEnvelope, openVarset } from "../core/registry/varsets.ts";
 import {
   type ConcurrencyGate,
   createConcurrencyGate,
   mapConcurrent,
 } from "../core/utils/concurrency.ts";
-import type {
-  EnvironmentRecord,
-  NodeSelector,
-  PlacementRecord,
-  PlainVarset,
-} from "../core/types/registry.ts";
+import type { EnvironmentRecord, NodeSelector, PlacementRecord } from "../core/types/registry.ts";
 
 /** One environment's placement as this node reads it. */
 export interface PlacementView {
@@ -79,29 +72,6 @@ export async function readDesired(
     placements: perProject.flatMap((entry) => entry.placements),
     failures: perProject.flatMap((entry) => entry.failures),
   };
-}
-
-/** Opens an environment varset. A configured but unreadable varset throws so
- * the caller records the failure instead of starting with missing variables. */
-export async function openEnvironmentVars(
-  registry: RegistryContext,
-  wanted: DesiredEnvironment,
-  key?: CryptoKey,
-): Promise<PlainVarset | null> {
-  const varsetId = wanted.varsetId;
-  if (varsetId === undefined) return null;
-
-  if (key === undefined) {
-    throw new ScafoError("invalid-varset", "No key for this environment's variables", {
-      detail:
-        `"${wanted.project}/${wanted.env.name}" is configured with varset "${varsetId}", ` +
-        `which this node holds no key for: point "varsets.keyFile" at the key file, ` +
-        `set SCAFO_VARSET_KEY_FILE, or pass --varset-key-file`,
-    });
-  }
-
-  const envelope = await getVarsetEnvelope(registry, wanted.project, varsetId);
-  return openVarset(envelope, key);
 }
 
 /** One project's environments, filtered to this node, and what placed them. */
@@ -183,9 +153,5 @@ export function resolveEnvironmentDeployment(
   const revision = deploymentRevision(env);
   if (revision === null) return null;
 
-  return {
-    project,
-    env,
-    varsetId: env.varset,
-  };
+  return { project, env };
 }

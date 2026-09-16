@@ -7,7 +7,7 @@ import { assertSlug } from "../utils/slug.ts";
 /** Prefix all registry documents live under. */
 const ROOT = "_scafo";
 
-/** Content ids (builds, varsets) are lowercase hex digests. */
+/** Content ids (builds) are lowercase hex digests. */
 export const ID_RE: RegExp = /^[a-f\d]{8,64}$/;
 
 /** Node ids double as celld session ids, which may contain underscores. */
@@ -216,9 +216,9 @@ export function varsetsPrefix(project: string): string {
   return `${projectsPrefix()}${project}/varsets/`;
 }
 
-export function varsetKey(project: string, id: string): string {
-  assertId(id);
-  return `${varsetsPrefix(project)}${id}.json`;
+export function varsetKey(project: string, name: string): string {
+  assertSlug(name);
+  return `${varsetsPrefix(project)}${name}.json`;
 }
 
 /**

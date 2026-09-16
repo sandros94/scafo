@@ -8,11 +8,7 @@ import {
   createProject,
   environmentKey,
   getEnvironment,
-  importVarsetKey,
   listEnvironments,
-  putVarset,
-  sealVarset,
-  setEnvironmentVarset,
 } from "../src/core/registry/index.ts";
 import { fleetPrefix } from "../src/core/registry/paths.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
@@ -142,23 +138,5 @@ describe("deployment revision", () => {
       {},
     );
     await rejectsWith(() => recordDeployment(clock.ctx, PROJECT, ENV, BUILD), "invalid-input");
-  });
-});
-
-describe("setEnvironmentVarset", () => {
-  it("requires the varset to exist", async () => {
-    await rejectsWith(() => setEnvironmentVarset(clock.ctx, PROJECT, ENV, "deadbeef"), "not-found");
-  });
-
-  it("updates the environment without claiming which build is current", async () => {
-    const frozen = "bbbbbbbb";
-    const key = await importVarsetKey(crypto.getRandomValues(new Uint8Array(32)));
-    const sealed = await sealVarset({ TOKEN: { value: "t", secret: true } }, key);
-    await putVarset(clock.ctx, PROJECT, sealed);
-    await createBuild(clock.ctx, PROJECT, { id: frozen });
-    await recordDeployment(clock.ctx, PROJECT, ENV, frozen);
-
-    const update = await setEnvironmentVarset(clock.ctx, PROJECT, ENV, sealed.id);
-    expect(update.varset).toBe(sealed.id);
   });
 });
