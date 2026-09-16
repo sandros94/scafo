@@ -225,7 +225,6 @@ function buildApp(): ReturnType<typeof createNodeApp> {
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: idleSupervisor(),
-    version: "0.0.0-test",
     versions: TEST_VERSIONS,
   });
 }
@@ -281,6 +280,7 @@ function idleSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: (): ProcessStatus[] => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

@@ -3,6 +3,7 @@
 import { readFile } from "node:fs/promises";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
+import { safeJsonParse } from "unsecure/sanitize";
 import { ScafoError } from "../core/error.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
 import {
@@ -140,7 +141,8 @@ export async function loadOperatorKeySource(spec: string): Promise<OperatorKeySo
 export function readOperatorDocument(text: string, source: string): OperatorKeySource {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    /* Somebody else's file: read without the keys an object answers for on its own. */
+    parsed = safeJsonParse<unknown>(text);
   } catch (error) {
     throw notAnOperatorFile(source, "it does not hold valid JSON", error);
   }
@@ -231,7 +233,7 @@ export function formatPublicOperator(pub: PublicOperator): string {
 export function readPublicOperator(text: string, source: string): PublicOperator {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    parsed = safeJsonParse<unknown>(text);
   } catch (error) {
     throw notAPublicOperator(source, "it does not hold valid JSON", error);
   }

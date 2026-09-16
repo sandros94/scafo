@@ -185,8 +185,11 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       const processes: RuntimeProcess[] = [];
       for (const status of daemon.supervisor.list()) {
         if (status.state !== "running") {
+          /* The exit is read here and nowhere else, so this is the pass that
+             owes the supervisor the word that it may drop the id. */
           quarantined.delete(status.id);
           known.delete(status.id);
+          daemon.supervisor.forget(status.id);
           continue;
         }
         const bookkept = known.get(status.id);

@@ -1,6 +1,5 @@
 /* Runtime-agnostic daemon configuration; flags override environment, then JSONC. */
 
-import { type JSONCParseError, parseJSONC } from "confbox";
 import { ScafoError } from "../core/error.ts";
 import { assertPositiveSafeInteger } from "../core/utils/number.ts";
 import { DEFAULT_ARCHIVE_ENTRIES, DEFAULT_ARTIFACT_BYTES } from "../core/types/deploy.ts";
@@ -12,6 +11,7 @@ import { assertHost, formatHostPort, isHost, parseInterfaceAddress } from "../co
 import { assertLabels, parseLabels } from "../core/utils/labels.ts";
 /* Import the driver's reserved names instead of duplicating that contract. */
 import { OPERATOR_RESERVED_ENV, TELEMETRY_ENV } from "../drivers/runtime/celld.ts";
+import { parseJsoncDocument } from "./_jsonc.ts";
 import { DEFAULT_JSON_BYTES } from "./_json.ts";
 import {
   DEFAULT_ACTIVE_TASKS,
@@ -893,14 +893,13 @@ async function readConfigFile(
     const text = await readFile(path);
     if (text === null) continue;
 
-    const errors: JSONCParseError[] = [];
-    const parsed: unknown = parseJSONC(text, { errors, allowTrailingComma: true });
-    const failure = errors[0];
-    if (failure !== undefined) {
+    const document = parseJsoncDocument(text);
+    if ("error" in document) {
       throw new ScafoError("invalid-input", "Config file is not valid JSONC", {
-        detail: `"${path}" has a syntax error at character ${String(failure.offset)}`,
+        detail: `"${path}" has a syntax error at character ${String(document.error.offset)}`,
       });
     }
+    const parsed = document.value;
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
       throw new ScafoError("invalid-input", "Config file is not a JSON object", {
         detail: `"${path}" must hold an object of settings`,
@@ -918,11 +917,17 @@ async function readConfigFile(
   return undefined;
 }
 
-/** Walks a dotted key path (`bucket.endpoint`) through the parsed config file. */
+/**
+ * Walks a dotted key path (`bucket.endpoint`) through the parsed config file.
+ *
+ * Every step reads a key the file itself wrote: a document can name a setting
+ * only by holding it, never by what it inherits.
+ */
 function fileValue(file: Record<string, unknown> | undefined, path: string): unknown {
   let current: unknown = file;
   for (const segment of path.split(".")) {
     if (typeof current !== "object" || current === null) return undefined;
+    if (!Object.hasOwn(current, segment)) return undefined;
     current = (current as Record<string, unknown>)[segment];
   }
   return current;

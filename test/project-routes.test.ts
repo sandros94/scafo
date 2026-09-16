@@ -19,7 +19,6 @@ import { ctxWith, type ManualClock, TEST_VERSIONS } from "./_helpers.ts";
 const NODE_ID = "node-a";
 const ADMIN_ID = "op-aaaa1111";
 const TENANT_ID = "op-bbbb2222";
-const VERSION = "0.0.0-test";
 
 /** The tenant's own project, and the one belonging to somebody else on the fleet. */
 const MINE = "acme";
@@ -66,7 +65,6 @@ beforeEach(async () => {
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: idleSupervisor(),
-    version: VERSION,
     versions: TEST_VERSIONS,
     observability: observed,
   });
@@ -346,6 +344,7 @@ function idleSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: (): ProcessStatus[] => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

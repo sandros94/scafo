@@ -346,7 +346,6 @@ describe("the resolved remote against a real node", () => {
       nodeId: "node-a",
       registry: clock.ctx,
       supervisor: idleSupervisor(),
-      version: "0.0.0-test",
       versions: TEST_VERSIONS,
     });
     const ops = nodeOps({
@@ -444,6 +443,7 @@ function idleSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: () => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

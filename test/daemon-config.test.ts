@@ -17,6 +17,7 @@ import {
   runtimeDialHost,
 } from "../src/daemon/config.ts";
 import { DEFAULT_ARCHIVE_ENTRIES, DEFAULT_ARTIFACT_BYTES } from "../src/core/types/deploy.ts";
+import { ENV_NAME_RULE, RESERVED_ENV_NAMES } from "../src/core/utils/env.ts";
 import {
   DEFAULT_ACTIVE_TASKS,
   DEFAULT_OUTPUT_BYTES,
@@ -817,6 +818,19 @@ describe("the variables an operator hands every runtime process", () => {
     }
   });
 
+  it.each(RESERVED_ENV_NAMES)(
+    "refuses %s under the rule a varset is read by, naming what a name may be",
+    async (name) => {
+      const error = await rejectsWith(
+        () => loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_CELLD_ENV: `${name}=1` } }),
+        "invalid-input",
+      );
+
+      expect(error.detail, name).toContain(name);
+      expect(error.detail, name).toContain(ENV_NAME_RULE);
+    },
+  );
+
   it("passes upstream Celld policy through without Scafo defaults", async () => {
     const config = await loadDaemonConfig({
       env: {
@@ -853,6 +867,26 @@ describe("the variables an operator hands every runtime process", () => {
       expect(error.detail).toContain("runtime.celldEnv");
     },
   );
+
+  it("takes no setting from a key the config file makes an object answer for", async () => {
+    /* The document names the bucket only under a member the parser would turn
+       into a prototype. Read as a document it holds nothing, so the required
+       settings are missing rather than inherited. */
+    const error = await rejectsWith(
+      () =>
+        loadDaemonConfig({
+          configPath: CONFIG_PATH,
+          readFile: fileAt(
+            CONFIG_PATH,
+            `{"__proto__": ${JSON.stringify({ bucket: { endpoint: "http://x", bucket: "b", accessKey: "a", secretKey: "s" } })}}`,
+          ),
+          env: {},
+        }),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("bucket");
+  });
 
   it("passes celld's own memory limits through to every runtime", async () => {
     const config = await loadDaemonConfig({

@@ -28,7 +28,7 @@ import { resolveOperatorHome } from "../_home.ts";
 import { OPERATOR_KEY_FORMS, operatorFlags, resolveOperator } from "../_operator.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
 import { describeEnvironmentVarset, readVarsetFlags } from "../_varset.ts";
-import { setEnvironmentVarset } from "../../core/registry/environments.ts";
+import { setEnvironmentVarset } from "../../core/registry/varsets.ts";
 
 /* The bucket the registry lives in, exactly as `scafo sail` takes it. Only read
    when no --node is given: with one, the node holds the bucket credentials and

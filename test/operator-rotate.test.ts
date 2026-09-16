@@ -25,7 +25,6 @@ import { ctxWith, type ManualClock, rejectsWith, TEST_VERSIONS } from "./_helper
 
 const NODE_URL = "http://10.0.0.4:7400";
 const REMOTE = "prod";
-const VERSION = "0.0.0-test";
 
 /** The admin an operator-tier home is set up beside; see `registeredRemote`. */
 const ADMIN_ID = "op-9999admin";
@@ -593,7 +592,6 @@ function nodeApp(): H3 {
     nodeId: "node-a",
     registry: clock.ctx,
     supervisor: idleSupervisor(),
-    version: VERSION,
     versions: TEST_VERSIONS,
   });
 }
@@ -625,6 +623,7 @@ function idleSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: () => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

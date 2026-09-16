@@ -27,13 +27,6 @@ export interface PlacementView {
   selector?: NodeSelector;
 }
 
-/** Something one read could not resolve, recorded against the environment it concerns. */
-export interface DesiredFailure {
-  /** `project/environment`. */
-  subject: string;
-  detail: string;
-}
-
 /** What one read of the registry told this node. */
 export interface DesiredState {
   /** Deployed environments this node should serve. */
@@ -47,8 +40,6 @@ export interface DesiredState {
   fleet: Array<{ project: string; env: EnvironmentRecord }>;
   /** Placement decisions read. An environment without one is pending, never implied. */
   placements: PlacementView[];
-  /** Resolution failures for environments that remain otherwise desired. */
-  failures: DesiredFailure[];
 }
 
 /** Reads desired environments for one node. Nothing is served without an
@@ -70,7 +61,6 @@ export async function readDesired(
     environments: perProject.flatMap((entry) => entry.environments),
     fleet: perProject.flatMap((entry) => entry.fleet),
     placements: perProject.flatMap((entry) => entry.placements),
-    failures: perProject.flatMap((entry) => entry.failures),
   };
 }
 
@@ -83,7 +73,7 @@ async function readProject(
 ): Promise<DesiredState> {
   /* A blocked project is served nowhere, so its listings are never read. */
   if (await gate.run(() => isProjectBlocked(registry, project))) {
-    return { environments: [], fleet: [], placements: [], failures: [] };
+    return { environments: [], fleet: [], placements: [] };
   }
 
   /* List environments and placements once per project. */
@@ -97,12 +87,11 @@ async function readProject(
     readEnvironment(registry, project, name, nodeId, placements.get(name)),
   );
 
-  const state: DesiredState = { environments: [], fleet: [], placements: [], failures: [] };
+  const state: DesiredState = { environments: [], fleet: [], placements: [] };
   for (const part of parts) {
     state.environments.push(...part.environments);
     state.fleet.push(...part.fleet);
     state.placements.push(...part.placements);
-    state.failures.push(...part.failures);
   }
   return state;
 }
@@ -115,7 +104,7 @@ async function readEnvironment(
   nodeId: string,
   placement: PlacementRecord | undefined,
 ): Promise<DesiredState> {
-  const state: DesiredState = { environments: [], fleet: [], placements: [], failures: [] };
+  const state: DesiredState = { environments: [], fleet: [], placements: [] };
   /* Unplaced is not a state this node may resolve on its own: only the
      coordinator says where an environment runs. */
   if (placement === undefined) return state;

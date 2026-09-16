@@ -231,6 +231,9 @@ importers:
       uns3:
         specifier: ^0.0.8
         version: 0.0.8
+      unsecure:
+        specifier: ^0.3.1
+        version: 0.3.1
     devDependencies:
       '@kubernetes/client-node':
         specifier: ^2.0.0
@@ -2439,6 +2442,9 @@ packages:
     resolution: {integrity: sha512-MMrWaNeRAVU+AdLnKtWllBhlJIBaLbKRLnAECrQsoK/Zug14/xaRsDAEqgRPJ4LuSXTFxd5sXUXslsEmV6vYUg==}
     engines: {node: ^22.12 || >=24}
 
+  unsecure@0.3.1:
+    resolution: {integrity: sha512-jOTdGOo7vEKI3qrXRZBQK0N2HUkKZNDZxZGxQEPHVHc8zIk3j9LNIFMGqDhyk5QKYxc2WFP0rjqG2WofITBhXg==}
+
   untyped@2.0.0:
     resolution: {integrity: sha512-nwNCjxJTjNuLCgFr42fEak5OcLuB3ecca+9ksPFNvtfYSLpjf+iJqSIaSnIile6ZPbKYxI5k2AfXqeopGudK/g==}
     hasBin: true
@@ -4458,6 +4464,8 @@ snapshots:
       h3: 2.0.1-rc.26(crossws@0.4.10(srvx@0.12.5))
 
   uns3@0.0.8: {}
+
+  unsecure@0.3.1: {}
 
   untyped@2.0.0:
     dependencies:

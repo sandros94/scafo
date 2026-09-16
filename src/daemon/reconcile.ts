@@ -166,11 +166,6 @@ export function createReconciler(
         now: nowDate(registry),
         api: daemon.config.api.public,
       });
-      /* Preserve read failures beside actions for the resolvable environments. */
-      for (const failure of state.failures) {
-        pending.push({ at: new Date().toISOString(), ...failure });
-      }
-
       const actual = executor.currentProcesses();
       plan = planReconcile({
         desired,

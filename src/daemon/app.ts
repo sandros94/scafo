@@ -64,10 +64,9 @@ export interface DaemonContext {
   nodeId: string;
   registry: RegistryContext;
   supervisor: Supervisor;
-  /** Build of the daemon, reported by `GET /.well-known/scafo/health`. */
-  version: string;
   /**
    * The binaries this daemon booted with, and what its node record reports. The
+   * Scafo half is what `GET /.well-known/scafo/health` answers with, and the
    * Celld half is what every other node's is measured against before this one
    * starts a process for an environment or takes a deploy into it.
    */
@@ -175,7 +174,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
   /* Public health endpoint for ingress and process supervision. */
   app.get("/.well-known/scafo/health", (): DaemonHealth => ({
     ok: true,
-    version: daemon.version,
+    version: daemon.versions.scafo,
     node: daemon.nodeId,
   }));
 

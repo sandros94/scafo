@@ -1,6 +1,7 @@
 /* Internal: bounded, runtime-neutral JSON request intake. */
 
 import type { H3Event } from "h3";
+import { safeJsonParse } from "unsecure/sanitize";
 import { ScafoError } from "../core/error.ts";
 import { assertPositiveSafeInteger } from "../core/utils/number.ts";
 
@@ -85,7 +86,9 @@ function cancel(stream: ReadableStream<Uint8Array> | null): void {
 function parse(body: Uint8Array): unknown {
   try {
     const raw = new TextDecoder("utf-8", { fatal: true }).decode(body);
-    return JSON.parse(raw);
+    /* A request body is a caller's text: it becomes an object without the keys
+       every object answers for on its own. */
+    return safeJsonParse<unknown>(raw);
   } catch (error) {
     throw malformed("the body is not valid UTF-8 JSON", error);
   }

@@ -233,7 +233,6 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
     nodeId: state.id,
     registry,
     supervisor,
-    version,
     versions,
     /* Kept for the node tokens this node will sign for calls to its peers. */
     signingKey: state.privateKey,

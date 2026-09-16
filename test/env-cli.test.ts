@@ -327,7 +327,6 @@ function buildNodeOps(): EnvironmentOps {
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: idleSupervisor(),
-    version: "0.0.0-test",
     versions: TEST_VERSIONS,
     coordinator: soleCoordinator(),
   });
@@ -403,6 +402,7 @@ function idleSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: () => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

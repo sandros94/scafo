@@ -26,6 +26,8 @@ export default defineBuildConfig({
           "uns3",
           "unjwt",
           /^unjwt\//,
+          "unsecure",
+          /^unsecure\//,
           "h3",
           "confbox",
           "citty",

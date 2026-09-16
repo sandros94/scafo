@@ -27,7 +27,6 @@ const NODE_ADDRESS = "10.42.7.19";
 const OPERATOR_ID = "op-aaaa1111";
 const SECOND_ID = "op-bbbb2222";
 const PROJECT = "acme";
-const VERSION = "0.0.0-test";
 
 let clock: ManualClock;
 
@@ -242,7 +241,6 @@ function nodeApp(): ReturnType<typeof createNodeApp> {
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: idleSupervisor(),
-    version: VERSION,
     versions: TEST_VERSIONS,
   });
 }
@@ -274,6 +272,7 @@ function idleSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: (): ProcessStatus[] => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

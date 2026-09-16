@@ -1,6 +1,8 @@
 /* Parses Caddy and Traefik JSON access logs independently per line. Malformed
    lines return null so unattended input cannot stop counting. */
 
+import { safeJsonParse } from "unsecure/sanitize";
+
 /** Access-log formats this reads. Both are the ingress's own JSON output. */
 export type AccessLogFormat = "caddy" | "traefik";
 
@@ -35,7 +37,9 @@ export function parseAccessLogLine(line: string): AccessLogRequest | null {
 
   let entry: unknown;
   try {
-    entry = JSON.parse(trimmed);
+    /* A line an ingress wrote about a request somebody else made: read without
+       the keys an object answers for on its own. */
+    entry = safeJsonParse<unknown>(trimmed);
   } catch {
     return null;
   }

@@ -260,7 +260,6 @@ describe("what is left out for reasons other than placement", () => {
       environments: [],
       fleet: [],
       placements: [],
-      failures: [],
     });
   });
 });

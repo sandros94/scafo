@@ -39,7 +39,6 @@ import {
 } from "./_helpers.ts";
 
 const NODE_ID = "node-a";
-const VERSION = "0.0.0-test";
 const TOKEN = "SdUvvcE1nlEQm4iJ4Nx6BdxUjHZ2Uzt4vPXH0cQnJKk";
 const FOREIGN = "someone-else";
 
@@ -91,7 +90,6 @@ beforeEach(() => {
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
-    version: VERSION,
     versions: TEST_VERSIONS,
   };
   storage = createStorageService(agent, {
@@ -154,7 +152,6 @@ describe("the token every request must present", () => {
       nodeId: NODE_ID,
       registry: clock.ctx,
       supervisor: fakeSupervisor(),
-      version: VERSION,
       versions: TEST_VERSIONS,
     });
 
@@ -180,7 +177,6 @@ describe("the several tokens an operator may supply instead", () => {
       nodeId: NODE_ID,
       registry: clock.ctx,
       supervisor: fakeSupervisor(),
-      version: VERSION,
       versions: TEST_VERSIONS,
     };
     agent.storage = createStorageService(agent, {
@@ -768,7 +764,6 @@ async function boot(dir: string, token?: string): Promise<H3> {
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
-    version: VERSION,
     versions: TEST_VERSIONS,
   };
   agent.storage = createStorageService(agent, {
@@ -853,6 +848,7 @@ function fakeSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: (): ProcessStatus[] => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import { createBuild } from "../src/core/registry/builds.ts";
-import { createEnvironment, setEnvironmentVarset } from "../src/core/registry/environments.ts";
+import { createEnvironment } from "../src/core/registry/environments.ts";
 import { acquireLease } from "../src/core/registry/lease.ts";
 import { getNode, registerNode } from "../src/core/registry/nodes.ts";
 import { nodeKey } from "../src/core/registry/paths.ts";
 import { writePlacement } from "../src/core/registry/placement.ts";
 import { createProject } from "../src/core/registry/projects.ts";
-import { putVarset } from "../src/core/registry/varsets.ts";
+import { putVarset, setEnvironmentVarset } from "../src/core/registry/varsets.ts";
 import type { NodeRecord } from "../src/core/types/registry.ts";
 import type { RuntimeDriver, RuntimeSpecInput } from "../src/core/types/runtime.ts";
 import type { ProcessSpec, ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
@@ -42,6 +42,20 @@ describe("environment-owned reconciliation", () => {
     expect(world.reconciler.status().processes[0]).toMatchObject({
       processId: "shop--production",
     });
+  });
+
+  it("forgets a process that ended on its own once a pass has read its exit", async () => {
+    const world = await seededWorld();
+    /* Left behind by an environment this node no longer serves, so nothing in
+       the plan would name it: the pass reads it, and that is the whole of it. */
+    world.supervisor.exited("shop--retired");
+
+    await world.reconciler.runOnce();
+
+    expect(world.supervisor.list().map((status) => status.id)).toEqual(["shop--production"]);
+    expect(world.reconciler.status().processes.map((process) => process.processId)).toEqual([
+      "shop--production",
+    ]);
   });
 
   it("takes no runtime action for a new deployment revision", async () => {
@@ -333,7 +347,6 @@ async function seededWorld() {
     nodeId: "node-a",
     registry: registry.ctx,
     supervisor,
-    version: "test",
     versions: { scafo: "test", celld: CELLD_VERSION },
     /* The one thing a pass still does with its own routing once execution is
        over: hand it to the counters, so a host is counted as whoever the pass
@@ -359,6 +372,8 @@ interface FakeSupervisor extends Supervisor {
   stopped: string[];
   stopFailures: number;
   startBarrier?: { entered: () => void; wait: Promise<void> };
+  /** Records `id` as a process that ended without the supervisor asking. */
+  exited: (id: string) => void;
 }
 
 function fakeSupervisor(events: string[]): FakeSupervisor {
@@ -394,7 +409,19 @@ function fakeSupervisor(events: string[]): FakeSupervisor {
     },
     status: (id) => statuses.get(id) ?? null,
     list: () => [...statuses.values()],
+    forget(id) {
+      if (statuses.get(id)?.state === "running") return;
+      statuses.delete(id);
+    },
     onExit: () => {},
+    exited(id) {
+      statuses.set(id, {
+        id,
+        state: "exited",
+        exitCode: 1,
+        startedAt: new Date().toISOString(),
+      });
+    },
   };
   return supervisor;
 }

@@ -1,5 +1,6 @@
 /* Internal: uniform rejection, plus unverified reads of a compact token. */
 
+import { safeJsonParse } from "unsecure/sanitize";
 import { ScafoError } from "../error.ts";
 import { fromBase64Url } from "../utils/base64.ts";
 
@@ -70,7 +71,9 @@ function decodeSegment(part: string, what: string): Record<string, unknown> {
 
   let value: unknown;
   try {
-    value = JSON.parse(json);
+    /* A token is text somebody else signed: its claims are read without the
+       keys every object answers for on its own. */
+    value = safeJsonParse<unknown>(json);
   } catch (error) {
     throw authInvalid(`Token ${what} is not JSON`, error);
   }

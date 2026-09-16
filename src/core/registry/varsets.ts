@@ -10,7 +10,7 @@
 
 import { ScafoError } from "../error.ts";
 import type { EnvironmentRecord, VarsetRecord } from "../types/registry.ts";
-import { isEnvName, RESERVED_ENV_NAMES } from "../utils/env.ts";
+import { ENV_NAME_RULE, isEnvName, RESERVED_ENV_NAMES } from "../utils/env.ts";
 import { sha256Hex } from "../utils/hash.ts";
 import { stableStringify } from "../utils/json.ts";
 import { deploymentRevision } from "./_deployment.ts";
@@ -25,11 +25,6 @@ export interface PutVarsetInput {
   name: string;
   vars: Record<string, string>;
 }
-
-/** The rule a variable name has to meet, worded for a refusal. */
-export const VAR_NAME_RULE: string =
-  "letters, digits and underscores, never beginning on a digit, and never " +
-  RESERVED_ENV_NAMES.map((reserved) => `"${reserved}"`).join(", ");
 
 /** Whether `name` is one a varset may hold and a process could read back. */
 export function isVarsetVarName(name: string): boolean {
@@ -62,7 +57,7 @@ export function assertVarsetVars(vars: unknown): asserts vars is Record<string, 
   for (const [name, value] of Object.entries(vars)) {
     if (!isVarsetVarName(name)) {
       throw new ScafoError("invalid-varset", "Invalid varset variable name", {
-        detail: `"${name}" is not a usable variable name: ${VAR_NAME_RULE}`,
+        detail: `"${name}" is not a usable variable name: ${ENV_NAME_RULE}`,
       });
     }
     if (typeof value !== "string") {
@@ -117,6 +112,37 @@ export async function getVarset(
 ): Promise<VarsetRecord> {
   const found = await requireJson<unknown>(ctx, varsetKey(project, name));
   return readVarsetRecord(found.value, project, name);
+}
+
+/**
+ * Points the environment at a varset of the same project by name, or at none
+ * with `null`. The varset has to exist first, so a misspelled name is refused
+ * with `not-found` instead of being stored for a deploy to trip over.
+ *
+ * Nothing running changes: a varset is carried by deploys, so the environment's
+ * next one is where this lands.
+ */
+export async function setEnvironmentVarset(
+  ctx: RegistryContext,
+  project: string,
+  env: string,
+  name: string | null,
+): Promise<EnvironmentRecord> {
+  if (name !== null) await getVarset(ctx, project, name);
+
+  const updated = await updateJson<EnvironmentRecord>(
+    ctx,
+    environmentKey(project, env),
+    (current) => {
+      if (name === null) {
+        const { varset: _varset, ...rest } = current;
+        return rest;
+      }
+      return { ...current, varset: name };
+    },
+  );
+
+  return updated.value;
 }
 
 /** Names of every varset of `project`, sorted. */

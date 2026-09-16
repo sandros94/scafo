@@ -481,7 +481,6 @@ function context(routing: FleetRouting | undefined): DaemonContext {
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
-    version: "0.0.0-test",
     versions: { scafo: "0.0.0-test", celld: "0.5.0" },
     reconciler: fakeReconciler(routing),
     /* Exactly as `sail` registers it: the entryPoints are the one thing about
@@ -545,6 +544,7 @@ function fakeSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: () => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

@@ -32,7 +32,6 @@ import { DEPLOY_METADATA_HEADER, encodeDeployMetadata } from "../src/daemon/_int
 import { ctxWith, type ManualClock, TEST_VERSIONS } from "./_helpers.ts";
 
 const NODE_ID = "node-a";
-const VERSION = "0.0.0-test";
 
 /** The tenant's own project, and the one next door that is none of its business. */
 const MINE = "acme";
@@ -99,7 +98,6 @@ beforeEach(async () => {
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: bothProjectsRunning(),
-    version: VERSION,
     versions: TEST_VERSIONS,
     reconciler: bothProjectsReconciled(),
     coordinator: coordinatorWithUnplaced(),
@@ -549,6 +547,7 @@ function bothProjectsRunning(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: (): ProcessStatus[] => processes,
+    forget: () => {},
     onExit: () => {},
   };
 }

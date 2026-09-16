@@ -5,6 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseJSONC } from "confbox";
+import { safeJsonParse, sanitizeObjectCopy } from "unsecure/sanitize";
 import { ScafoError } from "../../core/error.ts";
 import { RESERVED_ENV_NAMES } from "../../core/utils/env.ts";
 import { assertPositiveSafeInteger } from "../../core/utils/number.ts";
@@ -149,12 +150,18 @@ async function prepareConfig(dir: string, rewrite: ConfigRewrite): Promise<strin
       });
     }
 
-    const vars = mergedVars((parsed as { vars?: unknown }).vars, rewrite.vars, name);
+    /* The document is taken by its own entries and copied without the keys every
+       object answers for on its own. `vars` is left out of that copy and read as
+       the author wrote it: a name that cannot be read back is refused below,
+       which is worth more to whoever wrote it than a key quietly disappearing. */
+    const { vars: declared, ...outer } = parsed as Record<string, unknown>;
+    const document = sanitizeObjectCopy(outer);
+    const vars = mergedVars(declared, rewrite.vars, name) ?? declared;
     await writeFile(
       path,
       JSON.stringify(
         {
-          ...parsed,
+          ...document,
           name: rewrite.script,
           ...(rewrite.noBundle === true ? { no_bundle: true } : {}),
           ...(vars === undefined ? {} : { vars }),
@@ -336,7 +343,7 @@ function afterPublished(version: string, failure: ScafoError): ScafoError {
 function deployVersion(bytes: Uint8Array): string | undefined {
   let value: unknown;
   try {
-    value = JSON.parse(decodeUtf8Tail(bytes, bytes.byteLength).trim());
+    value = safeJsonParse<unknown>(decodeUtf8Tail(bytes, bytes.byteLength).trim());
   } catch {
     return undefined;
   }

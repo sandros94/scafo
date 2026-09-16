@@ -1,6 +1,7 @@
 /* Internal: reading and authenticating what the deploy-facing routes are sent. */
 
 import type { H3Event } from "h3";
+import { safeJsonParse } from "unsecure/sanitize";
 import type { NodeIdentity, NodeVerifier } from "../core/auth/node-token.ts";
 import type { OidcIdentity, OidcVerifier } from "../core/auth/oidc.ts";
 import { isScafoError, ScafoError } from "../core/error.ts";
@@ -124,7 +125,9 @@ export function readDeployMetadata(event: H3Event, project: string): DeployMeta 
   try {
     const bytes = fromBase64Url(encoded);
     json = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    parsed = JSON.parse(json);
+    /* A header the caller wrote: read without the keys an object answers for on
+       its own, which the canonical form below refuses to match anyway. */
+    parsed = safeJsonParse<unknown>(json);
     if (stableStringify(parsed) !== json || toBase64Url(bytes) !== encoded) {
       throw new Error("non-canonical metadata");
     }

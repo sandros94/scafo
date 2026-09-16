@@ -5,17 +5,14 @@ import { assertReplicas } from "../placement/replicas.ts";
 import { assertSelector } from "../placement/selector.ts";
 import type { EnvironmentRecord, NodeSelector, ReplicaCount } from "../types/registry.ts";
 import { deepEqual, isCasConflict, namesFromKeys } from "./_shared.ts";
-import { createJson, requireJson, updateJson } from "./cas.ts";
+import { createJson, requireJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
 import { environmentKey, environmentsPrefix, fleetPrefix } from "./paths.ts";
 import { getProject } from "./projects.ts";
-import { getVarset } from "./varsets.ts";
 
 export interface CreateEnvironmentInput {
   name: string;
   ephemeral?: boolean;
-  /** Name of the project varset this environment's deploys carry. */
-  varset?: string;
   /**
    * How many nodes should serve it. Left absent the environment takes the
    * default its kind implies, which is what every environment created before
@@ -56,7 +53,6 @@ export async function createEnvironment(
     ephemeral: input.ephemeral ?? false,
     createdAt: nowIso(ctx),
   };
-  if (input.varset !== undefined) record.varset = input.varset;
   if (input.replicas !== undefined) record.replicas = input.replicas;
   if (input.nodeSelector !== undefined) record.nodeSelector = { ...input.nodeSelector };
 
@@ -88,37 +84,6 @@ export async function getEnvironment(
 export async function listEnvironments(ctx: RegistryContext, project: string): Promise<string[]> {
   const prefix = environmentsPrefix(project);
   return namesFromKeys(await ctx.store.list(prefix), prefix);
-}
-
-/**
- * Points the environment at a varset of the same project by name, or at none
- * with `null`. The varset has to exist first, so a misspelled name is refused
- * with `not-found` instead of being stored for a deploy to trip over.
- *
- * Nothing running changes: a varset is carried by deploys, so the environment's
- * next one is where this lands.
- */
-export async function setEnvironmentVarset(
-  ctx: RegistryContext,
-  project: string,
-  env: string,
-  name: string | null,
-): Promise<EnvironmentRecord> {
-  if (name !== null) await getVarset(ctx, project, name);
-
-  const updated = await updateJson<EnvironmentRecord>(
-    ctx,
-    environmentKey(project, env),
-    (current) => {
-      if (name === null) {
-        const { varset: _varset, ...rest } = current;
-        return rest;
-      }
-      return { ...current, varset: name };
-    },
-  );
-
-  return updated.value;
 }
 
 /* Set at creation and never rewritten, so they identify the record. Everything

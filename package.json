@@ -95,7 +95,8 @@
     "tar": "^7.5.22",
     "tavolato": "^0.0.1",
     "unjwt": "^0.7.3",
-    "uns3": "^0.0.8"
+    "uns3": "^0.0.8",
+    "unsecure": "^0.3.1"
   },
   "devDependencies": {
     "@kubernetes/client-node": "^2.0.0",

@@ -34,7 +34,6 @@ import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock, TEST_VERSIONS } from "./_helpers.ts";
 
 const NODE_ID = "node-a";
-const VERSION = "0.0.0-test";
 const PROJECT = "app";
 const ENVIRONMENT = "prod";
 const CUSTOM_DOMAIN = "shop.example.com";
@@ -76,7 +75,6 @@ beforeEach(async () => {
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
-    version: VERSION,
     versions: TEST_VERSIONS,
   });
 });
@@ -88,7 +86,7 @@ describe("GET /.well-known/scafo/health", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
       ok: true,
-      version: VERSION,
+      version: TEST_VERSIONS.scafo,
       node: NODE_ID,
     });
   });
@@ -175,7 +173,6 @@ describe("GET /v1/state", () => {
       nodeId: NODE_ID,
       registry: clock.ctx,
       supervisor: fakeSupervisor(),
-      version: VERSION,
       versions: TEST_VERSIONS,
     });
 
@@ -342,7 +339,6 @@ describe("GET /v1/state, on the node that is coordinating", () => {
       nodeId: NODE_ID,
       registry: clock.ctx,
       supervisor: fakeSupervisor(),
-      version: VERSION,
       versions: TEST_VERSIONS,
       coordinator: {
         start: () => {},
@@ -476,7 +472,11 @@ describe("the fleet's API at the platform apex", () => {
     });
 
     expect(health.status).toBe(200);
-    await expect(health.json()).resolves.toEqual({ ok: true, version: VERSION, node: NODE_ID });
+    await expect(health.json()).resolves.toEqual({
+      ok: true,
+      version: TEST_VERSIONS.scafo,
+      node: NODE_ID,
+    });
   });
 
   it("answers a path it does not have there as the API's own miss", async () => {
@@ -612,7 +612,6 @@ function appWith(overrides: Partial<DaemonConfig>): H3 {
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
-    version: VERSION,
     versions: TEST_VERSIONS,
   });
 }
@@ -624,6 +623,7 @@ function fakeSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: () => PROCESSES.map((status) => ({ ...status })),
+    forget: () => {},
     onExit: () => {},
   };
 }
@@ -679,7 +679,6 @@ async function appCoordinating(unplaced: AssignmentFailure[]): Promise<H3> {
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
-    version: VERSION,
     versions: TEST_VERSIONS,
     coordinator: {
       start: () => {},

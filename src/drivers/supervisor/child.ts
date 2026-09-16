@@ -13,8 +13,8 @@ import { assertProcessGroups, processGroupId, stopProcessGroup } from "../_proce
 /** Time a stopped process is given between `SIGTERM` and `SIGKILL`. */
 export const DEFAULT_GRACE_MS: number = 30_000;
 
-/** Runs daemon child processes. Exited status persists until restart; restart
-    policy remains with the caller. */
+/** Runs daemon child processes. What it remembers, and until when, is the
+    {@link Supervisor} contract; restart policy remains with the caller. */
 export function createChildSupervisor(): Supervisor {
   assertProcessGroups();
   const supervised = new Map<string, Supervised>();
@@ -89,7 +89,11 @@ export function createChildSupervisor(): Supervisor {
       const entry = supervised.get(id);
       if (entry === undefined) return;
       /* Replays the one teardown this group got, including its failure. */
-      if (entry.cleanup !== undefined) return entry.cleanup;
+      if (entry.cleanup !== undefined) {
+        await entry.cleanup;
+        release(id, entry);
+        return;
+      }
 
       entry.selfInflicted = true;
       const cleanup = finish(entry, false, opts?.graceMs ?? DEFAULT_GRACE_MS);
@@ -104,6 +108,7 @@ export function createChildSupervisor(): Supervisor {
         if (entry.child !== null && entry.cleanup === cleanup) entry.cleanup = undefined;
         throw error;
       }
+      release(id, entry);
     },
 
     status(id: string): ProcessStatus | null {
@@ -115,10 +120,22 @@ export function createChildSupervisor(): Supervisor {
       return [...supervised.values()].map((entry) => ({ ...entry.status }));
     },
 
+    forget(id: string): void {
+      const entry = supervised.get(id);
+      if (entry === undefined || entry.status.state === "running") return;
+      supervised.delete(id);
+    },
+
     onExit(cb: (status: ProcessStatus) => void): void {
       listeners.push(cb);
     },
   };
+
+  /* Drops the id a stop has just emptied, unless something has started under it
+     again since: the entry that was torn down is the one being released. */
+  function release(id: string, entry: Supervised): void {
+    if (supervised.get(id) === entry) supervised.delete(id);
+  }
 
   async function finish(entry: Supervised, unexpected: boolean, graceMs?: number): Promise<void> {
     const groupId = processGroupId(entry.status.pid, entry.status.id);

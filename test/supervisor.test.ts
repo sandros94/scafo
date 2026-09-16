@@ -125,8 +125,9 @@ describe("stopping a process", () => {
 
       await supervisor.stop("cooperative");
 
-      /* A signal death carries no exit code, which is what `null` records. */
-      expect(supervisor.status("cooperative")).toMatchObject({ state: "exited", exitCode: null });
+      /* The caller asked for it to be gone, so there is nothing left to report. */
+      expect(supervisor.status("cooperative")).toBeNull();
+      expect(supervisor.list()).toEqual([]);
     },
   );
 
@@ -140,7 +141,7 @@ describe("stopping a process", () => {
       await supervisor.stop("stubborn", { graceMs: 200 });
 
       expect(Date.now() - startedAtMs).toBeLessThan(5000);
-      expect(supervisor.status("stubborn")).toMatchObject({ state: "exited", exitCode: null });
+      expect(supervisor.status("stubborn")).toBeNull();
     },
   );
 
@@ -214,17 +215,43 @@ describe("stopping a process", () => {
 
     await supervisor.stop("held", { graceMs: 100 });
 
-    expect(supervisor.status("held")).toMatchObject({ state: "exited" });
+    expect(supervisor.status("held")).toBeNull();
   });
 
-  it("is a no-op for an unknown id and for one that has already exited", async () => {
+  it("is a no-op for an unknown id, and forgets one that has already exited", async () => {
     await expect(supervisor.stop("never-started")).resolves.toBeUndefined();
 
     await supervisor.start(child("brief", SELF_EXIT));
-    await untilExited("brief");
+    expect(await untilExited("brief")).toMatchObject({ state: "exited", exitCode: 3 });
 
     await expect(supervisor.stop("brief")).resolves.toBeUndefined();
-    expect(supervisor.status("brief")).toMatchObject({ state: "exited", exitCode: 3 });
+    expect(supervisor.status("brief")).toBeNull();
+  });
+});
+
+describe("forgetting a process", () => {
+  it("keeps an unexpected exit until it has been read, and drops it after", async () => {
+    await supervisor.start(child("gone", SELF_EXIT));
+    const exited = await untilExited("gone");
+
+    /* The exit code is read by whoever asks next, not by the exit itself. */
+    expect(exited).toMatchObject({ state: "exited", exitCode: 3 });
+    expect(supervisor.list()).toEqual([exited]);
+
+    supervisor.forget("gone");
+
+    expect(supervisor.status("gone")).toBeNull();
+    expect(supervisor.list()).toEqual([]);
+  });
+
+  it("leaves a running process alone, and says nothing about an unknown id", async () => {
+    const started = await supervisor.start(child("busy", KEEPALIVE));
+
+    supervisor.forget("busy");
+    supervisor.forget("never-started");
+
+    expect(supervisor.status("busy")).toEqual(started);
+    expect(supervisor.list()).toEqual([started]);
   });
 });
 
@@ -253,7 +280,7 @@ describe("exit notifications", () => {
       await supervisor.start(child("retired", KEEPALIVE));
       await supervisor.stop("retired");
 
-      expect(supervisor.status("retired")).toMatchObject({ state: "exited" });
+      expect(supervisor.status("retired")).toBeNull();
       expect(calls).toBe(0);
     },
   );

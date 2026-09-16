@@ -28,7 +28,6 @@ const OPERATOR_ID = "op-aaaa1111";
 const SECOND_ID = "op-bbbb2222";
 const THIRD_ID = "op-cccc3333";
 const FOURTH_ID = "op-dddd4444";
-const VERSION = "0.0.0-test";
 /** The project every operator-tier key in this file is scoped to; see {@link scopedHalf}. */
 const PROJECT = "acme";
 
@@ -66,7 +65,6 @@ beforeEach(async () => {
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: idleSupervisor(),
-    version: VERSION,
     versions: TEST_VERSIONS,
     observability: observed,
   });
@@ -675,6 +673,7 @@ function idleSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: (): ProcessStatus[] => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

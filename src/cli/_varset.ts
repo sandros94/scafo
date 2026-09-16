@@ -8,7 +8,8 @@
  */
 
 import { ScafoError } from "../core/error.ts";
-import { isVarsetVarName, VAR_NAME_RULE, type VarsetUse } from "../core/registry/varsets.ts";
+import { isVarsetVarName, type VarsetUse } from "../core/registry/varsets.ts";
+import { ENV_NAME_RULE } from "../core/utils/env.ts";
 
 /** The dotenv dialect, as `scafo varset set --help` states it. */
 export const DOTENV_SYNTAX: string =
@@ -134,7 +135,7 @@ export function parseDotenv(text: string, source: string): Record<string, string
     if (!isVarsetVarName(name)) {
       throw invalidLine(
         at,
-        `"${name}" is not a usable variable name: ${VAR_NAME_RULE} ` +
+        `"${name}" is not a usable variable name: ${ENV_NAME_RULE} ` +
           `(an "export " prefix is not stripped)`,
       );
     }

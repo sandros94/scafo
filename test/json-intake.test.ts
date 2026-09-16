@@ -10,6 +10,16 @@ describe("bounded JSON intake", () => {
     await expect(readJsonBody(eventOf(bytes(raw)))).resolves.toBe(raw.slice(1, -1));
   });
 
+  it("hands over a body without the keys an object answers for on its own", async () => {
+    const body = bytes(
+      '{"selector": {"zone": "eu"}, "__proto__": {"admin": true}, "prototype": 1}',
+    );
+
+    const parsed = (await readJsonBody(eventOf(body))) as Record<string, unknown>;
+
+    expect(Object.keys(parsed)).toEqual(["selector"]);
+  });
+
   it("cancels a chunked document before accepting the byte that crosses the cap", async () => {
     let cancelled = 0;
     const body = chunks(

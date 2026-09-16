@@ -128,7 +128,6 @@ beforeEach(async () => {
     nodeId: OPERATOR,
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
-    version: "0.0.0-test",
     versions: { scafo: "0.0.0-test", celld: CELLD_VERSION },
     reconciler: fakeReconciler(),
   };
@@ -1119,6 +1118,7 @@ function fakeSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: () => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

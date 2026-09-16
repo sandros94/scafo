@@ -29,7 +29,6 @@ const ENVIRONMENT = "prod";
 const BUILD = "b1b1b1b1";
 const PLATFORM_DOMAIN = "apps.test";
 const CUSTOM_DOMAIN = "shop.example.com";
-const VERSION = "0.0.0-test";
 
 let clock: ManualClock;
 let registry: RegistryContext;
@@ -61,7 +60,6 @@ beforeEach(async () => {
     nodeId: NODE_ID,
     registry,
     supervisor: idleSupervisor(),
-    version: VERSION,
     versions: TEST_VERSIONS,
   });
 });
@@ -73,7 +71,7 @@ describe("what a node reads as its work", () => {
     const state = await readDesired(registry, { nodeId: NODE_ID });
 
     expect(state.environments.map((entry) => entry.project)).toEqual([NEIGHBOUR]);
-    expect(state.failures).toEqual([]);
+    expect(state.fleet.map((entry) => entry.project)).toEqual([NEIGHBOUR]);
   });
 
   it("reports no placement view for it, so its rows leave the node's state too", async () => {
@@ -162,6 +160,7 @@ function idleSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: (): ProcessStatus[] => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

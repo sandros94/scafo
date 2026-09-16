@@ -538,6 +538,16 @@ it.each(['["A=1"]', '"A=1"', "null", "5"])(
   },
 );
 
+it("publishes the config without a key every object answers for on its own", async () => {
+  const written = await deployedConfig(
+    '{ "name": "other", "constructor": { "cheat": true }, "vars": { "A": "1" } }',
+    { B: "2" },
+  );
+
+  expect(Object.keys(written)).toEqual(["name", "vars"]);
+  expect(written.vars).toEqual({ A: "1", B: "2" });
+});
+
 it("refuses a config variable named after something every object answers for", async () => {
   await expect(
     deployedConfig('{ "name": "other", "vars": { "constructor": "1" } }', { A: "1" }),

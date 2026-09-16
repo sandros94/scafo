@@ -25,19 +25,26 @@ export function isEnvName(s: string): boolean {
 export const RESERVED_ENV_NAMES: readonly string[] = ["__proto__", "constructor", "prototype"];
 
 /**
+ * The whole rule a variable name has to meet, worded for a refusal. Said once
+ * so every surface that carries variables — a varset, the runtime policy an
+ * operator hands a node — refuses the same names in the same words.
+ */
+export const ENV_NAME_RULE: string =
+  "letters, digits and underscores, never beginning on a digit, and never " +
+  RESERVED_ENV_NAMES.map((reserved) => `"${reserved}"`).join(", ");
+
+/**
  * Throws `ScafoError("invalid-input")` naming `what` unless `s` is a variable
- * name a process could read back.
+ * name a process could read back out of a record keyed by data.
  *
  * `what` is how the value is described to whoever typed it, so a refusal says
  * which half of a pair was the problem.
  */
 export function assertEnvName(s: unknown, what: string = "variable name"): void {
-  if (typeof s === "string" && isEnvName(s)) return;
+  if (typeof s === "string" && isEnvName(s) && !RESERVED_ENV_NAMES.includes(s)) return;
 
   throw new ScafoError("invalid-input", "Invalid environment variable", {
-    detail:
-      `${describe(s)} is not a usable ${what}: letters, digits and underscores, ` +
-      `never beginning on a digit`,
+    detail: `${describe(s)} is not a usable ${what}: ${ENV_NAME_RULE}`,
   });
 }
 
