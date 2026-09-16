@@ -37,6 +37,11 @@ export interface DeployRunInput {
   script: string;
   /** Ask Celld to use the artifact's already self-contained Worker entry. */
   noBundle?: true;
+  /**
+   * Variables the environment's deploys carry, merged into the ones the
+   * artifact's own config declares. Absent when the environment carries none.
+   */
+  vars?: Record<string, string>;
   /** The uploaded archive, exactly as it arrived and staged outside memory. */
   artifact: StagedArtifact;
   target: DeployTarget;

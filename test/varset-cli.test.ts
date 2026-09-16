@@ -125,18 +125,32 @@ describe("the surface the subcommands present", () => {
 });
 
 describe("what `scafo varset set` prints", () => {
-  it("says what it holds, who carries it, and when that lands", () => {
+  it("says what it holds, who carries it, and whether each has deployed it", () => {
     expect(
       describeVarsetWrite({
         project: PROJECT,
         name: "shared",
         variables: 3,
-        environments: ["production", "staging"],
+        environments: [
+          { env: "production", carried: "current" },
+          { env: "staging", carried: "stale" },
+        ],
       }),
     ).toBe(
-      `scafo: varset "shared" of "shop" holds 3 variables; used by production, staging — ` +
-        `takes effect at their next deploy`,
+      `scafo: varset "shared" of "shop" holds 3 variables; used by production (deployed), ` +
+        `staging (pending deploy) — takes effect at their next deploy`,
     );
+  });
+
+  it("reads an environment that has never deployed as pending too", () => {
+    expect(
+      describeVarsetWrite({
+        project: PROJECT,
+        name: "shared",
+        variables: 1,
+        environments: [{ env: "preview", carried: "never" }],
+      }),
+    ).toContain("used by preview (pending deploy)");
   });
 
   it("says so plainly when nothing carries it yet", () => {
@@ -169,15 +183,18 @@ describe("what `scafo varset show` prints", () => {
 });
 
 describe("what `scafo varset list` prints", () => {
-  it("gives one line per varset: what it holds and who carries it", () => {
+  it("gives one line per varset: what it holds, who carries it, and who deployed it", () => {
     expect(
       describeVarsetUse({
         project: PROJECT,
         name: "shared",
         variables: 3,
-        environments: ["production", "staging"],
+        environments: [
+          { env: "production", carried: "current" },
+          { env: "staging", carried: "never" },
+        ],
       }),
-    ).toBe("shared: 3 variables, used by production, staging");
+    ).toBe("shared: 3 variables, used by production (deployed), staging (pending deploy)");
     expect(
       describeVarsetUse({ project: PROJECT, name: "spare", variables: 1, environments: [] }),
     ).toBe("spare: 1 variable, used by no environment");

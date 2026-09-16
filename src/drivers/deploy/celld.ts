@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseJSONC } from "confbox";
 import { ScafoError } from "../../core/error.ts";
+import { RESERVED_ENV_NAMES } from "../../core/utils/env.ts";
 import { assertPositiveSafeInteger } from "../../core/utils/number.ts";
 import { ByteTail, decodeUtf8Tail } from "../../core/utils/byte-tail.ts";
 import type {
@@ -69,7 +70,11 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
           ...(opts?.archiveEntries === undefined ? {} : { maxEntries: opts.archiveEntries }),
           signal: runOpts.signal,
         });
-        const config = await prepareConfig(dir, input.script, input.noBundle);
+        const config = await prepareConfig(dir, {
+          script: input.script,
+          noBundle: input.noBundle,
+          vars: input.vars,
+        });
 
         const version = await run(
           binPath,
@@ -109,12 +114,25 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
   };
 }
 
-/** Rewrites the artifact config with the environment name used by the runtime. */
-async function prepareConfig(
-  dir: string,
-  script: string,
-  noBundle: true | undefined,
-): Promise<string> {
+/** What the artifact's own config is rewritten with before it is published. */
+interface ConfigRewrite {
+  /** Name the runtime files the application under. */
+  script: string;
+  /** Ask the runtime to use the artifact's self-contained Worker entry. */
+  noBundle: true | undefined;
+  /** Variables the environment carries, or none. */
+  vars: Record<string, string> | undefined;
+}
+
+/**
+ * Rewrites the artifact config with the environment name used by the runtime and
+ * the variables its deploys carry.
+ *
+ * `vars` is the runtime's one variable channel, so the environment's are merged
+ * into whatever the artifact declares. A deploy that carries none leaves the
+ * config's own `vars` untouched, exactly as it arrived.
+ */
+async function prepareConfig(dir: string, rewrite: ConfigRewrite): Promise<string> {
   for (const name of CONFIG_NAMES) {
     const path = join(dir, name);
     let text: string;
@@ -131,10 +149,16 @@ async function prepareConfig(
       });
     }
 
+    const vars = mergedVars((parsed as { vars?: unknown }).vars, rewrite.vars, name);
     await writeFile(
       path,
       JSON.stringify(
-        { ...parsed, name: script, ...(noBundle === true ? { no_bundle: true } : {}) },
+        {
+          ...parsed,
+          name: rewrite.script,
+          ...(rewrite.noBundle === true ? { no_bundle: true } : {}),
+          ...(vars === undefined ? {} : { vars }),
+        },
         null,
         2,
       ),
@@ -146,6 +170,56 @@ async function prepareConfig(
   throw new ScafoError("invalid-input", "Artifact carries no runtime config", {
     detail: `the archive has none of ${CONFIG_NAMES.join(", ")} at its root`,
   });
+}
+
+/**
+ * The variables the config is written with: the artifact's own and the carried
+ * ones together, or nothing to rewrite when the deploy carries none.
+ *
+ * A name both sides declare is refused rather than resolved. Either could
+ * plausibly be the one that meant it, and a silent winner is a variable whose
+ * value depends on which half of the deploy a reader happens to be looking at.
+ *
+ * Declared values are copied across untouched, whatever their JSON type: what
+ * the config's author wrote for the runtime is not this seam's to reinterpret.
+ */
+function mergedVars(
+  declared: unknown,
+  carried: Record<string, string> | undefined,
+  file: string,
+): Record<string, unknown> | undefined {
+  if (carried === undefined) return undefined;
+  if (declared === undefined) return { ...carried };
+
+  if (typeof declared !== "object" || declared === null || Array.isArray(declared)) {
+    throw new ScafoError("invalid-input", "Artifact config variables are not an object", {
+      detail:
+        `"${file}" must hold "vars" as an object of variable names and values, such as ` +
+        `{"APP_VERSION": "v1"}`,
+    });
+  }
+
+  const entries = Object.entries(declared as Record<string, unknown>);
+  for (const [name] of entries) {
+    if (!RESERVED_ENV_NAMES.includes(name)) continue;
+    throw new ScafoError("invalid-input", "Invalid artifact config variable name", {
+      detail:
+        `"${file}" declares "${name}", which every object answers for on its own, so the ` +
+        `application would read back something JavaScript put there; rename it`,
+    });
+  }
+
+  const both = entries.map(([name]) => name).filter((name) => Object.hasOwn(carried, name));
+  if (both.length > 0) {
+    throw new ScafoError("invalid-input", "Variable declared twice", {
+      detail:
+        `"${file}" and the environment's varset both declare ` +
+        `${both.map((name) => `"${name}"`).join(", ")}; one of the two has to drop ` +
+        `${both.length === 1 ? "it" : "them"}`,
+    });
+  }
+
+  return Object.fromEntries([...entries, ...Object.entries(carried)]);
 }
 
 /** Runs a publish and retains bounded stdout/stderr for failure diagnostics. */

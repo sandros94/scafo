@@ -8,7 +8,7 @@
  */
 
 import { ScafoError } from "../core/error.ts";
-import { isVarsetVarName, VAR_NAME_RULE } from "../core/registry/varsets.ts";
+import { isVarsetVarName, VAR_NAME_RULE, type VarsetUse } from "../core/registry/varsets.ts";
 
 /** The dotenv dialect, as `scafo varset set --help` states it. */
 export const DOTENV_SYNTAX: string =
@@ -17,27 +17,41 @@ export const DOTENV_SYNTAX: string =
   "quotes and all — there is no unquoting, so write the value you mean";
 
 /** One varset as the commands report it: what it holds, and who carries it. */
-export interface VarsetUse {
+export interface VarsetSummary {
   project: string;
   name: string;
   /** How many variables it holds. */
   variables: number;
   /** Environments of the project that point at it, sorted. */
-  environments: string[];
+  environments: VarsetUse[];
 }
 
 /** How a write reads on the terminal, naming when the next deploy carries it. */
-export function describeVarsetWrite(use: VarsetUse): string {
-  const held = `scafo: varset "${use.name}" of "${use.project}" holds ${countOf(use.variables)}`;
-  if (use.environments.length === 0) return `${held}; no environment points at it yet`;
+export function describeVarsetWrite(summary: VarsetSummary): string {
+  const held = `scafo: varset "${summary.name}" of "${summary.project}" holds ${countOf(summary.variables)}`;
+  if (summary.environments.length === 0) return `${held}; no environment points at it yet`;
 
-  return `${held}; used by ${use.environments.join(", ")} — takes effect at their next deploy`;
+  return `${held}; used by ${carriers(summary)} — takes effect at their next deploy`;
 }
 
 /** One `scafo varset list` line: the name, what it holds, and who carries it. */
-export function describeVarsetUse(use: VarsetUse): string {
-  const used = use.environments.length === 0 ? "no environment" : use.environments.join(", ");
-  return `${use.name}: ${countOf(use.variables)}, used by ${used}`;
+export function describeVarsetUse(summary: VarsetSummary): string {
+  const used = summary.environments.length === 0 ? "no environment" : carriers(summary);
+  return `${summary.name}: ${countOf(summary.variables)}, used by ${used}`;
+}
+
+/**
+ * The environments that carry a varset, each saying whether its last deploy
+ * carried what the varset holds now.
+ *
+ * An environment that has never deployed reads as pending too: it and one whose
+ * deploy predates the current variables are the same thing to whoever is looking
+ * — what is running is not this — and the same next deploy settles both.
+ */
+function carriers(summary: VarsetSummary): string {
+  return summary.environments
+    .map((use) => `${use.env} (${use.carried === "current" ? "deployed" : "pending deploy"})`)
+    .join(", ");
 }
 
 /**

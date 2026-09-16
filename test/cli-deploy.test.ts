@@ -1,5 +1,5 @@
 import { parseArgs } from "citty";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { deploy, deployMetadataFrom, watchDeploy } from "../src/cli/commands/deploy.ts";
 import type { ProblemDetails } from "../src/core/error.ts";
 import type { DeployStatus } from "../src/daemon/deploys.ts";
@@ -117,6 +117,36 @@ describe("watching a deploy the node already accepted", () => {
     expect(watched).toMatchObject({ state: "deployed", build: "0f0f0f0f" });
   });
 
+  it("says which varset the deploy carried, and what that varset held", async () => {
+    const lines = await printedBy(() =>
+      watchDeploy(WATCHED, () => Promise.resolve("minted"), ACCEPTED, {
+        pollMs: 0,
+        fetchFn: answering([
+          {
+            ...ACCEPTED,
+            state: "deployed",
+            build: "0f0f0f0f",
+            varset: { name: "shared", hash: "0123456789abcdef0123456789abcdef" },
+          },
+        ]),
+      }),
+    );
+
+    expect(lines).toContain("scafo: build 0f0f0f0f");
+    expect(lines).toContain('scafo: carried varset "shared" (0123456789ab)');
+  });
+
+  it("says nothing about a varset for a deploy that carried none", async () => {
+    const lines = await printedBy(() =>
+      watchDeploy(WATCHED, () => Promise.resolve("minted"), ACCEPTED, {
+        pollMs: 0,
+        fetchFn: answering([{ ...ACCEPTED, state: "deployed", build: "0f0f0f0f" }]),
+      }),
+    );
+
+    expect(lines.join("\n")).not.toContain("varset");
+  });
+
   it("fails on a deploy the node reports as failed, and says why", async () => {
     const error = await rejectsWith(
       () =>
@@ -132,3 +162,17 @@ describe("watching a deploy the node already accepted", () => {
     expect(error.detail).toBe("celld exited with code 1");
   });
 });
+
+/** Every line a command put on the terminal while it ran. */
+async function printedBy(run: () => Promise<unknown>): Promise<string[]> {
+  const lines: string[] = [];
+  const log = vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+    lines.push(String(line));
+  });
+  try {
+    await run();
+  } finally {
+    log.mockRestore();
+  }
+  return lines;
+}

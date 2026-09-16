@@ -9,10 +9,11 @@
  */
 
 import { ScafoError } from "../error.ts";
-import type { VarsetRecord } from "../types/registry.ts";
-import { isEnvName } from "../utils/env.ts";
+import type { EnvironmentRecord, VarsetRecord } from "../types/registry.ts";
+import { isEnvName, RESERVED_ENV_NAMES } from "../utils/env.ts";
 import { sha256Hex } from "../utils/hash.ts";
 import { stableStringify } from "../utils/json.ts";
+import { deploymentRevision } from "./_deployment.ts";
 import { isCasConflict, namesFromKeys } from "./_shared.ts";
 import { createJson, deleteKey, readJson, requireJson, updateJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
@@ -25,21 +26,14 @@ export interface PutVarsetInput {
   vars: Record<string, string>;
 }
 
-/**
- * Keys a JSON object may not carry as a variable name. They are valid variable
- * names for a process, and reading one back off an object literal would answer
- * with something JavaScript put there rather than with what was stored.
- */
-const RESERVED_VAR_NAMES = new Set(["__proto__", "constructor", "prototype"]);
-
 /** The rule a variable name has to meet, worded for a refusal. */
 export const VAR_NAME_RULE: string =
   "letters, digits and underscores, never beginning on a digit, and never " +
-  [...RESERVED_VAR_NAMES].map((reserved) => `"${reserved}"`).join(", ");
+  RESERVED_ENV_NAMES.map((reserved) => `"${reserved}"`).join(", ");
 
 /** Whether `name` is one a varset may hold and a process could read back. */
 export function isVarsetVarName(name: string): boolean {
-  return isEnvName(name) && !RESERVED_VAR_NAMES.has(name);
+  return isEnvName(name) && !RESERVED_ENV_NAMES.includes(name);
 }
 
 /**
@@ -137,14 +131,41 @@ export async function environmentsUsingVarset(
   project: string,
   name: string,
 ): Promise<string[]> {
-  const environments = await listEnvironments(ctx, project);
-  const carried = await Promise.all(
-    environments.map(async (env) => {
-      const found = await readJson<{ varset?: string }>(ctx, environmentKey(project, env));
-      return found?.value.varset === name ? env : null;
-    }),
-  );
-  return carried.filter((env): env is string => env !== null).sort();
+  return (await carriersOf(ctx, project, name)).map((carrier) => carrier.env);
+}
+
+/** Whether an environment's last deploy carried what the varset holds now. */
+export type VarsetCarried = "current" | "stale" | "never";
+
+/** One environment that carries a varset, and what its last deploy carried. */
+export interface VarsetUse {
+  env: string;
+  carried: VarsetCarried;
+}
+
+/**
+ * Environments of `project` whose deploys carry the varset, sorted by name, each
+ * with whether its last deploy carried what the varset holds now.
+ *
+ * `stale` covers an edited varset and a deploy made before the environment
+ * pointed at this one alike: either way what is running is not what an operator
+ * is looking at, and the way to close the gap is the same next deploy.
+ */
+export async function varsetUses(
+  ctx: RegistryContext,
+  project: string,
+  name: string,
+): Promise<VarsetUse[]> {
+  const [varset, carriers] = await Promise.all([
+    getVarset(ctx, project, name),
+    carriersOf(ctx, project, name),
+  ]);
+  const hash = await varsetHash(varset.vars);
+
+  return carriers.map((carrier) => ({
+    env: carrier.env,
+    carried: carriedBy(carrier.record, name, hash),
+  }));
 }
 
 /**
@@ -170,6 +191,41 @@ export async function deleteVarset(
   }
 
   await deleteKey(ctx, key);
+}
+
+/** One environment that points at a varset, under the name it is stored as. */
+interface VarsetCarrier {
+  env: string;
+  record: EnvironmentRecord;
+}
+
+/**
+ * The environments of `project` that point at `name`, sorted by name.
+ *
+ * The one walk over the environments: every answer about who carries a varset is
+ * a reading of these records, so they are read once and read whole.
+ */
+async function carriersOf(
+  ctx: RegistryContext,
+  project: string,
+  name: string,
+): Promise<VarsetCarrier[]> {
+  const environments = [...(await listEnvironments(ctx, project))].sort();
+  const carriers = await Promise.all(
+    environments.map(async (env) => {
+      const found = await readJson<EnvironmentRecord>(ctx, environmentKey(project, env));
+      return found?.value.varset === name ? { env, record: found.value } : null;
+    }),
+  );
+  return carriers.filter((carrier): carrier is VarsetCarrier => carrier !== null);
+}
+
+/** What the environment's deployment notice says it last carried of `name`. */
+function carriedBy(record: EnvironmentRecord, name: string, hash: string): VarsetCarried {
+  if (deploymentRevision(record) === null) return "never";
+
+  const stamp = record.deployment?.varset;
+  return stamp?.name === name && stamp.hash === hash ? "current" : "stale";
 }
 
 /** A stored object as this build reads a varset, or a refusal naming the way back. */

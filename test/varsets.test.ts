@@ -1,7 +1,9 @@
 /* Varsets are named records, edited in place, that an environment's deploys carry. */
 
 import { beforeEach, describe, expect, it } from "vitest";
+import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import {
+  createBuild,
   createEnvironment,
   createProject,
   deleteVarset,
@@ -12,6 +14,7 @@ import {
   putVarset,
   setEnvironmentVarset,
   varsetHash,
+  varsetUses,
 } from "../src/core/registry/index.ts";
 import { varsetKey } from "../src/core/registry/paths.ts";
 import { sha256Hex } from "../src/core/utils/hash.ts";
@@ -157,6 +160,64 @@ describe("which environments a varset is carried by", () => {
       "staging",
     ]);
     expect(await environmentsUsingVarset(clock.ctx, PROJECT, "spare")).toEqual([]);
+  });
+});
+
+describe("varsetUses", () => {
+  const BUILD = "aaaaaaaa";
+
+  beforeEach(async () => {
+    await createBuild(clock.ctx, PROJECT, { id: BUILD });
+    await putVarset(clock.ctx, PROJECT, { name: "shared", vars: VARS });
+    for (const env of ["staging", "production"]) {
+      await createEnvironment(clock.ctx, PROJECT, { name: env });
+      await setEnvironmentVarset(clock.ctx, PROJECT, env, "shared");
+    }
+  });
+
+  it("names only the environments that point at it, sorted", async () => {
+    await createEnvironment(clock.ctx, PROJECT, { name: "preview" });
+    await putVarset(clock.ctx, PROJECT, { name: "spare", vars: VARS });
+
+    expect(await varsetUses(clock.ctx, PROJECT, "shared")).toEqual([
+      { env: "production", carried: "never" },
+      { env: "staging", carried: "never" },
+    ]);
+    expect(await varsetUses(clock.ctx, PROJECT, "spare")).toEqual([]);
+  });
+
+  it("reads a deploy that carried this very content as current", async () => {
+    await recordDeployment(clock.ctx, PROJECT, "production", BUILD, {
+      varset: { name: "shared", hash: await varsetHash(VARS) },
+    });
+
+    expect(await varsetUses(clock.ctx, PROJECT, "shared")).toEqual([
+      { env: "production", carried: "current" },
+      { env: "staging", carried: "never" },
+    ]);
+  });
+
+  it("reads a deploy that carried other content, another varset, or none, as stale", async () => {
+    await recordDeployment(clock.ctx, PROJECT, "production", BUILD, {
+      varset: { name: "shared", hash: await varsetHash({ ...VARS, FEATURE_FLAGS: "stable" }) },
+    });
+    await recordDeployment(clock.ctx, PROJECT, "staging", BUILD);
+
+    expect(await varsetUses(clock.ctx, PROJECT, "shared")).toEqual([
+      { env: "production", carried: "stale" },
+      { env: "staging", carried: "stale" },
+    ]);
+
+    /* Editing the varset is what moves a deploy that WAS current to stale. */
+    await recordDeployment(clock.ctx, PROJECT, "staging", BUILD, {
+      varset: { name: "shared", hash: await varsetHash(VARS) },
+    });
+    await putVarset(clock.ctx, PROJECT, { name: "shared", vars: { ...VARS, EXTRA: "1" } });
+
+    expect(await varsetUses(clock.ctx, PROJECT, "shared")).toContainEqual({
+      env: "staging",
+      carried: "stale",
+    });
   });
 });
 

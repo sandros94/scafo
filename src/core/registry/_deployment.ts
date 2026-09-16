@@ -1,6 +1,6 @@
 /* Internal monotonic notice that celld moved an environment's current deployment. */
 
-import type { BuildRecord, EnvironmentRecord } from "../types/registry.ts";
+import type { BuildRecord, CarriedVarset, EnvironmentRecord } from "../types/registry.ts";
 import { requireJson, updateJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
 import { buildKey, environmentKey } from "./paths.ts";
@@ -12,18 +12,23 @@ export interface DeploymentUpdate {
 }
 
 /**
- * Advances an environment's deployment revision after celld publishes.
+ * Advances an environment's deployment revision after celld publishes, and
+ * stamps the varset that publication carried.
  *
  * The record deliberately carries no build or celld version. Concurrent writers
  * retry against the latest value, so each successful publication increments the
  * monotonic notice instead of restoring a stale claimed version.
+ *
+ * The notice is rewritten whole, so a publication carrying no varset clears an
+ * earlier stamp: kept, it would claim an environment still deploys with
+ * variables it was taken off.
  */
 export async function recordDeployment(
   ctx: RegistryContext,
   project: string,
   env: string,
   buildId: string,
-  opts?: { signal?: AbortSignal },
+  opts?: { signal?: AbortSignal; varset?: CarriedVarset },
 ): Promise<DeploymentUpdate> {
   await requireJson<BuildRecord>(ctx, buildKey(project, buildId));
   const updated = await updateJson<EnvironmentRecord>(
@@ -41,6 +46,9 @@ export async function recordDeployment(
         deployment: {
           revision: previous + 1,
           deployedAt: nowIso(ctx),
+          ...(opts?.varset === undefined
+            ? {}
+            : { varset: { name: opts.varset.name, hash: opts.varset.hash } }),
         },
       };
     },
@@ -66,11 +74,23 @@ export function deploymentRevision(environment: EnvironmentRecord): number | nul
     !Number.isSafeInteger(deployment.revision) ||
     deployment.revision <= 0 ||
     typeof deployment.deployedAt !== "string" ||
-    !Number.isFinite(Date.parse(deployment.deployedAt))
+    !Number.isFinite(Date.parse(deployment.deployedAt)) ||
+    !isCarriedVarset(deployment.varset)
   ) {
     throw new ScafoError("invalid-input", "Invalid deployment revision", {
       detail: `environment "${environment.name}" has a malformed deployment revision`,
     });
   }
   return deployment.revision;
+}
+
+/** Whether an absent or stored varset stamp is one this build can read. */
+function isCarriedVarset(value: CarriedVarset | undefined): boolean {
+  if (value === undefined) return true;
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof value.name === "string" &&
+    typeof value.hash === "string"
+  );
 }

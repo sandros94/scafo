@@ -12,6 +12,7 @@ import { createEnvironment, getEnvironment } from "../core/registry/environments
 import { fleetPrefix } from "../core/registry/paths.ts";
 import { setNodeSelector, setReplicas } from "../core/registry/placement.ts";
 import { assertProjectUnblocked, createProject } from "../core/registry/projects.ts";
+import { getVarset, varsetHash } from "../core/registry/varsets.ts";
 import {
   DEFAULT_ARTIFACT_BYTES,
   type DeployRunner,
@@ -20,6 +21,7 @@ import {
 import type {
   BuildRecord,
   BuildSource,
+  CarriedVarset,
   NodeSelector,
   OidcActor,
   ReplicaCount,
@@ -57,6 +59,8 @@ export interface DeployStatus {
   /** Build the deploy produced; absent until it has been recorded. */
   build?: string;
   state: DeployState;
+  /** Varset the deploy carried; set once it has been deployed, absent when none. */
+  varset?: CarriedVarset;
   /** Why it failed, when it did. */
   detail?: string;
 }
@@ -151,9 +155,14 @@ export function createDeployService(
   async function publish(
     id: string,
     meta: DeployMeta,
+    carried: CarriedVars | undefined,
     artifact: StagedArtifact,
     signal: AbortSignal,
   ): Promise<BuildRecord> {
+    /* What was handed to the runtime is what the notice is stamped with: both
+       come from the one read taken at admission, so an edit made while the
+       artifact was uploading cannot leave the two disagreeing. */
+    const stamp = carried === undefined ? undefined : { name: carried.name, hash: carried.hash };
     update(id, { state: "uploading" });
     const bucket = daemon.config.bucket;
     let celldVersionId: string | undefined;
@@ -164,6 +173,7 @@ export function createDeployService(
           environment: meta.environment,
           script: meta.script,
           ...(meta.noBundle === true ? { noBundle: true } : {}),
+          ...(carried === undefined ? {} : { vars: carried.vars }),
           artifact,
           target: {
             endpoint: bucket.endpoint,
@@ -190,8 +200,11 @@ export function createDeployService(
       /* The commit point. Past it the deployment revision is written and there
          is nothing left to abandon, so the signal is not consulted again: a
          cancellation that arrives now would only mislabel work that is done. */
-      await recordDeployment(daemon.registry, meta.project, meta.environment, build.id, { signal });
-      update(id, { state: "deployed" });
+      await recordDeployment(daemon.registry, meta.project, meta.environment, build.id, {
+        signal,
+        ...(stamp === undefined ? {} : { varset: stamp }),
+      });
+      update(id, { state: "deployed", ...(stamp === undefined ? {} : { varset: stamp }) });
       return build;
     } catch (error) {
       if (celldVersionId === undefined) throw error;
@@ -218,6 +231,7 @@ export function createDeployService(
         ...(meta.nodeSelector === undefined ? {} : { nodeSelector: meta.nodeSelector }),
       });
       await assertOneCelldVersion(daemon, meta.project, meta.environment);
+      const carried = await carriedVars(daemon, meta.project, meta.environment);
 
       return {
         start(artifact, reserved): DeployStatus {
@@ -234,7 +248,7 @@ export function createDeployService(
           };
           /* Enqueue before exposing an id to avoid ghost statuses. */
           const scheduled = reserved.enqueue(artifact, (signal) =>
-            publish(id, meta, artifact, signal),
+            publish(id, meta, carried, artifact, signal),
           );
           statuses.set(id, accepted);
           forget(statuses, history);
@@ -286,6 +300,44 @@ async function assertOneCelldVersion(
     now: nowDate(daemon.registry),
   });
   if (skew.length > 0) throw versionSkewError(skew, about);
+}
+
+/** A varset as one deploy carries it: its name, its variables, and their digest. */
+interface CarriedVars extends CarriedVarset {
+  vars: Record<string, string>;
+}
+
+/**
+ * The variables the environment's deploys carry, read once at intake.
+ *
+ * A varset the environment names but that is not there stops the deploy HERE,
+ * before a byte of the artifact is read: publishing without it would start the
+ * application on variables nobody chose for it, and which of the two ways out is
+ * meant — write the varset again, or stop carrying one — is not Scafo's to guess.
+ */
+async function carriedVars(
+  daemon: DaemonContext,
+  project: string,
+  environment: string,
+): Promise<CarriedVars | undefined> {
+  const name = (await getEnvironment(daemon.registry, project, environment)).varset;
+  if (name === undefined) return undefined;
+
+  try {
+    const varset = await getVarset(daemon.registry, project, name);
+    return { name, vars: varset.vars, hash: await varsetHash(varset.vars) };
+  } catch (error) {
+    if (!isScafoError(error) || error.code !== "not-found") throw error;
+
+    throw new ScafoError("not-found", "Varset not found", {
+      detail:
+        `"${project}/${environment}" carries varset "${name}", which no longer exists: write ` +
+        `it again with "scafo varset set --project ${project} --name ${name} --file <file>", ` +
+        `or stop the environment carrying one with "scafo env varset --project ${project} ` +
+        `--env ${environment} --none"`,
+      cause: error,
+    });
+  }
 }
 
 /** Ensures an environment exists. Existing placement changes only when requested;

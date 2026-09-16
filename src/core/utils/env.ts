@@ -17,6 +17,14 @@ export function isEnvName(s: string): boolean {
 }
 
 /**
+ * Names an object answers for whether or not anything was stored under them.
+ * They are valid variable names for a process, but a record keyed by data cannot
+ * carry one: writing it either changes the object itself or is shadowed by what
+ * JavaScript already put there, and reading it back answers with that instead.
+ */
+export const RESERVED_ENV_NAMES: readonly string[] = ["__proto__", "constructor", "prototype"];
+
+/**
  * Throws `ScafoError("invalid-input")` naming `what` unless `s` is a variable
  * name a process could read back.
  *

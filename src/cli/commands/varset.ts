@@ -12,10 +12,10 @@ import { ScafoError } from "../../core/error.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
 import {
   deleteVarset,
-  environmentsUsingVarset,
   getVarset,
   listVarsets,
   putVarset,
+  varsetUses,
 } from "../../core/registry/varsets.ts";
 import { createRegistry } from "../_bootstrap.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
@@ -141,7 +141,7 @@ async function runSet(flags: Record<string, unknown>): Promise<void> {
       project,
       name,
       variables: Object.keys(stored.vars).length,
-      environments: await environmentsUsingVarset(registry, project, name),
+      environments: await varsetUses(registry, project, name),
     }),
   );
 }
@@ -173,7 +173,7 @@ async function runList(flags: Record<string, unknown>): Promise<void> {
   for (const name of names) {
     const [stored, environments] = await Promise.all([
       getVarset(registry, project, name),
-      environmentsUsingVarset(registry, project, name),
+      varsetUses(registry, project, name),
     ]);
     console.log(
       describeVarsetUse({

@@ -222,6 +222,12 @@ export async function watchDeploy(
       throw new ScafoError("invalid-input", "Deploy failed", { detail: status.detail });
     }
     if (status.build !== undefined) console.log(`scafo: build ${status.build}`);
+    /* Short enough to read out, long enough to tell two edits of one varset
+       apart; the whole digest is in the environment's deployment notice. */
+    if (status.varset !== undefined) {
+      const { name, hash } = status.varset;
+      console.log(`scafo: carried varset "${name}" (${hash.slice(0, 12)})`);
+    }
     return status;
   }
 }

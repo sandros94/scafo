@@ -180,12 +180,24 @@ export interface BuildInput {
   oidc?: OidcActor;
 }
 
+/**
+ * The varset a publication carried, and the digest of its variables at that
+ * moment. A later read of the varset says whether it still holds what was
+ * deployed, which is the whole of what makes an edited varset visible.
+ */
+export interface CarriedVarset {
+  name: string;
+  hash: string;
+}
+
 /** Monotonic notice that celld's current deployment changed. */
 export interface DeploymentRevision {
   /** Increased once for every successful celld publication. */
   revision: number;
   /** When this revision was recorded. */
   deployedAt: string;
+  /** Varset this publication carried; absent when it carried none. */
+  varset?: CarriedVarset;
 }
 
 /**

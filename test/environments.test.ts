@@ -107,6 +107,55 @@ describe("deployment revision", () => {
     });
   });
 
+  it("stamps the varset the publication carried", async () => {
+    const update = await recordDeployment(clock.ctx, PROJECT, ENV, BUILD, {
+      varset: { name: "shared", hash: "a".repeat(64) },
+    });
+
+    expect(update.environment.deployment).toEqual({
+      revision: 1,
+      deployedAt: new Date(clock.nowMs()).toISOString(),
+      varset: { name: "shared", hash: "a".repeat(64) },
+    });
+  });
+
+  it("clears the stamp when the next publication carries no varset", async () => {
+    await recordDeployment(clock.ctx, PROJECT, ENV, BUILD, {
+      varset: { name: "shared", hash: "a".repeat(64) },
+    });
+
+    /* Kept, the stamp would claim the environment still deploys with variables
+       it was deliberately taken off. */
+    const update = await recordDeployment(clock.ctx, PROJECT, ENV, BUILD);
+
+    expect(update.environment.deployment).toEqual({
+      revision: 2,
+      deployedAt: new Date(clock.nowMs()).toISOString(),
+    });
+    const stored = await getEnvironment(clock.ctx, PROJECT, ENV);
+    expect(stored.deployment).not.toHaveProperty("varset");
+  });
+
+  it("refuses a malformed varset stamp as it refuses a malformed revision", async () => {
+    const environment = await getEnvironment(clock.ctx, PROJECT, ENV);
+
+    for (const varset of [
+      "shared",
+      null,
+      { name: "shared" },
+      { hash: "aaaa" },
+      { name: 1, hash: "aaaa" },
+      { name: "shared", hash: 1 },
+    ]) {
+      expect(() =>
+        deploymentRevision({
+          ...environment,
+          deployment: { revision: 1, deployedAt: environment.createdAt, varset } as never,
+        }),
+      ).toThrow(expect.objectContaining({ code: "invalid-input" }));
+    }
+  });
+
   it("refuses malformed and exhausted revisions instead of wrapping them", async () => {
     const environment = await getEnvironment(clock.ctx, PROJECT, ENV);
     expect(() =>

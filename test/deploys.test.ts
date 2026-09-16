@@ -22,7 +22,7 @@ import {
 } from "../src/daemon/_intake.ts";
 import type { Reconciler } from "../src/daemon/reconcile.ts";
 import { OIDC_AUDIENCE, signNodeToken } from "../src/core/auth/index.ts";
-import { environmentKey } from "../src/core/registry/paths.ts";
+import { environmentKey, varsetKey } from "../src/core/registry/paths.ts";
 import { ScafoError, type ProblemDetails } from "../src/core/error.ts";
 import { NODE_LIVENESS_WINDOW_MS } from "../src/core/registry/nodes.ts";
 import {
@@ -31,9 +31,12 @@ import {
   createProject,
   getBuild,
   getEnvironment,
+  putVarset,
   registerNode,
+  setEnvironmentVarset,
   setTrustPolicy,
   unblockProject,
+  varsetHash,
 } from "../src/core/registry/index.ts";
 import type {
   DeployRunInput,
@@ -592,6 +595,59 @@ describe("an environment another node serves on a different Celld", () => {
     await servedElsewhere("0.4.1", `${PROJECT}/staging`);
 
     expect((await upload(await operatorToken())).status).toBe(202);
+  });
+});
+
+describe("the varset an environment's deploys carry", () => {
+  const VARS = { DATABASE_URL: "postgres://db.test/app", FEATURE_FLAGS: "beta" };
+
+  /** An environment of the project pointed at a varset holding {@link VARS}. */
+  async function pointedAt(name: string): Promise<void> {
+    await createEnvironment(clock.ctx, PROJECT, { name: ENVIRONMENT });
+    await putVarset(clock.ctx, PROJECT, { name, vars: VARS });
+    await setEnvironmentVarset(clock.ctx, PROJECT, ENVIRONMENT, name);
+  }
+
+  it("hands the runner the variables and stamps what it carried", async () => {
+    await pointedAt("shared");
+
+    const id = (await responseId(await upload(await operatorToken()))) as string;
+    await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
+
+    const stamp = { name: "shared", hash: await varsetHash(VARS) };
+    expect(runs[0]?.vars).toEqual(VARS);
+    expect(daemon.deploys?.get(id)).toMatchObject({ varset: stamp });
+    const environment = await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
+    expect(environment.deployment).toMatchObject({ revision: 1, varset: stamp });
+  });
+
+  it("carries and stamps nothing for an environment pointed at no varset", async () => {
+    const id = (await responseId(await upload(await operatorToken()))) as string;
+    await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
+
+    expect(runs[0]).not.toHaveProperty("vars");
+    expect(daemon.deploys?.get(id)).not.toHaveProperty("varset");
+    const environment = await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
+    expect(environment.deployment).not.toHaveProperty("varset");
+  });
+
+  it("refuses the deploy when the varset it names is gone, naming both ways out", async () => {
+    await pointedAt("shared");
+    await clock.ctx.store.del(varsetKey(PROJECT, "shared"));
+
+    const response = await upload(await operatorToken());
+
+    expect(response.status).toBe(404);
+    const problem = await problemOf(response);
+    expect(problem.type).toBe("urn:scafo:not-found");
+    expect(problem.detail).toContain(ENVIRONMENT);
+    expect(problem.detail).toContain("shared");
+    expect(problem.detail).toContain("scafo varset set");
+    expect(problem.detail).toContain("scafo env varset");
+
+    /* Refused at intake: nothing is published into an environment whose
+       variables cannot be read. */
+    expect(runs).toEqual([]);
   });
 });
 
