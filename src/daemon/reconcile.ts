@@ -110,6 +110,10 @@ export function createReconciler(
   let lastRunAt: string | null = null;
   let lastActions: ReconcileAction[] = [];
   let failures: ReconcileFailure[] = [];
+  /* What the log has been told is failing, by action and subject, with the
+     detail it was told: a failure is printed when it appears or changes, and
+     once more when it clears, never on every pass in between. */
+  const reported = new Map<string, string>();
   let lastPlacements: PlacementView[] = [];
   /* Set by the first pass that renders one, and kept across a pass that fails to
      read the registry: see {@link Reconciler.fleetRouting}. */
@@ -191,6 +195,7 @@ export function createReconciler(
     } finally {
       lastActions = plan;
       failures = pending;
+      logFailureChanges(reported, pending);
       /* Report only placements this pass successfully read. */
       lastPlacements = placements;
       lastRunAt = new Date().toISOString();
@@ -300,4 +305,26 @@ export function runtimeBaseEnv(env: Record<string, string | undefined>): Record<
     if (value !== undefined) base[name] = value;
   }
   return base;
+}
+
+/**
+ * Prints each failure of a pass the first time it is seen, or when its detail
+ * changes, and prints once that it cleared: a start held pass after pass for
+ * the same reason is one line in the log, not one every few seconds.
+ */
+function logFailureChanges(reported: Map<string, string>, pending: ReconcileFailure[]): void {
+  const seen = new Set<string>();
+  for (const failure of pending) {
+    const key = `${failure.action ?? "pass"} ${failure.subject ?? ""}`.trim();
+    seen.add(key);
+    if (reported.get(key) === failure.detail) continue;
+    reported.set(key, failure.detail);
+    const code = failure.code === undefined ? "" : ` [${failure.code}]`;
+    console.error(`scafo: reconcile ${key} failed${code}: ${failure.detail}`);
+  }
+  for (const key of [...reported.keys()]) {
+    if (seen.has(key)) continue;
+    reported.delete(key);
+    console.error(`scafo: reconcile ${key} no longer fails`);
+  }
 }

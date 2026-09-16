@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { recordDeployment } from "../src/core/registry/_deployment.ts";
 import { createBuild } from "../src/core/registry/builds.ts";
 import { createEnvironment } from "../src/core/registry/environments.ts";
@@ -240,6 +240,30 @@ describe("an environment another node serves on a different Celld", () => {
 
     expect(world.reconciler.status().processes).toEqual([]);
     expect((await getNode(world.daemon.registry, "node-a")).serving).toEqual({});
+  });
+
+  it("is written to the log once, and once more when it clears", async () => {
+    const world = await seededWorld();
+    await registerNode(world.daemon.registry, otherNode("node-b", "0.4.1"));
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((line: unknown) => {
+      lines.push(String(line));
+    });
+    try {
+      await world.reconciler.runOnce();
+      await world.reconciler.runOnce();
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("scafo: reconcile start shop--production failed [version-skew]");
+      expect(lines[0]).toContain("node-b");
+
+      await world.daemon.registry.store.del(nodeKey("node-b"));
+      await world.reconciler.runOnce();
+      await world.reconciler.runOnce();
+      expect(lines).toHaveLength(2);
+      expect(lines[1]).toBe("scafo: reconcile start shop--production no longer fails");
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("starts on the next pass once that node is gone", async () => {
