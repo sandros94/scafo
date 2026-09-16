@@ -322,7 +322,9 @@ function logFailureChanges(reported: Map<string, string>, pending: ReconcileFail
     const code = failure.code === undefined ? "" : ` [${failure.code}]`;
     console.error(`scafo: reconcile ${key} failed${code}: ${failure.detail}`);
   }
-  for (const key of [...reported.keys()]) {
+  /* Deleting the entry being visited is defined for a Map, so the keys are
+     walked in place. */
+  for (const key of reported.keys()) {
     if (seen.has(key)) continue;
     reported.delete(key);
     console.error(`scafo: reconcile ${key} no longer fails`);

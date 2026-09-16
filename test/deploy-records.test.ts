@@ -13,7 +13,7 @@ import {
 import { deployKey, deploysPrefix } from "../src/core/registry/paths.ts";
 import type { BuildSource, CarriedVarset, OidcActor } from "../src/core/types/registry.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
+import { ctxWith, FaultStore, type ManualClock, rejectsWith } from "./_helpers.ts";
 
 const PROJECT = "shop";
 const NODE = "node-a";
@@ -159,6 +159,26 @@ describe("updateDeployRecord", () => {
       state: "deployed",
       build: "b1b1b1b1",
     });
+  });
+
+  it("refuses a finished deploy after one read, without retrying the write", async () => {
+    /* The refusal shares its error code with a lost conditional write, which
+       the update loop retries from a fresh read; a deploy that has finished is
+       final, so asking again would only repeat the answer. */
+    const store = new FaultStore(new MemoryCasStore());
+    const faulty = ctxWith(store);
+    await createDeployRecord(faulty.ctx, PROJECT, { id: ID, environment: ENVIRONMENT, node: NODE });
+    await updateDeployRecord(faulty.ctx, PROJECT, ID, { state: "deployed", build: "b1b1b1b1" });
+    const reads = store.gets;
+    const writes = store.puts;
+
+    await rejectsWith(
+      () => updateDeployRecord(faulty.ctx, PROJECT, ID, { state: "uploading" }),
+      "cas-conflict",
+    );
+
+    expect(store.gets - reads).toBe(1);
+    expect(store.puts - writes).toBe(0);
   });
 
   it("does not rewrite a deploy that succeeded as one that failed", async () => {

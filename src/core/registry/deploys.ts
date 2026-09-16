@@ -111,19 +111,27 @@ export async function updateDeployRecord(
   id: string,
   patch: DeployRecordPatch,
 ): Promise<DeployRecord> {
-  const updated = await updateJson<DeployRecord>(ctx, deployKey(project, id), (current) => {
-    /* Thrown from inside the read-modify-write, so the answer is measured
-       against what is stored now rather than what a caller last read. The retry
-       loop re-reads and asks again, which lands on the same refusal. */
-    if (isDeployTerminal(current.state) && current.state !== patch.state) {
-      throw new ScafoError("cas-conflict", "Deploy has already finished", {
-        detail:
-          `"${id}" of project "${project}" is ${current.state}, and a deploy that has ` +
-          `finished never moves again`,
-      });
-    }
-    return { ...current, ...patch, updatedAt: nowIso(ctx) };
-  });
+  /* Decided inside the read-modify-write, so the answer is measured against
+     what is stored now rather than what a caller last read. The refusal shares
+     its code with a lost conditional write, which the loop retries from a fresh
+     read; this one is final, so it is told apart by identity and not retried. */
+  let refusal: ScafoError | undefined;
+  const updated = await updateJson<DeployRecord>(
+    ctx,
+    deployKey(project, id),
+    (current) => {
+      if (isDeployTerminal(current.state) && current.state !== patch.state) {
+        refusal = new ScafoError("cas-conflict", "Deploy has already finished", {
+          detail:
+            `"${id}" of project "${project}" is ${current.state}, and a deploy that has ` +
+            `finished never moves again`,
+        });
+        throw refusal;
+      }
+      return { ...current, ...patch, updatedAt: nowIso(ctx) };
+    },
+    { isRetryable: (error) => error !== refusal && isCasConflict(error) },
+  );
   return updated.value;
 }
 
