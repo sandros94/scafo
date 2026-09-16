@@ -674,7 +674,9 @@ async function settledSinglePlacement(env: string): Promise<{
           const placement = state.placements.find(
             (view) => view.project === PROJECT && view.env === env,
           );
-          const processes = state.processes.map((process) => process.id).join(",");
+          const processes = state.processes
+            .map((process) => `${process.id}:${process.state}`)
+            .join(",");
           return `${pod.metadata?.name ?? "pod"} (${state.node?.id ?? "no id"}): placement=${JSON.stringify(placement?.nodes ?? null)} processes=[${processes}]`;
         })
         .join("\n");
@@ -694,12 +696,15 @@ async function settledSinglePlacement(env: string): Promise<{
         return null;
       const owner = states.find(({ state }) => state.node?.id === assignedNodeIds[0]);
       const nonOwner = states.find(({ state }) => state.node?.id !== assignedNodeIds[0]);
-      const processId = `${PROJECT}--${env}`;
+      /* Only a RUNNING process counts as serving. A node lists a process it
+         stopped as exited for as long as it runs, so a node that held the
+         environment while its owner was away keeps an exited entry after the
+         owner returns — bookkeeping, not a second runtime. */
       if (
         owner === undefined ||
         nonOwner === undefined ||
-        !owner.state.processes.some((process) => process.id === processId) ||
-        nonOwner.state.processes.some((process) => process.id === processId)
+        !owner.state.processes.some((process) => runs(process, env)) ||
+        nonOwner.state.processes.some((process) => runs(process, env))
       )
         return null;
       return { placement: { nodes: assignedNodeIds }, owner, nonOwner };
@@ -734,7 +739,12 @@ function runK3sCli(args: string[], extraEnv: Record<string, string>): Promise<Co
 }
 
 function runsProduction(process: ProcessStatus): boolean {
-  return process.state === "running" && process.id === `${PROJECT}--production`;
+  return runs(process, "production");
+}
+
+/** Whether `process` is the running runtime of the project's `env`. */
+function runs(process: ProcessStatus, env: string): boolean {
+  return process.state === "running" && process.id === `${PROJECT}--${env}`;
 }
 
 async function crictlId(args: string[], description: string): Promise<string> {
