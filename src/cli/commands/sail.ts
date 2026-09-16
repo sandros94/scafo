@@ -27,6 +27,7 @@ import { createReconciler, runtimeBaseEnv } from "../../daemon/reconcile.ts";
 import { startDaemon } from "../../daemon/serve.ts";
 import { createStorageService } from "../../daemon/storage.ts";
 import { DEFAULT_ARCHIVE_ENTRIES, DEFAULT_ARTIFACT_BYTES } from "../../core/types/deploy.ts";
+import type { NodeVersions } from "../../core/types/registry.ts";
 import { initRegistry, readMeta } from "../../core/registry/meta.ts";
 import { createDeployService } from "../../daemon/deploys.ts";
 import { createCelldDeployRunner } from "../../drivers/deploy/celld.ts";
@@ -201,6 +202,9 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   const celldBin = config.runtime.binPath;
   const celldVersion = await probeCelldVersion(celldBin);
   const version = await readPackageVersion();
+  /* Said once and used twice: the record the fleet reads this node's binaries
+     from, and what this node measures every other node's against. */
+  const versions: NodeVersions = { scafo: version, celld: celldVersion };
   console.log(`scafo: celld ${celldVersion} at "${celldBin}"`);
 
   const registry = createRegistry(config);
@@ -214,7 +218,7 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   await registerThisNode(registry, {
     config,
     state,
-    versions: { scafo: version, celld: celldVersion },
+    versions,
     ...(wireguard === undefined ? {} : { wireguard }),
   });
 
@@ -230,6 +234,7 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
     registry,
     supervisor,
     version,
+    versions,
     /* Kept for the node tokens this node will sign for calls to its peers. */
     signingKey: state.privateKey,
   };

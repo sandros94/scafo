@@ -19,7 +19,7 @@ import { listFleetNodes } from "../src/cli/_nodes.ts";
 import type { OperatorRecord } from "../src/core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
+import { ctxWith, type ManualClock, rejectsWith, TEST_VERSIONS } from "./_helpers.ts";
 
 const NODE_ID = "node-a";
 /** Where the machine answers. Nothing an operator-facing refusal may ever say. */
@@ -243,6 +243,7 @@ function nodeApp(): ReturnType<typeof createNodeApp> {
     registry: clock.ctx,
     supervisor: idleSupervisor(),
     version: VERSION,
+    versions: TEST_VERSIONS,
   });
 }
 

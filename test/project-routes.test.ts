@@ -14,7 +14,7 @@ import { type OperatorRole, trustOperator } from "../src/core/registry/operators
 import type { ProjectRecord } from "../src/core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock } from "./_helpers.ts";
+import { ctxWith, type ManualClock, TEST_VERSIONS } from "./_helpers.ts";
 
 const NODE_ID = "node-a";
 const ADMIN_ID = "op-aaaa1111";
@@ -67,6 +67,7 @@ beforeEach(async () => {
     registry: clock.ctx,
     supervisor: idleSupervisor(),
     version: VERSION,
+    versions: TEST_VERSIONS,
     observability: observed,
   });
 });

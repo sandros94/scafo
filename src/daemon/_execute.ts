@@ -1,8 +1,13 @@
 /* Internal: carrying out one reconcile plan against this node. */
 
-import { describeError, ScafoError } from "../core/error.ts";
+import { describeError, isScafoError, ScafoError } from "../core/error.ts";
 import { formatProcessId, parseProcessId } from "../core/placement/ids.ts";
 import type { DesiredEnvironment, ReconcileAction } from "../core/placement/reconcile.ts";
+import { servingKey } from "../core/placement/serving.ts";
+import { findVersionSkew, versionSkewError } from "../core/placement/version-skew.ts";
+import { nowDate, type RegistryContext } from "../core/registry/context.ts";
+import { listNodeRecords } from "../core/registry/nodes.ts";
+import type { NodeRecord } from "../core/types/registry.ts";
 import type { RuntimeDriver, RuntimeProcess, RuntimeSpecInput } from "../core/types/runtime.ts";
 import type { DaemonContext } from "./app.ts";
 import { advertisedAddress } from "./config.ts";
@@ -22,6 +27,8 @@ export interface ExecutorDeps {
   driver: RuntimeDriver;
   baseEnv: Record<string, string>;
   known: Map<string, RuntimeProcess>;
+  /** Registry the pass reads through, so its reads are counted with the pass's. */
+  registry: RegistryContext;
 }
 
 export interface Executor {
@@ -35,7 +42,7 @@ export interface Executor {
 }
 
 export function createExecutor(deps: ExecutorDeps): Executor {
-  const { daemon, driver, baseEnv, known } = deps;
+  const { daemon, driver, baseEnv, known, registry } = deps;
   const observe = daemon.observability;
   const quarantined = new Set<string>();
 
@@ -43,13 +50,36 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     action: Extract<ReconcileAction, { type: "start" }>,
     wanted: Map<string, DesiredEnvironment>,
     pending: ReconcileFailure[],
+    fleet: () => Promise<NodeRecord[]>,
     signal?: AbortSignal,
   ): Promise<void> {
     signal?.throwIfAborted();
-    const entry = wanted.get(placement(action.project, action.env));
+    const env = servingKey(action.project, action.env);
+    const entry = wanted.get(env);
     if (entry === undefined || entry.env.deployment === null) return;
 
     const processId = formatProcessId({ project: action.project, env: action.env });
+
+    /*
+     * ASKED HERE, AS LATE AS THE ANSWER IS STILL USEFUL: the environment's Celld
+     * fleet takes one version, and the node that would break that is the one
+     * about to start a second binary over it. Refused rather than raised, so the
+     * rest of the plan still runs and the next pass tries again — the other node
+     * stopping is all it takes.
+     */
+    const about = { env, celld: daemon.versions.celld };
+    const skew = findVersionSkew(await fleet(), {
+      ...about,
+      selfId: daemon.nodeId,
+      now: nowDate(registry),
+    });
+    if (skew.length > 0) {
+      pending.push(
+        failureOf(versionSkewError(skew, about), { action: "start", subject: processId }),
+      );
+      return;
+    }
+
     const spec = driver.processSpec(runtimeInput(entry, action.ports));
     if (spec.id !== processId) {
       throw new ScafoError("invalid-input", "Runtime process id does not match environment");
@@ -133,12 +163,17 @@ export function createExecutor(deps: ExecutorDeps): Executor {
   return {
     async execute(plan, desired, pending, signal): Promise<void> {
       const wanted = new Map(
-        desired.map((entry) => [placement(entry.project, entry.env.name), entry]),
+        desired.map((entry) => [servingKey(entry.project, entry.env.name), entry]),
       );
+      /* The fleet is read once per pass, and only by a pass that starts
+         something: a steady state costs nothing, and a pass held back by
+         another node's version asks about it once, not once per environment. */
+      let fleet: Promise<NodeRecord[]> | undefined;
+      const readFleet = (): Promise<NodeRecord[]> => (fleet ??= listNodeRecords(registry));
       for (const action of plan) {
         if (signal?.aborted === true) break;
         try {
-          if (action.type === "start") await runStart(action, wanted, pending, signal);
+          if (action.type === "start") await runStart(action, wanted, pending, readFleet, signal);
           else await runStop(action);
         } catch (error) {
           pending.push(failureOf(error, { action: action.type, subject: subjectOf(action) }));
@@ -185,12 +220,12 @@ export function failureOf(
   return {
     at: new Date().toISOString(),
     ...about,
+    /* Carried when there is one: the code is the stable half of a failure, and
+       a reader deciding what to do about a pass acts on it rather than on the
+       sentence beside it. */
+    ...(isScafoError(error) ? { code: error.code } : {}),
     detail: describeError(error),
   };
-}
-
-function placement(project: string, env: string): string {
-  return `${project}/${env}`;
 }
 
 function subjectOf(action: ReconcileAction): string {

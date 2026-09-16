@@ -4,9 +4,11 @@ import { createBuild } from "../src/core/registry/builds.ts";
 import { createEnvironment, setEnvironmentVarset } from "../src/core/registry/environments.ts";
 import { acquireLease } from "../src/core/registry/lease.ts";
 import { getNode, registerNode } from "../src/core/registry/nodes.ts";
+import { nodeKey } from "../src/core/registry/paths.ts";
 import { writePlacement } from "../src/core/registry/placement.ts";
 import { createProject } from "../src/core/registry/projects.ts";
 import { putVarset } from "../src/core/registry/varsets.ts";
+import type { NodeRecord } from "../src/core/types/registry.ts";
 import type { RuntimeDriver, RuntimeSpecInput } from "../src/core/types/runtime.ts";
 import type { ProcessSpec, ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import type { RoutingAttribution } from "../src/daemon/access-counters.ts";
@@ -21,6 +23,8 @@ const PROJECT = "shop";
 const ENV = "production";
 const BUILD_ONE = "1111aaaa";
 const BUILD_TWO = "2222bbbb";
+/** The Celld this node booted with; what every other node's is compared against. */
+const CELLD_VERSION = "0.5.0";
 
 describe("environment-owned reconciliation", () => {
   it("starts one process and routes it as soon as the supervisor reports it running", async () => {
@@ -190,6 +194,63 @@ describe("what a node tells the fleet it serves", () => {
   });
 });
 
+describe("an environment another node serves on a different Celld", () => {
+  it("is not started here, and says which node holds it on what", async () => {
+    const world = await seededWorld();
+    await registerNode(world.daemon.registry, otherNode("node-b", "0.4.1"));
+
+    await world.reconciler.runOnce();
+
+    expect(world.supervisor.started).toEqual([]);
+    /* Not even a spec: nothing about the process is built before the refusal. */
+    expect(world.events).not.toContain("spec");
+    const [failure] = world.reconciler.status().failures;
+    expect(failure).toMatchObject({
+      action: "start",
+      subject: "shop--production",
+      code: "version-skew",
+    });
+    expect(failure?.detail).toContain("node-b");
+    expect(failure?.detail).toContain("0.4.1");
+  });
+
+  it("leaves nothing behind for the fleet to route to", async () => {
+    /* A start that did not happen must not reach the heartbeat: a node that
+       announced this environment would take traffic it cannot answer. */
+    const world = await seededWorld();
+    const heartbeat = await attachHeartbeat(world);
+    await registerNode(world.daemon.registry, otherNode("node-b", "0.4.1"));
+
+    await world.reconciler.runOnce();
+    await heartbeat.beat();
+
+    expect(world.reconciler.status().processes).toEqual([]);
+    expect((await getNode(world.daemon.registry, "node-a")).serving).toEqual({});
+  });
+
+  it("starts on the next pass once that node is gone", async () => {
+    const world = await seededWorld();
+    await registerNode(world.daemon.registry, otherNode("node-b", "0.4.1"));
+    await world.reconciler.runOnce();
+
+    await world.daemon.registry.store.del(nodeKey("node-b"));
+
+    await world.reconciler.runOnce();
+    expect(world.supervisor.started).toHaveLength(1);
+    expect(world.reconciler.status().failures).toEqual([]);
+  });
+
+  it("starts while that node runs the same Celld", async () => {
+    const world = await seededWorld();
+    await registerNode(world.daemon.registry, otherNode("node-b", CELLD_VERSION));
+
+    await world.reconciler.runOnce();
+
+    expect(world.supervisor.started).toHaveLength(1);
+    expect(world.reconciler.status().failures).toEqual([]);
+  });
+});
+
 describe("the fleet routing a pass leaves behind", () => {
   it("is unknown before the first pass, then lists every live node serving, this one included", async () => {
     const world = await seededWorld();
@@ -200,6 +261,7 @@ describe("the fleet routing a pass leaves behind", () => {
       publicKey: { kty: "OKP", crv: "Ed25519", x: "b" },
       addresses: { internal: "10.0.0.2", apiPort: 7400 },
       heartbeatAt: new Date().toISOString(),
+      versions: { scafo: "test", celld: CELLD_VERSION },
       serving: { "shop/production": { port: 42_010 } },
     });
     /* Not the empty document: that one says the fleet answers on nothing, which
@@ -227,6 +289,19 @@ describe("the fleet routing a pass leaves behind", () => {
     });
   });
 });
+
+/** Another machine, answering now and telling the fleet it serves this environment. */
+function otherNode(id: string, celld: string): NodeRecord {
+  return {
+    v: 1,
+    id,
+    publicKey: { kty: "OKP", crv: "Ed25519", x: id },
+    addresses: { internal: "10.0.0.2", apiPort: 7400 },
+    heartbeatAt: new Date().toISOString(),
+    versions: { scafo: "test", celld },
+    serving: { [`${PROJECT}/${ENV}`]: { port: 42_010 } },
+  };
+}
 
 async function attachHeartbeat(world: Awaited<ReturnType<typeof seededWorld>>) {
   await registerNode(world.daemon.registry, {
@@ -259,6 +334,7 @@ async function seededWorld() {
     registry: registry.ctx,
     supervisor,
     version: "test",
+    versions: { scafo: "test", celld: CELLD_VERSION },
     /* The one thing a pass still does with its own routing once execution is
        over: hand it to the counters, so a host is counted as whoever the pass
        decided it belongs to. Recording it here is what puts the routing in the

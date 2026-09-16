@@ -30,7 +30,13 @@ import {
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import { fromBase64Url } from "../src/core/utils/base64.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { CLOCK_START_MS, ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
+import {
+  CLOCK_START_MS,
+  ctxWith,
+  type ManualClock,
+  rejectsWith,
+  TEST_VERSIONS,
+} from "./_helpers.ts";
 
 const NODE_ID = "node-a";
 const VERSION = "0.0.0-test";
@@ -86,6 +92,7 @@ beforeEach(() => {
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
     version: VERSION,
+    versions: TEST_VERSIONS,
   };
   storage = createStorageService(agent, {
     tokens: [TOKEN],
@@ -148,6 +155,7 @@ describe("the token every request must present", () => {
       registry: clock.ctx,
       supervisor: fakeSupervisor(),
       version: VERSION,
+      versions: TEST_VERSIONS,
     });
 
     /* No route at all, rather than the `401` the same call gets from a node that
@@ -173,6 +181,7 @@ describe("the several tokens an operator may supply instead", () => {
       registry: clock.ctx,
       supervisor: fakeSupervisor(),
       version: VERSION,
+      versions: TEST_VERSIONS,
     };
     agent.storage = createStorageService(agent, {
       tokens: SUPPLIED,
@@ -760,6 +769,7 @@ async function boot(dir: string, token?: string): Promise<H3> {
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
     version: VERSION,
+    versions: TEST_VERSIONS,
   };
   agent.storage = createStorageService(agent, {
     tokens: await loadIngressTokens(config),

@@ -21,7 +21,8 @@ export type ScafoErrorCode =
   | "resource-limit"
   | "invalid-slug"
   | "invalid-varset"
-  | "invalid-input";
+  | "invalid-input"
+  | "version-skew";
 
 /** RFC 9457 problem document, as produced by {@link ScafoError.toProblem}. */
 export interface ProblemDetails {
@@ -62,6 +63,10 @@ const DEFAULT_STATUS: Record<ScafoErrorCode, number> = {
   "invalid-slug": 400,
   "invalid-varset": 400,
   "invalid-input": 400,
+  /* Two Celld versions over one environment's fleet. A CONFLICT rather than a
+     capability that is missing: every binary involved is one scafo runs, and
+     what is wrong is the fleet's state rather than the caller or its node. */
+  "version-skew": 409,
 };
 
 /**

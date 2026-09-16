@@ -20,7 +20,7 @@ import {
 import type { RegistryContext } from "../src/core/registry/context.ts";
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock } from "./_helpers.ts";
+import { ctxWith, type ManualClock, TEST_VERSIONS } from "./_helpers.ts";
 
 const NODE_ID = "node-a";
 const PROJECT = "shop";
@@ -62,6 +62,7 @@ beforeEach(async () => {
     registry,
     supervisor: idleSupervisor(),
     version: VERSION,
+    versions: TEST_VERSIONS,
   });
 });
 

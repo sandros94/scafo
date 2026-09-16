@@ -295,6 +295,7 @@ async function nodeApp(opts?: {
     registry: clock.ctx,
     supervisor: idleSupervisor(),
     version: "0.0.0-test",
+    versions: { scafo: "0.0.0-test", celld: "0.5.0" },
     fetchFn: stubFetch,
   };
   if (opts?.signingKey !== false) daemon.signingKey = selfKeys.privateKey;

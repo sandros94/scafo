@@ -34,7 +34,7 @@ import { getOperator, trustOperator } from "../src/core/registry/operators.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { toBase64 } from "../src/core/utils/base64.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
+import { ctxWith, type ManualClock, rejectsWith, TEST_VERSIONS } from "./_helpers.ts";
 
 const NODE_URL = "http://10.0.0.4:7400";
 const REMOTE = "prod";
@@ -426,6 +426,7 @@ function nodeApp(): H3 {
     registry: clock.ctx,
     supervisor: idleSupervisor(),
     version: VERSION,
+    versions: TEST_VERSIONS,
   });
 }
 

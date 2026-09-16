@@ -24,6 +24,7 @@ import type { Reconciler } from "../src/daemon/reconcile.ts";
 import { OIDC_AUDIENCE, signNodeToken } from "../src/core/auth/index.ts";
 import { environmentKey } from "../src/core/registry/paths.ts";
 import { ScafoError, type ProblemDetails } from "../src/core/error.ts";
+import { NODE_LIVENESS_WINDOW_MS } from "../src/core/registry/nodes.ts";
 import {
   blockProject,
   createEnvironment,
@@ -53,6 +54,8 @@ const PROJECT = "shop";
 const RIVAL = "rival";
 const ENVIRONMENT = "production";
 const VERSION_ID = "abc123def456";
+/** The Celld this node booted with; what every other node's is compared against. */
+const CELLD_VERSION = "0.5.0";
 const PREFIX = "installations/one";
 
 const ISS = "https://issuer.test";
@@ -123,6 +126,7 @@ beforeEach(async () => {
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
     version: "0.0.0-test",
+    versions: { scafo: "0.0.0-test", celld: CELLD_VERSION },
     reconciler: fakeReconciler(),
   };
   daemon.deploys = createDeployService(daemon, fakeRunner());
@@ -541,6 +545,53 @@ describe("a project an admin has blocked", () => {
     const response = await upload(await operatorToken());
 
     expect(response.status).toBe(202);
+  });
+});
+
+describe("an environment another node serves on a different Celld", () => {
+  it("refuses the deploy before a byte is received, and names who holds it", async () => {
+    await servedElsewhere("0.4.1");
+
+    const response = await upload(await operatorToken());
+
+    /* A fleet cannot be served by two Celld versions, and the caller is the one
+       who can stop the other node: name it and the binary it runs. */
+    expect(response.status).toBe(409);
+    const problem = await problemOf(response);
+    expect(problem.type).toBe("urn:scafo:version-skew");
+    expect(problem.detail).toContain("node-b");
+    expect(problem.detail).toContain("0.4.1");
+    expect(problem.detail).toContain(`${PROJECT}/${ENVIRONMENT}`);
+
+    expect(runs).toEqual([]);
+  });
+
+  it("names a node that reports no versions at all", async () => {
+    await servedElsewhere(undefined);
+
+    const problem = await problemOf(await upload(await operatorToken()));
+
+    expect(problem.type).toBe("urn:scafo:version-skew");
+    expect(problem.detail).toContain("unreported");
+  });
+
+  it("accepts the deploy when that node runs the same Celld", async () => {
+    await servedElsewhere(CELLD_VERSION);
+
+    expect((await upload(await operatorToken())).status).toBe(202);
+  });
+
+  it("accepts the deploy when that node is no longer answering", async () => {
+    await servedElsewhere("0.4.1");
+    clock.tick(NODE_LIVENESS_WINDOW_MS + 1);
+
+    expect((await upload(await operatorToken())).status).toBe(202);
+  });
+
+  it("leaves a deploy for another environment alone", async () => {
+    await servedElsewhere("0.4.1", `${PROJECT}/staging`);
+
+    expect((await upload(await operatorToken())).status).toBe(202);
   });
 });
 
@@ -1036,6 +1087,22 @@ function fakeReconciler(processes: () => RuntimeProcess[] = () => running): Reco
       placements: [],
     }),
   };
+}
+
+/** Another live machine telling the fleet it already serves `env` on `celld`. */
+async function servedElsewhere(
+  celld: string | undefined,
+  env: string = `${PROJECT}/${ENVIRONMENT}`,
+): Promise<void> {
+  await registerNode(clock.ctx, {
+    v: 1,
+    id: "node-b",
+    publicKey: { kty: "OKP", crv: "Ed25519", x: "node-b" },
+    addresses: { internal: "10.0.0.2", apiPort: 7400 },
+    heartbeatAt: new Date(clock.nowMs()).toISOString(),
+    ...(celld === undefined ? {} : { versions: { scafo: "0.0.0-test", celld } }),
+    serving: { [env]: { port: 42_000 } },
+  });
 }
 
 function fakeRunner(): DeployRunner {

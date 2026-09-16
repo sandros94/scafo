@@ -47,7 +47,7 @@ const NODE_B = "node-b";
 const NODE_C = "node-c";
 
 /** What a booting daemon has just read about itself and about the binary it runs. */
-const VERSIONS = { scafo: "0.0.0", celld: "0.4.1" };
+const VERSIONS = { scafo: "0.0.0", celld: "0.5.0" };
 
 const roots: string[] = [];
 

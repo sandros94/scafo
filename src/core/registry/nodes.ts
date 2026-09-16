@@ -146,14 +146,10 @@ export async function drainNode(ctx: RegistryContext, id: string): Promise<strin
 }
 
 /**
- * Whether `record` counts as live for placement: it is not draining, and its
- * last sign of life is newer than {@link NODE_LIVENESS_WINDOW_MS}.
+ * Whether `record` counts as live for placement: it is not draining, and it has
+ * been heard from inside {@link NODE_LIVENESS_WINDOW_MS}.
  *
- * `heartbeatAt` is that sign. A record carrying none is NOT live: nothing in it
- * says when the node was last seen, and guessing "recently" would hand
- * environments to a node that may be years gone.
- *
- * `drainingAt` outranks all of it. A node on its way out has usually just
+ * `drainingAt` outranks the heartbeat. A node on its way out has usually just
  * beaten — it is stopping in an orderly fashion, not failing — so judging it by
  * its heartbeat alone would keep it a placement candidate for the whole liveness
  * window after it stopped serving. Its own word about where it is going is
@@ -163,7 +159,31 @@ export async function drainNode(ctx: RegistryContext, id: string): Promise<strin
  */
 export function isNodeLive(record: NodeRecord, now: Date, opts?: { windowMs?: number }): boolean {
   if (record.drainingAt !== undefined) return false;
+  return isNodeAnswering(record, now, opts);
+}
 
+/**
+ * Whether the node was last heard from inside {@link NODE_LIVENESS_WINDOW_MS},
+ * whatever it has said about leaving.
+ *
+ * THE OTHER HALF OF {@link isNodeLive}, and a different question. That one asks
+ * whether a node may be handed new work; this one asks whether it is still
+ * there. A draining node is a no to the first and a yes to the second: it is
+ * shutting down in an orderly fashion, and until it is done its processes are
+ * still running and still hold whatever they hold. A caller that has to reckon
+ * with what is running right now reads this one.
+ *
+ * `heartbeatAt` is the only sign. A record carrying none is NOT answering:
+ * nothing in it says when the node was last seen, and guessing "recently" would
+ * credit a machine that may be years gone.
+ *
+ * Pure, so the caller decides what "now" is.
+ */
+export function isNodeAnswering(
+  record: NodeRecord,
+  now: Date,
+  opts?: { windowMs?: number },
+): boolean {
   const seenAt = record.heartbeatAt;
   if (seenAt === undefined) return false;
 

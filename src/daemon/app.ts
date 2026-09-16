@@ -20,7 +20,12 @@ import {
   type ArtifactStager,
   type StagedArtifact,
 } from "../core/types/deploy.ts";
-import type { CoordinatorLease, EnvironmentRecord, NodeRecord } from "../core/types/registry.ts";
+import type {
+  CoordinatorLease,
+  EnvironmentRecord,
+  NodeRecord,
+  NodeVersions,
+} from "../core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../core/types/supervisor.ts";
 import { isHost } from "../core/utils/host.ts";
 import { assertSlug, parseHostLabel } from "../core/utils/slug.ts";
@@ -61,6 +66,12 @@ export interface DaemonContext {
   supervisor: Supervisor;
   /** Build of the daemon, reported by `GET /.well-known/scafo/health`. */
   version: string;
+  /**
+   * The binaries this daemon booted with, and what its node record reports. The
+   * Celld half is what every other node's is measured against before this one
+   * starts a process for an environment or takes a deploy into it.
+   */
+  versions: NodeVersions;
   /** Node private key used for peer tokens; its public half is in the registry. */
   signingKey?: NodeSigningKey;
   /** The reconcile loop, when this node runs one. */

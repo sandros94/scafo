@@ -26,7 +26,7 @@ import { createEnvironment, createProject, getEnvironment } from "../src/core/re
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { toBase64 } from "../src/core/utils/base64.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
+import { ctxWith, type ManualClock, rejectsWith, TEST_VERSIONS } from "./_helpers.ts";
 
 const PROD_URL = "http://10.0.0.4:7400";
 const STAGING_URL = "http://10.0.0.5:7400";
@@ -347,6 +347,7 @@ describe("the resolved remote against a real node", () => {
       registry: clock.ctx,
       supervisor: idleSupervisor(),
       version: "0.0.0-test",
+      versions: TEST_VERSIONS,
     });
     const ops = nodeOps({
       url: resolved.nodeUrl as string,

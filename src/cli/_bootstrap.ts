@@ -196,9 +196,9 @@ export interface RegisterNodeOptions extends NodeRecordOptions {
  * The VERSIONS it started with are written here for the same reason, and are
  * only ever written here: a heartbeat says a node is still there, not what it is
  * running, so a record's versions are what its daemon booted with until it boots
- * again. That is also what makes a rolling Celld upgrade visible — a node that
- * has been restarted says so, and one that has not still says what it started
- * with.
+ * again. That is also what the rest of the fleet reads to tell which machines
+ * are still on the old binary — a node that has been restarted says so, and one
+ * that has not still says what it started with.
  *
  * The node's LABELS are written here for the same reason, and REPLACED here for
  * a sharper one: they are boot configuration rather than runtime state, so the

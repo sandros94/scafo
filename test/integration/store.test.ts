@@ -131,8 +131,8 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
     });
 
     it("answers a ranged read with that range and nothing else", async () => {
-      /* What celld asks of the bucket since 0.4.1: a bucket that ignores
-         `Range` and hands back the whole object stops the runtime process. */
+      /* What celld asks of the bucket: one that ignores `Range` and hands back
+         the whole object stops the runtime process. */
       const key = `v1/range-${randomHex(4)}.json`;
       await store.put(key, `{"probe":3}`);
 

@@ -96,6 +96,7 @@ export function createReconciler(
     driver,
     baseEnv: opts?.baseEnv ?? runtimeBaseEnv(globalThis.process?.env ?? {}),
     known,
+    registry,
   });
 
   let timer: ReturnType<typeof setInterval> | null = null;

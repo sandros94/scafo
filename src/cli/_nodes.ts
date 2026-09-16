@@ -122,15 +122,16 @@ export function formatNodeTable(nodes: NodeListing[], now: Date = new Date()): s
 const UNREPORTED = "-";
 
 /**
- * One binary's spread over the fleet, newest first: `celld: 0.4.1 on 2 nodes,
- * 0.4.0 on 1`.
+ * One binary's spread over the fleet, newest first: `celld: 0.5.0 on 2 nodes,
+ * 0.4.1 on 1`.
  *
- * A ROLLING UPGRADE IS THE QUESTION THIS ANSWERS. The column below says what
- * each machine runs, which is what an operator needs once they know something is
- * wrong; this says how far the fleet has moved, which is what they are asking
- * while the upgrade is still running. Newest first, because that is the half
- * that is finished. A record from a build older than the field itself counts as
- * `unreported` rather than as a version, since nothing in it says one.
+ * WHICH MACHINES STILL RUN THE OLD BINARY IS THE QUESTION THIS ANSWERS. An
+ * installation is upgraded by stopping every node and starting the new ones, so
+ * a second version in this line is work left to do: the column below says which
+ * machine it is, and this says how much of the fleet is waiting on it. Newest
+ * first, because that is the half that is done. A record from a build older
+ * than the field itself counts as `unreported` rather than as a version, since
+ * nothing in it says one.
  */
 function formatVersionRoll(
   label: string,

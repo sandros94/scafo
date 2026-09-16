@@ -116,7 +116,7 @@ curl -H 'Host: shop.scafo.test' http://127.0.0.1/count
 
 The deploy prints a different build id and the host begins serving `v2`. The durable counter continues because the environment's Celld fleet did not change.
 
-Celld 0.4.1 exposes one current application deployment per fleet. Previous artifacts may remain in the bucket, but Scafo does not provide an old-build host or historical deployment selector. Track the upstream lifecycle discussion in [Celld issue #181](https://github.com/denoland/celld/issues/181).
+Celld 0.5.0 exposes one current application deployment per fleet. Previous artifacts may remain in the bucket, but Scafo does not provide an old-build host or historical deployment selector. Track the upstream lifecycle discussion in [Celld issue #181](https://github.com/denoland/celld/issues/181).
 
 ## 9. Read observations
 

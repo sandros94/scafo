@@ -16,9 +16,18 @@ import type {
   CoordinatorLease,
   DomainClaim,
   EnvironmentRecord,
+  NodeVersions,
 } from "../src/core/types/registry.ts";
+import { MIN_CELLD_VERSION } from "../src/drivers/runtime/celld.ts";
 import type { ByteRange, CasHeaders, CasStore, StoredObject } from "../src/core/types/store.ts";
 import { SLUG_MAX_LENGTH } from "../src/core/utils/slug.ts";
+
+/**
+ * What a node's daemon booted with, for a test that only needs it to be current.
+ * The Celld half is this build's floor, so a test that does not care which
+ * version is running never has to be edited when the floor moves.
+ */
+export const TEST_VERSIONS: NodeVersions = { scafo: "0.0.0-test", celld: MIN_CELLD_VERSION };
 
 /** xorshift32; returns floats in `[0, 1)`. The same seed always replays the same run. */
 export function seededRng(seed: number): () => number {

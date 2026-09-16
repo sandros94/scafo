@@ -12,7 +12,7 @@ Ask before acting when intent is ambiguous. For design or product decisions, run
 
 - A Scafo fleet is one installation: one registry and its Scafo nodes. A Scafo node is a machine running `scafo sail`.
 - Each deployed environment has its own Celld fleet. A Scafo node may supervise one Celld node process per assigned environment. Unqualified `fleet` and `node` mean Scafo's machine-level concepts; name Celld's process-level concepts explicitly.
-- Scafo requires Celld 0.4.1: `scafo sail` runs `celld --version` before it opens the bucket and refuses an older or unreadable binary with `capability-missing`, and each node record carries the `versions` (Scafo and Celld) its daemon booted with. Celld owns deployment adoption, application health, cells, and runtime resource policy; Scafo owns registry, auth, placement, supervision, deploy intake, and the routing every ingress reads.
+- Scafo requires Celld 0.5.0: `scafo sail` runs `celld --version` before it opens the bucket and refuses an older or unreadable binary with `capability-missing`, and each node record carries the `versions` (Scafo and Celld) its daemon booted with. A node does not start an environment's process, and does not accept a deploy for it, while another live node serving that environment reports a different Celld version (`version-skew`, 409); an upgrade stops every node of the installation first. Celld owns deployment adoption, application health, cells, and runtime resource policy; Scafo owns registry, auth, placement, supervision, deploy intake, and the routing every ingress reads.
 - Celld exposes one current deployment per environment fleet. Scafo records a monotonic deployment revision, not a selected version; it has no old-build host or local version selection. See https://github.com/denoland/celld/issues/181.
 - `/.well-known/scafo/health` is served by the node/API listener; `/.well-known/celld/health` is served on application hosts. `scafo health` probes the former at the listener it resolves from the daemon's own sources (env and config file, not `sail` flags); it is the image's HEALTHCHECK.
 
@@ -56,7 +56,7 @@ Docker E2E is opt-in; absent Docker skips a suite, not a product failure. Run `p
 
 ## Packaging
 
-- The image runs as uid 10001 with Celld 0.4.1 and esbuild. Its direct Node entrypoint stays PID 1 in a private PID namespace.
+- The image runs as uid 10001 with Celld 0.5.0 and esbuild. Its direct Node entrypoint stays PID 1 in a private PID namespace.
 - Allow at least 50 seconds for node shutdown. Celld's default may take 40; Docker and Kubernetes grace periods must not be shorter. If `CELLD_SHUTDOWN_TOTAL_MS` is larger, give the enclosing grace at least 10 seconds more.
 - Caddy/Traefik share the node network namespace to reach loopback application processes. Multi-node Celld peer traffic needs a trusted wider bind.
 - `scripts/install.sh` verifies every download before installation. `scripts/uninstall.sh` preserves `/var/lib/scafo` unless `--purge`; neither mutates the bucket.

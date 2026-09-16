@@ -18,7 +18,7 @@ describe("what the listing reads", () => {
     const clock = ctxWith(new MemoryCasStore());
     await register(clock, "node-b", {
       labels: { tier: "fast", region: "eu-west-1" },
-      versions: { scafo: "0.0.0", celld: "0.4.1" },
+      versions: { scafo: "0.0.0", celld: "0.5.0" },
     });
     await register(clock, "node-a", {});
 
@@ -30,7 +30,7 @@ describe("what the listing reads", () => {
       apiPort: 7400,
       labels: { region: "eu-west-1", tier: "fast" },
       /* Carried through untouched, so `--json` says which binaries are where. */
-      versions: { scafo: "0.0.0", celld: "0.4.1" },
+      versions: { scafo: "0.0.0", celld: "0.5.0" },
     });
     expect(listing[0]?.versions).toBeUndefined();
   });
@@ -102,17 +102,17 @@ describe("what the listing prints", () => {
 
   it("says what each machine runs, and rolls the fleet up by binary", async () => {
     const clock = ctxWith(new MemoryCasStore());
-    await register(clock, "node-a", { versions: { scafo: "0.0.0", celld: "0.4.1" } });
-    await register(clock, "node-b", { versions: { scafo: "0.0.0", celld: "0.4.1" } });
-    await register(clock, "node-c", { versions: { scafo: "0.0.0", celld: "0.4.0" } });
+    await register(clock, "node-a", { versions: { scafo: "0.0.0", celld: "0.5.0" } });
+    await register(clock, "node-b", { versions: { scafo: "0.0.0", celld: "0.5.0" } });
+    await register(clock, "node-c", { versions: { scafo: "0.0.0", celld: "0.4.1" } });
     await register(clock, "node-d", {});
     const now = new Date(clock.nowMs());
 
     const printed = formatNodeTable(await listFleetNodes(clock.ctx, { now }), now);
 
     expect(printed).toContain("CELLD  SCAFO  LABELS");
-    /* Newest first: mid-upgrade, the question is how much of the fleet has moved. */
-    expect(printed).toContain("celld: 0.4.1 on 2 nodes, 0.4.0 on 1, unreported on 1");
+    /* Newest first: the question is how much of the fleet is still on the old one. */
+    expect(printed).toContain("celld: 0.5.0 on 2 nodes, 0.4.1 on 1, unreported on 1");
     expect(printed).toContain("scafo: 0.0.0 on 3 nodes, unreported on 1");
     /* A record from a build that kept no versions reads as a dash, not a guess. */
     expect(printed).toMatch(/^ {2}node-d\s+lost\s+never\s+\S+\s+-\s+-$/m);

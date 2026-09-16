@@ -31,7 +31,7 @@ import {
 import type { NodeRecord } from "../src/core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock } from "./_helpers.ts";
+import { ctxWith, type ManualClock, TEST_VERSIONS } from "./_helpers.ts";
 
 const NODE_ID = "node-a";
 const VERSION = "0.0.0-test";
@@ -77,6 +77,7 @@ beforeEach(async () => {
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
     version: VERSION,
+    versions: TEST_VERSIONS,
   });
 });
 
@@ -175,6 +176,7 @@ describe("GET /v1/state", () => {
       registry: clock.ctx,
       supervisor: fakeSupervisor(),
       version: VERSION,
+      versions: TEST_VERSIONS,
     });
 
     const spent = await app.request("/v1/state", { headers: { authorization: `Bearer ${token}` } });
@@ -341,6 +343,7 @@ describe("GET /v1/state, on the node that is coordinating", () => {
       registry: clock.ctx,
       supervisor: fakeSupervisor(),
       version: VERSION,
+      versions: TEST_VERSIONS,
       coordinator: {
         start: () => {},
         stop: () => Promise.resolve(),
@@ -610,6 +613,7 @@ function appWith(overrides: Partial<DaemonConfig>): H3 {
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
     version: VERSION,
+    versions: TEST_VERSIONS,
   });
 }
 
@@ -676,6 +680,7 @@ async function appCoordinating(unplaced: AssignmentFailure[]): Promise<H3> {
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
     version: VERSION,
+    versions: TEST_VERSIONS,
     coordinator: {
       start: () => {},
       stop: () => Promise.resolve(),

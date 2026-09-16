@@ -19,7 +19,7 @@ import { createProject, getProject, registerNode } from "../src/core/registry/in
 import { type OperatorRole, trustOperator } from "../src/core/registry/operators.ts";
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
+import { ctxWith, type ManualClock, rejectsWith, TEST_VERSIONS } from "./_helpers.ts";
 
 const NODE_ID = "node-a";
 const NODE_URL = "http://10.0.0.4:7400";
@@ -226,6 +226,7 @@ function buildApp(): ReturnType<typeof createNodeApp> {
     registry: clock.ctx,
     supervisor: idleSupervisor(),
     version: "0.0.0-test",
+    versions: TEST_VERSIONS,
   });
 }
 

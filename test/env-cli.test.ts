@@ -31,7 +31,7 @@ import { coordinatorKey, environmentKey } from "../src/core/registry/paths.ts";
 import type { CoordinatorLease } from "../src/core/types/registry.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
+import { ctxWith, type ManualClock, rejectsWith, TEST_VERSIONS } from "./_helpers.ts";
 
 const NODE_ID = "node-a";
 const PROJECT = "app";
@@ -328,6 +328,7 @@ function buildNodeOps(): EnvironmentOps {
     registry: clock.ctx,
     supervisor: idleSupervisor(),
     version: "0.0.0-test",
+    versions: TEST_VERSIONS,
     coordinator: soleCoordinator(),
   });
 

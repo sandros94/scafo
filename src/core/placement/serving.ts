@@ -16,9 +16,14 @@ import type { RuntimeProcess } from "../types/runtime.ts";
  */
 export function servingOf(processes: RuntimeProcess[]): NodeServing {
   const entries = processes
-    .map((process) => [`${process.project}/${process.env}`, { port: process.port }] as const)
+    .map((process) => [servingKey(process.project, process.env), { port: process.port }] as const)
     .sort(([a], [b]) => (a === b ? 0 : a < b ? -1 : 1));
   return Object.fromEntries(entries);
+}
+
+/** The one name an environment goes by wherever the project and the name are one key. */
+export function servingKey(project: string, env: string): string {
+  return `${project}/${env}`;
 }
 
 /** Whether two published sets say the same thing, key for key and port for port. */

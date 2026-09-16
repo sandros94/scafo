@@ -15,21 +15,23 @@ export const DEFAULT_CELLD_BIN: string = "celld";
  * Oldest Celld this build runs against, and the one place that floor is written
  * down: the image, the installer and the docs all quote this.
  *
- * A HARD FLOOR, because 0.4.1 changed three things Scafo builds on — the lease
- * retry, the storage contract, and the bucket format a paged restore reads — so
- * an older binary in a fleet is not a missing feature but a silent hazard: it
- * starts, it serves, and it loses work in ways nothing here would report.
+ * A HARD FLOOR, because it is the release whose bucket format, variable model —
+ * variables travel in the Wrangler config at deploy — and storage contract this
+ * build is written against. An older binary in a fleet is not a missing feature
+ * but a silent hazard: it starts, it serves, and it loses work in ways nothing
+ * here would report.
  *
- * CHECKED ONLY WHERE A DAEMON STARTS, which is exactly what lets a fleet be
- * upgraded one machine at a time: a node already running keeps serving whatever
- * it started with, and the restart is where an old binary is refused.
+ * CHECKED WHERE A DAEMON STARTS, which is the moment a machine picks up a
+ * binary. What keeps one environment's fleet from being served by two Celld
+ * versions at once is the separate gate on starting a process and on taking a
+ * deploy; see `core/placement/version-skew.ts`.
  */
-export const MIN_CELLD_VERSION: string = "0.4.1";
+export const MIN_CELLD_VERSION: string = "0.5.0";
 
 /** Default loopback bind; wider peer exposure requires an explicit network decision. */
 export const DEFAULT_BIND_HOST: string = "127.0.0.1";
 
-/** celld 0.4.1's complete process shutdown bound when the operator does not set one. */
+/** Celld's complete process shutdown bound when the operator does not set one. */
 export const DEFAULT_CELLD_SHUTDOWN_TOTAL_MS: number = 40_000;
 
 /** Time kept between celld's complete shutdown bound and the supervisor's hard kill. */
@@ -111,7 +113,7 @@ const VERSION_TIMEOUT_MS = 10_000;
 /** Output quoted back in a refusal, so a chatty or broken binary cannot flood a log. */
 const VERSION_OUTPUT_CHARS = 200;
 
-/** What the binary prints: `celld 0.4.1`, and `celld 0.4.1 (debug)` from a debug build. */
+/** What the binary prints: `celld 0.5.0`, and `celld 0.5.0 (debug)` from a debug build. */
 const VERSION_RE = /^celld (\d+)\.(\d+)\.(\d+)\b/;
 
 const run = promisify(execFile);
@@ -168,9 +170,9 @@ export async function probeCelldVersion(
  * By number rather than by text, because text puts `0.4.10` before `0.4.9` —
  * which would let the gate admit a binary older than the floor, and would order
  * a fleet listing backwards at exactly the moment an operator is reading it to
- * see how far an upgrade has got. A part that is not a number counts as older
- * than any number, so a record carrying something unexpected sorts last instead
- * of shuffling the rest.
+ * see which machines still run the old one. A part that is not a number counts
+ * as older than any number, so a record carrying something unexpected sorts last
+ * instead of shuffling the rest.
  */
 export function compareVersions(a: string, b: string): number {
   const left = triple(a);

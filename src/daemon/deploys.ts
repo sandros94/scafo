@@ -2,7 +2,11 @@
    and exposes bounded in-memory status history. */
 
 import { describeError, isScafoError, ScafoError } from "../core/error.ts";
+import { servingKey } from "../core/placement/serving.ts";
+import { findVersionSkew, versionSkewError } from "../core/placement/version-skew.ts";
 import { createBuild } from "../core/registry/builds.ts";
+import { nowDate } from "../core/registry/context.ts";
+import { listNodeRecords } from "../core/registry/nodes.ts";
 import { recordDeployment } from "../core/registry/_deployment.ts";
 import { createEnvironment, getEnvironment } from "../core/registry/environments.ts";
 import { fleetPrefix } from "../core/registry/paths.ts";
@@ -213,6 +217,7 @@ export function createDeployService(
         ...(meta.replicas === undefined ? {} : { replicas: meta.replicas }),
         ...(meta.nodeSelector === undefined ? {} : { nodeSelector: meta.nodeSelector }),
       });
+      await assertOneCelldVersion(daemon, meta.project, meta.environment);
 
       return {
         start(artifact, reserved): DeployStatus {
@@ -257,6 +262,30 @@ export function createDeployService(
       await Promise.allSettled(continuations);
     },
   };
+}
+
+/**
+ * Refuses the deploy while another node still serves the environment on a
+ * different Celld.
+ *
+ * ASKED AT INTAKE, before a byte of the artifact is read: publishing writes into
+ * the environment's Celld fleet, whose bucket format belongs to whichever
+ * version is serving it, and the caller's answer is a 409 it can act on rather
+ * than an upload that is thrown away. The publish path asks nothing more — the
+ * refusal has already happened, and the node the deploy lands on is this one.
+ */
+async function assertOneCelldVersion(
+  daemon: DaemonContext,
+  project: string,
+  environment: string,
+): Promise<void> {
+  const about = { env: servingKey(project, environment), celld: daemon.versions.celld };
+  const skew = findVersionSkew(await listNodeRecords(daemon.registry), {
+    ...about,
+    selfId: daemon.nodeId,
+    now: nowDate(daemon.registry),
+  });
+  if (skew.length > 0) throw versionSkewError(skew, about);
 }
 
 /** Ensures an environment exists. Existing placement changes only when requested;
