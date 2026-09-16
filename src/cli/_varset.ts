@@ -35,6 +35,14 @@ export function describeVarsetWrite(summary: VarsetSummary): string {
   return `${held}; used by ${carriers(summary)} — takes effect at their next deploy`;
 }
 
+/** One `scafo varset list` line for a record this build cannot read. */
+export function describeUnreadableVarset(name: string): string {
+  return (
+    `${name}: unreadable, written by an earlier build; recreate it with "scafo varset set" ` +
+    `and delete it once no environment points at it`
+  );
+}
+
 /** One `scafo varset list` line: the name, what it holds, and who carries it. */
 export function describeVarsetUse(summary: VarsetSummary): string {
   const used = summary.environments.length === 0 ? "no environment" : carriers(summary);

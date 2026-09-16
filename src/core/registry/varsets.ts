@@ -12,6 +12,7 @@ import { ScafoError } from "../error.ts";
 import type { EnvironmentRecord, VarsetRecord } from "../types/registry.ts";
 import { ENV_NAME_RULE, isEnvName, RESERVED_ENV_NAMES } from "../utils/env.ts";
 import { sha256Hex } from "../utils/hash.ts";
+import { assertSlug } from "../utils/slug.ts";
 import { stableStringify } from "../utils/json.ts";
 import { deploymentRevision } from "./_deployment.ts";
 import { isCasConflict, namesFromKeys } from "./_shared.ts";
@@ -77,6 +78,9 @@ export async function putVarset(
   project: string,
   input: PutVarsetInput,
 ): Promise<VarsetRecord> {
+  /* Written only under a slug; the key helper also reads the names an earlier
+     build filed records under, and a new record must not be one of those. */
+  assertSlug(input.name);
   const key = varsetKey(project, input.name);
   assertVarsetVars(input.vars);
 

@@ -216,8 +216,13 @@ export function varsetsPrefix(project: string): string {
   return `${projectsPrefix()}${project}/varsets/`;
 }
 
+/**
+ * A varset is written under a slug, and read or deleted under whatever name it
+ * was stored as: a record filed under a content id by an earlier build is still
+ * one an operator has to be able to read the refusal for and delete.
+ */
 export function varsetKey(project: string, name: string): string {
-  assertSlug(name);
+  if (!ID_RE.test(name)) assertSlug(name);
   return `${varsetsPrefix(project)}${name}.json`;
 }
 

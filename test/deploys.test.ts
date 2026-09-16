@@ -630,6 +630,24 @@ describe("the varset an environment's deploys carry", () => {
     expect(environment.deployment).not.toHaveProperty("varset");
   });
 
+  it("refuses the deploy when the varset it names cannot be read, naming both ways out", async () => {
+    await pointedAt("shared");
+    await clock.ctx.store.put(
+      varsetKey(PROJECT, "shared"),
+      JSON.stringify({ v: 1, alg: "A256GCM", iv: "aaaa", ct: "bbbb" }),
+    );
+
+    const response = await upload(await operatorToken());
+
+    expect(response.status).toBe(400);
+    const problem = await problemOf(response);
+    expect(problem.type).toBe("urn:scafo:invalid-varset");
+    expect(problem.detail).toContain("cannot read");
+    expect(problem.detail).toContain("scafo varset set");
+    expect(problem.detail).toContain("--none");
+    expect(runs).toEqual([]);
+  });
+
   it("refuses the deploy when the varset it names is gone, naming both ways out", async () => {
     await pointedAt("shared");
     await clock.ctx.store.del(varsetKey(PROJECT, "shared"));

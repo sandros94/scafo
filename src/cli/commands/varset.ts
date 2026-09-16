@@ -8,7 +8,7 @@
 
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import { loadDaemonConfig } from "../../daemon/config.ts";
-import { ScafoError } from "../../core/error.ts";
+import { isScafoError, ScafoError } from "../../core/error.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
 import {
   deleteVarset,
@@ -20,6 +20,7 @@ import {
 import { createRegistry } from "../_bootstrap.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
 import {
+  describeUnreadableVarset,
   describeVarsetUse,
   describeVarsetWrite,
   DOTENV_SYNTAX,
@@ -171,10 +172,20 @@ async function runList(flags: Record<string, unknown>): Promise<void> {
   }
 
   for (const name of names) {
-    const [stored, environments] = await Promise.all([
-      getVarset(registry, project, name),
-      varsetUses(registry, project, name),
-    ]);
+    let stored: Awaited<ReturnType<typeof getVarset>>;
+    let environments: Awaited<ReturnType<typeof varsetUses>>;
+    try {
+      [stored, environments] = await Promise.all([
+        getVarset(registry, project, name),
+        varsetUses(registry, project, name),
+      ]);
+    } catch (error) {
+      /* One record this build cannot read must not hide the rest of the list:
+         it is named, said to be unreadable, and left to the operator. */
+      if (!isScafoError(error) || error.code !== "invalid-varset") throw error;
+      console.log(describeUnreadableVarset(name));
+      continue;
+    }
     console.log(
       describeVarsetUse({
         project,

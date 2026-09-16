@@ -9,6 +9,7 @@ import { env } from "../src/cli/commands/env.ts";
 import { varset } from "../src/cli/commands/varset.ts";
 import {
   describeEnvironmentVarset,
+  describeUnreadableVarset,
   describeVarsetUse,
   describeVarsetWrite,
   formatVarsetVars,
@@ -198,6 +199,15 @@ describe("what `scafo varset list` prints", () => {
     expect(
       describeVarsetUse({ project: PROJECT, name: "spare", variables: 1, environments: [] }),
     ).toBe("spare: 1 variable, used by no environment");
+  });
+});
+
+describe("what `scafo varset list` prints for a record this build cannot read", () => {
+  it("names it, says it is unreadable, and points at the way back", () => {
+    expect(describeUnreadableVarset("bf5d1d1d")).toBe(
+      `bf5d1d1d: unreadable, written by an earlier build; recreate it with "scafo varset set" ` +
+        `and delete it once no environment points at it`,
+    );
   });
 });
 

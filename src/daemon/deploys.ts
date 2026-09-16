@@ -327,14 +327,20 @@ async function carriedVars(
     const varset = await getVarset(daemon.registry, project, name);
     return { name, vars: varset.vars, hash: await varsetHash(varset.vars) };
   } catch (error) {
-    if (!isScafoError(error) || error.code !== "not-found") throw error;
+    if (!isScafoError(error)) throw error;
+    if (error.code !== "not-found" && error.code !== "invalid-varset") throw error;
 
-    throw new ScafoError("not-found", "Varset not found", {
+    /* Two ways out, and which is meant is not scafo's to guess: the name
+       may be a slug to write again, or one an earlier build filed the record
+       under, which only a new record and a new pointer replace. */
+    const why = error.code === "not-found" ? "no longer exists" : "this build cannot read";
+    throw new ScafoError(error.code, "Varset cannot be carried", {
       detail:
-        `"${project}/${environment}" carries varset "${name}", which no longer exists: write ` +
-        `it again with "scafo varset set --project ${project} --name ${name} --file <file>", ` +
-        `or stop the environment carrying one with "scafo env varset --project ${project} ` +
-        `--env ${environment} --none"`,
+        `"${project}/${environment}" carries varset "${name}", which ${why}: write a varset ` +
+        `with "scafo varset set --project ${project} --name <name> --file <file>" and point ` +
+        `the environment at it with "scafo env varset --project ${project} --env ` +
+        `${environment} --name <name>", or stop it carrying one with "scafo env varset ` +
+        `--project ${project} --env ${environment} --none"`,
       cause: error,
     });
   }

@@ -134,6 +134,31 @@ describe("writing and reading one", () => {
   });
 });
 
+describe("a record filed under a content id by an earlier build", () => {
+  const LEGACY = "bf5d1d1d9e1b80b058709197e0c8f910e9c7362c1400ccbd2309fa7305565a78";
+
+  it("is read as unreadable rather than as a bad name, and can be deleted", async () => {
+    await store.put(
+      varsetKey(PROJECT, LEGACY),
+      JSON.stringify({ v: 1, alg: "A256GCM", iv: "aaaa", ct: "bbbb" }),
+    );
+
+    const error = await rejectsWith(() => getVarset(clock.ctx, PROJECT, LEGACY), "invalid-varset");
+    expect(error.detail).toContain("scafo varset set");
+    expect(await listVarsets(clock.ctx, PROJECT)).toEqual([LEGACY]);
+
+    await deleteVarset(clock.ctx, PROJECT, LEGACY);
+    expect(await listVarsets(clock.ctx, PROJECT)).toEqual([]);
+  });
+
+  it("is a name nothing new may be written under", async () => {
+    await rejectsWith(
+      () => putVarset(clock.ctx, PROJECT, { name: LEGACY, vars: VARS }),
+      "invalid-slug",
+    );
+  });
+});
+
 describe("listVarsets", () => {
   it("names every varset of the project, sorted", async () => {
     for (const name of ["staging", "shared", "preview"]) {
