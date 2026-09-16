@@ -256,6 +256,49 @@ export interface DomainClaim {
 }
 
 /**
+ * Where one deploy has got to. `deployed` and `failed` are terminal: a deploy
+ * that reached either has stopped moving and never moves again.
+ */
+export type DeployState = "accepted" | "uploading" | "deployed" | "failed";
+
+/**
+ * One deploy, from the moment a node accepted it to the moment it stopped
+ * moving. Key: `_scafo/projects/<project>/deploys/<id>.json`.
+ *
+ * The state lives HERE rather than in the accepting node's memory, so that any
+ * node of the installation answers a poll — behind an apex that fronts several
+ * of them the poll lands wherever the ingress sends it — and so that a node
+ * restarting mid-deploy leaves an operator with an answer rather than a
+ * forgotten id.
+ */
+export interface DeployRecord {
+  v: 1;
+  /** `<project>.<16 hex>`; the project half is what authenticates a poll. */
+  id: string;
+  project: string;
+  environment: string;
+  state: DeployState;
+  /** Node that accepted the deploy and is carrying it out. */
+  node: string;
+  acceptedAt: string;
+  /** When the state last moved; the reaper reads it to spot an abandoned deploy. */
+  updatedAt: string;
+  /** Build the deploy produced; absent until one has been recorded. */
+  build?: string;
+  /** Varset the deploy carried; absent when it carried none. */
+  varset?: CarriedVarset;
+  /** Why it failed, when it did. */
+  detail?: string;
+  /**
+   * What the caller said it was deploying, and the workload identity that was
+   * verified at intake. A build record carries both for a deploy that reached
+   * one; these are the same trail for a deploy that never did.
+   */
+  source?: BuildSource;
+  oidc?: OidcActor;
+}
+
+/**
  * Variables an environment's deploys carry, named per project and edited in
  * place. Key: `_scafo/projects/<project>/varsets/<name>.json`.
  */

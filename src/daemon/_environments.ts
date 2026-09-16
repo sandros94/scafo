@@ -11,7 +11,8 @@ import { coordinatorKey } from "../core/registry/paths.ts";
 import { deleteEnvironment } from "../core/registry/reaper.ts";
 import type { CoordinatorLease } from "../core/types/registry.ts";
 import type { DaemonContext, EnvironmentDeleted } from "./app.ts";
-import { isProxiedHop, peerUrl, PROXIED_HEADER, PROXIED_VALUE } from "./_peer.ts";
+import { forwardToNode } from "./_forward.ts";
+import { isProxiedHop } from "./_peer.ts";
 
 /**
  * Whether the request asked for a forced deletion, which bypasses both the
@@ -99,9 +100,12 @@ async function currentLease(daemon: DaemonContext): Promise<CoordinatorLease | n
 }
 
 /**
- * Forwards this request to the node holding the lease and returns what it
- * answered, unchanged. The coordinator's answer is the answer — including its
- * problem document, which explains a refusal better than a relayed summary.
+ * Forwards this request to the node holding the lease, speaking as this node.
+ *
+ * The caller's own authorization was settled HERE — an operator's scope is
+ * checked against the project in the path before any of this — so the hop
+ * carries this node's identity rather than the caller's, and the coordinator
+ * answers a peer of its own installation.
  */
 async function forwardToCoordinator(
   daemon: DaemonContext,
@@ -118,12 +122,6 @@ async function forwardToCoordinator(
   }
 
   const record = await getNode(daemon.registry, nodeId);
-  /* Path AND query: the query is where `force` is, and a hop that dropped it
-     would turn a deletion the operator forced into a refusal from a node they
-     never addressed — or, worse if the default ever inverted, the reverse. What
-     the coordinator carries out has to be the request that was made. */
-  const url = peerUrl(record, `${event.url.pathname}${event.url.search}`);
-
   /*
    * A FRESH token, signed by this node for itself. The caller's token is never
    * forwarded: a node token is single-use, so the one this request arrived with
@@ -132,15 +130,5 @@ async function forwardToCoordinator(
    * another node, which is a thing this node is trusted not to do.
    */
   const token = await signNodeToken(signingKey, daemon.nodeId);
-  const fetchFn = daemon.fetchFn ?? globalThis.fetch;
-  const answer = await fetchFn(url, {
-    method: "DELETE",
-    headers: { authorization: `Bearer ${token}`, [PROXIED_HEADER]: PROXIED_VALUE },
-  });
-
-  const contentType = answer.headers.get("content-type");
-  return new Response(await answer.text(), {
-    status: answer.status,
-    headers: contentType === null ? {} : { "content-type": contentType },
-  });
+  return forwardToNode(daemon, event, record, { authorization: `Bearer ${token}` });
 }

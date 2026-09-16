@@ -6,6 +6,7 @@ export * from "./lease.ts";
 export * from "./meta.ts";
 export * from "./projects.ts";
 export * from "./builds.ts";
+export * from "./deploys.ts";
 export * from "./environments.ts";
 export * from "./retirement.ts";
 export * from "./placement.ts";

@@ -3,6 +3,7 @@
 import { ScafoError } from "../error.ts";
 import type {
   BuildRecord,
+  DeployRecord,
   DomainClaim,
   EnvironmentRecord,
   PlacementRecord,
@@ -11,10 +12,24 @@ import { formatDuration } from "./_shared.ts";
 import { deleteKey, readJson, requireJson } from "./cas.ts";
 import { nowDate, type RegistryContext } from "./context.ts";
 import { listBuilds } from "./builds.ts";
+import {
+  DEPLOY_RECORD_RETENTION_MS,
+  isDeployTerminal,
+  listDeployRecords,
+  updateDeployRecord,
+} from "./deploys.ts";
 import { releaseDomain } from "./domains.ts";
 import { listEnvironments } from "./environments.ts";
 import { type KeepAlive, type LeaseHandle, verifyLease } from "./lease.ts";
-import { buildKey, domainsPrefix, environmentKey, fleetPrefix, placementKey } from "./paths.ts";
+import { isNodeAnswering, listNodeRecords, NODE_LIVENESS_WINDOW_MS } from "./nodes.ts";
+import {
+  buildKey,
+  deployKey,
+  domainsPrefix,
+  environmentKey,
+  fleetPrefix,
+  placementKey,
+} from "./paths.ts";
 import { listProjects } from "./projects.ts";
 import {
   assertDeletable,
@@ -33,11 +48,21 @@ export interface ReapOptions extends RetirementOptions {
 export interface ReapPlan {
   environments: Array<{ project: string; env: string; reason: string }>;
   builds: Array<{ project: string; id: string; reason: string }>;
+  /**
+   * Deploys still on their way whose accepting node stopped answering. Nobody
+   * else will ever finish them: the state lived in that daemon, and a poll would
+   * otherwise report a deploy as uploading forever.
+   */
+  staleDeploys: Array<{ project: string; id: string; reason: string }>;
+  /** Finished deploys past {@link DEPLOY_RECORD_RETENTION_MS}. */
+  deploys: Array<{ project: string; id: string; reason: string }>;
 }
 
 export interface ReapResult {
   /** Store keys actually deleted. */
   deleted: string[];
+  /** Store keys of the deploys marked failed because their node went. */
+  failed: string[];
   /** Targets left alone, keyed by their record's store key. */
   skipped: Array<{ target: string; reason: string }>;
 }
@@ -50,9 +75,15 @@ export interface DeleteEnvironmentOptions extends RetirementOptions {
 
 /** Plans reapable items. Execution rechecks fresh state before deletion. */
 export async function planReap(ctx: RegistryContext, opts?: ReapOptions): Promise<ReapPlan> {
-  const plan: ReapPlan = { environments: [], builds: [] };
+  const plan: ReapPlan = { environments: [], builds: [], staleDeploys: [], deploys: [] };
   const now = nowDate(ctx).getTime();
   const maxAgeMs = opts?.buildRetention?.maxAgeMs;
+  /* Read once, and only if a deploy has gone quiet long enough to be worth
+     asking about: every one of them is then judged against the same fleet,
+     whoever beat while the walk was going on. */
+  let fleet: ReadonlySet<string> | null = null;
+  const answering = async (): Promise<ReadonlySet<string>> =>
+    (fleet ??= await answeringNodes(ctx, new Date(now)));
 
   for (const project of await listProjects(ctx)) {
     const environments = await readEnvironments(ctx, project);
@@ -60,6 +91,21 @@ export async function planReap(ctx: RegistryContext, opts?: ReapOptions): Promis
     for (const environment of environments) {
       const reason = reapReason(environment, now, opts);
       if (reason !== null) plan.environments.push({ project, env: environment.name, reason });
+    }
+
+    for (const record of await listDeployRecords(ctx, project)) {
+      if (isDeployTerminal(record.state)) {
+        const age = now - Date.parse(record.updatedAt);
+        if (!Number.isFinite(age) || age < DEPLOY_RECORD_RETENTION_MS) continue;
+        plan.deploys.push({
+          project,
+          id: record.id,
+          reason: `${String(Math.floor(age / 1000))}s old`,
+        });
+        continue;
+      }
+      if (!idleTooLong(record, now) || (await answering()).has(record.node)) continue;
+      plan.staleDeploys.push({ project, id: record.id, reason: abandonedReason(record) });
     }
 
     if (maxAgeMs === undefined) continue;
@@ -88,7 +134,7 @@ export async function executeReap(
   initial: LeaseHandle,
   opts: ReapOptions,
 ): Promise<ReapResult> {
-  const result: ReapResult = { deleted: [], skipped: [] };
+  const result: ReapResult = { deleted: [], failed: [], skipped: [] };
   /* The handle each deletion is verified against, refreshed as the reap goes on. */
   let lease = initial;
   const keepAlive = opts.keepAlive;
@@ -138,6 +184,61 @@ export async function executeReap(
     const age = nowDate(ctx).getTime() - Date.parse(found.value.createdAt);
     if (maxAgeMs !== undefined && age < maxAgeMs) {
       result.skipped.push({ target: key, reason: "build is within the retention window" });
+      continue;
+    }
+
+    await deleteKey(ctx, key);
+    result.deleted.push(key);
+  }
+
+  const answering =
+    plan.staleDeploys.length === 0 ? new Set<string>() : await answeringNodes(ctx, nowDate(ctx));
+  for (const target of plan.staleDeploys) {
+    if (keepAlive !== undefined) lease = await keepAlive();
+    await assertLease(ctx, lease);
+
+    const key = deployKey(target.project, target.id);
+    const found = await readJson<DeployRecord>(ctx, key);
+    if (found === null) {
+      result.skipped.push({ target: key, reason: "deploy no longer exists" });
+      continue;
+    }
+
+    /* Re-checked against fresh state, the fleet included: a deploy that finished
+       between the plan and this step is one that HAPPENED, and a node heard from
+       again is one still carrying its deploy. */
+    const record = found.value;
+    if (isDeployTerminal(record.state)) {
+      result.skipped.push({ target: key, reason: "deploy has already finished" });
+      continue;
+    }
+    if (!idleTooLong(record, nowDate(ctx).getTime()) || answering.has(record.node)) {
+      result.skipped.push({ target: key, reason: `node "${record.node}" is answering again` });
+      continue;
+    }
+
+    await updateDeployRecord(ctx, target.project, target.id, {
+      state: "failed",
+      detail: abandonedReason(record),
+    });
+    result.failed.push(key);
+  }
+
+  for (const target of plan.deploys) {
+    if (keepAlive !== undefined) lease = await keepAlive();
+    await assertLease(ctx, lease);
+
+    const key = deployKey(target.project, target.id);
+    const found = await readJson<DeployRecord>(ctx, key);
+    if (found === null) {
+      result.skipped.push({ target: key, reason: "deploy no longer exists" });
+      continue;
+    }
+
+    const record = found.value;
+    const age = nowDate(ctx).getTime() - Date.parse(record.updatedAt);
+    if (!isDeployTerminal(record.state) || age < DEPLOY_RECORD_RETENTION_MS) {
+      result.skipped.push({ target: key, reason: "deploy is within the retention window" });
       continue;
     }
 
@@ -198,6 +299,17 @@ async function purgeEnvironment(
     deleted.push(fleetKey);
   }
 
+  /* Deploy records are filed per PROJECT, so only the ones naming this
+     environment go; the project's other environments keep theirs. */
+  for (const record of await listDeployRecords(ctx, project)) {
+    if (record.environment !== environment.name) continue;
+
+    const key = deployKey(project, record.id);
+    await guard();
+    await deleteKey(ctx, key);
+    deleted.push(key);
+  }
+
   /* Before the record, because it points AT the record: a placement left behind
      names an environment that is gone, and the only thing that would ever have
      cleaned it up is the coordinator noticing the same absence a tick later. */
@@ -241,6 +353,37 @@ function reapReason(
     );
   }
   return null;
+}
+
+/**
+ * Ids of the nodes this installation has heard from inside
+ * {@link NODE_LIVENESS_WINDOW_MS}. A node with no record at all is not in it:
+ * nothing says when it was last seen, and a deploy it took is one nobody is
+ * carrying out.
+ */
+async function answeringNodes(ctx: RegistryContext, now: Date): Promise<ReadonlySet<string>> {
+  const answering = new Set<string>();
+  for (const record of await listNodeRecords(ctx)) {
+    if (isNodeAnswering(record, now)) answering.add(record.id);
+  }
+  return answering;
+}
+
+/**
+ * Whether a deploy still on its way has not moved for a whole liveness window.
+ *
+ * THE FIRST HALF of abandonment, and the cheap one. A deploy that wrote a moment
+ * ago is being carried out whatever the fleet says about its node's heartbeat,
+ * so nothing asks about the fleet until this is true.
+ */
+function idleTooLong(record: DeployRecord, now: number): boolean {
+  const idleMs = now - Date.parse(record.updatedAt);
+  return Number.isFinite(idleMs) && idleMs >= NODE_LIVENESS_WINDOW_MS;
+}
+
+/** What an abandoned deploy is told it died of, and what the plan says about it. */
+function abandonedReason(record: DeployRecord): string {
+  return `node "${record.node}" stopped answering while this deploy was ${record.state}`;
 }
 
 async function assertLease(ctx: RegistryContext, lease: LeaseHandle): Promise<void> {

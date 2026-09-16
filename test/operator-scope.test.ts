@@ -567,7 +567,9 @@ function stubDeploys(): StubDeploys {
   const record = (project: string): DeployStatus => {
     next += 1;
     const status: DeployStatus = {
-      id: `000000000000000${String(next)}`,
+      /* A deploy id names the project it belongs to; a poll is authenticated
+         against that project before anything is read. */
+      id: `${project}.000000000000000${String(next)}`,
       project,
       state: "accepted",
     };
@@ -592,7 +594,7 @@ function stubDeploys(): StubDeploys {
       return Promise.resolve({
         start: (artifact) => {
           void artifact.dispose();
-          return record(meta.project);
+          return Promise.resolve(record(meta.project));
         },
       });
     },

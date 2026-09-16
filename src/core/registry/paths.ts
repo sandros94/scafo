@@ -2,7 +2,7 @@
 
 import { ScafoError } from "../error.ts";
 import { assertHost } from "../utils/host.ts";
-import { assertSlug } from "../utils/slug.ts";
+import { assertSlug, isSlug } from "../utils/slug.ts";
 
 /** Prefix all registry documents live under. */
 const ROOT = "_scafo";
@@ -199,6 +199,56 @@ export function buildsPrefix(project: string): string {
 export function buildKey(project: string, id: string): string {
   assertId(id);
   return `${buildsPrefix(project)}${id}.json`;
+}
+
+/** The unguessable half of a deploy id, as it is written and as it is read. */
+const DEPLOY_TOKEN_RE = /^[a-f\d]{16}$/;
+
+/** The two halves a deploy id is made of. */
+export interface DeployIdParts {
+  /** Project the deploy belongs to, and the only thing a poll can be authenticated against. */
+  project: string;
+  /** The unguessable half; knowing it is evidence of having started the deploy. */
+  token: string;
+}
+
+/**
+ * The project and token `id` names, or null when it is not a deploy id at all.
+ *
+ * The grammar lives here because this is where the key built from it is built:
+ * a caller that split an id by hand would be the thing that put a read one
+ * segment away from another project's records.
+ */
+export function parseDeployId(id: string): DeployIdParts | null {
+  const dot = id.indexOf(".");
+  if (dot < 0) return null;
+
+  const project = id.slice(0, dot);
+  const token = id.slice(dot + 1);
+  /* A slug carries no dot, so the first one is the separator and anything
+     before it that is not a slug makes the whole id no id of ours. */
+  if (!isSlug(project) || !DEPLOY_TOKEN_RE.test(token)) return null;
+  return { project, token };
+}
+
+/** Throws `ScafoError("invalid-slug")` when `id` is not a deploy id. */
+export function assertDeployId(id: string): void {
+  if (parseDeployId(id) !== null) return;
+
+  throw new ScafoError("invalid-slug", "Invalid deploy id", {
+    detail: `"${id}" must be a project slug, a dot, and 16 lowercase hexadecimal characters`,
+  });
+}
+
+/** Prefix one project's deploy records live under. */
+export function deploysPrefix(project: string): string {
+  assertSlug(project);
+  return `${projectsPrefix()}${project}/deploys/`;
+}
+
+export function deployKey(project: string, id: string): string {
+  assertDeployId(id);
+  return `${deploysPrefix(project)}${id}.json`;
 }
 
 export function environmentsPrefix(project: string): string {

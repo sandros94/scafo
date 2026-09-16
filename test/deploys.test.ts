@@ -13,7 +13,12 @@ import { sign as signJws } from "unjwt/jws";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { type DaemonContext, createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
-import { createDeployService, type DeployStatus } from "../src/daemon/deploys.ts";
+import {
+  createDeployService,
+  deployId,
+  parseDeployId,
+  type DeployStatus,
+} from "../src/daemon/deploys.ts";
 import {
   DEPLOY_METADATA_HEADER,
   DEPLOY_METADATA_MAX_BYTES,
@@ -22,7 +27,7 @@ import {
 } from "../src/daemon/_intake.ts";
 import type { Reconciler } from "../src/daemon/reconcile.ts";
 import { OIDC_AUDIENCE, signNodeToken } from "../src/core/auth/index.ts";
-import { environmentKey, varsetKey } from "../src/core/registry/paths.ts";
+import { deploysPrefix, environmentKey, varsetKey } from "../src/core/registry/paths.ts";
 import { ScafoError, type ProblemDetails } from "../src/core/error.ts";
 import { NODE_LIVENESS_WINDOW_MS } from "../src/core/registry/nodes.ts";
 import {
@@ -30,11 +35,13 @@ import {
   createEnvironment,
   createProject,
   getBuild,
+  getDeployRecord,
   getEnvironment,
   putVarset,
   registerNode,
   setEnvironmentVarset,
   setTrustPolicy,
+  trustOperator,
   unblockProject,
   varsetHash,
 } from "../src/core/registry/index.ts";
@@ -44,8 +51,9 @@ import type {
   DeployRunner,
   StagedArtifact,
 } from "../src/core/types/deploy.ts";
-import type { NodeRecord } from "../src/core/types/registry.ts";
+import type { BuildSource, DeployRecord, NodeRecord } from "../src/core/types/registry.ts";
 import type { RuntimeProcess } from "../src/core/types/runtime.ts";
+import type { CasStore } from "../src/core/types/store.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { packDirectory } from "../src/drivers/archive/tar-zst.ts";
 import { createFileArtifactStager } from "../src/drivers/artifact/file.ts";
@@ -53,12 +61,24 @@ import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, type ManualClock } from "./_helpers.ts";
 
 const OPERATOR = "op-1234abcd";
+/** A trusted key scoped to another project than the one being deployed. */
+const SCOPED = "op-scoped11";
 const PROJECT = "shop";
 const RIVAL = "rival";
 const ENVIRONMENT = "production";
 const VERSION_ID = "abc123def456";
+/** Another node of this installation, and where it says it is reached. */
+const PEER = "node-b";
+const PEER_ADDRESS = { internal: "10.0.0.2", apiPort: 7400 };
 /** The Celld this node booted with; what every other node's is compared against. */
 const CELLD_VERSION = "0.5.0";
+/** What a pipeline says about the commit it is deploying. */
+const SOURCE: BuildSource = {
+  provider: "github",
+  repo: "acme/shop",
+  ref: "refs/heads/main",
+  commit: "c0ffeec0ffeec0ffee",
+};
 const PREFIX = "installations/one";
 
 const ISS = "https://issuer.test";
@@ -76,6 +96,7 @@ const AUTH_INVALID_PROBLEM = {
 
 let issuerKeys: { privateKey: JWK_RSA_Private<"RS256">; publicKey: JWK_RSA_Public<"RS256"> };
 let operatorKeys: Awaited<ReturnType<typeof generateJWK<"EdDSA">>>;
+let scopedKeys: Awaited<ReturnType<typeof generateJWK<"EdDSA">>>;
 let artifact: StagedArtifact;
 let artifactBytes: Uint8Array;
 
@@ -91,6 +112,7 @@ let issuerCalls: string[];
 beforeAll(async () => {
   issuerKeys = await generateJWK("RS256", { kid: KID });
   operatorKeys = await generateJWK("EdDSA", { kid: OPERATOR });
+  scopedKeys = await generateJWK("EdDSA", { kid: SCOPED });
 
   const dir = await mkdtemp(join(tmpdir(), "scafo-artifact-"));
   await writeFile(join(dir, "wrangler.jsonc"), '{ "name": "shop" /* the app */ }');
@@ -114,6 +136,12 @@ beforeEach(async () => {
     addresses: { internal: "operator", apiPort: 0 },
   };
   await registerNode(clock.ctx, record);
+  await trustOperator(clock.ctx, {
+    id: SCOPED,
+    publicKey: { kty: "OKP", crv: "Ed25519", x: scopedKeys.publicKey.x },
+    role: "operator",
+    projects: [RIVAL],
+  });
 
   for (const project of [PROJECT, RIVAL]) await createProject(clock.ctx, { slug: project });
   /* Only one project trusts the issuer; the other is what a cross-project
@@ -1056,7 +1084,7 @@ describe("what happens to an accepted deploy", () => {
       environment: ENVIRONMENT,
       script: PROJECT,
     });
-    const status = admission?.start(
+    const status = await admission?.start(
       {
         byteLength: artifactBytes.byteLength,
         open: () => new Blob([artifactBytes as BlobPart]).stream(),
@@ -1092,6 +1120,251 @@ describe("polling a deploy", () => {
 
   it("tells a caller without a token nothing, not even that the id is unknown", async () => {
     const response = await get("/v1/deploys/0000000000000000", undefined);
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual(AUTH_INVALID_PROBLEM);
+  });
+});
+
+describe("what a deploy id names", () => {
+  it("carries the project it belongs to, so any node can authenticate a poll", async () => {
+    const id = (await responseId(await upload(await operatorToken()))) as string;
+
+    expect(id).toMatch(new RegExp(`^${PROJECT}\\.[a-f\\d]{16}$`));
+    expect(parseDeployId(id)).toEqual({ project: PROJECT, token: id.slice(PROJECT.length + 1) });
+  });
+
+  it("parses back to the project that minted it, whatever the slug looks like", () => {
+    for (const project of ["a", PROJECT, "acme-shop-2", "s".repeat(63)]) {
+      const id = deployId(project);
+      expect(parseDeployId(id)).toEqual({ project, token: id.slice(project.length + 1) });
+    }
+  });
+
+  it("mints an unguessable token for every deploy", () => {
+    const minted = new Set(Array.from({ length: 64 }, () => deployId(PROJECT)));
+
+    expect(minted.size).toBe(64);
+    for (const id of minted) expect(id.split(".")[1]).toMatch(/^[a-f\d]{16}$/);
+  });
+
+  it.each([
+    ["empty", ""],
+    ["a project with no token", PROJECT],
+    ["a token with no project", "a1b2c3d4e5f60718"],
+    ["a short token", `${PROJECT}.a1b2c3d4e5f607`],
+    ["a long token", `${PROJECT}.a1b2c3d4e5f607189`],
+    ["an uppercase token", `${PROJECT}.A1B2C3D4E5F60718`],
+    ["a project outside the slug charset", "not_a_slug.a1b2c3d4e5f60718"],
+    ["a project the registry could not hold", `${"s".repeat(64)}.a1b2c3d4e5f60718`],
+    ["a path in place of a project", "../trust.a1b2c3d4e5f60718"],
+  ])("refuses %s", (_what, id) => {
+    expect(parseDeployId(id)).toBeNull();
+  });
+});
+
+describe("the record a deploy leaves in the registry", () => {
+  /** Every state written to a deploy record, in the order the writes landed. */
+  let states: string[];
+
+  beforeEach(() => {
+    states = [];
+    daemon.registry = { ...clock.ctx, store: watchingDeployRecords(clock.ctx.store, states) };
+    daemon.deploys = createDeployService(daemon, fakeRunner());
+    app = createNodeApp(daemon);
+  });
+
+  it("records the deploy as accepted, then uploading, then deployed", async () => {
+    const id = (await responseId(
+      await upload(await operatorToken(), { ...meta(), source: SOURCE }),
+    )) as string;
+    await settled(id);
+
+    expect(states).toEqual(["accepted", "uploading", "deployed"]);
+    const record = await getDeployRecord(clock.ctx, PROJECT, id);
+    expect(record).toMatchObject({
+      v: 1,
+      id,
+      project: PROJECT,
+      environment: ENVIRONMENT,
+      node: OPERATOR,
+      state: "deployed",
+      build: VERSION_ID,
+      /* The audit trail a failed deploy would otherwise leave nowhere. */
+      source: SOURCE,
+    });
+    expect(Date.parse(record.updatedAt)).toBeGreaterThanOrEqual(Date.parse(record.acceptedAt));
+  });
+
+  it("records the workload identity that started the deploy", async () => {
+    const id = (await responseId(await upload(await workloadToken()))) as string;
+    await settled(id);
+
+    await expect(getDeployRecord(clock.ctx, PROJECT, id)).resolves.toMatchObject({
+      state: "deployed",
+      oidc: { issuer: ISS, subject: SUBJECT },
+    });
+  });
+
+  it("records the varset the deploy carried", async () => {
+    const vars = { DATABASE_URL: "postgres://db.test/app" };
+    await createEnvironment(clock.ctx, PROJECT, { name: ENVIRONMENT });
+    await putVarset(clock.ctx, PROJECT, { name: "shared", vars });
+    await setEnvironmentVarset(clock.ctx, PROJECT, ENVIRONMENT, "shared");
+
+    const id = (await responseId(await upload(await operatorToken()))) as string;
+    await settled(id);
+
+    await expect(getDeployRecord(clock.ctx, PROJECT, id)).resolves.toMatchObject({
+      state: "deployed",
+      varset: { name: "shared", hash: await varsetHash(vars) },
+    });
+  });
+
+  it("records why a deploy failed, and stops there", async () => {
+    publish = () => Promise.reject(new Error("celld exited with code 1"));
+
+    const id = (await responseId(await upload(await operatorToken()))) as string;
+    await settled(id);
+
+    expect(states).toEqual(["accepted", "uploading", "failed"]);
+    const record = await getDeployRecord(clock.ctx, PROJECT, id);
+    expect(record.state).toBe("failed");
+    expect(record.detail).toContain("celld exited with code 1");
+    expect(record.build).toBeUndefined();
+  });
+
+  it("refuses the deploy outright when its record cannot be written", async () => {
+    /* The id is the caller's only handle on the deploy, and a handle nothing is
+       recorded under is one no node could ever answer for. */
+    const faulted = new FaultStore(clock.ctx.store);
+    faulted.onBeforePut = (key): void => {
+      if (!key.startsWith(deploysPrefix(PROJECT))) return;
+      throw new ScafoError("draining", "Injected fault", { detail: "no record could be written" });
+    };
+    daemon.registry = { ...clock.ctx, store: faulted };
+    daemon.deploys = createDeployService(daemon, fakeRunner());
+    app = createNodeApp(daemon);
+
+    const response = await upload(await operatorToken());
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("location")).toBeNull();
+    expect(runs).toEqual([]);
+  });
+});
+
+describe("polling a deploy on another node of the fleet", () => {
+  /** A second daemon of the same installation, which accepted nothing. */
+  let other: H3;
+
+  beforeEach(() => {
+    other = createNodeApp({
+      config: daemonConfig(),
+      nodeId: PEER,
+      registry: clock.ctx,
+      supervisor: fakeSupervisor(),
+      versions: { scafo: "0.0.0-test", celld: CELLD_VERSION },
+      reconciler: fakeReconciler(),
+    });
+  });
+
+  it("answers an operator from the record, having accepted nothing itself", async () => {
+    const id = (await responseId(await upload(await operatorToken()))) as string;
+    await settled(id);
+
+    const response = await poll(other, id, await operatorToken());
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      id,
+      project: PROJECT,
+      state: "deployed",
+      build: VERSION_ID,
+    });
+  });
+
+  it("answers the workload token that started the deploy, which is the CI case", async () => {
+    /* The poll behind a shared apex lands wherever the ingress sends it, and the
+       project in the id is what lets this node verify the token against that
+       project's trust policy. */
+    const id = (await responseId(await upload(await workloadToken()))) as string;
+    await settled(id);
+
+    const response = await poll(other, id, await workloadToken());
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ id, state: "deployed" });
+  });
+
+  it("answers a deploy that is still running with where it has got to", async () => {
+    const builder = Promise.withResolvers<DeployRunResult>();
+    publish = () => builder.promise;
+    const id = (await responseId(await upload(await operatorToken()))) as string;
+    await vi.waitFor(() => expect(runs).toHaveLength(1), { timeout: 5000, interval: 5 });
+
+    const response = await poll(other, id, await operatorToken());
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ id, state: "uploading" });
+    builder.resolve({ celldVersionId: VERSION_ID });
+    await settled(id);
+  });
+
+  it("refuses a scoped-out operator before it reads anything", async () => {
+    /* No deploy exists under this id at all: a 404 would mean the scope was
+       applied to what the read found, rather than to the project asked for. */
+    const response = await poll(other, `${PROJECT}.a1b2c3d4e5f60718`, await scopedToken());
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
+  });
+
+  it("answers an id of a project that never deployed as a miss", async () => {
+    const response = await poll(other, `${PROJECT}.a1b2c3d4e5f60718`, await operatorToken());
+
+    const problem = await problemOf(response);
+    expect(problem.status).toBe(404);
+    expect(problem.detail).toContain(PROJECT);
+  });
+
+  it("answers an id that is no id of ours as a miss, without naming a project", async () => {
+    const response = await poll(other, "0000000000000000", await operatorToken());
+
+    const problem = await problemOf(response);
+    expect(problem.status).toBe(404);
+    expect(problem.detail).toContain("0000000000000000");
+  });
+
+  it("answers a record filed under a project its id does not claim as a miss", async () => {
+    /* A document written by hand, or by a build that filed it elsewhere: the id
+       is what the caller was authenticated against, and a record that disagrees
+       with it is not the one the caller asked for. */
+    const id = `${PROJECT}.a1b2c3d4e5f60718`;
+    await clock.ctx.store.put(
+      `${deploysPrefix(PROJECT)}${id}.json`,
+      JSON.stringify({
+        v: 1,
+        id,
+        project: RIVAL,
+        environment: ENVIRONMENT,
+        state: "deployed",
+        node: PEER,
+        acceptedAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      } satisfies DeployRecord),
+    );
+
+    const response = await poll(other, id, await operatorToken());
+
+    expect(response.status).toBe(404);
+  });
+
+  it("tells a caller without a token nothing, wherever the deploy lives", async () => {
+    const id = (await responseId(await upload(await operatorToken()))) as string;
+    await settled(id);
+
+    const response = await poll(other, id, undefined);
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual(AUTH_INVALID_PROBLEM);
@@ -1170,9 +1443,9 @@ async function servedElsewhere(
 ): Promise<void> {
   await registerNode(clock.ctx, {
     v: 1,
-    id: "node-b",
-    publicKey: { kty: "OKP", crv: "Ed25519", x: "node-b" },
-    addresses: { internal: "10.0.0.2", apiPort: 7400 },
+    id: PEER,
+    publicKey: { kty: "OKP", crv: "Ed25519", x: PEER },
+    addresses: PEER_ADDRESS,
     heartbeatAt: new Date(clock.nowMs()).toISOString(),
     ...(celld === undefined ? {} : { versions: { scafo: "0.0.0-test", celld } }),
     serving: { [env]: { port: 42_000 } },
@@ -1268,6 +1541,33 @@ async function get(path: string, token: string | undefined): Promise<Response> {
   });
 }
 
+/** Polls `app` for one deploy, as an operator or a workload behind the apex does. */
+async function poll(node: H3, id: string, token: string | undefined): Promise<Response> {
+  return node.request(`/v1/deploys/${id}`, {
+    headers: token === undefined ? {} : { authorization: `Bearer ${token}` },
+  });
+}
+
+/**
+ * Wraps a store so every state written to a deploy record is remembered in
+ * order: what a deploy's record went through is as much the contract as where
+ * it ended up.
+ */
+function watchingDeployRecords(inner: CasStore, states: string[]): CasStore {
+  return {
+    get: (key) => inner.get(key),
+    getBytes: (key, opts) => inner.getBytes(key, opts),
+    put: (key, body, cas) => {
+      if (key.startsWith(deploysPrefix(PROJECT)) && typeof body === "string") {
+        states.push((JSON.parse(body) as DeployRecord).state);
+      }
+      return inner.put(key, body, cas);
+    },
+    del: (key) => inner.del(key),
+    list: (prefix) => inner.list(prefix),
+  };
+}
+
 async function responseId(response: Response): Promise<string | undefined> {
   expect(response.status).toBe(202);
   return ((await response.json()) as DeployStatus).id;
@@ -1294,6 +1594,11 @@ async function problemOf(response: Response): Promise<ProblemDetails> {
 /** A token this node's registered operator key verifies, good for one request. */
 function operatorToken(): Promise<string> {
   return signNodeToken(operatorKeys.privateKey, OPERATOR);
+}
+
+/** A token of the trusted key that reaches every project but this one. */
+function scopedToken(): Promise<string> {
+  return signNodeToken(scopedKeys.privateKey, SCOPED);
 }
 
 /**

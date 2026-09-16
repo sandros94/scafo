@@ -6,6 +6,11 @@ import { servingKey } from "../core/placement/serving.ts";
 import { findVersionSkew, versionSkewError } from "../core/placement/version-skew.ts";
 import { createBuild } from "../core/registry/builds.ts";
 import { nowDate } from "../core/registry/context.ts";
+import {
+  createDeployRecord,
+  isDeployTerminal,
+  updateDeployRecord,
+} from "../core/registry/deploys.ts";
 import { listNodeRecords } from "../core/registry/nodes.ts";
 import { recordDeployment } from "../core/registry/_deployment.ts";
 import { createEnvironment, getEnvironment } from "../core/registry/environments.ts";
@@ -22,6 +27,8 @@ import type {
   BuildRecord,
   BuildSource,
   CarriedVarset,
+  DeployRecord,
+  DeployState,
   NodeSelector,
   OidcActor,
   ReplicaCount,
@@ -45,12 +52,11 @@ import {
 /** Maximum in-memory deploy statuses. */
 export const DEFAULT_HISTORY: number = 256;
 
-/** Deploy lifecycle. `deployed` and `failed` are terminal; failure can follow
-    a publish not yet recorded. */
-export type DeployState = "accepted" | "uploading" | "deployed" | "failed";
-
-/** The states a deploy stops moving in, and never moves out of again. */
-const TERMINAL: ReadonlySet<DeployState> = new Set<DeployState>(["deployed", "failed"]);
+/* A deploy id's grammar lives with the key it is built into, so that one rule
+   answers both what an id is and what may be read under it. */
+export type { DeployIdParts } from "../core/registry/paths.ts";
+export { parseDeployId } from "../core/registry/paths.ts";
+export type { DeployState } from "../core/types/registry.ts";
 
 /** What a caller polling a deploy is told. */
 export interface DeployStatus {
@@ -107,11 +113,32 @@ export interface DeployService {
 
 /** One validated deploy waiting only for a complete staged artifact. */
 export interface DeployAdmission {
-  /** Transfers artifact ownership to background deploy processing. */
-  start(artifact: StagedArtifact, reservation: DeployReservation): DeployStatus;
+  /**
+   * Records the deploy and transfers artifact ownership to background
+   * processing. The record is written BEFORE the id is answered: the id is the
+   * caller's only handle, and a handle nothing is recorded under is one no node
+   * could ever answer for, so a record that cannot be written refuses the deploy.
+   */
+  start(artifact: StagedArtifact, reservation: DeployReservation): Promise<DeployStatus>;
 }
 
-/** Builds deploy intake. Statuses are daemon-local; persisted builds survive a restart. */
+/** The status a poll is answered with, read off a deploy's registry record. */
+export function deployStatusOf(record: DeployRecord): DeployStatus {
+  return {
+    id: record.id,
+    project: record.project,
+    state: record.state,
+    ...(record.build === undefined ? {} : { build: record.build }),
+    ...(record.varset === undefined ? {} : { varset: record.varset }),
+    ...(record.detail === undefined ? {} : { detail: record.detail }),
+  };
+}
+
+/**
+ * Builds deploy intake. Every state a deploy moves through is written to its
+ * registry record; the statuses kept here are this node's hot cache of the
+ * deploys it accepted itself.
+ */
 export function createDeployService(
   daemon: DaemonContext,
   runner: DeployRunner,
@@ -145,7 +172,7 @@ export function createDeployService(
        so a cancellation that lands afterwards has nothing left to cancel and
        must not rewrite the outcome as a failure. The scheduler reports one
        whenever the task's signal was aborted, whatever the task returned. */
-    if (TERMINAL.has(current.state)) return current;
+    if (isDeployTerminal(current.state)) return current;
 
     const next: DeployStatus = { ...current, ...patch };
     statuses.set(id, next);
@@ -164,6 +191,17 @@ export function createDeployService(
        artifact was uploading cannot leave the two disagreeing. */
     const stamp = carried === undefined ? undefined : { name: carried.name, hash: carried.hash };
     update(id, { state: "uploading" });
+    /* The terminal write is the one that matters, so a lost `uploading` is
+       reported and the deploy goes on: the record is a state behind for as long
+       as the publish takes, and the reaper measures a deploy's silence in
+       liveness windows rather than seconds. */
+    await updateDeployRecord(daemon.registry, meta.project, id, { state: "uploading" }).catch(
+      (error: unknown) => {
+        console.error(
+          `scafo: deploy "${id}" could not be recorded as uploading: ${describeError(error)}`,
+        );
+      },
+    );
     const bucket = daemon.config.bucket;
     let celldVersionId: string | undefined;
     try {
@@ -204,6 +242,11 @@ export function createDeployService(
         signal,
         ...(stamp === undefined ? {} : { varset: stamp }),
       });
+      await updateDeployRecord(daemon.registry, meta.project, id, {
+        state: "deployed",
+        build: build.id,
+        ...(stamp === undefined ? {} : { varset: stamp }),
+      });
       update(id, { state: "deployed", ...(stamp === undefined ? {} : { varset: stamp }) });
       return build;
     } catch (error) {
@@ -212,6 +255,31 @@ export function createDeployService(
         `celld published version "${celldVersionId}", but Scafo could not confirm or finish ` +
           `recording its deployment revision: ${boundedDetail(error)}`,
         { cause: error },
+      );
+    }
+  }
+
+  /**
+   * Records how a deploy ended when it ended badly.
+   *
+   * The scheduler reports every failure here, the ones that never reached
+   * {@link publish} included, so this is where a deploy stops moving whatever
+   * stopped it. A record that has already finished refuses the write, which is
+   * the right answer for a cancellation arriving after the commit point.
+   */
+  async function recordFailure(id: string, project: string, detail: string): Promise<void> {
+    const next = update(id, { state: "failed", detail });
+    /* Already terminal HERE: nothing to record, and nothing to overwrite. A
+       deploy this node has forgotten still gets the write — the bound on the
+       cache is not a statement about the deploy. */
+    if (next !== null && next.state !== "failed") return;
+
+    try {
+      await updateDeployRecord(daemon.registry, project, id, { state: "failed", detail });
+    } catch (error) {
+      if (isScafoError(error) && error.code === "cas-conflict") return;
+      console.error(
+        `scafo: deploy "${id}" could not be recorded as failed: ${describeError(error)}`,
       );
     }
   }
@@ -234,13 +302,24 @@ export function createDeployService(
       const carried = await carriedVars(daemon, meta.project, meta.environment);
 
       return {
-        start(artifact, reserved): DeployStatus {
+        async start(artifact, reserved): Promise<DeployStatus> {
           if (reserved.project !== meta.project) {
             throw new ScafoError("invalid-input", "Deploy reservation belongs to another project", {
               detail: `the reservation is for "${reserved.project}", not "${meta.project}"`,
             });
           }
-          const id = randomDeployId();
+          const id = deployId(meta.project);
+          /* Before anything is enqueued: a deploy whose record could not be
+             written is one the caller is told about now, rather than one it
+             holds an id for that no node will ever answer. */
+          await createDeployRecord(daemon.registry, meta.project, {
+            id,
+            environment: meta.environment,
+            node: daemon.nodeId,
+            ...(meta.source === undefined ? {} : { source: meta.source }),
+            ...(meta.oidc === undefined ? {} : { oidc: meta.oidc }),
+          });
+
           const accepted: DeployStatus = {
             id,
             project: meta.project,
@@ -255,9 +334,7 @@ export function createDeployService(
           const answer = snapshot(accepted);
           const continuation = scheduled.completion.then(
             () => undefined,
-            (error) => {
-              update(id, { state: "failed", detail: boundedDetail(error) });
-            },
+            (error) => recordFailure(id, meta.project, boundedDetail(error)),
           );
           continuations.add(continuation);
           void continuation.finally(() => continuations.delete(continuation));
@@ -392,13 +469,21 @@ function joinPrefix(keyPrefix: string | undefined, fleet: string): string {
   return trimmed === "" ? fleet : `${trimmed}/${fleet}`;
 }
 
-/** Unguessable, so knowing an id is itself evidence of having started the deploy. */
-function randomDeployId(): string {
+/**
+ * Mints an id for one deploy of `project`.
+ *
+ * It NAMES the project, because a poll may reach any node of the installation
+ * and the project is what that node authenticates the caller against — an
+ * operator's scope and a workload's trust policy are both answers about a
+ * project. The second half stays unguessable, so knowing a whole id remains
+ * evidence of having started the deploy.
+ */
+export function deployId(project: string): string {
   let hex = "";
   for (const byte of crypto.getRandomValues(new Uint8Array(8))) {
     hex += byte.toString(16).padStart(2, "0");
   }
-  return hex;
+  return `${project}.${hex}`;
 }
 
 /** The specifics a scafo failure carries are the useful half; keep both. */

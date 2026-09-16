@@ -10,13 +10,15 @@ import {
   checkDomain,
   claimDomain,
   createBuild,
+  createDeployRecord,
   createEnvironment,
   createProject,
   deleteEnvironment,
+  getDeployRecord,
   getEnvironment,
   type LeaseHandle,
 } from "../src/core/registry/index.ts";
-import { domainKey, environmentKey, fleetPrefix } from "../src/core/registry/paths.ts";
+import { deployKey, domainKey, environmentKey, fleetPrefix } from "../src/core/registry/paths.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, invariants, type ManualClock, rejectsWith } from "./_helpers.ts";
 
@@ -109,6 +111,30 @@ describe("deleteEnvironment", () => {
 
     expect(deleted).not.toContain(domainKey(HOST));
     await expect(checkDomain(clock.ctx, HOST)).resolves.toMatchObject({ environment: "prod" });
+  });
+
+  it("takes the deploy records of that environment with it, and no others", async () => {
+    const mine = `${PROJECT}.a1b2c3d4e5f60718`;
+    const theirs = `${PROJECT}.00112233445566ff`;
+    await createDeployRecord(clock.ctx, PROJECT, {
+      id: mine,
+      environment: "preview",
+      node: "node-a",
+    });
+    await createDeployRecord(clock.ctx, PROJECT, {
+      id: theirs,
+      environment: "prod",
+      node: "node-a",
+    });
+
+    const { deleted } = await deleteEnvironment(clock.ctx, PROJECT, "preview", lease);
+
+    expect(deleted).toContain(deployKey(PROJECT, mine));
+    /* Deploy records are filed per project, and prod is still there. */
+    expect(deleted).not.toContain(deployKey(PROJECT, theirs));
+    await expect(getDeployRecord(clock.ctx, PROJECT, theirs)).resolves.toMatchObject({
+      environment: "prod",
+    });
   });
 
   it("refuses an environment that is not there", async () => {

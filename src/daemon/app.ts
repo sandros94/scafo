@@ -11,7 +11,8 @@ import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { checkDomain } from "../core/registry/domains.ts";
 import { isProjectBlocked } from "../core/registry/projects.ts";
 import { isLeaseExpired } from "../core/registry/lease.ts";
-import { coordinatorKey, environmentKey, nodeKey } from "../core/registry/paths.ts";
+import { getDeployRecord } from "../core/registry/deploys.ts";
+import { coordinatorKey, environmentKey, nodeKey, parseDeployId } from "../core/registry/paths.ts";
 import { setNodeSelector } from "../core/registry/placement.ts";
 import { retireEnvironment, unretireEnvironment } from "../core/registry/retirement.ts";
 import type { IngressFormat } from "../core/types/ingress.ts";
@@ -41,7 +42,7 @@ import {
 import type { IngressCounters } from "./access-counters.ts";
 import type { DaemonConfig } from "./config.ts";
 import type { Coordinator } from "./coordinator.ts";
-import type { DeployService, DeployStatus } from "./deploys.ts";
+import { deployStatusOf, type DeployService, type DeployStatus } from "./deploys.ts";
 import {
   nodeIdentity,
   renderProblem,
@@ -287,7 +288,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
         maxBytes: daemon.config.deploy?.artifactBytes ?? DEFAULT_ARTIFACT_BYTES,
         signal: AbortSignal.any([event.req.signal, reservation.signal]),
       });
-      status = admission.start(artifact, reservation);
+      status = await admission.start(artifact, reservation);
     } catch (error) {
       if (artifact === undefined) reservation.cancel(error);
       else await reservation.discard(artifact, error);
@@ -299,18 +300,38 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     });
   });
 
+  /* Any node answers a poll: the deploy's state is a registry record, and behind
+     an apex that several nodes answer for the poll lands wherever the ingress
+     sends it. The accepting node still answers from memory, which is the same
+     record a moment sooner. */
   app.get("/v1/deploys/:id", async (event): Promise<DeployStatus> => {
     const id = event.context.params?.id ?? "";
-    const status = daemon.deploys?.get(id) ?? null;
+    const parsed = parseDeployId(id);
 
-    /* Unknown ids have no project to authenticate, so do not disclose existence. */
-    await verifyCaller(verifiers, event, status?.project ?? null);
-    if (status === null) {
+    /* The project in the id is what the caller is authenticated against, exactly
+       as the upload was: an operator's scope is applied to it and a workload
+       token is verified against its trust policy. An id that is no id of ours
+       names no project, so there is nothing to authenticate and nothing to
+       disclose. */
+    await verifyCaller(verifiers, event, parsed?.project ?? null);
+    if (parsed === null) {
       throw new ScafoError("not-found", "No such deploy", {
-        detail: `this node has no deploy "${id}"; a restarted daemon forgets the ones it accepted`,
+        detail: `"${id}" is not a deploy id this installation mints`,
       });
     }
-    return status;
+
+    const local = daemon.deploys?.get(id) ?? null;
+    if (local !== null) return local;
+
+    const record = await getDeployRecord(daemon.registry, parsed.project, id);
+    /* A record that disagrees with the id it is filed under is not the one the
+       caller was authenticated for. */
+    if (record.project !== parsed.project) {
+      throw new ScafoError("not-found", "No such deploy", {
+        detail: `"${id}" is not a deploy of project "${parsed.project}"`,
+      });
+    }
+    return deployStatusOf(record);
   });
 
   /* Trusted-key administration requires an operator token, never a node token. */
