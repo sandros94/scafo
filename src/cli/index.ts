@@ -3,6 +3,7 @@
 
 import { defineCommand, runMain } from "citty";
 import { readPackageVersion } from "./_utils.ts";
+import { build } from "./commands/build.ts";
 import { deploy } from "./commands/deploy.ts";
 import { env } from "./commands/env.ts";
 import { fleet } from "./commands/fleet.ts";
@@ -46,6 +47,7 @@ const main = defineCommand({
     deploy,
     env,
     varset,
+    build,
     trust,
     metrics,
     traces,

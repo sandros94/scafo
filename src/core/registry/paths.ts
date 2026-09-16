@@ -232,6 +232,42 @@ export function fleetPrefix(project: string, env: string): string {
   return `fleets/${project}/${env}`;
 }
 
+/*
+ * The three keyspaces below are CELLD's, not the registry's. Scafo reads them —
+ * to tell what an environment is serving, and what it has published before —
+ * and writes none of them: Celld owns everything under an environment's fleet
+ * prefix. They are named here all the same, because this file is where a key is
+ * built and a caller that assembled one by hand would be the thing that put a
+ * deletion one segment away from the wrong prefix.
+ */
+
+/** Prefix Celld publishes an environment's deployments under. */
+export function deployPrefix(project: string, env: string): string {
+  return `${fleetPrefix(project, env)}/deploy/`;
+}
+
+/**
+ * The fleet-wide pointer: the SOLE selector of what an environment serves, and
+ * the one object that says which publication must survive anything scafo
+ * deletes underneath it.
+ */
+export function deployPointerKey(project: string, env: string): string {
+  return `${deployPrefix(project, env)}current.json`;
+}
+
+/**
+ * Prefix the static-asset blobs every publication shares.
+ *
+ * Content-addressed, so two publications that ship the same file name the same
+ * blob. NOTHING in scafo deletes under here: a blob still referenced by the
+ * current publication and by an old one is indistinguishable from one only the
+ * old publication references, and deleting the second kind by mistake breaks
+ * what is running.
+ */
+export function deployBlobsPrefix(project: string, env: string): string {
+  return `${fleetPrefix(project, env)}/deploy-blobs/`;
+}
+
 /**
  * Prefix the TLS material an ingress persists through this node lives under:
  * its certificates, its account keys, and anything else it must keep across
