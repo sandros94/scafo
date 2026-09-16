@@ -157,14 +157,54 @@ export function describeUnexpected(error: unknown): string {
   return said.join(", caused by ");
 }
 
+/** Characters of a rendered cause kept on the line; a response body is not the point. */
+const MAX_CAUSE_CHARS = 300;
+
 /**
  * One error as a line. The class name is kept only when it says something — a
  * `TypeError` is worth naming, and the bare `Error` every `fs` failure carries
  * is not.
+ *
+ * A cause that is no error at all is rendered by what it holds: a client that
+ * attaches the parsed response of a refused request attaches an object, and the
+ * default rendering of an object says nothing an operator could act on.
  */
 function oneError(value: unknown): string {
-  if (!(value instanceof Error)) return String(value);
-  return value.name === "Error" || value.name === ""
-    ? value.message
-    : `${value.name}: ${value.message}`;
+  if (value instanceof Error) {
+    return value.name === "Error" || value.name === ""
+      ? value.message
+      : `${value.name}: ${value.message}`;
+  }
+  switch (typeof value) {
+    case "string":
+      return value;
+    case "number":
+    case "boolean":
+    case "bigint":
+      return String(value);
+    case "symbol":
+      return value.toString();
+    case "undefined":
+      return "undefined";
+    case "function":
+      return `function ${value.name}`;
+    default:
+      /* Every other `typeof` has been named above, so what is left is an object
+         or null; the type system does not narrow `unknown` through a switch. */
+      return oneObject(value as object | null);
+  }
+}
+
+/** A thrown or attached object as a bounded line of what it holds. */
+function oneObject(value: object | null): string {
+  if (value === null) return "null";
+
+  let rendered: string | undefined;
+  try {
+    rendered = JSON.stringify(value);
+  } catch {
+    rendered = undefined;
+  }
+  if (rendered === undefined) return "an object that cannot be rendered";
+  return rendered.length <= MAX_CAUSE_CHARS ? rendered : `${rendered.slice(0, MAX_CAUSE_CHARS)}…`;
 }
