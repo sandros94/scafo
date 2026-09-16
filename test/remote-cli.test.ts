@@ -29,7 +29,7 @@ import {
 import { getOperator } from "../src/core/registry/operators.ts";
 import { toBase64 } from "../src/core/utils/base64.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, rejectsWith } from "./_helpers.ts";
+import { ctxWith, rejectionOf, rejectsWith } from "./_helpers.ts";
 
 const ENDPOINT = "http://10.0.0.4:7400";
 const OTHER_ENDPOINT = "http://10.0.0.5:7400";
@@ -103,10 +103,11 @@ describe("registering a remote", () => {
   it("refuses a name that could not be a file in the home", async () => {
     const home = await scratch();
 
-    await rejectsWith(
-      () => addRemote(home, { name: "../../etc/passwd", endpoints: [ENDPOINT] }),
-      "invalid-slug",
+    const error = await rejectionOf(() =>
+      addRemote(home, { name: "../../etc/passwd", endpoints: [ENDPOINT] }),
     );
+
+    expect(error.code).toBe("invalid-slug");
   });
 
   it("refuses a remote with no endpoint, which nothing could reach", async () => {
@@ -239,7 +240,7 @@ describe("unregistering a remote", () => {
   it("reports a remote that is not registered rather than doing nothing quietly", async () => {
     const home = await scratch();
 
-    await rejectsWith(() => removeRemote(home, "ghost"), "not-found");
+    expect((await rejectionOf(() => removeRemote(home, "ghost"))).code).toBe("not-found");
   });
 });
 
@@ -312,7 +313,9 @@ describe("exporting a remote", () => {
   it("reports a remote that is not registered", async () => {
     const home = await scratch();
 
-    await rejectsWith(() => exportRemote(home, "ghost", { write: () => {} }), "not-found");
+    expect((await rejectionOf(() => exportRemote(home, "ghost", { write: () => {} }))).code).toBe(
+      "not-found",
+    );
   });
 });
 

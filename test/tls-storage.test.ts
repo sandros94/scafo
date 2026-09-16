@@ -23,7 +23,7 @@ import {
   tlsObjectKey,
 } from "../src/core/registry/index.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { CLOCK_START_MS, ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
+import { CLOCK_START_MS, ctxWith, type ManualClock, rejectionOf, rejectsWith } from "./_helpers.ts";
 
 const HOLDER = "node-a-1234abcd";
 const OTHER_HOLDER = "node-b-5678efab";
@@ -254,7 +254,7 @@ describe("keys the store refuses", () => {
   it.each(refused.filter((key) => key !== ""))("refuses %j as a lock name too", async (name) => {
     const { ctx } = fresh();
 
-    await rejectsWith(() => acquireTlsLock(ctx, name, HOLDER), "invalid-input");
+    expect((await rejectionOf(() => acquireTlsLock(ctx, name, HOLDER))).code).toBe("invalid-input");
   });
 
   it("takes every printable character, spaces and wildcards among them", async () => {
@@ -305,7 +305,9 @@ describe("taking a lock", () => {
     await acquireTlsLock(ctx, "issue", HOLDER);
     clock.tick(TLS_LOCK_STALE_MS - 1);
 
-    await rejectsWith(() => acquireTlsLock(ctx, "issue", OTHER_HOLDER), "cas-conflict");
+    expect((await rejectionOf(() => acquireTlsLock(ctx, "issue", OTHER_HOLDER))).code).toBe(
+      "cas-conflict",
+    );
   });
 
   it("hands it to the next caller once nobody has restamped it", async () => {
@@ -370,7 +372,7 @@ describe("keeping a lock", () => {
     clock.tick(TLS_LOCK_STALE_MS);
     await acquireTlsLock(ctx, "issue", OTHER_HOLDER);
 
-    await rejectsWith(() => refreshTlsLock(ctx, handle), "lease-lost");
+    expect((await rejectionOf(() => refreshTlsLock(ctx, handle))).code).toBe("lease-lost");
   });
 });
 

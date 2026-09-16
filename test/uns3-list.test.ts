@@ -3,7 +3,7 @@
 import { S3Error, type S3Client } from "uns3";
 import { describe, expect, it } from "vitest";
 import { createUns3Store } from "../src/drivers/store/uns3.ts";
-import { rejectsWith } from "./_helpers.ts";
+import { rejectionOf, rejectsWith } from "./_helpers.ts";
 
 type GetParams = Parameters<S3Client["get"]>[0];
 type ListParams = Parameters<S3Client["list"]>[0];
@@ -61,10 +61,11 @@ describe("listing across pages", () => {
   it("refuses a truncated page it has no way to walk past, rather than answering short", async () => {
     const { client } = scripted([pageOf(["p/a.json"], { isTruncated: true })]);
 
-    await rejectsWith(
-      () => createUns3Store(client, { bucket: "b", prefix: "p" }).list(""),
-      "store-nonconforming",
+    const error = await rejectionOf(() =>
+      createUns3Store(client, { bucket: "b", prefix: "p" }).list(""),
     );
+
+    expect(error.code).toBe("store-nonconforming");
   });
 });
 

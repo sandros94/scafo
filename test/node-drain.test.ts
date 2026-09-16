@@ -20,7 +20,7 @@ import {
 } from "../src/core/registry/index.ts";
 import type { NodeRecord } from "../src/core/types/registry.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, FaultStore, type ManualClock, rejectsWith } from "./_helpers.ts";
+import { ctxWith, FaultStore, type ManualClock, rejectionOf, rejectsWith } from "./_helpers.ts";
 
 const PROJECT = "app";
 const BUILD = "b1b1b1b1";
@@ -88,7 +88,7 @@ describe("drainNode", () => {
   });
 
   it("refuses a node with no record, because it states something about one", async () => {
-    await rejectsWith(() => drainNode(clock.ctx, "node-ghost"), "not-found");
+    expect((await rejectionOf(() => drainNode(clock.ctx, "node-ghost"))).code).toBe("not-found");
   });
 });
 

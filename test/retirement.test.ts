@@ -18,7 +18,14 @@ import {
 import { environmentKey } from "../src/core/registry/paths.ts";
 import type { EnvironmentRecord } from "../src/core/types/registry.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, FaultStore, invariants, type ManualClock, rejectsWith } from "./_helpers.ts";
+import {
+  ctxWith,
+  FaultStore,
+  invariants,
+  type ManualClock,
+  rejectionOf,
+  rejectsWith,
+} from "./_helpers.ts";
 
 const PROJECT = "app";
 const BUILD = "b1b1b1b1";
@@ -103,8 +110,12 @@ describe("retiring and taking it back", () => {
   });
 
   it("refuses either call on an environment that is not there", async () => {
-    await rejectsWith(() => retireEnvironment(clock.ctx, PROJECT, "ghost"), "not-found");
-    await rejectsWith(() => unretireEnvironment(clock.ctx, PROJECT, "ghost"), "not-found");
+    expect((await rejectionOf(() => retireEnvironment(clock.ctx, PROJECT, "ghost"))).code).toBe(
+      "not-found",
+    );
+    expect((await rejectionOf(() => unretireEnvironment(clock.ctx, PROJECT, "ghost"))).code).toBe(
+      "not-found",
+    );
   });
 });
 
@@ -264,10 +275,11 @@ describe("what it refuses, and what it tells the operator to do about it", () =>
   it("still refuses an environment that is not there, before any of this", async () => {
     /* Force is about the state of an environment, not about conjuring one: a
        typo in a name must not be answered as a successful deletion. */
-    await rejectsWith(
-      () => deleteEnvironment(clock.ctx, PROJECT, "ghost", lease, { force: true }),
-      "not-found",
+    const error = await rejectionOf(() =>
+      deleteEnvironment(clock.ctx, PROJECT, "ghost", lease, { force: true }),
     );
+
+    expect(error.code).toBe("not-found");
   });
 
   it("still refuses once the lease has been taken away, forced or not", async () => {

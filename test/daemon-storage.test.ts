@@ -34,6 +34,7 @@ import {
   CLOCK_START_MS,
   ctxWith,
   type ManualClock,
+  rejectionOf,
   rejectsWith,
   TEST_VERSIONS,
 } from "./_helpers.ts";
@@ -612,7 +613,7 @@ describe("the token file guarding the surface", () => {
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, INGRESS_TOKEN_FILE), "\n  \n");
 
-    await rejectsWith(() => loadOrCreateIngressToken(dir), "invalid-input");
+    expect((await rejectionOf(() => loadOrCreateIngressToken(dir))).code).toBe("invalid-input");
   });
 });
 

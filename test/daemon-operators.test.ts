@@ -108,35 +108,26 @@ describe("the tier a listing shows", () => {
 });
 
 describe("what tier a POST may grant", () => {
-  const grants: Array<[OperatorRole, OperatorRole, number]> = [
-    ["admin", "admin", 200],
-    ["admin", "operator", 200],
-    ["operator", "operator", 200],
-    ["operator", "admin", 403],
+  const granted: Array<[OperatorRole, OperatorRole]> = [
+    ["admin", "admin"],
+    ["admin", "operator"],
+    ["operator", "operator"],
   ];
 
-  it.each(grants)("a %s registering a %s is answered %i", async (caller, wanted, status) => {
-    const callerKeys = await generateJWK("EdDSA", { kid: SECOND_ID });
-    await trustAs(SECOND_ID, callerKeys, caller);
-    const minted = await generateJWK("EdDSA", { kid: THIRD_ID });
+  it.each(granted)("a %s registering a %s is answered 200", async (caller, wanted) => {
+    const response = await grant(caller, wanted);
 
-    const response = await app.request("/v1/operators", {
-      method: "POST",
-      headers: { ...(await asKey(SECOND_ID, callerKeys)), "content-type": "application/json" },
-      body: JSON.stringify({
-        ...(wanted === "operator" ? scopedHalf(THIRD_ID, minted) : publicHalf(THIRD_ID, minted)),
-        role: wanted,
-      }),
-    });
+    expect(response.status).toBe(200);
+    await expect(getOperator(clock.ctx, THIRD_ID)).resolves.toMatchObject({ role: wanted });
+  });
 
-    expect(response.status).toBe(status);
-    if (status === 200) {
-      await expect(getOperator(clock.ctx, THIRD_ID)).resolves.toMatchObject({ role: wanted });
-    } else {
-      const problem = (await response.json()) as { type: string; detail?: string };
-      expect(problem.type).toBe("urn:scafo:auth-scope");
-      expect(await getOperator(clock.ctx, THIRD_ID)).toBeNull();
-    }
+  it("REFUSES an operator-tier key registering an admin, and files nothing", async () => {
+    const response = await grant("operator", "admin");
+
+    expect(response.status).toBe(403);
+    const problem = (await response.json()) as { type: string; detail?: string };
+    expect(problem.type).toBe("urn:scafo:auth-scope");
+    expect(await getOperator(clock.ctx, THIRD_ID)).toBeNull();
   });
 
   it("defaults a registration to the operator tier, which is least privilege", async () => {
@@ -198,6 +189,22 @@ describe("what tier a POST may grant", () => {
 
     expect(response.status).toBe(400);
   });
+
+  /** A `caller`-tier key registering a fresh key at the `wanted` tier. */
+  async function grant(caller: OperatorRole, wanted: OperatorRole): Promise<Response> {
+    const callerKeys = await generateJWK("EdDSA", { kid: SECOND_ID });
+    await trustAs(SECOND_ID, callerKeys, caller);
+    const minted = await generateJWK("EdDSA", { kid: THIRD_ID });
+
+    return app.request("/v1/operators", {
+      method: "POST",
+      headers: { ...(await asKey(SECOND_ID, callerKeys)), "content-type": "application/json" },
+      body: JSON.stringify({
+        ...(wanted === "operator" ? scopedHalf(THIRD_ID, minted) : publicHalf(THIRD_ID, minted)),
+        role: wanted,
+      }),
+    });
+  }
 });
 
 describe("who a DELETE may take away", () => {

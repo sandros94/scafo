@@ -19,7 +19,14 @@ import { createProject, getProject, registerNode } from "../src/core/registry/in
 import { type OperatorRole, trustOperator } from "../src/core/registry/operators.ts";
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock, rejectsWith, TEST_VERSIONS } from "./_helpers.ts";
+import {
+  ctxWith,
+  type ManualClock,
+  rejectionOf,
+  rejectsWith,
+  TEST_VERSIONS,
+  urlOf,
+} from "./_helpers.ts";
 
 const NODE_ID = "node-a";
 const NODE_URL = "http://10.0.0.4:7400";
@@ -122,11 +129,11 @@ describe("scafo project block", () => {
   });
 
   it("refuses a slug that could never name a project, before any call is made", async () => {
-    await rejectsWith(() => asAdmin.block("Not A Slug"), "invalid-slug");
+    expect((await rejectionOf(() => asAdmin.block("Not A Slug"))).code).toBe("invalid-slug");
   });
 
   it("answers not-found for a project this fleet does not hold", async () => {
-    await rejectsWith(() => asAdmin.block("nothing-here"), "not-found");
+    expect((await rejectionOf(() => asAdmin.block("nothing-here"))).code).toBe("not-found");
   });
 });
 
@@ -235,7 +242,7 @@ function reach(app: ReturnType<typeof createNodeApp>, id: string, keys: Keypair)
     url: NODE_URL,
     authorize: () => signNodeToken(keys.privateKey, id),
     /* The app may answer synchronously; `fetch` never does. */
-    fetchFn: async (input, init) => app.request(String(input), init),
+    fetchFn: async (input, init) => app.request(urlOf(input), init),
   });
 }
 

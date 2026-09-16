@@ -34,7 +34,14 @@ import { getOperator, trustOperator } from "../src/core/registry/operators.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { toBase64 } from "../src/core/utils/base64.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock, rejectsWith, TEST_VERSIONS } from "./_helpers.ts";
+import {
+  ctxWith,
+  type ManualClock,
+  rejectionOf,
+  rejectsWith,
+  TEST_VERSIONS,
+  urlOf,
+} from "./_helpers.ts";
 
 const NODE_URL = "http://10.0.0.4:7400";
 const REMOTE = "prod";
@@ -233,7 +240,9 @@ describe("the projects an enrollment scopes a key to", () => {
   });
 
   it("refuses a name that is not a project slug, here rather than at the node", async () => {
-    await rejectsWith(async () => operatorProjects("Not A Slug"), "invalid-slug");
+    expect((await rejectionOf(async () => operatorProjects("Not A Slug"))).code).toBe(
+      "invalid-slug",
+    );
   });
 
   it("scopes the key a node records, and reports the scope the node decided", async () => {
@@ -415,7 +424,7 @@ function noConfig(): Promise<string | null> {
 
 /** Calls that reach the app in this process; the app may answer synchronously. */
 function through(target: H3): typeof fetch {
-  return async (input, init) => target.request(String(input), init);
+  return async (input, init) => target.request(urlOf(input), init);
 }
 
 function nodeApp(): H3 {

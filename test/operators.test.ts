@@ -21,7 +21,7 @@ import { getNode, registerNode } from "../src/core/registry/nodes.ts";
 import { nodeKey, operatorKey } from "../src/core/registry/paths.ts";
 import type { NodeRecord, OperatorRecord } from "../src/core/types/registry.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
+import { ctxWith, type ManualClock, rejectionOf, rejectsWith } from "./_helpers.ts";
 
 const MACHINE = "node-a";
 
@@ -250,7 +250,9 @@ describe("revoking a key", () => {
   it("answers an id nothing is filed under as a miss", async () => {
     await trustOperator(clock.ctx, operator("op-aaaa1111"));
 
-    await rejectsWith(() => revokeOperator(clock.ctx, "op-ffff9999"), "not-found");
+    expect((await rejectionOf(() => revokeOperator(clock.ctx, "op-ffff9999"))).code).toBe(
+      "not-found",
+    );
   });
 });
 
@@ -293,14 +295,14 @@ describe("the projects a key is scoped to", () => {
   });
 
   it("REFUSES a wildcard listed beside named projects, rather than picking a reading", async () => {
-    await rejectsWith(
-      () =>
-        trustOperator(clock.ctx, {
-          ...operator("op-aaaa1111", "operator"),
-          projects: [WILDCARD_PROJECT, "acme"],
-        }),
-      "invalid-input",
+    const error = await rejectionOf(() =>
+      trustOperator(clock.ctx, {
+        ...operator("op-aaaa1111", "operator"),
+        projects: [WILDCARD_PROJECT, "acme"],
+      }),
     );
+
+    expect(error.code).toBe("invalid-input");
   });
 
   it("reads a hand-written mixed wildcard as the two literal names it holds", async () => {
@@ -335,21 +337,22 @@ describe("the projects a key is scoped to", () => {
   });
 
   it("refuses a scope naming no project, which would be a key that can do nothing", async () => {
-    await rejectsWith(
-      () => trustOperator(clock.ctx, { ...operator("op-aaaa1111", "operator"), projects: [] }),
-      "invalid-input",
+    const error = await rejectionOf(() =>
+      trustOperator(clock.ctx, { ...operator("op-aaaa1111", "operator"), projects: [] }),
     );
+
+    expect(error.code).toBe("invalid-input");
   });
 
   it("refuses a scope naming something that is not a project slug", async () => {
-    await rejectsWith(
-      () =>
-        trustOperator(clock.ctx, {
-          ...operator("op-aaaa1111", "operator"),
-          projects: ["Not A Slug"],
-        }),
-      "invalid-slug",
+    const error = await rejectionOf(() =>
+      trustOperator(clock.ctx, {
+        ...operator("op-aaaa1111", "operator"),
+        projects: ["Not A Slug"],
+      }),
     );
+
+    expect(error.code).toBe("invalid-slug");
   });
 
   it("reads a hand-written record that claims BOTH as scoped, which is the safe direction", async () => {

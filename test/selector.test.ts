@@ -20,7 +20,7 @@ import {
   parseLabels,
 } from "../src/core/utils/labels.ts";
 import type { NodeRecord } from "../src/core/types/registry.ts";
-import { rejectsWith } from "./_helpers.ts";
+import { rejectionOf, rejectsWith } from "./_helpers.ts";
 
 describe("what counts as a label", () => {
   it.each([
@@ -67,7 +67,7 @@ describe("what counts as a label", () => {
   });
 
   it.each([undefined, null, 1, true, {}, []])("refuses %p, which is not text at all", async (v) => {
-    await rejectsWith(() => Promise.resolve(assertLabel(v)), "invalid-input");
+    expect((await rejectionOf(() => Promise.resolve(assertLabel(v)))).code).toBe("invalid-input");
   });
 
   it("names which half of a pair was the problem", async () => {
@@ -265,7 +265,9 @@ describe("assertSelector", () => {
   it.each([null, undefined, "tier=fast", 3, [], { Tier: "fast" }, { tier: "very fast" }])(
     "refuses %p",
     async (value) => {
-      await rejectsWith(() => Promise.resolve(assertSelector(value)), "invalid-input");
+      expect((await rejectionOf(() => Promise.resolve(assertSelector(value)))).code).toBe(
+        "invalid-input",
+      );
     },
   );
 

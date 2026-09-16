@@ -26,7 +26,7 @@ import { createEnvironment, createProject, getEnvironment } from "../src/core/re
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { toBase64 } from "../src/core/utils/base64.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock, rejectsWith, TEST_VERSIONS } from "./_helpers.ts";
+import { ctxWith, type ManualClock, rejectsWith, TEST_VERSIONS, urlOf } from "./_helpers.ts";
 
 const PROD_URL = "http://10.0.0.4:7400";
 const STAGING_URL = "http://10.0.0.5:7400";
@@ -352,7 +352,7 @@ describe("the resolved remote against a real node", () => {
       url: resolved.nodeUrl as string,
       authorize: operatorSigner(key),
       /* The app may answer synchronously; `fetch` never does. */
-      fetchFn: async (input, init) => app.request(String(input), init),
+      fetchFn: async (input, init) => app.request(urlOf(input), init),
     });
 
     const environment = await ops.retire({ project: "app", env: "prod" });

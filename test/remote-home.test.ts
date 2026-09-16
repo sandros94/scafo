@@ -13,7 +13,7 @@ import {
   resolveOperatorHome,
   SCAFO_HOME_ENV,
 } from "../src/cli/_home.ts";
-import { rejectsWith } from "./_helpers.ts";
+import { rejectionOf, rejectsWith } from "./_helpers.ts";
 
 const homes: string[] = [];
 
@@ -93,7 +93,7 @@ describe("the remote registry file", () => {
        somewhere else entirely, or nowhere at all. */
     await writeFile(homeConfigPath(home), "{ not json", "utf8");
 
-    await rejectsWith(() => readRemotes(home), "invalid-input");
+    expect((await rejectionOf(() => readRemotes(home))).code).toBe("invalid-input");
   });
 });
 

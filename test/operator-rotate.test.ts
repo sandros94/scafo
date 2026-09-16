@@ -21,7 +21,7 @@ import {
 } from "../src/core/registry/operators.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock, rejectsWith, TEST_VERSIONS } from "./_helpers.ts";
+import { ctxWith, type ManualClock, rejectsWith, TEST_VERSIONS, urlOf } from "./_helpers.ts";
 
 const NODE_URL = "http://10.0.0.4:7400";
 const REMOTE = "prod";
@@ -566,7 +566,7 @@ async function keyFileAt(path: string): Promise<OperatorKeyFile> {
 
 /** Calls that reach the app in this process; the app may answer synchronously. */
 function through(target: H3): typeof fetch {
-  return async (input, init) => target.request(String(input), init);
+  return async (input, init) => target.request(urlOf(input), init);
 }
 
 /**
@@ -582,7 +582,7 @@ function crashOn(target: H3, method: string): typeof fetch {
         detail: `the ${method} of the rotation was killed`,
       });
     }
-    return target.request(String(input), init);
+    return target.request(urlOf(input), init);
   };
 }
 

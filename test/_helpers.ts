@@ -297,6 +297,16 @@ export async function rejectionOf(fn: () => Promise<unknown>): Promise<ScafoErro
   return caught as ScafoError;
 }
 
+/**
+ * The URL a `fetch` input names, whichever of the three shapes it arrived in.
+ * An app answering in-process takes a URL, and stringifying the input wholesale
+ * would render a `Request` as `[object Object]`.
+ */
+export function urlOf(input: Parameters<typeof fetch>[0]): string {
+  if (typeof input === "string") return input;
+  return input instanceof URL ? input.href : input.url;
+}
+
 /** Asserts `fn` rejects with `code`, and hands the error back for further checks. */
 export async function rejectsWith(
   fn: () => Promise<unknown>,

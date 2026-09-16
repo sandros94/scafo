@@ -2,7 +2,7 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { putJson, readJson } from "../src/core/registry/cas.ts";
-import { CLOCK_START_MS, ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
+import { CLOCK_START_MS, ctxWith, type ManualClock, rejectionOf } from "./_helpers.ts";
 import { projectKey } from "../src/core/registry/paths.ts";
 import {
   blockProject,
@@ -128,7 +128,7 @@ describe("blocking a project", () => {
   });
 
   it("refuses a project that is not there", async () => {
-    await rejectsWith(() => blockProject(clock.ctx, PROJECT), "not-found");
+    expect((await rejectionOf(() => blockProject(clock.ctx, PROJECT))).code).toBe("not-found");
   });
 });
 
@@ -136,18 +136,18 @@ describe("what may never change", () => {
   it("keeps v and slug immutable through an update", async () => {
     await createProject(clock.ctx, { slug: PROJECT });
 
-    await rejectsWith(
-      () => updateProject(clock.ctx, PROJECT, (current) => ({ ...current, slug: "other" })),
-      "immutable",
+    const slug = await rejectionOf(() =>
+      updateProject(clock.ctx, PROJECT, (current) => ({ ...current, slug: "other" })),
     );
-    await rejectsWith(
-      () =>
-        updateProject(clock.ctx, PROJECT, (current) => ({
-          ...current,
-          v: 2 as unknown as 1,
-        })),
-      "immutable",
+    const version = await rejectionOf(() =>
+      updateProject(clock.ctx, PROJECT, (current) => ({
+        ...current,
+        v: 2 as unknown as 1,
+      })),
     );
+
+    expect(slug.code).toBe("immutable");
+    expect(version.code).toBe("immutable");
   });
 
   it("keeps them immutable through the block verbs too", async () => {

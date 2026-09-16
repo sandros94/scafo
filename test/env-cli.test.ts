@@ -31,7 +31,14 @@ import { coordinatorKey, environmentKey } from "../src/core/registry/paths.ts";
 import type { CoordinatorLease } from "../src/core/types/registry.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock, rejectsWith, TEST_VERSIONS } from "./_helpers.ts";
+import {
+  ctxWith,
+  type ManualClock,
+  rejectionOf,
+  rejectsWith,
+  TEST_VERSIONS,
+  urlOf,
+} from "./_helpers.ts";
 
 const NODE_ID = "node-a";
 const PROJECT = "app";
@@ -99,7 +106,9 @@ describe.each([
   });
 
   it("reports an environment that is not there rather than inventing one", async () => {
-    await rejectsWith(() => build().retire({ project: PROJECT, env: "ghost" }), "not-found");
+    expect((await rejectionOf(() => build().retire({ project: PROJECT, env: "ghost" }))).code).toBe(
+      "not-found",
+    );
   });
 });
 
@@ -136,10 +145,11 @@ describe.each([
   });
 
   it("reports an environment that is not there rather than inventing one", async () => {
-    await rejectsWith(
-      () => build().setSelector({ project: PROJECT, env: "ghost" }, { tier: "fast" }),
-      "not-found",
+    const error = await rejectionOf(() =>
+      build().setSelector({ project: PROJECT, env: "ghost" }, { tier: "fast" }),
     );
+
+    expect(error.code).toBe("not-found");
   });
 
   it("takes no coordinator lease to do it", async () => {
@@ -335,7 +345,7 @@ function buildNodeOps(): EnvironmentOps {
     url: NODE_URL,
     authorize: () => signNodeToken(keys.privateKey, NODE_ID),
     fetchFn: async (input, init) => {
-      const url = String(input);
+      const url = urlOf(input);
       called.push(url);
       return app.request(url, init);
     },

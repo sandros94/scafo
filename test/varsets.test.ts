@@ -20,7 +20,7 @@ import { varsetKey } from "../src/core/registry/paths.ts";
 import { sha256Hex } from "../src/core/utils/hash.ts";
 import { stableStringify } from "../src/core/utils/json.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
+import { ctxWith, type ManualClock, rejectionOf, rejectsWith } from "./_helpers.ts";
 
 const PROJECT = "shop";
 const VARS = { DATABASE_URL: "postgres://db.test/app", FEATURE_FLAGS: "beta" };
@@ -152,10 +152,11 @@ describe("a record filed under a content id by an earlier build", () => {
   });
 
   it("is a name nothing new may be written under", async () => {
-    await rejectsWith(
-      () => putVarset(clock.ctx, PROJECT, { name: LEGACY, vars: VARS }),
-      "invalid-slug",
+    const error = await rejectionOf(() =>
+      putVarset(clock.ctx, PROJECT, { name: LEGACY, vars: VARS }),
     );
+
+    expect(error.code).toBe("invalid-slug");
   });
 });
 
