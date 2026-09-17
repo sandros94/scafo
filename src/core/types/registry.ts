@@ -35,6 +35,23 @@ export interface CoordinatorLease {
   fence: number;
 }
 
+/**
+ * The fleet's deploy intake, stopped by an admin for a maintenance or an
+ * upgrade. Key: `_scafo/freeze.json`, and its absence means deploys are taken.
+ *
+ * Serving is untouched while it stands: processes keep running, routing keeps
+ * being published, and everything already deployed stays deployed. What stops
+ * is intake, which every node refuses with `deploys-frozen` until it is lifted.
+ */
+export interface FreezeRecord {
+  v: 1;
+  frozenAt: string;
+  /** Operator id of the admin who froze deploys, as their token was verified. */
+  by: string;
+  /** Why, when the admin said so; the first freeze's reason is the one that stands. */
+  reason?: string;
+}
+
 /** Node WireGuard metadata for peers; the registry never holds private keys. */
 export interface NodeWireguard {
   /** X25519 public key, base64 as `wg pubkey` prints it. */

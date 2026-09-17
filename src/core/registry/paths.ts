@@ -44,6 +44,11 @@ export function metaKey(): string {
   return `${ROOT}/meta.json`;
 }
 
+/** The fleet-wide deploy freeze; its absence is what "deploys are taken" means. */
+export function freezeKey(): string {
+  return `${ROOT}/freeze.json`;
+}
+
 export function coordinatorKey(): string {
   return `${ROOT}/coordinator/lease.json`;
 }

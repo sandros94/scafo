@@ -14,6 +14,7 @@ const CODES: ScafoErrorCode[] = [
   "auth-invalid",
   "trust-mismatch",
   "cas-conflict",
+  "deploys-frozen",
   "not-found",
   "invalid-input",
   "store-unavailable",
@@ -51,6 +52,21 @@ describe("a failure that crossed a process boundary", () => {
     expect(denied.code).toBe("trust-mismatch");
     expect(denied.status).toBe(403);
     expect(denied.toProblem().type).toBe(`${PROBLEM_TYPE_PREFIX}trust-mismatch`);
+  });
+
+  it("reads a frozen fleet back as the conflict it is, not as something the caller did", () => {
+    /* Nothing is wrong with the caller or with its key, and the same request
+       works unchanged once the freeze is lifted — which is what 409 says and
+       what 403 would not. */
+    const frozen = fromProblem(
+      new ScafoError("deploys-frozen", "Deploys are frozen", {
+        detail: `frozen at 2026-09-17T09:00:00.000Z by "op-aaaa1111"`,
+      }).toProblem(),
+    );
+
+    expect(frozen.code).toBe("deploys-frozen");
+    expect(frozen.status).toBe(409);
+    expect(frozen.toProblem().type).toBe(`${PROBLEM_TYPE_PREFIX}deploys-frozen`);
   });
 
   it("keeps the status the answer actually carried, over the one the code maps to", () => {

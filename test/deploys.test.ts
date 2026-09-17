@@ -27,13 +27,19 @@ import {
 } from "../src/daemon/_intake.ts";
 import type { Reconciler } from "../src/daemon/reconcile.ts";
 import { OIDC_AUDIENCE, signNodeToken } from "../src/core/auth/index.ts";
-import { deploysPrefix, environmentKey, varsetKey } from "../src/core/registry/paths.ts";
+import {
+  deploysPrefix,
+  environmentKey,
+  projectKey,
+  varsetKey,
+} from "../src/core/registry/paths.ts";
 import { ScafoError, type ProblemDetails } from "../src/core/error.ts";
 import { NODE_LIVENESS_WINDOW_MS } from "../src/core/registry/nodes.ts";
 import {
   blockProject,
   createEnvironment,
   createProject,
+  freezeDeploys,
   getDeployment,
   getDeployRecord,
   getEnvironment,
@@ -43,6 +49,7 @@ import {
   setTrustPolicy,
   trustOperator,
   unblockProject,
+  unfreezeDeploys,
   varsetHash,
 } from "../src/core/registry/index.ts";
 import type {
@@ -577,6 +584,60 @@ describe("a project an admin has blocked", () => {
     const response = await upload(await operatorToken());
 
     expect(response.status).toBe(202);
+  });
+});
+
+describe("a fleet whose deploys an admin has frozen", () => {
+  /* A project this registry has never held, so "nothing was created" is a thing
+     the bucket can be asked about rather than a thing the fixture already did. */
+  const FRESH = "not-yet-a-project";
+  const ADMIN = "op-admin1111";
+  const REASON = "celld 0.5.0 upgrade";
+
+  it("refuses the deploy before ANYTHING is created, and says what it is waiting on", async () => {
+    const { freeze } = await freezeDeploys(clock.ctx, { by: ADMIN, reason: REASON });
+
+    const response = await upload(await operatorToken(), { ...meta(), project: FRESH });
+
+    expect(response.status).toBe(409);
+    const problem = await problemOf(response);
+    expect(problem.type).toBe("urn:scafo:deploys-frozen");
+    /*
+     * The whole of what the caller has to act on. Nothing is wrong with this
+     * deploy or with its key — an admin stopped intake for the installation —
+     * so its only other signal would be a deploy that fails for no stated cause.
+     */
+    expect(problem.detail).toContain(ADMIN);
+    expect(problem.detail).toContain(freeze.frozenAt);
+    expect(problem.detail).toContain(REASON);
+    expect(problem.detail).toContain("scafo fleet unfreeze");
+
+    /* Refused ahead of every write: intake creates a project and an environment
+       on the way in, and either would have outlived the refusal. */
+    await expect(clock.ctx.store.get(projectKey(FRESH))).resolves.toBeNull();
+    await expect(clock.ctx.store.get(environmentKey(FRESH, ENVIRONMENT))).resolves.toBeNull();
+    await expect(clock.ctx.store.list(deploysPrefix(FRESH))).resolves.toEqual([]);
+    expect(runs).toEqual([]);
+  });
+
+  it("refuses a project that is already there too, and records no deploy of it", async () => {
+    await freezeDeploys(clock.ctx, { by: ADMIN, reason: REASON });
+
+    const response = await upload(await operatorToken());
+
+    expect(response.status).toBe(409);
+    expect((await problemOf(response)).type).toBe("urn:scafo:deploys-frozen");
+    await expect(clock.ctx.store.list(deploysPrefix(PROJECT))).resolves.toEqual([]);
+    expect(runs).toEqual([]);
+  });
+
+  it("accepts the same upload, unchanged, once the freeze is lifted", async () => {
+    await freezeDeploys(clock.ctx, { by: ADMIN, reason: REASON });
+    expect((await upload(await operatorToken())).status).toBe(409);
+
+    await unfreezeDeploys(clock.ctx);
+
+    expect((await upload(await operatorToken())).status).toBe(202);
   });
 });
 

@@ -16,9 +16,10 @@
 
 import type { RegistryContext } from "../core/registry/context.ts";
 import { isNodeLive, listNodeRecords, NODE_LIVENESS_WINDOW_MS } from "../core/registry/nodes.ts";
-import type { NodeRecord, NodeVersions } from "../core/types/registry.ts";
+import type { FreezeRecord, NodeRecord, NodeVersions } from "../core/types/registry.ts";
 import { formatLabels } from "../core/utils/labels.ts";
 import { compareVersions } from "../drivers/runtime/celld.ts";
+import { describeFreezeLine } from "./_fleet.ts";
 
 /**
  * What a node is, for placement.
@@ -79,7 +80,11 @@ export function readNode(record: NodeRecord, now: Date): NodeListing {
  * "is the fleet the size I think it is?", and answering that by making them
  * count rows would be answering a different question.
  */
-export function formatNodeTable(nodes: NodeListing[], now: Date = new Date()): string {
+export function formatNodeTable(
+  nodes: NodeListing[],
+  now: Date = new Date(),
+  freeze: FreezeRecord | null = null,
+): string {
   if (nodes.length === 0) {
     return (
       `scafo: no node is registered in this bucket; a machine joins the fleet by running ` +
@@ -108,6 +113,9 @@ export function formatNodeTable(nodes: NodeListing[], now: Date = new Date()): s
     `scafo: ${String(nodes.length)} node${nodes.length === 1 ? "" : "s"}, ${String(live)} live ` +
       `(a node counts as live for ${String(NODE_LIVENESS_WINDOW_MS / 1000)}s after it last ` +
       `said so)`,
+    /* Above the version rolls, because a frozen fleet is usually a fleet part
+       way through the upgrade those rolls are measuring. */
+    ...(freeze === null ? [] : [describeFreezeLine(freeze)]),
     formatVersionRoll("celld", nodes, (versions) => versions.celld),
     formatVersionRoll("scafo", nodes, (versions) => versions.scafo),
     "",

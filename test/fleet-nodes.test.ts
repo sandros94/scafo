@@ -9,7 +9,7 @@ import {
   heartbeatNode,
   registerNode,
 } from "../src/core/registry/nodes.ts";
-import type { NodeRecord } from "../src/core/types/registry.ts";
+import type { FreezeRecord, NodeRecord } from "../src/core/types/registry.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock } from "./_helpers.ts";
 
@@ -116,6 +116,36 @@ describe("what the listing prints", () => {
     expect(printed).toContain("scafo: 0.0.0 on 3 nodes, unreported on 1");
     /* A record from a build that kept no versions reads as a dash, not a guess. */
     expect(printed).toMatch(/^ {2}node-d\s+lost\s+never\s+\S+\s+-\s+-$/m);
+  });
+
+  it("says under the header that this fleet is refusing deploys, and why", async () => {
+    const clock = ctxWith(new MemoryCasStore());
+    await register(clock, "node-a", { versions: { scafo: "0.0.0", celld: "0.5.0" } });
+    const now = new Date(clock.nowMs());
+    const listing = await listFleetNodes(clock.ctx, { now });
+    const freeze: FreezeRecord = {
+      v: 1,
+      frozenAt: "2026-09-17T09:00:00.000Z",
+      by: "op-aaaa1111",
+      reason: "celld 0.5.0 upgrade",
+    };
+
+    const printed = formatNodeTable(listing, now, freeze);
+
+    /* Directly under the count, and above the version rolls: an operator looking
+       at the fleet mid-upgrade is looking at the thing the freeze was set for. */
+    const lines = printed.split("\n");
+    expect(lines[0]).toContain("1 node");
+    expect(lines[1]).toBe(
+      `deploys: frozen since 2026-09-17T09:00:00.000Z by "op-aaaa1111": celld 0.5.0 upgrade`,
+    );
+    expect(lines[2]).toContain("celld: 0.5.0");
+
+    /* No line at all when nothing is frozen, rather than one saying so. */
+    expect(formatNodeTable(listing, now)).not.toContain("deploys:");
+    expect(formatNodeTable(listing, now, { v: 1, frozenAt: freeze.frozenAt, by: freeze.by })).toBe(
+      printed.replace(": celld 0.5.0 upgrade", ""),
+    );
   });
 
   it("says plainly when the bucket holds no node, and how a machine joins", async () => {

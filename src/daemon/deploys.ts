@@ -11,6 +11,7 @@ import {
   isDeployTerminal,
   updateDeployRecord,
 } from "../core/registry/deploys.ts";
+import { assertDeploysUnfrozen, readFreeze } from "../core/registry/freeze.ts";
 import { listNodeRecords } from "../core/registry/nodes.ts";
 import { recordRevision } from "../core/registry/_revision.ts";
 import { createEnvironment, getEnvironment } from "../core/registry/environments.ts";
@@ -287,6 +288,10 @@ export function createDeployService(
     },
 
     async admit(meta): Promise<DeployAdmission> {
+      /* Before anything at all is created: an admin has stopped intake for the
+         whole fleet, and a project or an environment brought into being by a
+         deploy that is about to be refused would outlive the refusal. */
+      assertDeploysUnfrozen(await readFreeze(daemon.registry));
       /* Reject invalid identity before acknowledging the deploy. */
       const project = await createProject(daemon.registry, { slug: meta.project });
       /* Reject blocked projects before artifact work begins. */

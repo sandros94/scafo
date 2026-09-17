@@ -51,6 +51,7 @@ import {
 } from "./middleware.ts";
 import { assertProjectScope, scopedState } from "./_scope.ts";
 import { registerOperatorRoutes } from "./_operator-routes.ts";
+import { registerFleetRoutes } from "./_fleet-routes.ts";
 import { registerProjectRoutes } from "./_project-routes.ts";
 import type { Heartbeat } from "./heartbeat.ts";
 import type { Observability } from "./observe.ts";
@@ -340,6 +341,9 @@ export function createNodeApp(daemon: DaemonContext): H3 {
 
   /* Project administration uses the same operator-only boundary. */
   registerProjectRoutes(app, daemon, operatorGuard);
+
+  /* So does what an admin says about the installation itself. */
+  registerFleetRoutes(app, daemon, operatorGuard);
 
   /* TLS storage carries private keys: serve it only when configured, and never
      expose it through a public ingress. */

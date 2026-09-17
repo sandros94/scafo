@@ -10,6 +10,7 @@ export type ScafoErrorCode =
   | "capability-missing"
   | "placement-unavailable"
   | "project-blocked"
+  | "deploys-frozen"
   | "draining"
   | "deploy-overloaded"
   | "deploy-timeout"
@@ -52,6 +53,11 @@ const DEFAULT_STATUS: Record<ScafoErrorCode, number> = {
      forbidden: nothing is wrong with the caller or with its key, and the same
      request works unchanged the moment the block is lifted. */
   "project-blocked": 409,
+  /* An admin of the fleet has stopped deploy intake, for a maintenance or an
+     upgrade. A CONFLICT rather than a forbidden, for the same reason a blocked
+     project is one: nothing is wrong with the caller or with its key, and the
+     same request works unchanged the moment the freeze is lifted. */
+  "deploys-frozen": 409,
   "draining": 503,
   "deploy-overloaded": 429,
   "deploy-timeout": 408,
