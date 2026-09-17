@@ -19,6 +19,7 @@ const PROJECT = "shop";
 const ENV = "production";
 const SCRIPT = "app";
 const HOUR_MS = 3_600_000;
+const DAY_MS = 24 * HOUR_MS;
 
 const FLEET = `${fleetPrefix(PROJECT, ENV)}/`;
 const DEPLOY = `${FLEET}deploy/`;
@@ -205,6 +206,118 @@ describe("what a plan selects", () => {
   });
 });
 
+describe("the age gate, which is always on", () => {
+  beforeEach(async () => {
+    await publishAll();
+    await pointAt(V4);
+  });
+
+  it("keeps a deployment younger than the window however far past the keep count it is", async () => {
+    const made = await plan({ keep: 1, olderThanMs: DAY_MS });
+
+    expect(names(made.delete)).toEqual([]);
+    expect(reasons(made)).toEqual({
+      [`${SCRIPT}/${V4}`]: "current",
+      [`${SCRIPT}/${V3}`]: "within-age",
+      [`${SCRIPT}/${V2}`]: "within-age",
+      [`${SCRIPT}/${V1}`]: "within-age",
+    });
+  });
+
+  it("deletes whatever the keep count did not spare when the window is zero", async () => {
+    const made = await plan({ keep: 1, olderThanMs: 0 });
+
+    expect(names(made.delete)).toEqual([`${SCRIPT}/${V3}`, `${SCRIPT}/${V2}`, `${SCRIPT}/${V1}`]);
+  });
+
+  it.each([
+    ["with both gates lifted", 0, 0],
+    ["with the age gate lifted", 0, DAY_MS],
+    ["with the keep count lifted", 10, 0],
+    ["with neither lifted", 10, DAY_MS],
+  ])("never deletes what a pointer names, %s", async (_case, keep, olderThanMs) => {
+    await pointAt(V1);
+
+    const made = await plan({ keep, olderThanMs });
+
+    expect(names(made.delete)).not.toContain(`${SCRIPT}/${V1}`);
+    expect(made.keep.find((one) => one.version === V1)?.reason).toBe("current");
+  });
+});
+
+/*
+ * The four fleets the defaults were weighed against. `keep` and `olderThanMs`
+ * are what the CLI hands over: ten deployments and a day, unless an operator
+ * lifts one of the two gates with a zero.
+ */
+describe("what the two gates select over a fleet's history", () => {
+  const KEEP = 10;
+  const WINDOW = DAY_MS;
+
+  const SCENARIOS = [
+    {
+      fleet: "20 deployments, none of them a day old",
+      published: [{ count: 20, apart: HOUR_MS }],
+      gates: [
+        { keep: KEEP, olderThanMs: WINDOW, deleted: 0 },
+        { keep: KEEP, olderThanMs: 0, deleted: 10 },
+        { keep: 0, olderThanMs: 0, deleted: 19 },
+      ],
+    },
+    {
+      fleet: "20 deployments, 12 of them older than a day",
+      published: [
+        { count: 12, apart: HOUR_MS },
+        { count: 1, apart: 30 * HOUR_MS },
+        { count: 7, apart: HOUR_MS },
+      ],
+      gates: [{ keep: KEEP, olderThanMs: WINDOW, deleted: 10 }],
+    },
+    {
+      fleet: "5 deployments, 4 of them a week old",
+      published: [
+        { count: 4, apart: HOUR_MS },
+        { count: 1, apart: 7 * DAY_MS },
+      ],
+      gates: [
+        { keep: KEEP, olderThanMs: WINDOW, deleted: 0 },
+        { keep: 1, olderThanMs: WINDOW, deleted: 4 },
+      ],
+    },
+    {
+      fleet: "30 deployments published within two hours",
+      published: [{ count: 30, apart: 4 * 60_000 }],
+      gates: [
+        { keep: KEEP, olderThanMs: WINDOW, deleted: 0 },
+        { keep: KEEP, olderThanMs: 0, deleted: 20 },
+        { keep: 0, olderThanMs: 0, deleted: 29 },
+      ],
+    },
+  ];
+
+  it.each(SCENARIOS)("$fleet", async ({ published, gates }) => {
+    const versions: string[] = [];
+    for (const group of published) {
+      for (let index = 0; index < group.count; index += 1) {
+        const version = versionOf(versions.length);
+        await publish(version, { after: group.apart });
+        versions.push(version);
+      }
+    }
+    const newest = versions.at(-1) as string;
+    await pointAt(newest);
+
+    for (const gate of gates) {
+      const made = await plan({ keep: gate.keep, olderThanMs: gate.olderThanMs });
+      const where = `keep ${String(gate.keep)}, window ${String(gate.olderThanMs)}`;
+
+      expect(made.delete.length, where).toBe(gate.deleted);
+      /* Whatever the gates said, the deployment the fleet serves is not among them. */
+      expect(names(made.delete), where).not.toContain(`${SCRIPT}/${newest}`);
+    }
+  });
+});
+
 describe("executePrune", () => {
   it("deletes exactly what the plan named, and leaves the shared blobs alone", async () => {
     await publishAll();
@@ -277,7 +390,9 @@ function plan(opts: { keep?: number; olderThanMs?: number } = {}): Promise<Prune
     project: PROJECT,
     env: ENV,
     keep: opts.keep ?? 3,
-    ...(opts.olderThanMs === undefined ? {} : { olderThanMs: opts.olderThanMs }),
+    /* A zero window is the age gate lifted, which is how a test about the count
+       alone says so; the gate itself is the subject further down. */
+    olderThanMs: opts.olderThanMs ?? 0,
     now: new Date(clock.nowMs()),
   });
 }
@@ -287,13 +402,13 @@ async function publishAll(): Promise<void> {
   for (const version of [V1, V2, V3, V4]) await publish(version);
 }
 
-/** One Celld deployment, an hour after the last, with the record scafo files for it. */
+/** One Celld deployment, `after` past the last (an hour by default), with the record scafo files for it. */
 async function publish(
   version: string,
-  opts: { script?: string; record?: boolean } = {},
+  opts: { script?: string; record?: boolean; after?: number } = {},
 ): Promise<void> {
   const script = opts.script ?? SCRIPT;
-  clock.tick(HOUR_MS);
+  clock.tick(opts.after ?? HOUR_MS);
 
   const prefix = `${DEPLOY}${script}/${version}/`;
   await store.put(`${prefix}manifest.json`, JSON.stringify({ version }));
@@ -312,6 +427,11 @@ async function pointAt(version: string, script: string = SCRIPT): Promise<void> 
   });
   await store.put(deployPointerKey(PROJECT, ENV), body);
   await store.put(`${DEPLOY}${script}/current.json`, body);
+}
+
+/** A Celld-shaped version id for the nth publication of a series. */
+function versionOf(index: number): string {
+  return index.toString(16).padStart(8, "0");
 }
 
 function names(publications: Array<{ script: string; version: string }>): string[] {

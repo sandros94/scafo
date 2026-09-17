@@ -67,8 +67,12 @@ export interface PlanPruneOptions {
   env: string;
   /** How many of the newest deployments survive regardless of their age. */
   keep: number;
-  /** Without it age plays no part, and every candidate past `keep` is selected. */
-  olderThanMs?: number;
+  /**
+   * How old a deployment past `keep` must be before it is selected. ALWAYS
+   * WEIGHED: a deployment is selected only when it is both past `keep` and older
+   * than this. Zero is the gate lifted — whatever its age.
+   */
+  olderThanMs: number;
   /** The moment ages are measured from. */
   now: Date;
 }
@@ -87,7 +91,8 @@ interface DeployPointer {
 
 /**
  * Weighs one environment's deployments against its own pointers, the count to
- * keep, and the optional age window. Reads only; {@link executePrune} deletes.
+ * keep, and the age window. BOTH GATES ARE WEIGHED: what goes is past the count
+ * AND older than the window. Reads only; {@link executePrune} deletes.
  */
 export async function planPrune(ctx: RegistryContext, opts: PlanPruneOptions): Promise<PrunePlan> {
   const prefix = deployPrefix(opts.project, opts.env);
@@ -105,10 +110,7 @@ export async function planPrune(ctx: RegistryContext, opts: PlanPruneOptions): P
       plan.keep.push({ ...deployment, reason: "current" });
     } else if (index < opts.keep) {
       plan.keep.push({ ...deployment, reason: "within-keep" });
-    } else if (
-      opts.olderThanMs !== undefined &&
-      !isOlderThan(deployment, nowMs, opts.olderThanMs)
-    ) {
+    } else if (!isOlderThan(deployment, nowMs, opts.olderThanMs)) {
       plan.keep.push({ ...deployment, reason: "within-age" });
     } else {
       plan.delete.push(deployment);
@@ -302,8 +304,14 @@ function recordedAt(deployment: StoredDeployment): number {
   return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
 }
 
-/** A deployment with no usable record is older than any window, being the oldest there is. */
+/**
+ * A deployment with no usable record is older than any window, being the oldest
+ * there is; and a window of zero is no window at all, which is how an operator
+ * says "whatever its age".
+ */
 function isOlderThan(deployment: StoredDeployment, nowMs: number, olderThanMs: number): boolean {
+  if (olderThanMs === 0) return true;
+
   const at = recordedAt(deployment);
   return Number.isFinite(at) ? nowMs - at > olderThanMs : true;
 }

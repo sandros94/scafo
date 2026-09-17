@@ -20,6 +20,7 @@ import {
   type StoredDeployment,
 } from "../../core/registry/prune.ts";
 import { createRegistry } from "../_bootstrap.ts";
+import { confirm } from "../_confirm.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
 import { warnUnstable } from "../_warn.ts";
 
@@ -34,8 +35,17 @@ const bucketArgs: ArgsDef = {
   "secret-key": { type: "string", description: "Bucket secret access key" },
 };
 
-/** Deployments kept when the operator named no count of their own. */
-const DEFAULT_KEEP = 3;
+/**
+ * The two gates an operator did not set, chosen to protect somebody who typed
+ * this command for the first time: Kubernetes' own `revisionHistoryLimit`
+ * default of ten, and a day of grace on top of it. BOTH ARE ALWAYS WEIGHED —
+ * what goes is past the count and older than the window — and a zero lifts
+ * whichever one it is given to.
+ */
+const DEFAULT_KEEP = 10;
+
+/** The age window an operator named none of their own, as they would have typed it. */
+const DEFAULT_OLDER_THAN = "24h";
 
 const pruneArgs: ArgsDef = {
   ...bucketArgs,
@@ -43,11 +53,19 @@ const pruneArgs: ArgsDef = {
   "env": { type: "string", description: "Environment to prune deployments of", required: true },
   "keep": {
     type: "string",
-    description: `How many of the newest deployments to keep (default ${String(DEFAULT_KEEP)})`,
+    description:
+      `How many of the newest deployments to keep (default ${String(DEFAULT_KEEP)}; 0 keeps ` +
+      `only what a Celld pointer names)`,
   },
   "older-than": {
     type: "string",
-    description: "Only delete deployments older than this: 30d, 12h, 45m, or seconds (3600)",
+    description:
+      `Only delete deployments older than this: 30d, 12h, 45m, or seconds (3600) (default ` +
+      `${DEFAULT_OLDER_THAN}; 0 deletes them whatever their age)`,
+  },
+  "yes": {
+    type: "boolean",
+    description: "Delete without asking; required when the input is not a terminal",
   },
   "dry-run": { type: "boolean", description: "Print what would go, and delete nothing" },
 };
@@ -99,19 +117,95 @@ async function runPrune(flags: Record<string, unknown>): Promise<void> {
     project: wanted.project,
     env: wanted.env,
     keep: wanted.keep,
-    ...(wanted.olderThan === undefined ? {} : { olderThanMs: wanted.olderThan.ms }),
+    olderThanMs: wanted.olderThan.ms,
     now: new Date(),
   });
 
-  if (!wanted.dryRun) await executePrune(registry, plan);
-
-  const lines = describePrune({
-    plan,
-    keep: wanted.keep,
-    ...(wanted.olderThan === undefined ? {} : { olderThan: wanted.olderThan.text }),
-    ...(wanted.dryRun ? { dryRun: true } : {}),
+  await runPruneDialog({
+    report: {
+      plan,
+      keep: wanted.keep,
+      olderThan: wanted.olderThan.text,
+      ...(wanted.dryRun ? { dryRun: true } : {}),
+    },
+    yes: wanted.yes,
+    prune: async (): Promise<void> => {
+      await executePrune(registry, plan);
+    },
   });
-  for (const line of lines) console.log(line);
+}
+
+/** One run of `prune` talking to the operator, with everything it touches injected. */
+export interface PruneDialog {
+  /** The plan, and how it is to be read out. */
+  report: PruneReport;
+  /** `--yes`: the question was answered on the command line. */
+  yes: boolean;
+  /** Whether there is somebody to ask. Defaults to what stdin says. */
+  isTTY?: boolean;
+  /** How the question is put and the answer read. Defaults to the terminal. */
+  ask?: (question: string) => Promise<string>;
+  /** Carries the plan out. Called only when the answer allows it. */
+  prune: () => Promise<void>;
+  /** Where the lines go. Defaults to stdout. */
+  say?: (line: string) => void;
+}
+
+/**
+ * The whole exchange, in the order an operator lives it: what the plan weighed,
+ * the question a real deletion asks, the deletion, and what went.
+ *
+ * THE PLAN IS PRINTED BEFORE THE QUESTION, because the question is only worth
+ * asking of somebody who has read the answer's consequences.
+ */
+export async function runPruneDialog(dialog: PruneDialog): Promise<void> {
+  const say =
+    dialog.say ??
+    ((line: string): void => {
+      console.log(line);
+    });
+
+  for (const line of planLines(dialog.report)) say(line);
+
+  const decision = await decidePrune(dialog);
+  if (decision === "declined") {
+    say(NOTHING_DELETED);
+    return;
+  }
+  if (decision === "delete") await dialog.prune();
+
+  say(summarize(dialog.report));
+}
+
+/** What became of the question: carried out, answered no, or never asked. */
+type PruneDecision = "delete" | "declined" | "nothing";
+
+/** Said to an operator who answered the question with anything but yes. */
+const NOTHING_DELETED = "scafo: nothing deleted";
+
+/**
+ * Whether the plan is carried out. A dry run and an empty plan ask nothing —
+ * there is no deletion to consent to — and `--yes` has answered already.
+ */
+async function decidePrune(dialog: PruneDialog): Promise<PruneDecision> {
+  const plan = dialog.report.plan;
+  if (dialog.report.dryRun === true || plan.delete.length === 0) return "nothing";
+  if (dialog.yes) return "delete";
+
+  const said = await confirm(deletionQuestion(plan), {
+    command: PRUNE_COMMAND,
+    ...(dialog.isTTY === undefined ? {} : { isTTY: dialog.isTTY }),
+    ...(dialog.ask === undefined ? {} : { ask: dialog.ask }),
+  });
+  return said ? "delete" : "declined";
+}
+
+/** The question itself: how much goes, and out of where. */
+function deletionQuestion(plan: PrunePlan): string {
+  return (
+    `Delete ${plural(plan.delete.length, "deployment")} ` +
+    `(${plural(objectsOf(plan), "object")}) of "${plan.project}/${plan.env}"? [y/N] `
+  );
 }
 
 /** What `scafo deployment prune` was told to do, once every flag has been read. */
@@ -120,22 +214,25 @@ export interface PruneFlags {
   env: string;
   keep: number;
   /** The age window as the operator typed it, and what it means in milliseconds. */
-  olderThan?: { text: string; ms: number };
+  olderThan: { text: string; ms: number };
   dryRun: boolean;
+  /** `--yes`: the operator answered the question on the command line. */
+  yes: boolean;
 }
 
 /** Reads and validates the prune flags before a bucket is opened. */
 export function readPruneFlags(flags: Record<string, unknown>): PruneFlags {
   /* Both spellings, because the parser hands over the kebab name it was typed
      as and the camel one it derives; a plain record has only whichever was set. */
-  const window = text(flags["older-than"] ?? flags.olderThan);
+  const window = text(flags["older-than"] ?? flags.olderThan) ?? DEFAULT_OLDER_THAN;
 
   return {
     project: required(flags, "project"),
     env: required(flags, "env"),
     keep: readKeep(flags.keep),
-    ...(window === undefined ? {} : { olderThan: { text: window, ms: parseOlderThan(window) } }),
+    olderThan: { text: window, ms: parseOlderThan(window) },
     dryRun: (flags["dry-run"] ?? flags.dryRun) === true,
+    yes: flags.yes === true,
   };
 }
 
@@ -147,26 +244,25 @@ const DURATION_UNITS_MS: Record<string, number> = {
 };
 
 /**
- * `--older-than` in milliseconds: `30d`, `12h`, `45m`, `3600s`, or a plain
- * whole number of seconds.
+ * `--older-than` in milliseconds: `30d`, `12h`, `45m`, `3600s`, a plain whole
+ * number of seconds, or `0`.
  *
- * Positive only. A zero window means "delete whatever `--keep` did not spare",
- * which is what leaving the flag out already says — and a `--older-than $VAR`
- * whose variable never expanded would otherwise read as exactly that.
+ * ZERO IS THE AGE GATE LIFTED — delete whatever `--keep` did not spare, whatever
+ * its age. It has to be typed: leaving the flag out is a day of grace, and an
+ * operator who means to delete this morning's deployments says so.
  */
 export function parseOlderThan(value: string): number {
   const match = /^(\d+)(s|m|h|d)?$/.exec(value.trim());
-  const amount = match === null ? 0 : Number(match[1]);
 
-  if (match === null || amount <= 0) {
+  if (match === null) {
     throw new ScafoError("invalid-input", "Invalid --older-than", {
       detail:
-        `"${value}" is not a positive duration: give 30d, 12h, 45m, or a whole number of ` +
-        `seconds (3600)`,
+        `"${value}" is not a duration: give 30d, 12h, 45m, a whole number of seconds (3600), ` +
+        `or 0 to delete whatever --keep did not spare whatever its age`,
     });
   }
   const unit = match[2];
-  return amount * (unit === undefined ? DURATION_UNITS_MS.s : DURATION_UNITS_MS[unit]);
+  return Number(match[1]) * (unit === undefined ? DURATION_UNITS_MS.s : DURATION_UNITS_MS[unit]);
 }
 
 function readKeep(value: unknown): number {
@@ -193,22 +289,25 @@ export interface PruneReport {
   plan: PrunePlan;
   /** How many of the newest deployments the plan was told to keep. */
   keep: number;
-  /** The age window exactly as the operator typed it, when they gave one. */
-  olderThan?: string;
+  /** The age window exactly as the operator typed it, or the default they took. */
+  olderThan: string;
   /** Nothing was deleted; the lines say what would have been. */
   dryRun?: boolean;
 }
 
 /** Every line `scafo deployment prune` prints, in the order it prints them. */
 export function describePrune(report: PruneReport): string[] {
+  return [...planLines(report), summarize(report)];
+}
+
+/** One line per deployment the plan weighed: what stays and why, then what goes. */
+function planLines(report: PruneReport): string[] {
   const lines = report.plan.keep.map((kept) => `keep ${nameOf(kept)}: ${whyKept(kept, report)}`);
 
   const verb = report.dryRun === true ? "would delete" : "delete";
   for (const doomed of report.plan.delete) {
     lines.push(`${verb} ${nameOf(doomed)}: ${whatGoes(doomed)}`);
   }
-
-  lines.push(summarize(report));
   return lines;
 }
 
@@ -225,7 +324,7 @@ function whyKept(kept: KeptDeployment, report: PruneReport): string {
       return `within the newest ${String(report.keep)} deployments`;
     }
     case "within-age": {
-      return `younger than ${report.olderThan ?? "the window given"}`;
+      return `younger than ${report.olderThan}`;
     }
   }
 }
@@ -242,7 +341,7 @@ function summarize(report: PruneReport): string {
     return `scafo: nothing to prune in ${where}, ${kept}; ${BLOBS_LEFT_ALONE}`;
   }
 
-  const objects = report.plan.delete.reduce((total, one) => total + one.keys.length, 0);
+  const objects = objectsOf(report.plan);
   const records = report.plan.delete.filter((one) => one.recordKey !== undefined).length;
   const verb = report.dryRun === true ? "would prune" : "pruned";
 
@@ -252,6 +351,11 @@ function summarize(report: PruneReport): string {
     `${kept}; ` +
     `${BLOBS_LEFT_ALONE}`
   );
+}
+
+/** Every store object the plan selected, across the deployments it selected. */
+function objectsOf(plan: PrunePlan): number {
+  return plan.delete.reduce((total, one) => total + one.keys.length, 0);
 }
 
 function plural(count: number, noun: string): string {
