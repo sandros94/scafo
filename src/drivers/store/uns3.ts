@@ -1,6 +1,6 @@
 import { S3Error, type S3Client } from "uns3";
 import { ScafoError } from "../../core/error.ts";
-import type { ByteRange, CasStore, StoredObject } from "../../core/types/store.ts";
+import type { ByteRange, CasStore, StoredEntry, StoredObject } from "../../core/types/store.ts";
 import { withRetry } from "../../core/utils/backoff.ts";
 
 /**
@@ -50,6 +50,27 @@ export function createUns3Store(client: S3Client, opts: Uns3StoreOptions): CasSt
       }
       throw error;
     }
+  };
+
+  /** Every object under a prefix, fully paginated, sorted by key. */
+  const listEntries = async (keyPrefix: string): Promise<StoredEntry[]> => {
+    const entries: StoredEntry[] = [];
+    const prefix = toObjectKey(keyPrefix);
+    let next: { continuationToken: string } | { query: { marker: string } } | undefined;
+
+    do {
+      const page = await client.list({ bucket, prefix, ...next });
+      for (const object of page.contents) {
+        /* File-backed stores materialize the folders between keys and list
+           them as zero-byte entries ending in `/` — phantoms this store
+           never wrote, which a caller iterating keys must never meet. */
+        if (object.key.endsWith("/")) continue;
+        entries.push({ key: toStoreKey(object.key), ...modifiedAt(object.lastModified) });
+      }
+      next = nextPage(page, prefix);
+    } while (next !== undefined);
+
+    return entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   };
 
   return {
@@ -107,25 +128,22 @@ export function createUns3Store(client: S3Client, opts: Uns3StoreOptions): CasSt
     },
 
     async list(keyPrefix: string): Promise<string[]> {
-      const keys: string[] = [];
-      const prefix = toObjectKey(keyPrefix);
-      let next: { continuationToken: string } | { query: { marker: string } } | undefined;
-
-      do {
-        const page = await client.list({ bucket, prefix, ...next });
-        for (const object of page.contents) {
-          /* File-backed stores materialize the folders between keys and list
-             them as zero-byte entries ending in `/` — phantoms this store
-             never wrote, which a caller iterating keys must never meet. */
-          if (object.key.endsWith("/")) continue;
-          keys.push(toStoreKey(object.key));
-        }
-        next = nextPage(page, prefix);
-      } while (next !== undefined);
-
-      return keys.sort();
+      return (await listEntries(keyPrefix)).map((entry) => entry.key);
     },
+
+    listEntries,
   };
+}
+
+/**
+ * The listing's own timestamp as a date, or nothing at all when the store sent
+ * one that does not read as a time. A missing age is not an old object: a caller
+ * that deletes past an age reads the absence as too young to touch.
+ */
+function modifiedAt(lastModified: string | undefined): { lastModified?: Date } {
+  if (lastModified === undefined) return {};
+  const at = Date.parse(lastModified);
+  return Number.isFinite(at) ? { lastModified: new Date(at) } : {};
 }
 
 /**

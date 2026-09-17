@@ -99,6 +99,7 @@ describe("deployment revision", () => {
       },
       del: (key) => inner.del(key),
       list: (prefix) => inner.list(prefix),
+      listEntries: (prefix) => inner.listEntries(prefix),
     };
 
     await recordRevision(clock.ctx, PROJECT, ENV, VERSION);

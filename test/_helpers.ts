@@ -19,7 +19,13 @@ import type {
   NodeVersions,
 } from "../src/core/types/registry.ts";
 import { MIN_CELLD_VERSION } from "../src/drivers/runtime/celld.ts";
-import type { ByteRange, CasHeaders, CasStore, StoredObject } from "../src/core/types/store.ts";
+import type {
+  ByteRange,
+  CasHeaders,
+  CasStore,
+  StoredEntry,
+  StoredObject,
+} from "../src/core/types/store.ts";
 import { SLUG_MAX_LENGTH } from "../src/core/utils/slug.ts";
 
 /**
@@ -167,6 +173,10 @@ export class FaultStore implements CasStore {
     return this.#inner.list(prefix);
   }
 
+  listEntries(prefix: string): Promise<StoredEntry[]> {
+    return this.#inner.listEntries(prefix);
+  }
+
   #spend(): void {
     if (this.#budget === null) return;
     if (this.#budget <= 0) throw this.#error ?? new Error("Injected fault");
@@ -239,6 +249,10 @@ export class ObservingStore implements CasStore {
 
   list(prefix: string): Promise<string[]> {
     return this.#inner.list(prefix);
+  }
+
+  listEntries(prefix: string): Promise<StoredEntry[]> {
+    return this.#inner.listEntries(prefix);
   }
 }
 

@@ -1573,6 +1573,7 @@ function watchingDeployRecords(inner: CasStore, states: string[]): CasStore {
     },
     del: (key) => inner.del(key),
     list: (prefix) => inner.list(prefix),
+    listEntries: (prefix) => inner.listEntries(prefix),
   };
 }
 

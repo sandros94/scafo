@@ -13,7 +13,7 @@
  */
 
 import type { RegistryContext } from "./context.ts";
-import type { ByteRange, CasHeaders, CasStore, StoredObject } from "../types/store.ts";
+import type { ByteRange, CasHeaders, CasStore, StoredEntry, StoredObject } from "../types/store.ts";
 
 /** Store operations dispatched, by kind, since the counter was created. */
 export interface StoreOpCounts {
@@ -77,6 +77,12 @@ export function createCountingStore(inner: CasStore): CountingStore {
     list(prefix: string): Promise<string[]> {
       counts.list++;
       return inner.list(prefix);
+    },
+
+    /* The same round trips a plain listing costs, and counted as one. */
+    listEntries(prefix: string): Promise<StoredEntry[]> {
+      counts.list++;
+      return inner.listEntries(prefix);
     },
 
     counts: (): StoreOpCounts => ({ ...counts }),

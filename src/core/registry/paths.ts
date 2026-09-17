@@ -312,13 +312,13 @@ export function deployPointerKey(project: string, env: string): string {
 }
 
 /**
- * Prefix the static-asset blobs every publication shares.
+ * Prefix the static-asset blobs every deployment shares.
  *
- * Content-addressed, so two publications that ship the same file name the same
- * blob. NOTHING in scafo deletes under here: a blob still referenced by the
- * current publication and by an old one is indistinguishable from one only the
- * old publication references, and deleting the second kind by mistake breaks
- * what is running.
+ * Content-addressed, so two deployments that ship the same file name the same
+ * blob: `assets/sha256/<first two hex>/<digest>` beneath here. Only
+ * `scafo deployment prune` deletes under this prefix, and only by reference —
+ * a blob every deployment that stays has stopped naming, once it is older than
+ * the window that covers a deploy in flight.
  */
 export function deployBlobsPrefix(project: string, env: string): string {
   return `${fleetPrefix(project, env)}/deploy-blobs/`;

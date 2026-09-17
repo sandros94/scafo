@@ -11,16 +11,24 @@
  * first is that CELLD'S OWN POINTERS decide what survives: a deployment any
  * pointer names is never a candidate, and a fleet whose fleet-wide pointer
  * cannot be read is refused outright rather than guessed at. The second is that
- * the shared asset blobs are out of scope entirely — they are content
- * addressed, so a blob the current deployment needs is the same object an old
- * deployment referenced, and nothing here can tell those two apart.
+ * the shared asset blobs are collected BY REFERENCE: they are content
+ * addressed, so a blob is deleted only once no deployment that stays names its
+ * digest, and an asset index that cannot be read refuses the whole plan rather
+ * than being read as a deployment that references nothing.
  */
 
 import { ScafoError } from "../error.ts";
 import type { DeploymentRecord } from "../types/registry.ts";
+import type { StoredEntry } from "../types/store.ts";
 import { deleteKey, readJson } from "./cas.ts";
 import type { RegistryContext } from "./context.ts";
-import { deploymentKey, deployPointerKey, deployPrefix, ID_RE } from "./paths.ts";
+import {
+  deployBlobsPrefix,
+  deploymentKey,
+  deployPointerKey,
+  deployPrefix,
+  ID_RE,
+} from "./paths.ts";
 
 /** One deployment Celld published, as the bucket still holds it. */
 export interface StoredDeployment {
@@ -60,6 +68,16 @@ export interface PrunePlan {
   keep: KeptDeployment[];
   /** Everything that goes, in the same newest-first order. */
   delete: StoredDeployment[];
+  /** The shared asset blobs the same weighing selected: how many stay, and which keys go. */
+  blobs: PrunedBlobs;
+}
+
+/** What becomes of the content-addressed asset blobs an environment shares. */
+export interface PrunedBlobs {
+  /** How many objects under `deploy-blobs/` the plan leaves where they are. */
+  keep: number;
+  /** Keys of the blobs no deployment that stays references, and old enough to go. */
+  delete: string[];
 }
 
 export interface PlanPruneOptions {
@@ -101,7 +119,14 @@ export async function planPrune(ctx: RegistryContext, opts: PlanPruneOptions): P
   const current = await readPointers(ctx, opts, prefix, keys);
   const ordered = (await readDeployments(ctx, opts.project, prefix, keys)).sort(byNewestFirst);
 
-  const plan: PrunePlan = { project: opts.project, env: opts.env, current, keep: [], delete: [] };
+  const plan: PrunePlan = {
+    project: opts.project,
+    env: opts.env,
+    current,
+    keep: [],
+    delete: [],
+    blobs: { keep: 0, delete: [] },
+  };
   const named = new Set(current);
   const nowMs = opts.now.getTime();
 
@@ -116,6 +141,10 @@ export async function planPrune(ctx: RegistryContext, opts: PlanPruneOptions): P
       plan.delete.push(deployment);
     }
   }
+
+  /* After the deployments and not before: what a blob is measured against is
+     the set that STAYS, which only the weighing above decides. */
+  plan.blobs = await planBlobs(ctx, opts, plan.keep, nowMs);
   return plan;
 }
 
@@ -147,7 +176,143 @@ export async function executePrune(ctx: RegistryContext, plan: PrunePlan): Promi
       deleted.push(key);
     }
   }
+
+  /* The blobs go LAST, and nothing is re-read for them. A blob is not a pointer
+     target: no fleet selector can move onto one, and the only thing that could
+     make a selected blob live again is a deploy that references it — which the
+     age window, not a re-read, is what protects. Going last also means a run
+     that dies halfway has deleted deployments that no longer reference them. */
+  for (const key of plan.blobs.delete) {
+    await deleteKey(ctx, key);
+    deleted.push(key);
+  }
   return { deleted };
+}
+
+/**
+ * Which shared asset blobs no deployment that stays has a use for.
+ *
+ * Reference counted against the KEPT deployments only, since a deleted
+ * deployment's references die with it, and gated by the same age window the
+ * deployments were weighed against. A blob younger than the window survives
+ * whatever references it: a deploy in flight writes its blobs BEFORE the
+ * manifest and the pointer that make it visible, so during that window an
+ * unreferenced blob and a blob about to be referenced look exactly alike. The
+ * window is what tells them apart; lifting it (`olderThanMs: 0`) is an operator
+ * saying no deploy is happening.
+ */
+async function planBlobs(
+  ctx: RegistryContext,
+  opts: Pick<PlanPruneOptions, "project" | "env" | "olderThanMs">,
+  kept: KeptDeployment[],
+  nowMs: number,
+): Promise<PrunedBlobs> {
+  const referenced = new Set<string>();
+  for (const deployment of kept) {
+    for (const digest of await readAssetDigests(ctx, deployment)) referenced.add(digest);
+  }
+
+  const prefix = deployBlobsPrefix(opts.project, opts.env);
+  const entries = await ctx.store.listEntries(prefix);
+  const doomed: string[] = [];
+
+  for (const entry of entries) {
+    const digest = blobDigest(entry.key, prefix);
+    if (digest === undefined || referenced.has(digest)) continue;
+    if (!isBlobOlderThan(entry, nowMs, opts.olderThanMs)) continue;
+    doomed.push(entry.key);
+  }
+  return { keep: entries.length - doomed.length, delete: doomed };
+}
+
+/** Celld's own name for a deployment's asset index, and the only one it serves. */
+const ASSET_INDEX_FILE = "assets.json";
+
+/**
+ * Every digest one deployment's asset index names, or none at all when the
+ * deployment ships no assets.
+ *
+ * An index that cannot be read or parsed throws `ScafoError("store-nonconforming")`
+ * naming its key. A deployment whose references cannot be read is not one to
+ * delete blobs beside: reading it as referencing nothing would free exactly the
+ * blobs it is holding.
+ */
+async function readAssetDigests(
+  ctx: RegistryContext,
+  deployment: StoredDeployment,
+): Promise<string[]> {
+  const key = `${deployment.prefix}${ASSET_INDEX_FILE}`;
+  if (!deployment.keys.includes(key)) return [];
+
+  const index = await readJson<unknown>(ctx, key);
+  if (index === null) throw assetIndexProblem(key, "is not there any more");
+
+  const record = index.value as Record<string, unknown> | null;
+  if (typeof record !== "object" || record === null || Array.isArray(record)) {
+    throw assetIndexProblem(key, "is not an object");
+  }
+
+  /* Read through the one field the digests live in rather than through
+     `schema_version`: an index this cannot read refuses here anyway, and
+     pinning a number would refuse a Celld that only added a field. */
+  const entries = record.entries;
+  if (typeof entries !== "object" || entries === null || Array.isArray(entries)) {
+    throw assetIndexProblem(key, `has no "entries"`);
+  }
+
+  const digests: string[] = [];
+  for (const [path, entry] of Object.entries(entries as Record<string, unknown>)) {
+    const digest = (entry as { sha256?: unknown } | null)?.sha256;
+    if (typeof digest !== "string" || !DIGEST_RE.test(digest)) {
+      throw assetIndexProblem(key, `names no usable digest for "${path}"`);
+    }
+    digests.push(digest);
+  }
+  return digests;
+}
+
+function assetIndexProblem(key: string, wrong: string): ScafoError {
+  return new ScafoError("store-nonconforming", "Asset index is not an asset index", {
+    detail:
+      `"${key}" ${wrong}, so it cannot say which shared blobs the deployment needs; scafo ` +
+      `will not delete a blob beside a deployment whose references it cannot read`,
+  });
+}
+
+/** A full asset digest, exactly as Celld writes one: lowercase hexadecimal. */
+const DIGEST_RE = /^[a-f\d]{64}$/;
+
+/**
+ * The digest a blob key names, or nothing when the key is not one Celld wrote.
+ *
+ * Celld's layout is `deploy-blobs/assets/sha256/<first two hex>/<digest>`.
+ * ANYTHING ELSE UNDER THE PREFIX IS LEFT ALONE: a key this cannot read as a
+ * digest is one nothing here can reference-count, and an object of unknown
+ * shape is not one to delete on a guess.
+ */
+function blobDigest(key: string, prefix: string): string | undefined {
+  const rest = key.slice(prefix.length).split("/");
+  if (rest.length !== 4) return undefined;
+
+  const [assets, algorithm, fanout, digest] = rest;
+  if (assets !== "assets" || algorithm !== "sha256") return undefined;
+  if (digest === undefined || !DIGEST_RE.test(digest) || fanout !== digest.slice(0, 2)) {
+    return undefined;
+  }
+  return digest;
+}
+
+/**
+ * Whether a blob is old enough to delete. A window of zero is the gate lifted,
+ * as it is for a deployment; a blob whose age the store did not report reads as
+ * too young to touch, which is the direction that cannot break what is running.
+ */
+function isBlobOlderThan(entry: StoredEntry, nowMs: number, olderThanMs: number): boolean {
+  if (olderThanMs === 0) return true;
+
+  const at = entry.lastModified?.getTime();
+  if (at === undefined || !Number.isFinite(at)) return false;
+  return nowMs - at > olderThanMs;
 }
 
 /**

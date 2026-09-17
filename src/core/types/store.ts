@@ -20,6 +20,19 @@ export interface ByteRange {
   end: number;
 }
 
+/** One object a listing named, together with what the listing itself said about it. */
+export interface StoredEntry {
+  /** The key, exactly as {@link CasStore.list} would have returned it. */
+  key: string;
+  /**
+   * When the store says the object was last written, when its listing carried a
+   * timestamp that reads as a date. A store that said nothing usable leaves it
+   * out rather than guessing, and a caller that needs an age reads the absence
+   * as "not old enough to act on".
+   */
+  lastModified?: Date;
+}
+
 /** An object body together with the ETag needed to condition the next write. */
 export interface StoredObject {
   /**
@@ -67,4 +80,16 @@ export interface CasStore {
   del(key: string): Promise<void>;
   /* All keys under prefix, lexicographically sorted, fully paginated. */
   list(prefix: string): Promise<string[]>;
+  /*
+   * The same listing in the same order, each key carrying what the store said
+   * about the object beside it.
+   *
+   * A LISTING RATHER THAN A `head` PER KEY, because a bucket listing already
+   * answers with a modification time on every page {@link CasStore.list}
+   * already walks: asking the age of a prefix holding thousands of shared asset
+   * blobs costs the requests the listing costs, where one `head` each would
+   * cost one request per blob. It is a second method rather than a richer
+   * `list` because every other caller here wants keys and nothing else.
+   */
+  listEntries(prefix: string): Promise<StoredEntry[]>;
 }

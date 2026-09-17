@@ -6,6 +6,7 @@
 import type { ArgsDef, CommandDef } from "citty";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  AGE_GATE_LIFTED_WARNING,
   deployment,
   describePrune,
   parseOlderThan,
@@ -13,6 +14,7 @@ import {
   type PruneDialog,
   readPruneFlags,
   runPruneDialog,
+  warnAgeGateLifted,
 } from "../src/cli/commands/deployment.ts";
 import { warnUnstable } from "../src/cli/_warn.ts";
 import type { PrunePlan, StoredDeployment } from "../src/core/registry/prune.ts";
@@ -47,12 +49,13 @@ describe("the surface `scafo deployment` presents", () => {
     }
   });
 
-  it("says in its own help that the shared asset blobs are left alone", () => {
+  it("says in its own help what becomes of the shared asset blobs", () => {
     const prune = (deployment.subCommands as Record<string, CommandDef>).prune;
     const description = (prune.meta as { description?: string }).description ?? "";
 
     expect(description).toContain("deploy-blobs/");
-    expect(description.toLowerCase()).toContain("left in place");
+    expect(description).toContain("no kept deployment references");
+    expect(description).toContain("older than the window");
   });
 
   it("states both defaults in its own help, and that a zero lifts either gate", () => {
@@ -65,6 +68,38 @@ describe("the surface `scafo deployment` presents", () => {
     expect(window).toContain("24h");
     expect(window).toContain("0");
     expect(args.yes?.description ?? "").toContain("asking");
+  });
+
+  it("warns that lifting the age gate can delete a deploy that is happening", () => {
+    const lines = warnings(() => {
+      warnAgeGateLifted(0);
+    });
+
+    expect(lines).toEqual([
+      `scafo: warning: "--older-than 0" lifts the age gate: a deploy in flight uploads its ` +
+        `files before it is visible, and pruning now can delete one that is happening; do not ` +
+        `prune while anyone deploys`,
+    ]);
+    expect(lines[0]).toContain(AGE_GATE_LIFTED_WARNING);
+  });
+
+  it("says nothing about the age gate when there is a window at all", () => {
+    expect(
+      warnings(() => {
+        warnAgeGateLifted(DAY_MS);
+        warnAgeGateLifted(1);
+      }),
+    ).toEqual([]);
+  });
+
+  it("is silenced by the one switch that silences every warning", () => {
+    vi.stubEnv("SCAFO_SILENCE_WARNINGS", "1");
+
+    expect(
+      warnings(() => {
+        warnAgeGateLifted(0);
+      }),
+    ).toEqual([]);
   });
 
   it("warns that it follows upstream before it does anything", () => {
@@ -186,8 +221,9 @@ describe("what the command prints", () => {
       `keep app/bbbb2222: younger than 12h`,
       `delete app/aaaa1111: 2 objects and its deployment record`,
       `delete worker/ffff6666: 1 object and no deployment record`,
-      `scafo: pruned 2 deployments (3 objects, 1 deployment record) of "shop/production", ` +
-        `kept 3; shared asset blobs under deploy-blobs/ are left in place`,
+      `delete 4 asset blobs no kept deployment references`,
+      `scafo: pruned 2 deployments (3 objects, 1 deployment record, 4 asset blobs) of ` +
+        `"shop/production", kept 3; ${BLOBS_SENTENCE}`,
     ]);
 
     /* A dry run says what WOULD go, and only that. */
@@ -196,17 +232,47 @@ describe("what the command prints", () => {
     expect(dry.filter((line) => line.startsWith("would delete "))).toEqual([
       `would delete app/aaaa1111: 2 objects and its deployment record`,
       `would delete worker/ffff6666: 1 object and no deployment record`,
+      `would delete 4 asset blobs no kept deployment references`,
     ]);
     expect(dry.at(-1)).toBe(
-      `scafo: would prune 2 deployments (3 objects, 1 deployment record) of "shop/production", ` +
-        `kept 3; shared asset blobs under deploy-blobs/ are left in place`,
+      `scafo: would prune 2 deployments (3 objects, 1 deployment record, 4 asset blobs) of ` +
+        `"shop/production", kept 3; ${BLOBS_SENTENCE}`,
     );
 
-    const nothing = describePrune({ plan: { ...PLAN, delete: [] }, keep: 3, olderThan: "12h" });
+    const nothing = describePrune({
+      plan: { ...PLAN, delete: [], blobs: { keep: 12, delete: [] } },
+      keep: 3,
+      olderThan: "12h",
+    });
 
-    expect(nothing.at(-1)).toBe(
-      `scafo: nothing to prune in "shop/production", kept 3; shared asset blobs under ` +
-        `deploy-blobs/ are left in place`,
+    expect(nothing.slice(-2)).toEqual([
+      `keep 12 asset blobs, referenced or younger than 12h`,
+      `scafo: nothing to prune in "shop/production", kept 3; ${BLOBS_SENTENCE}`,
+    ]);
+  });
+
+  it("says nothing of the blobs in an environment that has none", () => {
+    const lines = describePrune({
+      plan: { ...PLAN, delete: [], blobs: { keep: 0, delete: [] } },
+      keep: 3,
+      olderThan: "12h",
+    });
+
+    /* The summary always names the rule; the plan above it says nothing. */
+    expect(lines.slice(0, -1).filter((line) => line.includes("asset blob"))).toEqual([]);
+  });
+
+  it("counts the blobs it collects beside a deployment nothing selected", () => {
+    const lines = describePrune({
+      plan: { ...PLAN, delete: [], blobs: { keep: 8, delete: BLOB_KEYS } },
+      keep: 3,
+      olderThan: "12h",
+    });
+
+    expect(lines.at(-2)).toBe(`delete 4 asset blobs no kept deployment references`);
+    expect(lines.at(-1)).toBe(
+      `scafo: pruned 0 deployments (0 objects, 0 deployment records, 4 asset blobs) of ` +
+        `"shop/production", kept 3; ${BLOBS_SENTENCE}`,
     );
   });
 });
@@ -217,10 +283,12 @@ describe("asking before anything is deleted", () => {
 
     await run.go();
 
-    expect(run.asked).toEqual([`Delete 2 deployments (3 objects) of "shop/production"? [y/N] `]);
+    expect(run.asked).toEqual([
+      `Delete 2 deployments (3 objects) and 4 asset blobs of "shop/production"? [y/N] `,
+    ]);
     /* Every line but the summary was already on the terminal when the question
        was put: an operator answers having read what would go. */
-    expect(run.saidWhenAsked()).toBe(5);
+    expect(run.saidWhenAsked()).toBe(6);
     expect(run.pruned()).toBe(1);
     expect(run.said).toEqual(describePrune({ plan: PLAN, keep: 10, olderThan: "24h" }));
   });
@@ -288,7 +356,7 @@ describe("asking before anything is deleted", () => {
   });
 
   it("asks nothing when the plan names nothing to delete", async () => {
-    const run = session({ plan: { ...PLAN, delete: [] } });
+    const run = session({ plan: { ...PLAN, delete: [], blobs: { keep: 12, delete: [] } } });
 
     await run.go();
 
@@ -296,7 +364,29 @@ describe("asking before anything is deleted", () => {
     expect(run.pruned()).toBe(0);
     expect(run.said.at(-1)).toContain("scafo: nothing to prune");
   });
+
+  it("asks about the blobs alone when they are all the plan selected", async () => {
+    const run = session({
+      answer: "y",
+      plan: { ...PLAN, delete: [], blobs: { keep: 8, delete: BLOB_KEYS } },
+    });
+
+    await run.go();
+
+    expect(run.asked).toEqual([`Delete 4 asset blobs of "shop/production"? [y/N] `]);
+    expect(run.pruned()).toBe(1);
+  });
 });
+
+/** Every `scafo: warning: …` line `act` puts on stderr. */
+function warnings(act: () => void): string[] {
+  const lines: string[] = [];
+  vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  });
+  act();
+  return lines;
+}
 
 /** One run of the dialog with everything that touches a terminal or a bucket recorded. */
 function session(
@@ -351,6 +441,11 @@ function session(
   };
 }
 
+/** Four blobs no deployment that stays references, as Celld keys them. */
+const BLOB_KEYS = ["0a", "1b", "2c", "3d"].map(
+  (fanout) => `fleets/shop/production/deploy-blobs/assets/sha256/${fanout}/${fanout.repeat(32)}`,
+);
+
 /** One plan of each kept reason and of both kinds of doomed deployment. */
 const PLAN: PrunePlan = {
   project: "shop",
@@ -365,7 +460,13 @@ const PLAN: PrunePlan = {
     storedDeployment("app", "aaaa1111", { record: true }),
     storedDeployment("worker", "ffff6666", { objects: 1 }),
   ],
+  blobs: { keep: 12, delete: BLOB_KEYS },
 };
+
+/** The sentence every summary ends on, and the help says too. */
+const BLOBS_SENTENCE =
+  `shared asset blobs under deploy-blobs/ that no kept deployment references go once they are ` +
+  `older than the window`;
 
 function storedDeployment(
   script: string,

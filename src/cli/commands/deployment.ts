@@ -22,7 +22,7 @@ import {
 import { createRegistry } from "../_bootstrap.ts";
 import { confirm } from "../_confirm.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
-import { warnUnstable } from "../_warn.ts";
+import { warn, warnUnstable } from "../_warn.ts";
 
 /** The bucket the registry lives in, exactly as `scafo sail` takes it. */
 const bucketArgs: ArgsDef = {
@@ -78,15 +78,35 @@ export const PRUNE_UNSTABLE_WHY: string =
   `Celld may grow a native deployment lifecycle (denoland/celld#181), and this command ` +
   `follows upstream when it does`;
 
-/** Said in the help and again in the summary, because it is the one thing this never does. */
-const BLOBS_LEFT_ALONE = "shared asset blobs under deploy-blobs/ are left in place";
+/** Said in the help and again in the summary, because it is what prune does past the deployments. */
+const BLOBS_COLLECTED =
+  `shared asset blobs under deploy-blobs/ that no kept deployment references go once they are ` +
+  `older than the window`;
+
+/**
+ * Said before the plan of a run that lifted the age window.
+ *
+ * The window is the ONLY thing that separates a blob nobody wants from one a
+ * deploy uploaded a second ago and is about to reference — a deploy writes its
+ * files before anything makes it visible. An operator who lifts it is saying
+ * nobody is deploying, and this is where they are told that is what they said.
+ */
+export const AGE_GATE_LIFTED_WARNING: string =
+  `"--older-than 0" lifts the age gate: a deploy in flight uploads its files before it is ` +
+  `visible, and pruning now can delete one that is happening; do not prune while anyone deploys`;
+
+/** Warns the operator who lifted the age gate; any window at all is silent. */
+export function warnAgeGateLifted(olderThanMs: number): void {
+  if (olderThanMs !== 0) return;
+  warn(AGE_GATE_LIFTED_WARNING);
+}
 
 const prune: CommandDef = defineCommand({
   meta: {
     name: "prune",
     description:
       `Delete the old Celld deployments of one environment; what a pointer names is ` +
-      `never deleted and ${BLOBS_LEFT_ALONE}`,
+      `never deleted and ${BLOBS_COLLECTED}`,
   },
   args: pruneArgs,
   async run({ args }): Promise<void> {
@@ -112,6 +132,10 @@ async function runPrune(flags: Record<string, unknown>): Promise<void> {
   warnUnstable(PRUNE_COMMAND, PRUNE_UNSTABLE_WHY);
 
   const wanted = readPruneFlags(flags);
+  /* Before the plan, not beside it: the one gate whose lifting can cost an
+     operator a deploy that is happening while they read the plan. */
+  warnAgeGateLifted(wanted.olderThan.ms);
+
   const registry = await openRegistry(flags);
   const plan = await planPrune(registry, {
     project: wanted.project,
@@ -189,7 +213,7 @@ const NOTHING_DELETED = "scafo: nothing deleted";
  */
 async function decidePrune(dialog: PruneDialog): Promise<PruneDecision> {
   const plan = dialog.report.plan;
-  if (dialog.report.dryRun === true || plan.delete.length === 0) return "nothing";
+  if (dialog.report.dryRun === true || !deletesAnything(plan)) return "nothing";
   if (dialog.yes) return "delete";
 
   const said = await confirm(deletionQuestion(plan), {
@@ -200,12 +224,22 @@ async function decidePrune(dialog: PruneDialog): Promise<PruneDecision> {
   return said ? "delete" : "declined";
 }
 
+/** Whether the plan names anything at all to delete: a deployment, or a blob. */
+function deletesAnything(plan: PrunePlan): boolean {
+  return plan.delete.length > 0 || plan.blobs.delete.length > 0;
+}
+
 /** The question itself: how much goes, and out of where. */
 function deletionQuestion(plan: PrunePlan): string {
-  return (
-    `Delete ${plural(plan.delete.length, "deployment")} ` +
-    `(${plural(objectsOf(plan), "object")}) of "${plan.project}/${plan.env}"? [y/N] `
-  );
+  const parts: string[] = [];
+  if (plan.delete.length > 0) {
+    parts.push(
+      `${plural(plan.delete.length, "deployment")} (${plural(objectsOf(plan), "object")})`,
+    );
+  }
+  if (plan.blobs.delete.length > 0) parts.push(plural(plan.blobs.delete.length, "asset blob"));
+
+  return `Delete ${parts.join(" and ")} of "${plan.project}/${plan.env}"? [y/N] `;
 }
 
 /** What `scafo deployment prune` was told to do, once every flag has been read. */
@@ -308,7 +342,26 @@ function planLines(report: PruneReport): string[] {
   for (const doomed of report.plan.delete) {
     lines.push(`${verb} ${nameOf(doomed)}: ${whatGoes(doomed)}`);
   }
+
+  const blobs = blobLine(report);
+  if (blobs !== undefined) lines.push(blobs);
   return lines;
+}
+
+/**
+ * The one line the shared blobs get: what goes, or, when nothing does, how many
+ * stayed and what kept them. An environment with no blobs at all says nothing.
+ */
+function blobLine(report: PruneReport): string | undefined {
+  const blobs = report.plan.blobs;
+  if (blobs.delete.length > 0) {
+    const verb = report.dryRun === true ? "would delete" : "delete";
+    return `${verb} ${plural(blobs.delete.length, "asset blob")} no kept deployment references`;
+  }
+  if (blobs.keep > 0) {
+    return `keep ${plural(blobs.keep, "asset blob")}, referenced or younger than ${report.olderThan}`;
+  }
+  return undefined;
 }
 
 function nameOf(deployment: StoredDeployment): string {
@@ -337,19 +390,21 @@ function whatGoes(doomed: StoredDeployment): string {
 function summarize(report: PruneReport): string {
   const where = `"${report.plan.project}/${report.plan.env}"`;
   const kept = `kept ${String(report.plan.keep.length)}`;
-  if (report.plan.delete.length === 0) {
-    return `scafo: nothing to prune in ${where}, ${kept}; ${BLOBS_LEFT_ALONE}`;
+  if (!deletesAnything(report.plan)) {
+    return `scafo: nothing to prune in ${where}, ${kept}; ${BLOBS_COLLECTED}`;
   }
 
   const objects = objectsOf(report.plan);
   const records = report.plan.delete.filter((one) => one.recordKey !== undefined).length;
+  const blobs = report.plan.blobs.delete.length;
   const verb = report.dryRun === true ? "would prune" : "pruned";
 
   return (
     `scafo: ${verb} ${plural(report.plan.delete.length, "deployment")} ` +
-    `(${plural(objects, "object")}, ${plural(records, "deployment record")}) of ${where}, ` +
+    `(${plural(objects, "object")}, ${plural(records, "deployment record")}, ` +
+    `${plural(blobs, "asset blob")}) of ${where}, ` +
     `${kept}; ` +
-    `${BLOBS_LEFT_ALONE}`
+    `${BLOBS_COLLECTED}`
   );
 }
 

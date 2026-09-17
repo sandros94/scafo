@@ -1,17 +1,36 @@
 import { ScafoError } from "../../core/error.ts";
-import type { ByteRange, CasHeaders, CasStore, StoredObject } from "../../core/types/store.ts";
+import type {
+  ByteRange,
+  CasHeaders,
+  CasStore,
+  StoredEntry,
+  StoredObject,
+} from "../../core/types/store.ts";
 
 /** In-process `CasStore` matching S3 conditional-write semantics; not persistent. */
 /** An object as it was written, before a reader asked for it as text. */
 interface StoredBytes {
   body: string | Uint8Array;
   etag: string;
+  /** When this store wrote it, which is what a listing reports as its age. */
+  modified: Date;
+}
+
+/** What the store reads the clock from, for a test that owns the clock. */
+export interface MemoryStoreOptions {
+  /** The moment a write happens; the system clock unless a caller says otherwise. */
+  now?: () => Date;
 }
 
 export class MemoryCasStore implements CasStore {
   /* Preserve bytes exactly, including binary observations. */
   readonly #objects = new Map<string, StoredBytes>();
+  readonly #now: () => Date;
   #sequence = 0;
+
+  constructor(opts: MemoryStoreOptions = {}) {
+    this.#now = opts.now ?? ((): Date => new Date());
+  }
 
   /** Number of stored objects. */
   get size(): number {
@@ -57,7 +76,7 @@ export class MemoryCasStore implements CasStore {
 
     this.#sequence++;
     const etag = `m${this.#sequence}`;
-    this.#objects.set(key, { body, etag });
+    this.#objects.set(key, { body, etag, modified: this.#now() });
     return Promise.resolve({ etag });
   }
 
@@ -71,14 +90,23 @@ export class MemoryCasStore implements CasStore {
     return Promise.resolve(keys);
   }
 
+  /** The same listing, each key carrying the moment its object was written. */
+  listEntries(prefix: string): Promise<StoredEntry[]> {
+    const entries = [...this.#objects.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([key, object]): StoredEntry => ({ key, lastModified: object.modified }))
+      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    return Promise.resolve(entries);
+  }
+
   /** Drops every object; the etag sequence keeps running. */
   clear(): void {
     this.#objects.clear();
   }
 }
 
-export function createMemoryStore(): MemoryCasStore {
-  return new MemoryCasStore();
+export function createMemoryStore(opts: MemoryStoreOptions = {}): MemoryCasStore {
+  return new MemoryCasStore(opts);
 }
 
 function conflict(key: string, detail: string): ScafoError {

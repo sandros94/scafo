@@ -213,6 +213,7 @@ describe("createCoordinator", () => {
       put: (key, body, cas) => inner.put(key, body, cas),
       del: (key) => inner.del(key),
       list: (prefix) => inner.list(prefix),
+      listEntries: (prefix) => inner.listEntries(prefix),
     };
     const startedAt = clock.nowMs();
     await coordinator.runOnce();
@@ -242,6 +243,7 @@ describe("createCoordinator", () => {
       },
       del: (key) => inner.del(key),
       list: (prefix) => inner.list(prefix),
+      listEntries: (prefix) => inner.listEntries(prefix),
     };
 
     const first = coordinator.runOnce();

@@ -18,6 +18,20 @@ function pageOf(keys: string[], more: Partial<ListPage> = {}): ListPage {
   } as ListPage;
 }
 
+/** A page whose objects carry the times the store reported for them. */
+function agedPage(times: Record<string, string>): ListPage {
+  return {
+    contents: Object.entries(times).map(([key, lastModified]) => ({
+      key,
+      size: 0,
+      etag: undefined,
+      lastModified,
+    })),
+    commonPrefixes: [],
+    isTruncated: false,
+  } as ListPage;
+}
+
 /** A client that answers each list call with the next scripted page, remembering what it was asked. */
 function scripted(pages: ListPage[]): { client: S3Client; asked: ListParams[] } {
   const asked: ListParams[] = [];
@@ -66,6 +80,47 @@ describe("listing across pages", () => {
     );
 
     expect(error.code).toBe("store-nonconforming");
+  });
+});
+
+describe("listing what the store said about each object", () => {
+  it("carries the modification time of every key, across pages and without the prefix", async () => {
+    const { client } = scripted([
+      {
+        ...agedPage({ "p/a.json": "2026-01-01T00:00:00.000Z" }),
+        isTruncated: true,
+        nextContinuationToken: "t1",
+      } as ListPage,
+      agedPage({ "p/b.json": "2026-01-02T03:04:05.000Z" }),
+    ]);
+
+    const entries = await createUns3Store(client, { bucket: "b", prefix: "p" }).listEntries("");
+
+    expect(entries).toEqual([
+      { key: "a.json", lastModified: new Date("2026-01-01T00:00:00.000Z") },
+      { key: "b.json", lastModified: new Date("2026-01-02T03:04:05.000Z") },
+    ]);
+  });
+
+  it("leaves the time out rather than inventing one the store did not send", async () => {
+    const { client } = scripted([agedPage({ "p/a.json": "", "p/b.json": "whenever" })]);
+
+    const entries = await createUns3Store(client, { bucket: "b", prefix: "p" }).listEntries("");
+
+    expect(entries).toEqual([{ key: "a.json" }, { key: "b.json" }]);
+  });
+
+  it("skips the folder phantoms a file-backed store lists, exactly as the keys do", async () => {
+    const { client } = scripted([
+      agedPage({
+        "p/nested/": "2026-01-01T00:00:00.000Z",
+        "p/nested/a.json": "2026-01-01T00:00:00.000Z",
+      }),
+    ]);
+
+    const entries = await createUns3Store(client, { bucket: "b", prefix: "p" }).listEntries("");
+
+    expect(entries.map((entry) => entry.key)).toEqual(["nested/a.json"]);
   });
 });
 

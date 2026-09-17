@@ -23,8 +23,14 @@ const DAY_MS = 24 * HOUR_MS;
 
 const FLEET = `${fleetPrefix(PROJECT, ENV)}/`;
 const DEPLOY = `${FLEET}deploy/`;
-/** One content-addressed asset blob, shared by every publication that uses it. */
-const BLOB = `${deployBlobsPrefix(PROJECT, ENV)}assets/sha256/ab/abcdef0123456789`;
+
+/** Asset digests, 64 lowercase hex as Celld writes them; each is one blob. */
+const SHARED = digestOf("a");
+const ORPHAN = digestOf("b");
+const PINNED = digestOf("c");
+
+/** The one blob every publication of the fixture references. */
+const SHARED_BLOB = blobKey(SHARED);
 
 /** Four versions, published an hour apart in this order. */
 const V1 = "aaaa1111";
@@ -37,13 +43,15 @@ let store: FaultStore;
 let clock: ManualClock;
 
 beforeEach(async () => {
-  inner = new MemoryCasStore();
+  /* The store stamps every write with the test's own clock, so a blob has the
+     age the test gave it rather than the age the suite took to run. */
+  inner = new MemoryCasStore({ now: (): Date => new Date(clock.nowMs()) });
   store = new FaultStore(inner);
   clock = ctxWith(store);
 
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, { name: ENV });
-  await store.put(BLOB, "asset-bytes");
+  await putBlob(SHARED);
 });
 
 describe("reading the fleet's own selector", () => {
@@ -186,6 +194,7 @@ describe("what a plan selects", () => {
 
     expect(oldest?.prefix).toBe(`${DEPLOY}${SCRIPT}/${V1}/`);
     expect(oldest?.keys).toEqual([
+      `${DEPLOY}${SCRIPT}/${V1}/assets.json`,
       `${DEPLOY}${SCRIPT}/${V1}/manifest.json`,
       `${DEPLOY}${SCRIPT}/${V1}/modules/index.js`,
     ]);
@@ -318,8 +327,130 @@ describe("what the two gates select over a fleet's history", () => {
   });
 });
 
+/*
+ * The content-addressed blobs every deployment of an environment shares. They
+ * are reference counted against what STAYS, and the age window is what keeps a
+ * deploy in flight — blobs first, manifest and pointer after — from being
+ * collected while it is happening.
+ */
+describe("the shared asset blobs", () => {
+  it("deletes a blob only a deleted deployment named, once it is older than the window", async () => {
+    await putBlob(ORPHAN);
+    await publish(V1, { assets: [SHARED, ORPHAN] });
+    await publish(V2);
+    await publish(V3);
+    await publish(V4);
+    await pointAt(V4);
+
+    const made = await plan({ keep: 1, olderThanMs: 2 * HOUR_MS });
+
+    expect(names(made.delete)).toEqual([`${SCRIPT}/${V1}`]);
+    expect(made.blobs.delete).toEqual([blobKey(ORPHAN)]);
+    /* The one every kept deployment still names. */
+    expect(made.blobs.keep).toBe(1);
+  });
+
+  it("keeps a blob a kept deployment names, however old the blob is", async () => {
+    await publishAll();
+    await pointAt(V4);
+    clock.tick(365 * DAY_MS);
+
+    const made = await plan({ keep: 0, olderThanMs: HOUR_MS });
+
+    expect(names(made.delete)).toEqual([`${SCRIPT}/${V3}`, `${SCRIPT}/${V2}`, `${SCRIPT}/${V1}`]);
+    expect(made.blobs).toEqual({ keep: 1, delete: [] });
+  });
+
+  it("keeps a blob nobody names while it is younger than the window", async () => {
+    await publishAll();
+    await pointAt(V4);
+    /* Uploaded a moment ago: this is what a deploy in flight looks like from
+       here, and what the window exists to protect. */
+    await putBlob(ORPHAN);
+
+    const made = await plan({ keep: 0, olderThanMs: HOUR_MS });
+
+    expect(made.blobs).toEqual({ keep: 2, delete: [] });
+  });
+
+  it("deletes that same young blob once the age gate is lifted", async () => {
+    await publishAll();
+    await pointAt(V4);
+    await putBlob(ORPHAN);
+
+    const made = await plan({ keep: 0, olderThanMs: 0 });
+
+    expect(made.blobs).toEqual({ keep: 1, delete: [blobKey(ORPHAN)] });
+  });
+
+  it("keeps the blobs of the deployment a pointer names, and nothing else keeps", async () => {
+    await putBlob(PINNED);
+    await publish(V1, { assets: [SHARED, PINNED] });
+    await publish(V2);
+    await publish(V3);
+    await publish(V4);
+    await pointAt(V1);
+
+    const made = await plan({ keep: 0, olderThanMs: 0 });
+
+    expect(reasons(made)).toEqual({ [`${SCRIPT}/${V1}`]: "current" });
+    expect(made.blobs).toEqual({ keep: 2, delete: [] });
+  });
+
+  it("names no blob of a deployment that ships no asset index at all", async () => {
+    await publish(V1, { assets: [] });
+    await publish(V2, { assets: [] });
+    await pointAt(V2);
+
+    const made = await plan({ keep: 0, olderThanMs: 0 });
+
+    /* Nothing references the fixture's blob any more, and nothing refuses either. */
+    expect(made.blobs).toEqual({ keep: 0, delete: [SHARED_BLOB] });
+  });
+
+  it("leaves an object under deploy-blobs/ it cannot read as a digest where it is", async () => {
+    await publishAll();
+    await pointAt(V4);
+    const stray = `${deployBlobsPrefix(PROJECT, ENV)}assets/sha256/ab/abcdef0123456789`;
+    await store.put(stray, "not a blob this can reference-count");
+
+    const made = await plan({ keep: 0, olderThanMs: 0 });
+
+    expect(made.blobs).toEqual({ keep: 2, delete: [] });
+  });
+
+  it.each([
+    ["is not JSON at all", "not json"],
+    ["is not an object", "[]"],
+    ["names no entries", JSON.stringify({ schema_version: 1, config: {} })],
+    [
+      "names a digest that is not one",
+      JSON.stringify({ entries: { "/a.js": { sha256: "abcd" } } }),
+    ],
+  ])("refuses the whole plan when a kept deployment's asset index %s", async (_case, body) => {
+    await publishAll();
+    await pointAt(V4);
+    await store.put(`${DEPLOY}${SCRIPT}/${V4}/assets.json`, body);
+
+    const error = await rejectsWith(() => plan({ keep: 0, olderThanMs: 0 }), "store-nonconforming");
+
+    expect(error.detail).toContain(`${V4}/assets.json`);
+  });
+
+  it("never reads the asset index of a deployment it is deleting anyway", async () => {
+    await publishAll();
+    await pointAt(V4);
+    await store.put(`${DEPLOY}${SCRIPT}/${V1}/assets.json`, "not json");
+
+    const made = await plan({ keep: 1, olderThanMs: 0 });
+
+    expect(names(made.delete)).toContain(`${SCRIPT}/${V1}`);
+    expect(made.blobs.delete).toEqual([]);
+  });
+});
+
 describe("executePrune", () => {
-  it("deletes exactly what the plan named, and leaves the shared blobs alone", async () => {
+  it("deletes exactly what the plan named, and leaves a referenced blob alone", async () => {
     await publishAll();
     await pointAt(V4);
     const made = await plan({ keep: 1 });
@@ -335,7 +466,7 @@ describe("executePrune", () => {
       ].sort(),
     );
     const left = await store.list("");
-    expect(left).toContain(BLOB);
+    expect(left).toContain(SHARED_BLOB);
     expect(left).toContain(deployPointerKey(PROJECT, ENV));
     expect(left).toContain(`${DEPLOY}${SCRIPT}/${V4}/manifest.json`);
     expect(left.filter((key) => key.startsWith(`${DEPLOY}${SCRIPT}/${V1}/`))).toEqual([]);
@@ -369,6 +500,29 @@ describe("executePrune", () => {
     const left = await store.list("");
     expect(left).toContain(`${DEPLOY}${SCRIPT}/${V2}/manifest.json`);
     expect(left).toContain(deploymentKey(PROJECT, V2));
+  });
+
+  it("deletes the blobs after the deployments that were still referencing them", async () => {
+    await putBlob(ORPHAN);
+    await publish(V1, { assets: [SHARED, ORPHAN] });
+    await publish(V2);
+    await publish(V3);
+    await publish(V4);
+    await pointAt(V4);
+    const made = await plan({ keep: 1, olderThanMs: 0 });
+
+    const result = await executePrune(clock.ctx, made);
+
+    /* Last of everything: the deployments that referenced it are gone by then,
+       so a run that dies halfway never strands a blob a live deployment needs. */
+    expect(result.deleted.at(-1)).toBe(blobKey(ORPHAN));
+    expect(result.deleted.filter((key) => key.startsWith(deployBlobsPrefix(PROJECT, ENV)))).toEqual(
+      [blobKey(ORPHAN)],
+    );
+
+    const left = await store.list("");
+    expect(left).not.toContain(blobKey(ORPHAN));
+    expect(left).toContain(SHARED_BLOB);
   });
 
   it("does nothing at all for a plan that names nothing", async () => {
@@ -405,7 +559,13 @@ async function publishAll(): Promise<void> {
 /** One Celld deployment, `after` past the last (an hour by default), with the record scafo files for it. */
 async function publish(
   version: string,
-  opts: { script?: string; record?: boolean; after?: number } = {},
+  opts: {
+    script?: string;
+    record?: boolean;
+    after?: number;
+    /** Digests its asset index names; none at all ships no index, as a bundle with no assets does. */
+    assets?: string[];
+  } = {},
 ): Promise<void> {
   const script = opts.script ?? SCRIPT;
   clock.tick(opts.after ?? HOUR_MS);
@@ -413,9 +573,41 @@ async function publish(
   const prefix = `${DEPLOY}${script}/${version}/`;
   await store.put(`${prefix}manifest.json`, JSON.stringify({ version }));
   await store.put(`${prefix}modules/index.js`, "export default {};");
+
+  const assets = opts.assets ?? [SHARED];
+  if (assets.length > 0) await store.put(`${prefix}assets.json`, assetIndex(assets));
   if (opts.record !== false) {
     await createDeployment(clock.ctx, PROJECT, { version });
   }
+}
+
+/** Celld's `assets.json`: a schema version and one entry per path, each naming its digest. */
+function assetIndex(digests: string[]): string {
+  return JSON.stringify({
+    schema_version: 1,
+    entries: Object.fromEntries(
+      digests.map((digest, index) => [
+        `/asset-${String(index)}.js`,
+        { sha256: digest, bytes: 11, content_type: "text/javascript" },
+      ]),
+    ),
+    config: {},
+  });
+}
+
+/** One content-addressed blob, written at the clock's current moment. */
+async function putBlob(digest: string): Promise<void> {
+  await store.put(blobKey(digest), "asset-bytes");
+}
+
+/** Where Celld keeps the blob of `digest`: `assets/sha256/<first two hex>/<digest>`. */
+function blobKey(digest: string): string {
+  return `${deployBlobsPrefix(PROJECT, ENV)}assets/sha256/${digest.slice(0, 2)}/${digest}`;
+}
+
+/** A full digest made of one repeated hex character, readable in a failure message. */
+function digestOf(character: string): string {
+  return character.repeat(64);
 }
 
 /** Both pointers Celld keeps for `script`, aimed at `version`. */

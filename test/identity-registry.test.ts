@@ -10,7 +10,13 @@ import {
 } from "../src/core/registry/operators.ts";
 import { identityKey, nodeKey, operatorKey } from "../src/core/registry/paths.ts";
 import type { IdentityReservation, NodeRecord } from "../src/core/types/registry.ts";
-import type { ByteRange, CasHeaders, CasStore, StoredObject } from "../src/core/types/store.ts";
+import type {
+  ByteRange,
+  CasHeaders,
+  CasStore,
+  StoredEntry,
+  StoredObject,
+} from "../src/core/types/store.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, rejectsWith } from "./_helpers.ts";
 
@@ -211,5 +217,8 @@ class ReservationBarrierStore implements CasStore {
   }
   list(prefix: string): Promise<string[]> {
     return this.#inner.list(prefix);
+  }
+  listEntries(prefix: string): Promise<StoredEntry[]> {
+    return this.#inner.listEntries(prefix);
   }
 }

@@ -154,6 +154,20 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
         `v1/list-${run}/nested/c.json`,
       ]);
     });
+
+    it("says when each listed object was written, which is the only age prune has", async () => {
+      const run = randomHex(4);
+      const wroteAt = Date.now();
+      await store.put(`v1/aged-${run}/a.json`, "{}");
+
+      const entries = await store.listEntries(`v1/aged-${run}/`);
+
+      expect(entries.map((entry) => entry.key)).toEqual([`v1/aged-${run}/a.json`]);
+      const at = entries[0]?.lastModified?.getTime();
+      expect(at, "the store reported no usable modification time").toBeDefined();
+      /* Bucket clocks are their own; a minute either way is still this write. */
+      expect(Math.abs((at ?? 0) - wroteAt)).toBeLessThan(60_000);
+    });
   });
 
   describe("write-then-read round trips", () => {
