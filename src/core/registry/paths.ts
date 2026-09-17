@@ -426,11 +426,15 @@ export function deployBlobsPrefix(application: string): string {
 }
 
 /**
- * Prefix Celld saves container images under: one `<content key>.tar` per
- * image, shared by every deployment that runs it.
+ * Prefix the saved container images every deployment shares.
  *
- * A KEYSPACE OF CELLD'S PROTOCOL, not a deployment. Nothing here reads it, and
- * `scafo deployment prune` never weighs what is under it as one.
+ * Content-addressed like the asset blobs: one `<content key>.tar` per image
+ * beneath here, so two deployments of one image share one tar, and the fence
+ * image that rides with every deployment that has a container sits among them.
+ * A KEYSPACE OF CELLD'S PROTOCOL, not a deployment: `scafo deployment prune`
+ * never weighs what is under it as one, and deletes under it only by reference
+ * — an image every deployment that stays has stopped naming, once it is older
+ * than the window that covers a deploy in flight.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/container.rs#L67-L73 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/container.rs#L67-L73 (v0.5.1)
  */

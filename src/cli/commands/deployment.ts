@@ -83,9 +83,9 @@ export const PRUNE_UNSTABLE_WHY: string =
   `against the Celld releases it was verified against (${verifiedReleaseList()})`;
 
 /** Said in the help and again in the summary, because it is what prune does past the deployments. */
-const BLOBS_COLLECTED =
-  `shared asset blobs under deploy-blobs/ that no kept deployment references go once they are ` +
-  `older than the window`;
+const SHARED_COLLECTED =
+  `shared asset blobs under deploy-blobs/ and container images under deploy/images/ that no ` +
+  `kept deployment references go once they are older than the window`;
 
 /**
  * Said before the plan of a run that lifted the age window.
@@ -110,7 +110,7 @@ const prune: CommandDef = defineCommand({
     name: "prune",
     description:
       `Delete the old Celld deployments of one application; what a pointer names is ` +
-      `never deleted, ${BLOBS_COLLECTED}, and the run is refused unless the installation is ` +
+      `never deleted, ${SHARED_COLLECTED}, and the run is refused unless the installation is ` +
       `answering on Celld ${verifiedReleaseList()}`,
   },
   args: pruneArgs,
@@ -228,9 +228,9 @@ async function decidePrune(dialog: PruneDialog): Promise<PruneDecision> {
   return said ? "delete" : "declined";
 }
 
-/** Whether the plan names anything at all to delete: a deployment, or a blob. */
+/** Whether the plan names anything to delete: a deployment, a blob, or an image. */
 function deletesAnything(plan: PrunePlan): boolean {
-  return plan.delete.length > 0 || plan.blobs.delete.length > 0;
+  return plan.delete.length > 0 || plan.blobs.delete.length > 0 || plan.images.delete.length > 0;
 }
 
 /** The question itself: how much goes, and out of where. */
@@ -242,8 +242,17 @@ function deletionQuestion(plan: PrunePlan): string {
     );
   }
   if (plan.blobs.delete.length > 0) parts.push(plural(plan.blobs.delete.length, "asset blob"));
+  if (plan.images.delete.length > 0) {
+    parts.push(plural(plan.images.delete.length, "container image"));
+  }
 
-  return `Delete ${parts.join(" and ")} of "${plan.application}"? [y/N] `;
+  return `Delete ${listOf(parts)} of "${plan.application}"? [y/N] `;
+}
+
+/** What the question counts, read as one English list: "a", "a and b", "a, b and c". */
+function listOf(parts: string[]): string {
+  if (parts.length < 3) return parts.join(" and ");
+  return `${parts.slice(0, -1).join(", ")} and ${parts.at(-1) ?? ""}`;
 }
 
 /** What `scafo deployment prune` was told to do, once every flag has been read. */
@@ -345,23 +354,30 @@ function planLines(report: PruneReport): string[] {
     lines.push(`${verb} ${nameOf(doomed)}: ${whatGoes(doomed)}`);
   }
 
-  const blobs = blobLine(report);
+  const blobs = sharedLine(report, report.plan.blobs, "asset blob");
   if (blobs !== undefined) lines.push(blobs);
+
+  const images = sharedLine(report, report.plan.images, "container image");
+  if (images !== undefined) lines.push(images);
   return lines;
 }
 
 /**
- * The one line the shared blobs get: what goes, or, when nothing does, how many
- * stayed and what kept them. An application with no blobs at all says nothing.
+ * The one line each kind of shared object gets: what goes, or, when nothing
+ * does, how many stayed and what kept them. An application that has none of
+ * that kind at all says nothing.
  */
-function blobLine(report: PruneReport): string | undefined {
-  const blobs = report.plan.blobs;
-  if (blobs.delete.length > 0) {
+function sharedLine(
+  report: PruneReport,
+  shared: { keep: number; delete: string[] },
+  noun: string,
+): string | undefined {
+  if (shared.delete.length > 0) {
     const verb = report.dryRun === true ? "would delete" : "delete";
-    return `${verb} ${plural(blobs.delete.length, "asset blob")} no kept deployment references`;
+    return `${verb} ${plural(shared.delete.length, noun)} no kept deployment references`;
   }
-  if (blobs.keep > 0) {
-    return `keep ${plural(blobs.keep, "asset blob")}, referenced or younger than ${report.olderThan}`;
+  if (shared.keep > 0) {
+    return `keep ${plural(shared.keep, noun)}, referenced or younger than ${report.olderThan}`;
   }
   return undefined;
 }
@@ -393,20 +409,21 @@ function summarize(report: PruneReport): string {
   const where = `"${report.plan.application}"`;
   const kept = `kept ${String(report.plan.keep.length)}`;
   if (!deletesAnything(report.plan)) {
-    return `scafo: nothing to prune in ${where}, ${kept}; ${BLOBS_COLLECTED}`;
+    return `scafo: nothing to prune in ${where}, ${kept}; ${SHARED_COLLECTED}`;
   }
 
   const objects = objectsOf(report.plan);
   const records = report.plan.delete.filter((one) => one.recordKey !== undefined).length;
   const blobs = report.plan.blobs.delete.length;
+  const images = report.plan.images.delete.length;
   const verb = report.dryRun === true ? "would prune" : "pruned";
 
   return (
     `scafo: ${verb} ${plural(report.plan.delete.length, "deployment")} ` +
     `(${plural(objects, "object")}, ${plural(records, "deployment record")}, ` +
-    `${plural(blobs, "asset blob")}) of ${where}, ` +
+    `${plural(blobs, "asset blob")}, ${plural(images, "container image")}) of ${where}, ` +
     `${kept}; ` +
-    `${BLOBS_COLLECTED}`
+    `${SHARED_COLLECTED}`
   );
 }
 
