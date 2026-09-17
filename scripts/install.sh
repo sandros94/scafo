@@ -540,6 +540,12 @@ write_units() {
 }
 
 # Start the node before ingress so the ingress token exists on first boot.
+# Container classes are the operator's to enable, and nothing here installs one:
+# a deployment that declares a container is built or pulled through a
+# Docker-compatible engine's `docker` client on the node that accepts the deploy,
+# so both the engine and that client must be on this node's PATH before such a
+# deployment can land. Whether the service user may reach the engine's socket is
+# the operator's decision as well; this unit grants it no access to one.
 render_node_unit() {
   cat <<EOF
 [Unit]
@@ -737,6 +743,9 @@ next_steps() {
   printf '\n'
   printf 'The scafo binary was %s.\n' "$SCAFO_CHECKSUM_SOURCE"
   printf 'The scafo-caddy binary was %s.\n' "$CADDY_CHECKSUM_SOURCE"
+  printf 'Container classes need a Docker-compatible engine and its "docker" client on\n'
+  printf "this node's PATH; neither is installed here, and whether the %s user\\n" "$SERVICE_USER"
+  printf 'reaches the engine socket is yours to decide.\n'
 
   case ":${PATH}:" in
     *":${BIN_DIR}:"*) ;;

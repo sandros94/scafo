@@ -46,6 +46,17 @@ async function pinnedCelldVersion(): Promise<string> {
 }
 
 /**
+ * The container engine's client release the Dockerfile pins; the image carries
+ * that client and no engine at all.
+ */
+async function pinnedDockerVersion(): Promise<string> {
+  const dockerfile = await readFile(join(REPO_ROOT, "Dockerfile"), "utf8");
+  const pin = /^ARG DOCKER_VERSION=(\S+)$/m.exec(dockerfile)?.[1];
+  if (pin === undefined) throw new Error("the Dockerfile pins no container client release");
+  return pin;
+}
+
+/**
  * Caddy with both `scafo` modules compiled in; it reads this node rather than
  * being written to. Point the variable at a locally built tag to run against
  * modules that are not released yet.
@@ -202,6 +213,37 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
         celld: celld.output.trim(),
         esbuild: esbuild.output.trim(),
         celldEsbuild: pinned.output.trim(),
+      };
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "carries the container engine's client on PATH, and no engine of its own",
+    async () => {
+      /* `celld deploy` builds or pulls a container image through this client on
+         the node that accepts the deploy, so it has to be here; the engine it
+         talks to is the operator's, through a socket they mount. */
+      const found = await node.exec(["sh", "-c", "command -v docker"]);
+      expect(found.exitCode, found.output).toBe(0);
+      expect(found.output.trim()).toBe("/usr/local/bin/docker");
+
+      const version = await node.exec(["docker", "--version"]);
+      expect(version.exitCode, version.output).toBe(0);
+      expect(version.output).toContain(await pinnedDockerVersion());
+
+      /* No engine, and nothing to reach without a socket: the client alone
+         grants the node nothing. */
+      const engine = await node.exec(["sh", "-c", "command -v dockerd containerd"]);
+      expect(engine.exitCode, engine.output).not.toBe(0);
+
+      const info = await node.exec(["docker", "info"]);
+      expect(info.exitCode, info.output).not.toBe(0);
+
+      observed.containerClient = {
+        path: found.output.trim(),
+        version: version.output.trim(),
+        infoExitCode: info.exitCode,
       };
     },
     STEP_TIMEOUT_MS,
