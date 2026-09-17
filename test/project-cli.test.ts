@@ -204,7 +204,7 @@ describe("scafo project label", () => {
 });
 
 describe("how one project prints", () => {
-  it("names the state, the stamp and the way back out of a block", async () => {
+  it("names the state, the stamp and the way back out of a block, and admits an unknown stamp", async () => {
     await asAdmin.setLabels(MINE, { tenant: "acme" });
     const blocked = await asAdmin.block(MINE);
 
@@ -216,13 +216,12 @@ describe("how one project prints", () => {
     /* The way back is printed with the bad news, because somebody reading this
        is usually about to ask how to undo it. */
     expect(shown).toContain(`scafo project unblock ${MINE}`);
-  });
 
-  it("admits it does not know when a record predates the stamp", () => {
-    const shown = formatProject({ v: 1, slug: MINE });
+    /* A record that predates the stamp says so rather than guessing at one. */
+    const old = formatProject({ v: 1, slug: MINE });
 
-    expect(shown).toContain("unknown");
-    expect(shown).toContain("serving");
+    expect(old).toContain("unknown");
+    expect(old).toContain("serving");
   });
 });
 

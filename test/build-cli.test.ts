@@ -141,7 +141,7 @@ describe("reading the flags", () => {
 });
 
 describe("what the command prints", () => {
-  it("gives a line per publication, says why each was kept, and counts what went", () => {
+  it("gives a line per publication and counts what went, for a run, a dry run, and an empty one", () => {
     expect(describePrune({ plan: PLAN, keep: 3, olderThan: "12h" })).toEqual([
       `keep app/dddd4444: current, the fleet's selector points at it`,
       `keep app/cccc3333: within the newest 3 publications`,
@@ -151,25 +151,22 @@ describe("what the command prints", () => {
       `scafo: pruned 2 publications (3 objects, 1 build record) of "shop/production", kept 3; ` +
         `shared asset blobs under deploy-blobs/ are left in place`,
     ]);
-  });
 
-  it("says what would go, and only that, when nothing is to be deleted yet", () => {
-    const lines = describePrune({ plan: PLAN, keep: 3, olderThan: "12h", dryRun: true });
+    /* A dry run says what WOULD go, and only that. */
+    const dry = describePrune({ plan: PLAN, keep: 3, olderThan: "12h", dryRun: true });
 
-    expect(lines.filter((line) => line.startsWith("would delete "))).toEqual([
+    expect(dry.filter((line) => line.startsWith("would delete "))).toEqual([
       `would delete app/aaaa1111: 2 objects and its build record`,
       `would delete worker/ffff6666: 1 object and no build record`,
     ]);
-    expect(lines.at(-1)).toBe(
+    expect(dry.at(-1)).toBe(
       `scafo: would prune 2 publications (3 objects, 1 build record) of "shop/production", ` +
         `kept 3; shared asset blobs under deploy-blobs/ are left in place`,
     );
-  });
 
-  it("says plainly when there was nothing to prune", () => {
-    const lines = describePrune({ plan: { ...PLAN, delete: [] }, keep: 3 });
+    const nothing = describePrune({ plan: { ...PLAN, delete: [] }, keep: 3 });
 
-    expect(lines.at(-1)).toBe(
+    expect(nothing.at(-1)).toBe(
       `scafo: nothing to prune in "shop/production", kept 3; shared asset blobs under ` +
         `deploy-blobs/ are left in place`,
     );

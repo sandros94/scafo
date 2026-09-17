@@ -509,18 +509,17 @@ describe("whose traffic a counted host actually was", () => {
     expect(summary.rows).toMatchObject([{ project: "shop", env: "preview-7", requests: 20 }]);
   });
 
-  it("never invents a project out of a host nothing serves", () => {
+  it("never invents a project out of a host nothing serves, nor an env no project holds", () => {
     /* `wat.apps.test` parses as a project label perfectly well, and a scanner
        walking the platform domain produces a thousand of them. */
-    const summary = summarizeMetrics(run("wat", "production", 0, 9), window, { naming });
+    const invented = summarizeMetrics(run("wat", "production", 0, 9), window, { naming });
 
-    expect(summary.rows).toMatchObject([{ project: UNMATCHED, env: UNMATCHED, requests: 9 }]);
-  });
+    expect(invented.rows).toMatchObject([{ project: UNMATCHED, env: UNMATCHED, requests: 9 }]);
 
-  it("puts a real project's unknown ref under the same unmatched row", () => {
-    const summary = summarizeMetrics(run("shop", "typo", 0, 3), window, { naming });
+    /* A real project's unknown ref goes under the same unmatched row. */
+    const unknownRef = summarizeMetrics(run("shop", "typo", 0, 3), window, { naming });
 
-    expect(summary.rows).toMatchObject([{ project: UNMATCHED, env: UNMATCHED, requests: 3 }]);
+    expect(unknownRef.rows).toMatchObject([{ project: UNMATCHED, env: UNMATCHED, requests: 3 }]);
   });
 
   it("gathers what the node could not attribute at all into that one row", () => {

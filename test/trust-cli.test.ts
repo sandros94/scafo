@@ -199,7 +199,7 @@ describe("no longer trusting an issuer", () => {
 });
 
 describe("what `scafo trust show` puts on the terminal", () => {
-  it("prints every subject verbatim, globs and all", async () => {
+  it("prints every subject verbatim, globs and all, under the audience it was granted for", async () => {
     const registry = emptyRegistry();
     await trust(registry, GITHUB, [BRANCHES, TAGS]);
 
@@ -208,18 +208,18 @@ describe("what `scafo trust show` puts on the terminal", () => {
     expect(printed).toBe(
       [`${GITHUB} (aud ${OIDC_AUDIENCE})`, `  ${BRANCHES}`, `  ${TAGS}`].join("\n"),
     );
-  });
 
-  it("names the audience, because a token minted for another one is refused", async () => {
-    const registry = emptyRegistry();
-    await setTrustIssuer(registry, {
+    /* The audience is named whichever one it is, because a token minted for
+       another one is refused. */
+    const staged = emptyRegistry();
+    await setTrustIssuer(staged, {
       project: PROJECT,
       iss: GITHUB,
       aud: "staging",
       subjects: [MAIN],
     });
 
-    expect(formatTrustPolicy(await readTrustPolicy(registry, PROJECT))).toContain("(aud staging)");
+    expect(formatTrustPolicy(await readTrustPolicy(staged, PROJECT))).toContain("(aud staging)");
   });
 
   it("says plainly that a project with no policy admits nothing", async () => {

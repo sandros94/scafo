@@ -45,22 +45,21 @@ describe("where the probe looks", () => {
     expect(healthUrl(node)).toBe("http://10.83.0.4:7400/.well-known/scafo/health");
   });
 
-  it("follows it onto any address it was told to bind, port included", async () => {
+  it("follows it onto any address it was told to bind: a plain one, a wildcard, an IPv6", async () => {
     expect(healthUrl(await configuredWith({ SCAFO_LISTEN: "10.0.0.9:9400" }))).toBe(
       "http://10.0.0.9:9400/.well-known/scafo/health",
     );
-  });
 
-  it("dials a wildcard bind on loopback, because that is one of the addresses it answers on", async () => {
+    /* A wildcard bind is dialled on loopback, because that is one of the
+       addresses it answers on. */
     expect(healthUrl(await configuredWith({ SCAFO_LISTEN: "0.0.0.0:7400" }))).toBe(
       "http://127.0.0.1:7400/.well-known/scafo/health",
     );
     expect(healthUrl(await configuredWith({ SCAFO_LISTEN: "[::]:7400" }))).toBe(
       "http://127.0.0.1:7400/.well-known/scafo/health",
     );
-  });
 
-  it("writes an IPv6 listener the way a URL takes one", async () => {
+    /* And an IPv6 listener is written the way a URL takes one. */
     expect(healthUrl(await configuredWith({ SCAFO_LISTEN: "[fd00::4]:7400" }))).toBe(
       "http://[fd00::4]:7400/.well-known/scafo/health",
     );

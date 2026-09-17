@@ -126,7 +126,7 @@ describe("the surface the subcommands present", () => {
 });
 
 describe("what `scafo varset set` prints", () => {
-  it("says what it holds, who carries it, and whether each has deployed it", () => {
+  it("says what it holds, who carries it, whether each has deployed it, and when nothing does", () => {
     expect(
       describeVarsetWrite({
         project: PROJECT,
@@ -141,9 +141,8 @@ describe("what `scafo varset set` prints", () => {
       `scafo: varset "shared" of "shop" holds 3 variables; used by production (deployed), ` +
         `staging (pending deploy) — takes effect at their next deploy`,
     );
-  });
 
-  it("reads an environment that has never deployed as pending too", () => {
+    /* An environment that has never deployed reads as pending too. */
     expect(
       describeVarsetWrite({
         project: PROJECT,
@@ -152,9 +151,7 @@ describe("what `scafo varset set` prints", () => {
         environments: [{ env: "preview", carried: "never" }],
       }),
     ).toContain("used by preview (pending deploy)");
-  });
 
-  it("says so plainly when nothing carries it yet", () => {
     expect(
       describeVarsetWrite({ project: PROJECT, name: "spare", variables: 1, environments: [] }),
     ).toBe(`scafo: varset "spare" of "shop" holds 1 variable; no environment points at it yet`);
@@ -214,14 +211,12 @@ describe("what `scafo varset list` prints for a record this build cannot read", 
 describe("what `scafo env varset` prints", () => {
   const target = { project: PROJECT, env: "production" };
 
-  it("names the varset and says when it lands", () => {
+  it("names the varset, or says it carries none, and says when either lands", () => {
     expect(describeEnvironmentVarset(target, "shared")).toBe(
       `scafo: "shop/production" carries varset "shared"; it takes effect at the environment's ` +
         `next deploy`,
     );
-  });
 
-  it("says the same when the environment stops carrying one", () => {
     expect(describeEnvironmentVarset(target, null)).toBe(
       `scafo: "shop/production" carries no varset; it takes effect at the environment's ` +
         `next deploy`,

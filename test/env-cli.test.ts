@@ -293,7 +293,10 @@ describe("deleting straight through the bucket", () => {
 });
 
 describe("what the command puts on the terminal", () => {
-  it("names the two things an operator does next", async () => {
+  it("names the two things an operator does next, and says when there was nothing to retire", async () => {
+    const standing = await getEnvironment(clock.ctx, PROJECT, "prod");
+    expect(describeRetirement(PROD, standing)).toContain("is not retired");
+
     const environment = await retireEnvironment(clock.ctx, PROJECT, "prod");
 
     const printed = describeRetirement(PROD, environment);
@@ -303,25 +306,17 @@ describe("what the command puts on the terminal", () => {
     expect(printed).toContain("deleted");
   });
 
-  it("says plainly when there was nothing to retire", async () => {
-    const environment = await getEnvironment(clock.ctx, PROJECT, "prod");
-
-    expect(describeRetirement(PROD, environment)).toContain("is not retired");
-  });
-
-  it("names the labels a selector now asks for, and who acts on them", async () => {
+  it("names the labels a selector now asks for and who acts on them, and what clearing it means", async () => {
     const environment = await throughBucket().setSelector(PROD, { tier: "fast" });
 
     const printed = describeSelectorChange(PROD, environment);
 
     expect(printed).toContain("tier=fast");
     expect(printed).toContain("coordinator");
-  });
 
-  it("says what a cleared selector means, rather than saying nothing", async () => {
-    const environment = await throughBucket().setSelector(PROD, null);
+    const cleared = await throughBucket().setSelector(PROD, null);
 
-    expect(describeSelectorChange(PROD, environment)).toContain("no nodes any more");
+    expect(describeSelectorChange(PROD, cleared)).toContain("no nodes any more");
   });
 });
 

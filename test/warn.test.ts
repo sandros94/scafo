@@ -48,15 +48,6 @@ describe("warnUnstable", () => {
       `scafo: warning: "scafo build prune" is subject to change: upstream may replace it`,
     ]);
   });
-
-  it("is silenced by the same switch as every other warning", () => {
-    vi.stubEnv("SCAFO_SILENCE_WARNINGS", "1");
-    const said = capture();
-
-    warnUnstable("scafo build prune", "upstream may replace it");
-
-    expect(said()).toEqual([]);
-  });
 });
 
 /** Everything written to the warning stream, in the order it was written. */

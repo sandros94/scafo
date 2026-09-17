@@ -117,8 +117,8 @@ describe("watching a deploy the node already accepted", () => {
     expect(watched).toMatchObject({ state: "deployed", build: "0f0f0f0f" });
   });
 
-  it("says which varset the deploy carried, and what that varset held", async () => {
-    const lines = await printedBy(() =>
+  it("says which varset the deploy carried and what it held, and nothing at all when it carried none", async () => {
+    const carried = await printedBy(() =>
       watchDeploy(WATCHED, () => Promise.resolve("minted"), ACCEPTED, {
         pollMs: 0,
         fetchFn: answering([
@@ -132,19 +132,17 @@ describe("watching a deploy the node already accepted", () => {
       }),
     );
 
-    expect(lines).toContain("scafo: build 0f0f0f0f");
-    expect(lines).toContain('scafo: carried varset "shared" (0123456789ab)');
-  });
+    expect(carried).toContain("scafo: build 0f0f0f0f");
+    expect(carried).toContain('scafo: carried varset "shared" (0123456789ab)');
 
-  it("says nothing about a varset for a deploy that carried none", async () => {
-    const lines = await printedBy(() =>
+    const bare = await printedBy(() =>
       watchDeploy(WATCHED, () => Promise.resolve("minted"), ACCEPTED, {
         pollMs: 0,
         fetchFn: answering([{ ...ACCEPTED, state: "deployed", build: "0f0f0f0f" }]),
       }),
     );
 
-    expect(lines.join("\n")).not.toContain("varset");
+    expect(bare.join("\n")).not.toContain("varset");
   });
 
   it("fails on a deploy the node reports as failed, and says why", async () => {
