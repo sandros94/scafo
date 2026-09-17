@@ -283,7 +283,12 @@ describe("taking a lock", () => {
     const handle = await acquireTlsLock(ctx, "issue/example.com", HOLDER);
 
     const at = new Date(CLOCK_START_MS).toISOString();
-    expect(handle.lock).toEqual({ holder: HOLDER, acquiredAt: at, refreshedAt: at });
+    expect(handle.lock).toEqual({
+      holder: HOLDER,
+      acquiredAt: at,
+      refreshedAt: at,
+      token: expect.stringMatching(/^[a-f\d]{16}$/) as string,
+    });
     const stored = await store.get(tlsLockKey("issue/example.com"));
     expect(JSON.parse(stored?.body ?? "") as TlsLock).toEqual(handle.lock);
   });
@@ -318,7 +323,12 @@ describe("taking a lock", () => {
     const taken = await acquireTlsLock(ctx, "issue", OTHER_HOLDER);
 
     const at = new Date(CLOCK_START_MS + TLS_LOCK_STALE_MS).toISOString();
-    expect(taken.lock).toEqual({ holder: OTHER_HOLDER, acquiredAt: at, refreshedAt: at });
+    expect(taken.lock).toEqual({
+      holder: OTHER_HOLDER,
+      acquiredAt: at,
+      refreshedAt: at,
+      token: expect.stringMatching(/^[a-f\d]{16}$/) as string,
+    });
   });
 
   it("lets only one of two callers take a stale lock over", async () => {
@@ -335,9 +345,9 @@ describe("taking a lock", () => {
   });
 
   it("counts a record whose time cannot be read as stale, so nothing is stuck forever", () => {
-    expect(isTlsLockStale({ holder: HOLDER, acquiredAt: "?", refreshedAt: "?" }, new Date())).toBe(
-      true,
-    );
+    expect(
+      isTlsLockStale({ holder: HOLDER, acquiredAt: "?", refreshedAt: "?", token: "?" }, new Date()),
+    ).toBe(true);
   });
 });
 

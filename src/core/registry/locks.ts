@@ -3,6 +3,7 @@
 
 import { ScafoError } from "../error.ts";
 import { isCasConflict } from "./_shared.ts";
+import { randomHex } from "../utils/random.ts";
 import { createJson, deleteKey, putJson, readJson, type Versioned } from "./cas.ts";
 import { nowDate, nowIso, type RegistryContext } from "./context.ts";
 
@@ -31,6 +32,12 @@ export interface NamedLock {
   acquiredAt: string;
   /** Restamped on every refresh; the field staleness is measured from. */
   refreshedAt: string;
+  /**
+   * Drawn once at acquisition and kept across refreshes. Holder and moment
+   * cannot tell two acquisitions apart when the same holder takes the same name
+   * twice within one clock tick; this can.
+   */
+  token: string;
 }
 
 /** A held lock together with the ETag that conditions its next write. */
@@ -57,7 +64,7 @@ export async function acquireLock(
 ): Promise<LockHandle> {
   const key = space.keyOf(name);
   const at = nowIso(ctx);
-  const lock: NamedLock = { holder, acquiredAt: at, refreshedAt: at };
+  const lock: NamedLock = { holder, acquiredAt: at, refreshedAt: at, token: randomHex(8) };
 
   try {
     const { etag } = await createJson(ctx, key, lock);
@@ -66,7 +73,13 @@ export async function acquireLock(
     if (!isCasConflict(error)) throw error;
   }
 
+  /* A refusal may be the repeat of a write that landed unanswered: the store
+     driver repeats a write the store did not answer, and the repeat is refused
+     by its own precondition. The record says which it was. */
   const current = await readJson<NamedLock>(ctx, key);
+  if (current !== null && isSameWrite(current.value, lock)) {
+    return { name, lock, etag: current.etag };
+  }
   if (current === null || !isLockStale(current.value, nowDate(ctx), space.staleMs)) {
     throw taken(name, current?.value ?? null);
   }
@@ -75,9 +88,22 @@ export async function acquireLock(
     const { etag } = await putJson(ctx, key, lock, { ifMatch: current.etag });
     return { name, lock, etag };
   } catch (error) {
-    if (isCasConflict(error)) throw taken(name, current.value);
-    throw error;
+    if (!isCasConflict(error)) throw error;
+    const after = await readJson<NamedLock>(ctx, key);
+    if (after !== null && isSameWrite(after.value, lock)) {
+      return { name, lock, etag: after.etag };
+    }
+    throw taken(name, after?.value ?? current.value);
   }
+}
+
+/** Whether a stored record is the very one this call stamped: same tenancy, same token. */
+function isSameWrite(stored: NamedLock, written: NamedLock): boolean {
+  return (
+    stored.holder === written.holder &&
+    stored.acquiredAt === written.acquiredAt &&
+    stored.token === written.token
+  );
 }
 
 /**
@@ -133,7 +159,13 @@ async function stillHeld(
   if (current === null) return null;
 
   const lock = current.value;
-  if (lock.holder !== handle.lock.holder || lock.acquiredAt !== handle.lock.acquiredAt) return null;
+  if (
+    lock.holder !== handle.lock.holder ||
+    lock.acquiredAt !== handle.lock.acquiredAt ||
+    lock.token !== handle.lock.token
+  ) {
+    return null;
+  }
   return { name: handle.name, lock, etag: current.etag };
 }
 
@@ -158,10 +190,7 @@ export async function releaseLock(
  * two daemons sharing a node id apart in a record that outlived one of them.
  */
 export function lockHolder(nodeId: string): string {
-  let hex = "";
-  for (const byte of crypto.getRandomValues(new Uint8Array(4))) {
-    hex += byte.toString(16).padStart(2, "0");
-  }
+  const hex = randomHex(4);
   return `${nodeId}-${hex}`;
 }
 

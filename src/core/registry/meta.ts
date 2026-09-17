@@ -6,6 +6,7 @@ import type { CasStore } from "../types/store.ts";
 import { isCasConflict } from "./_shared.ts";
 import { createJson, readJson, requireJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
+import { randomHex } from "../utils/random.ts";
 import { metaKey, probeKey } from "./paths.ts";
 
 /**
@@ -150,12 +151,4 @@ function nonconforming(step: number, what: string, cause?: unknown): ScafoError 
     detail: `Conformance probe failed at step ${String(step)} (${what})`,
     cause,
   });
-}
-
-function randomHex(bytes: number): string {
-  let hex = "";
-  for (const byte of crypto.getRandomValues(new Uint8Array(bytes))) {
-    hex += byte.toString(16).padStart(2, "0");
-  }
-  return hex;
 }

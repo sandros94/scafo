@@ -45,36 +45,38 @@ export async function acquireLease(
 ): Promise<LeaseHandle | null> {
   const key = coordinatorKey();
   const ttlMs = opts?.ttlMs ?? DEFAULT_LEASE_TTL_MS;
+  /* What this call wrote, kept so a refusal can be checked against the record. */
+  let written: CoordinatorLease | undefined;
 
   try {
     const current = await readJson<CoordinatorLease>(ctx, key);
     if (current === null) {
-      const lease: CoordinatorLease = {
-        v: 1,
-        node: nodeId,
-        acquiredAt: nowIso(ctx),
-        ttlMs,
-        fence: 1,
-      };
-      const { etag } = await createJson(ctx, key, lease);
-      return { lease, etag };
+      written = { v: 1, node: nodeId, acquiredAt: nowIso(ctx), ttlMs, fence: 1 };
+      const { etag } = await createJson(ctx, key, written);
+      return { lease: written, etag };
     }
 
     const held = current.value;
     if (held.node !== nodeId && !isLeaseExpired(held, nowDate(ctx))) return null;
 
-    const lease: CoordinatorLease = {
-      v: 1,
-      node: nodeId,
-      acquiredAt: nowIso(ctx),
-      ttlMs,
-      fence: held.fence + 1,
-    };
-    const { etag } = await putJson(ctx, key, lease, { ifMatch: current.etag });
-    return { lease, etag };
+    written = { v: 1, node: nodeId, acquiredAt: nowIso(ctx), ttlMs, fence: held.fence + 1 };
+    const { etag } = await putJson(ctx, key, written, { ifMatch: current.etag });
+    return { lease: written, etag };
   } catch (error) {
-    if (isCasConflict(error)) return null;
-    throw error;
+    if (!isCasConflict(error)) throw error;
+    if (written === undefined) return null;
+
+    /* A refusal may be the repeat of a write that landed unanswered: the store
+       driver repeats a write the store did not answer, and the repeat is refused
+       by its own precondition. Node, fence and moment together name the write. */
+    const after = await readJson<CoordinatorLease>(ctx, key);
+    if (after === null) return null;
+    const stored = after.value;
+    const ours =
+      stored.node === written.node &&
+      stored.fence === written.fence &&
+      stored.acquiredAt === written.acquiredAt;
+    return ours ? { lease: stored, etag: after.etag } : null;
   }
 }
 

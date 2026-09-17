@@ -105,6 +105,36 @@ describe("renewLease", () => {
     await expect(verifyLease(ctx, renewed)).resolves.toBe(true);
   });
 
+  it("holds a lease whose acquisition landed before the store failed to say so", async () => {
+    const store = new FaultStore(new MemoryCasStore());
+    const { ctx } = ctxWith(store);
+    store.onAfterPut = (): void => {
+      store.onAfterPut = undefined;
+      throw unacknowledged();
+    };
+
+    const handle = await acquireLease(ctx, "node-a", { ttlMs: TTL_MS });
+
+    expect(handle?.lease).toMatchObject({ node: "node-a", fence: 1 });
+    await expect(verifyLease(ctx, handle as LeaseHandle)).resolves.toBe(true);
+  });
+
+  it("holds a lease it took over from an expired holder when that write went unanswered", async () => {
+    const store = new FaultStore(new MemoryCasStore());
+    const { ctx, tick } = ctxWith(store);
+    await held(acquireLease(ctx, "node-b", { ttlMs: TTL_MS }), "node-b");
+    tick(TTL_MS + 1);
+    store.onAfterPut = (): void => {
+      store.onAfterPut = undefined;
+      throw unacknowledged();
+    };
+
+    const handle = await acquireLease(ctx, "node-a", { ttlMs: TTL_MS });
+
+    expect(handle?.lease).toMatchObject({ node: "node-a", fence: 2 });
+    await expect(verifyLease(ctx, handle as LeaseHandle)).resolves.toBe(true);
+  });
+
   it("keeps a lease whose renewal landed before the store failed to say so", async () => {
     const store = new FaultStore(new MemoryCasStore());
     const { ctx, tick } = ctxWith(store);
