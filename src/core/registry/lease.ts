@@ -81,6 +81,11 @@ export async function acquireLease(
 /**
  * Extends the lease in place: same fence, fresh `acquiredAt`. Throws
  * `ScafoError("lease-lost")` when someone else has written the lease since.
+ *
+ * A refused write is not on its own proof of that. The store driver repeats a
+ * write the store failed to answer, and a repeat of one that had silently landed
+ * is refused by its own precondition — so the record, not the answer to the
+ * write, is what says whether this node is still the coordinator.
  */
 export async function renewLease(ctx: RegistryContext, handle: LeaseHandle): Promise<LeaseHandle> {
   const lease: CoordinatorLease = { ...handle.lease, acquiredAt: nowIso(ctx) };
@@ -89,9 +94,29 @@ export async function renewLease(ctx: RegistryContext, handle: LeaseHandle): Pro
     const { etag } = await putJson(ctx, coordinatorKey(), lease, { ifMatch: handle.etag });
     return { lease, etag };
   } catch (error) {
-    if (isCasConflict(error)) throw leaseLost(handle, error);
-    throw error;
+    if (!isCasConflict(error)) throw error;
+    const held = await stillHeld(ctx, handle);
+    if (held === null) throw leaseLost(handle, error);
+    return held;
   }
+}
+
+/**
+ * The lease as it stands when it is still this handle's — the same node at the
+ * same fence — or null when anyone else has written it.
+ *
+ * Node and fence together name one tenancy: every acquisition raises the fence,
+ * so no other holder, and no later run of this one, can ever write the pair this
+ * handle carries. The ETag cannot answer the question: a renewal that landed
+ * without being acknowledged left an ETag this caller was never told.
+ */
+async function stillHeld(ctx: RegistryContext, handle: LeaseHandle): Promise<LeaseHandle | null> {
+  const current = await readJson<CoordinatorLease>(ctx, coordinatorKey());
+  if (current === null) return null;
+
+  const lease = current.value;
+  if (lease.node !== handle.lease.node || lease.fence !== handle.lease.fence) return null;
+  return { lease, etag: current.etag };
 }
 
 /**

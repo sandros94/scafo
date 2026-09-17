@@ -22,7 +22,8 @@ export type ScafoErrorCode =
   | "invalid-slug"
   | "invalid-varset"
   | "invalid-input"
-  | "version-skew";
+  | "version-skew"
+  | "store-unavailable";
 
 /** RFC 9457 problem document, as produced by {@link ScafoError.toProblem}. */
 export interface ProblemDetails {
@@ -67,6 +68,10 @@ const DEFAULT_STATUS: Record<ScafoErrorCode, number> = {
      capability that is missing: every binary involved is one scafo runs, and
      what is wrong is the fleet's state rather than the caller or its node. */
   "version-skew": 409,
+  /* The store stopped answering, and the write that wanted it was repeated until
+     there was nothing left to repeat. UNAVAILABLE rather than a bucket that
+     misbehaves: nothing about the answer was wrong, there was no answer. */
+  "store-unavailable": 503,
 };
 
 /**

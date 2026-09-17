@@ -104,6 +104,12 @@ export class FaultStore implements CasStore {
   dels: number = 0;
   /** Runs before every put; write through the wrapped store here to race the caller. */
   onBeforePut?: (key: string) => void | Promise<void>;
+  /**
+   * Runs after every put that landed. Throwing here is the one failure a caller
+   * cannot tell from a write that never happened: the record is already the new
+   * one, and the answer saying so was lost.
+   */
+  onAfterPut?: (key: string) => void | Promise<void>;
   /** Runs before every delete; the same seam for a race against a multi-step deletion. */
   onBeforeDel?: (key: string) => void | Promise<void>;
 
@@ -145,7 +151,9 @@ export class FaultStore implements CasStore {
     await this.onBeforePut?.(key);
     this.#spend();
     this.puts++;
-    return this.#inner.put(key, body, cas);
+    const written = await this.#inner.put(key, body, cas);
+    await this.onAfterPut?.(key);
+    return written;
   }
 
   async del(key: string): Promise<void> {

@@ -16,6 +16,7 @@ const CODES: ScafoErrorCode[] = [
   "cas-conflict",
   "not-found",
   "invalid-input",
+  "store-unavailable",
 ];
 
 describe("a failure that crossed a process boundary", () => {

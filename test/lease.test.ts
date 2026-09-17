@@ -17,8 +17,14 @@ import {
 } from "../src/core/registry/index.ts";
 import type { CoordinatorLease } from "../src/core/types/registry.ts";
 import { coordinatorKey } from "../src/core/registry/paths.ts";
+import { ScafoError } from "../src/core/error.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, FaultStore, rejectsWith } from "./_helpers.ts";
+import { CLOCK_START_MS, ctxWith, FaultStore, rejectsWith } from "./_helpers.ts";
+
+/** What the store driver raises once it has repeated a write that had landed. */
+function unacknowledged(): ScafoError {
+  return new ScafoError("cas-conflict", "Conditional write failed", { status: 412 });
+}
 
 const TTL_MS = 15_000;
 
@@ -97,6 +103,40 @@ describe("renewLease", () => {
     );
     await expect(verifyLease(ctx, first)).resolves.toBe(false);
     await expect(verifyLease(ctx, renewed)).resolves.toBe(true);
+  });
+
+  it("keeps a lease whose renewal landed before the store failed to say so", async () => {
+    const store = new FaultStore(new MemoryCasStore());
+    const { ctx, tick } = ctxWith(store);
+
+    const first = await held(acquireLease(ctx, "node-a", { ttlMs: TTL_MS }), "node-a");
+    tick(1000);
+    /* The record is already the renewed one and the answer that said so was
+       lost, so the repeat the driver sent is refused by its own precondition.
+       Fencing the node over that would take the lease off its rightful holder. */
+    store.onAfterPut = (): void => {
+      store.onAfterPut = undefined;
+      throw unacknowledged();
+    };
+
+    const renewed = await renewLease(ctx, first);
+
+    expect(renewed.lease).toMatchObject({ node: "node-a", fence: 1 });
+    expect(Date.parse(renewed.lease.acquiredAt)).toBe(CLOCK_START_MS + 1000);
+    await expect(verifyLease(ctx, renewed)).resolves.toBe(true);
+  });
+
+  it("loses a lease its own node has since taken again at a higher fence", async () => {
+    const { ctx, tick } = ctxWith(new MemoryCasStore());
+
+    const first = await held(acquireLease(ctx, "node-a", { ttlMs: TTL_MS }), "node-a");
+    tick(TTL_MS + 1);
+    /* The same node after a restart: the holder id is unchanged, and only the
+       fence tells the two runs of it apart. */
+    await held(acquireLease(ctx, "node-a", { ttlMs: TTL_MS }), "node-a again");
+
+    const error = await rejectsWith(() => renewLease(ctx, first), "lease-lost");
+    expect(error.detail).toContain(`fence ${String(first.lease.fence)}`);
   });
 });
 

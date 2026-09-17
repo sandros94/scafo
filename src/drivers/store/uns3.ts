@@ -1,6 +1,15 @@
 import { S3Error, type S3Client } from "uns3";
 import { ScafoError } from "../../core/error.ts";
 import type { ByteRange, CasStore, StoredObject } from "../../core/types/store.ts";
+import { withRetry } from "../../core/utils/backoff.ts";
+
+/**
+ * How many tries a write gets, and the first step of the jittered wait between
+ * them, doubled at each one — the same range a read-modify-write gives a
+ * conditional write it lost.
+ */
+const WRITE_ATTEMPTS = 5;
+const WRITE_BASE_MS = 50;
 
 export interface Uns3StoreOptions {
   bucket: string;
@@ -63,17 +72,19 @@ export function createUns3Store(client: S3Client, opts: Uns3StoreOptions): CasSt
       const objectKey = toObjectKey(key);
       let response: Response;
       try {
-        response = await client.put({
-          bucket,
-          key: objectKey,
-          body,
-          /* Every record this registry keeps is JSON; the one thing written as
-             bytes is an encoding that is not text at all, and claiming JSON for it
-             would be a lie the bucket then serves to whatever reads it. */
-          contentType: typeof body === "string" ? "application/json" : "application/octet-stream",
-          ifMatch: cas?.ifMatch,
-          ifNoneMatch: cas?.ifNoneMatch,
-        });
+        response = await repeatWrite("put", objectKey, () =>
+          client.put({
+            bucket,
+            key: objectKey,
+            body,
+            /* Every record this registry keeps is JSON; the one thing written as
+               bytes is an encoding that is not text at all, and claiming JSON for it
+               would be a lie the bucket then serves to whatever reads it. */
+            contentType: typeof body === "string" ? "application/json" : "application/octet-stream",
+            ifMatch: cas?.ifMatch,
+            ifNoneMatch: cas?.ifNoneMatch,
+          }),
+        );
       } catch (error) {
         /* Some S3-compatible stores answer create-conflicts with 409 instead of 412. */
         const status = statusOf(error);
@@ -87,8 +98,9 @@ export function createUns3Store(client: S3Client, opts: Uns3StoreOptions): CasSt
     },
 
     async del(key: string): Promise<void> {
+      const objectKey = toObjectKey(key);
       try {
-        await client.del({ bucket, key: toObjectKey(key) });
+        await repeatWrite("delete", objectKey, () => client.del({ bucket, key: objectKey }));
       } catch (error) {
         if (statusOf(error) !== 404) throw error;
       }
@@ -166,4 +178,79 @@ function casConflict(objectKey: string, cause?: unknown): ScafoError {
     detail: "the object changed since it was read",
     cause,
   });
+}
+
+/**
+ * Runs one write, repeating the failures the S3 client will not repeat itself.
+ *
+ * That client retries GET and HEAD and nothing else, which is the only safe
+ * default it can hold: it cannot know whether repeating a write is harmless.
+ * Here it is known. Every record this registry writes is written under a
+ * precondition, so a repeat of a write that had silently landed is refused by
+ * that precondition rather than applied twice, and a caller handed a refusal
+ * already reads the record back before it writes again. The single write that
+ * carries no precondition is the observation flush, whose bytes are
+ * last-writer-wins and say the same thing however often they land.
+ *
+ * A precondition failure is never repeated: that is the store answering, and the
+ * answer is final. Only a store that did not answer is asked again.
+ */
+async function repeatWrite<T>(
+  operation: string,
+  objectKey: string,
+  write: () => Promise<T>,
+): Promise<T> {
+  let tries = 0;
+  try {
+    return await withRetry(
+      async () => {
+        tries++;
+        return await write();
+      },
+      { attempts: WRITE_ATTEMPTS, baseMs: WRITE_BASE_MS, isRetryable: isUnanswered },
+    );
+  } catch (error) {
+    if (!isUnanswered(error)) throw error;
+    throw storeUnavailable(operation, objectKey, tries, error);
+  }
+}
+
+/**
+ * Whether the store failed to answer, rather than answered a refusal. The
+ * statuses are the transient ones — a rate limit, or a server-side failure other
+ * than the two that say the request is one this store will never serve.
+ */
+function isUnanswered(error: unknown): boolean {
+  if (error instanceof S3Error) {
+    if (error.status === 429) return true;
+    return error.status >= 500 && error.status !== 501 && error.status !== 505;
+  }
+  /* What `fetch` throws when nothing came back at all: a TypeError carrying the
+     transport failure underneath it, and never a status. */
+  return error instanceof TypeError && error.cause !== undefined;
+}
+
+function storeUnavailable(
+  operation: string,
+  objectKey: string,
+  tries: number,
+  cause: unknown,
+): ScafoError {
+  const answer =
+    cause instanceof S3Error
+      ? `HTTP ${String(cause.status)}${s3Specifics(cause)}`
+      : `no answer (${cause instanceof Error ? cause.message : String(cause)})`;
+
+  return new ScafoError("store-unavailable", "Store did not answer", {
+    detail: `${operation} of "${objectKey}" failed with ${answer} after ${String(tries)} attempts`,
+    cause,
+  });
+}
+
+/** What the store called the failure, for an operator reading its own logs. */
+function s3Specifics(error: S3Error): string {
+  const named: string[] = [];
+  if (error.code !== undefined) named.push(error.code);
+  if (error.requestId !== undefined) named.push(`request ${error.requestId}`);
+  return named.length === 0 ? "" : ` (${named.join(", ")})`;
 }

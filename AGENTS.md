@@ -42,7 +42,7 @@ Docker E2E is opt-in; absent Docker skips a suite, not a product failure. Run `p
 
 ## Architecture and security
 
-- All registry mutation uses `CasStore` preconditions. Surface conflicts as `ScafoError("cas-conflict")`; retrying callers re-read before writing.
+- All registry mutation uses `CasStore` preconditions. Surface conflicts as `ScafoError("cas-conflict")`; retrying callers re-read before writing. The store driver repeats a write the store answers with a transient error and raises `ScafoError("store-unavailable")`—503—once the tries run out, and a lease or lock refused by its own precondition is re-read before it is called lost.
 - Keep core pure where practical and on Web APIs; `unjwt` in `core/auth` and `unsecure` where external text is parsed are the exceptions. Put runtime work behind core interfaces in drivers; add external runtime dependencies to `build.config.ts`.
 - Token failures—bad, expired, forged, replayed, or unknown-key—are `ScafoError("auth-invalid")`. `trust-mismatch` remains the distinct authorization refusal.
 - External text becomes an object through `unsecure` only—registry documents, request bodies, tokens, access logs, config and artifact files carry no key an object answers for on its own, and a config setting is read from a key the file itself holds. One rule refuses those names wherever variables are written: a varset and `runtime.celldEnv` alike.

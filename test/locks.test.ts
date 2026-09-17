@@ -19,8 +19,9 @@ import {
 } from "../src/core/registry/locks.ts";
 import { tlsLockKey } from "../src/core/registry/paths.ts";
 import { TLS_LOCK_SPACE } from "../src/core/registry/tls-lock.ts";
+import { ScafoError } from "../src/core/error.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { CLOCK_START_MS, ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
+import { CLOCK_START_MS, ctxWith, FaultStore, type ManualClock, rejectsWith } from "./_helpers.ts";
 
 const HOLDER = "node-a-0f0f0f0f";
 const FOREIGN = "somebody-else";
@@ -107,6 +108,45 @@ describe("keeping a lock", () => {
 
     const error = await rejectsWith(() => refreshLock(clock.ctx, SPACE, handle), "lease-lost");
     expect(error.detail).toContain(HOLDER);
+  });
+
+  it("keeps a lock whose restamp landed before the store failed to say so", async () => {
+    const store = new FaultStore(new MemoryCasStore());
+    const clock = ctxWith(store);
+    const handle = await acquireLock(clock.ctx, SPACE, "one", HOLDER);
+
+    clock.tick(SPACE.refreshMs);
+    /* The record is already restamped and the answer that said so was lost, so
+       the repeat the driver sent is refused by its own precondition. */
+    store.onAfterPut = (): void => {
+      store.onAfterPut = undefined;
+      throw new ScafoError("cas-conflict", "Conditional write failed", { status: 412 });
+    };
+
+    const kept = await refreshLock(clock.ctx, SPACE, handle);
+
+    expect(kept.lock).toMatchObject({
+      holder: HOLDER,
+      acquiredAt: handle.lock.acquiredAt,
+      refreshedAt: new Date(clock.nowMs()).toISOString(),
+    });
+    /* And the handle it answered with fences the next restamp, which the one
+       the caller came in with no longer could. */
+    clock.tick(SPACE.refreshMs);
+    await expect(refreshLock(clock.ctx, SPACE, kept)).resolves.toMatchObject({ name: "one" });
+  });
+
+  it("types a restamp onto a record its own id has taken again as lease loss", async () => {
+    const { clock } = world();
+    const handle = await acquireLock(clock.ctx, SPACE, "one", HOLDER);
+
+    clock.tick(SPACE.staleMs);
+    /* The same id holding the name a second time: only the moment it was taken
+       tells the two tenancies apart. */
+    await acquireLock(clock.ctx, SPACE, "one", HOLDER);
+
+    const error = await rejectsWith(() => refreshLock(clock.ctx, SPACE, handle), "lease-lost");
+    expect(error.detail).toContain(handle.lock.acquiredAt);
   });
 
   it("types an unreachable restamp as lease loss too, and preserves its cause", async () => {

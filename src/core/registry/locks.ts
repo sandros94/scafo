@@ -3,7 +3,7 @@
 
 import { ScafoError } from "../error.ts";
 import { isCasConflict } from "./_shared.ts";
-import { createJson, deleteKey, putJson, readJson } from "./cas.ts";
+import { createJson, deleteKey, putJson, readJson, type Versioned } from "./cas.ts";
 import { nowDate, nowIso, type RegistryContext } from "./context.ts";
 
 /** How often a holder restamps a lock it means to keep. */
@@ -80,7 +80,14 @@ export async function acquireLock(
   }
 }
 
-/** Refreshes a held lock. Any failed conditional write is lease-lost. */
+/**
+ * Refreshes a held lock. A failed conditional write is lease-lost unless the
+ * record itself says otherwise: the store driver repeats a write the store
+ * failed to answer, and a repeat of one that had silently landed is refused by
+ * its own precondition, so a refusal alone would fence a holder that never lost
+ * anything. Nothing else proves a refresh landed, so a transport failure, and a
+ * record this handle can no longer be read out of, both still cost the lock.
+ */
 export async function refreshLock(
   ctx: RegistryContext,
   space: LockSpace,
@@ -92,9 +99,42 @@ export async function refreshLock(
     const { etag } = await putJson(ctx, space.keyOf(handle.name), lock, { ifMatch: handle.etag });
     return { name: handle.name, lock, etag };
   } catch (error) {
-    /* Neither conflict nor transport failure proves the refresh landed. */
+    if (isCasConflict(error)) {
+      const held = await stillHeld(ctx, space, handle);
+      if (held !== null) return held;
+    }
     throw lost(handle, error);
   }
+}
+
+/**
+ * The record as it stands while it is still this handle's — the same holder,
+ * taken at the same moment — or null when it is anyone else's, unreadable, or
+ * gone.
+ *
+ * Holder and acquisition time together name one tenancy. The holder alone would
+ * not: a lock taken over, given up and taken again carries the same id, and a
+ * refusal in that window is a real loss. The ETag cannot answer the question at
+ * all, since a refresh that landed without being acknowledged left one this
+ * caller was never told.
+ */
+async function stillHeld(
+  ctx: RegistryContext,
+  space: LockSpace,
+  handle: LockHandle,
+): Promise<LockHandle | null> {
+  let current: Versioned<NamedLock> | null;
+  try {
+    current = await readJson<NamedLock>(ctx, space.keyOf(handle.name));
+  } catch {
+    /* Nothing was proven either way, and an unproven hold is one to give up. */
+    return null;
+  }
+  if (current === null) return null;
+
+  const lock = current.value;
+  if (lock.holder !== handle.lock.holder || lock.acquiredAt !== handle.lock.acquiredAt) return null;
+  return { name: handle.name, lock, etag: current.etag };
 }
 
 /** Releases only the handle's current record. The store lacks conditional delete,

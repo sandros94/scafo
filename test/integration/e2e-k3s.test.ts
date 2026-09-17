@@ -26,6 +26,7 @@ import type { ProcessStatus } from "../../src/core/types/supervisor.ts";
 import {
   buildIdOf,
   buildRepo,
+  describeFailure,
   type BucketSettings,
   type CommandResult,
   createBucket,
@@ -108,211 +109,222 @@ let operatorKey: OperatorKeyFile;
 let registry: RegistryContext;
 const tmpDirs: string[] = [];
 
+/**
+ * Everything the suite needs standing before its first case: the cluster, the
+ * store, the manifest, the edge and one registered operator key.
+ *
+ * It is its own function so that a bring-up failure can be answered with the
+ * logs of what it was talking to. Vitest has no failure hook for `beforeAll`,
+ * and a suite that dies here reports only the step that raised — which, when
+ * the store is what went wrong, names the CLI and never the bucket.
+ */
+async function bringUp(): Promise<void> {
+  await buildRepo();
+  if (PREBUILT_IMAGE === "")
+    await GenericContainer.fromDockerfile(REPO_ROOT, "Dockerfile")
+      .withCache(true)
+      .build(IMAGE_TAG, { deleteOnExit: false });
+
+  const imageDir = await mkdtemp(join(tmpdir(), "scafo-k3s-image-"));
+  tmpDirs.push(imageDir);
+  const imageTar = join(imageDir, "scafo.tar");
+  const saved = await run("docker", ["image", "save", "--output", imageTar, IMAGE_REF], REPO_ROOT, {
+    PATH: process.env.PATH ?? "",
+  });
+  if (saved.code !== 0) throw new Error(`could not save the node image:\n${saved.output}`);
+
+  /* The module disables Traefik unless this command is explicit. */
+  cluster = await new K3sContainer(K3S_IMAGE)
+    .withCommand(["server"])
+    .withExposedPorts(TRAEFIK_HTTP_PORT, STORE_NODE_PORT, API_NODE_PORT)
+    .withStartupTimeout(DEADLINE_MS)
+    .start();
+  await cluster.copyFilesToContainer([{ source: imageTar, target: "/tmp/scafo.tar" }]);
+  const imported = await cluster.exec([
+    "ctr",
+    "--namespace",
+    "k8s.io",
+    "images",
+    "import",
+    "/tmp/scafo.tar",
+  ]);
+  if (imported.exitCode !== 0)
+    throw new Error(`could not import the node image into K3s:\n${imported.output}`);
+
+  kubeConfig = new k8s.KubeConfig();
+  kubeConfig.loadFromString(cluster.getKubeConfig());
+  core = kubeConfig.makeApiClient(k8s.CoreV1Api);
+  apps = kubeConfig.makeApiClient(k8s.AppsV1Api);
+  objects = k8s.KubernetesObjectApi.makeApiClient(kubeConfig);
+
+  await core.createNamespace({ body: { metadata: { name: NAMESPACE } } });
+  await apply({
+    apiVersion: "apps/v1",
+    kind: "Deployment",
+    metadata: { name: "seaweedfs", namespace: NAMESPACE },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { app: "seaweedfs" } },
+      template: {
+        metadata: { labels: { app: "seaweedfs" } },
+        spec: {
+          containers: [
+            {
+              name: "seaweedfs",
+              image: "chrislusf/seaweedfs:4.42",
+              args: ["server", "-s3"],
+              ports: [{ containerPort: 8333 }],
+            },
+          ],
+        },
+      },
+    },
+  });
+  await apply({
+    apiVersion: "v1",
+    kind: "Service",
+    metadata: { name: "seaweedfs", namespace: NAMESPACE },
+    spec: {
+      type: "NodePort",
+      selector: { app: "seaweedfs" },
+      ports: [{ port: 8333, targetPort: 8333, nodePort: STORE_NODE_PORT }],
+    },
+  });
+  await apply({
+    apiVersion: "v1",
+    kind: "Secret",
+    metadata: { name: "scafo-bucket", namespace: NAMESPACE },
+    stringData: {
+      SCAFO_S3_ACCESS_KEY: BUCKET.accessKey,
+      SCAFO_S3_SECRET_KEY: BUCKET.secretKey,
+    },
+  });
+  await apply({
+    apiVersion: "v1",
+    kind: "Secret",
+    metadata: { name: "scafo-ingress", namespace: NAMESPACE },
+    stringData: { SCAFO_INGRESS_TOKEN: INGRESS_TOKEN },
+  });
+  /* Traefik runs in kube-system and expands the token into its provider header
+     from there, so the fleet's token needs a second copy in that namespace. */
+  await apply({
+    apiVersion: "v1",
+    kind: "Secret",
+    metadata: { name: "scafo-ingress", namespace: "kube-system" },
+    stringData: { SCAFO_INGRESS_TOKEN: INGRESS_TOKEN },
+  });
+  await applyManifest();
+  await applyTraefikConfig();
+
+  await readyPod(NAMESPACE, "app=seaweedfs");
+  storeEndpoint = `http://${cluster.getHost()}:${String(cluster.getMappedPort(STORE_NODE_PORT))}`;
+  apiPort = cluster.getMappedPort(API_NODE_PORT);
+  ingressPort = cluster.getMappedPort(TRAEFIK_HTTP_PORT);
+  await createBucket(storeEndpoint, BUCKET.bucket);
+  registry = registryAt(storeEndpoint, BUCKET);
+
+  const keyDir = await mkdtemp(join(tmpdir(), "scafo-k3s-key-"));
+  tmpDirs.push(keyDir);
+  keyPath = join(keyDir, "operator.json");
+  const keygen = await runK3sCli(
+    ["operator", "keygen", "--out", keyPath, "--register"],
+    storeEnv(storeEndpoint, BUCKET),
+  );
+  if (keygen.code !== 0) throw new Error(`could not register the operator key:\n${keygen.output}`);
+  operatorKey = JSON.parse(await readFile(keyPath, "utf8")) as OperatorKeyFile;
+
+  /* The helm-controller upgrades the bundled release when the HelmChartConfig
+     lands, so readiness is the rolled-out pod carrying the provider argument,
+     not merely an available one. */
+  await until("K3s bundled Traefik to poll the fleet's routing", DEADLINE_MS, async () => {
+    const deployment = await apps.readNamespacedDeployment({
+      namespace: "kube-system",
+      name: "traefik",
+    });
+    const args = deployment.spec?.template.spec?.containers[0]?.args ?? [];
+    if (!args.some((argument) => argument.includes(PROVIDER_ENDPOINT))) return null;
+    const status = deployment.status;
+    return status?.availableReplicas === 1 &&
+      status.updatedReplicas === 1 &&
+      status.replicas === 1 &&
+      status.observedGeneration === deployment.metadata?.generation
+      ? deployment
+      : null;
+  });
+  const control = (await nodes())[0];
+  controlPodName = control.metadata?.name as string;
+  await core.patchNamespacedPod({
+    namespace: NAMESPACE,
+    name: controlPodName,
+    body: [
+      {
+        op: "add",
+        path: `/metadata/labels/${CONTROL_LABEL_PATH}`,
+        value: CONTROL_VALUE,
+      },
+    ],
+  });
+  await apply({
+    apiVersion: "v1",
+    kind: "Service",
+    metadata: { name: CONTROL_SERVICE, namespace: NAMESPACE },
+    spec: {
+      type: "NodePort",
+      selector: { [CONTROL_LABEL]: CONTROL_VALUE },
+      ports: [{ port: 7400, targetPort: "api", nodePort: API_NODE_PORT }],
+    },
+  });
+  await until("the test API service to pin one daemon", DEADLINE_MS, async () => {
+    const [service, pods, endpoints] = await Promise.all([
+      core.readNamespacedService({ namespace: NAMESPACE, name: CONTROL_SERVICE }),
+      core.listNamespacedPod({
+        namespace: NAMESPACE,
+        labelSelector: "app.kubernetes.io/name=scafo",
+      }),
+      core.readNamespacedEndpoints({ namespace: NAMESPACE, name: CONTROL_SERVICE }),
+    ]);
+    const targets = pods.items
+      .filter((pod) => pod.metadata?.labels?.[CONTROL_LABEL] === CONTROL_VALUE)
+      .map((pod) => pod.metadata?.name);
+    const endpointTargets = (endpoints.subsets ?? [])
+      .flatMap((subset) => subset.addresses ?? [])
+      .map((address) => address.targetRef?.name);
+    if (
+      Object.keys(service.spec?.selector ?? {}).length === 1 &&
+      service.spec?.selector?.[CONTROL_LABEL] === CONTROL_VALUE &&
+      targets.length === 1 &&
+      targets[0] === controlPodName &&
+      endpointTargets.length === 1 &&
+      endpointTargets[0] === controlPodName
+    )
+      return true;
+    return null;
+  });
+
+  const controlNode = (await stateOf(control)).node;
+  if (controlNode === null) throw new Error("the control pod has not registered its node record");
+  const controlNodeId = controlNode.id;
+  await until("the pinned test API NodePort", DEADLINE_MS, async () => {
+    const answer = await httpGet(apiPort, "/.well-known/scafo/health", {});
+    if (answer.status !== 200) return null;
+    const health = JSON.parse(answer.body) as { node?: string };
+    return health.node === controlNodeId ? answer : null;
+  });
+  await until("the K3s Traefik platform apex", DEADLINE_MS, async () => {
+    const answer = await httpGet(ingressPort, "/.well-known/scafo/health", {
+      host: PLATFORM_DOMAIN,
+    });
+    return answer.status === 200 ? answer : null;
+  });
+}
+
 describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
   beforeAll(async () => {
-    await buildRepo();
-    if (PREBUILT_IMAGE === "")
-      await GenericContainer.fromDockerfile(REPO_ROOT, "Dockerfile")
-        .withCache(true)
-        .build(IMAGE_TAG, { deleteOnExit: false });
-
-    const imageDir = await mkdtemp(join(tmpdir(), "scafo-k3s-image-"));
-    tmpDirs.push(imageDir);
-    const imageTar = join(imageDir, "scafo.tar");
-    const saved = await run(
-      "docker",
-      ["image", "save", "--output", imageTar, IMAGE_REF],
-      REPO_ROOT,
-      {
-        PATH: process.env.PATH ?? "",
-      },
-    );
-    if (saved.code !== 0) throw new Error(`could not save the node image:\n${saved.output}`);
-
-    /* The module disables Traefik unless this command is explicit. */
-    cluster = await new K3sContainer(K3S_IMAGE)
-      .withCommand(["server"])
-      .withExposedPorts(TRAEFIK_HTTP_PORT, STORE_NODE_PORT, API_NODE_PORT)
-      .withStartupTimeout(DEADLINE_MS)
-      .start();
-    await cluster.copyFilesToContainer([{ source: imageTar, target: "/tmp/scafo.tar" }]);
-    const imported = await cluster.exec([
-      "ctr",
-      "--namespace",
-      "k8s.io",
-      "images",
-      "import",
-      "/tmp/scafo.tar",
-    ]);
-    if (imported.exitCode !== 0)
-      throw new Error(`could not import the node image into K3s:\n${imported.output}`);
-
-    kubeConfig = new k8s.KubeConfig();
-    kubeConfig.loadFromString(cluster.getKubeConfig());
-    core = kubeConfig.makeApiClient(k8s.CoreV1Api);
-    apps = kubeConfig.makeApiClient(k8s.AppsV1Api);
-    objects = k8s.KubernetesObjectApi.makeApiClient(kubeConfig);
-
-    await core.createNamespace({ body: { metadata: { name: NAMESPACE } } });
-    await apply({
-      apiVersion: "apps/v1",
-      kind: "Deployment",
-      metadata: { name: "seaweedfs", namespace: NAMESPACE },
-      spec: {
-        replicas: 1,
-        selector: { matchLabels: { app: "seaweedfs" } },
-        template: {
-          metadata: { labels: { app: "seaweedfs" } },
-          spec: {
-            containers: [
-              {
-                name: "seaweedfs",
-                image: "chrislusf/seaweedfs:4.42",
-                args: ["server", "-s3"],
-                ports: [{ containerPort: 8333 }],
-              },
-            ],
-          },
-        },
-      },
-    });
-    await apply({
-      apiVersion: "v1",
-      kind: "Service",
-      metadata: { name: "seaweedfs", namespace: NAMESPACE },
-      spec: {
-        type: "NodePort",
-        selector: { app: "seaweedfs" },
-        ports: [{ port: 8333, targetPort: 8333, nodePort: STORE_NODE_PORT }],
-      },
-    });
-    await apply({
-      apiVersion: "v1",
-      kind: "Secret",
-      metadata: { name: "scafo-bucket", namespace: NAMESPACE },
-      stringData: {
-        SCAFO_S3_ACCESS_KEY: BUCKET.accessKey,
-        SCAFO_S3_SECRET_KEY: BUCKET.secretKey,
-      },
-    });
-    await apply({
-      apiVersion: "v1",
-      kind: "Secret",
-      metadata: { name: "scafo-ingress", namespace: NAMESPACE },
-      stringData: { SCAFO_INGRESS_TOKEN: INGRESS_TOKEN },
-    });
-    /* Traefik runs in kube-system and expands the token into its provider header
-       from there, so the fleet's token needs a second copy in that namespace. */
-    await apply({
-      apiVersion: "v1",
-      kind: "Secret",
-      metadata: { name: "scafo-ingress", namespace: "kube-system" },
-      stringData: { SCAFO_INGRESS_TOKEN: INGRESS_TOKEN },
-    });
-    await applyManifest();
-    await applyTraefikConfig();
-
-    await readyPod(NAMESPACE, "app=seaweedfs");
-    storeEndpoint = `http://${cluster.getHost()}:${String(cluster.getMappedPort(STORE_NODE_PORT))}`;
-    apiPort = cluster.getMappedPort(API_NODE_PORT);
-    ingressPort = cluster.getMappedPort(TRAEFIK_HTTP_PORT);
-    await createBucket(storeEndpoint, BUCKET.bucket);
-    registry = registryAt(storeEndpoint, BUCKET);
-
-    const keyDir = await mkdtemp(join(tmpdir(), "scafo-k3s-key-"));
-    tmpDirs.push(keyDir);
-    keyPath = join(keyDir, "operator.json");
-    const keygen = await runK3sCli(
-      ["operator", "keygen", "--out", keyPath, "--register"],
-      storeEnv(storeEndpoint, BUCKET),
-    );
-    if (keygen.code !== 0)
-      throw new Error(`could not register the operator key:\n${keygen.output}`);
-    operatorKey = JSON.parse(await readFile(keyPath, "utf8")) as OperatorKeyFile;
-
-    /* The helm-controller upgrades the bundled release when the HelmChartConfig
-       lands, so readiness is the rolled-out pod carrying the provider argument,
-       not merely an available one. */
-    await until("K3s bundled Traefik to poll the fleet's routing", DEADLINE_MS, async () => {
-      const deployment = await apps.readNamespacedDeployment({
-        namespace: "kube-system",
-        name: "traefik",
-      });
-      const args = deployment.spec?.template.spec?.containers[0]?.args ?? [];
-      if (!args.some((argument) => argument.includes(PROVIDER_ENDPOINT))) return null;
-      const status = deployment.status;
-      return status?.availableReplicas === 1 &&
-        status.updatedReplicas === 1 &&
-        status.replicas === 1 &&
-        status.observedGeneration === deployment.metadata?.generation
-        ? deployment
-        : null;
-    });
-    const control = (await nodes())[0];
-    controlPodName = control.metadata?.name as string;
-    await core.patchNamespacedPod({
-      namespace: NAMESPACE,
-      name: controlPodName,
-      body: [
-        {
-          op: "add",
-          path: `/metadata/labels/${CONTROL_LABEL_PATH}`,
-          value: CONTROL_VALUE,
-        },
-      ],
-    });
-    await apply({
-      apiVersion: "v1",
-      kind: "Service",
-      metadata: { name: CONTROL_SERVICE, namespace: NAMESPACE },
-      spec: {
-        type: "NodePort",
-        selector: { [CONTROL_LABEL]: CONTROL_VALUE },
-        ports: [{ port: 7400, targetPort: "api", nodePort: API_NODE_PORT }],
-      },
-    });
-    await until("the test API service to pin one daemon", DEADLINE_MS, async () => {
-      const [service, pods, endpoints] = await Promise.all([
-        core.readNamespacedService({ namespace: NAMESPACE, name: CONTROL_SERVICE }),
-        core.listNamespacedPod({
-          namespace: NAMESPACE,
-          labelSelector: "app.kubernetes.io/name=scafo",
-        }),
-        core.readNamespacedEndpoints({ namespace: NAMESPACE, name: CONTROL_SERVICE }),
-      ]);
-      const targets = pods.items
-        .filter((pod) => pod.metadata?.labels?.[CONTROL_LABEL] === CONTROL_VALUE)
-        .map((pod) => pod.metadata?.name);
-      const endpointTargets = (endpoints.subsets ?? [])
-        .flatMap((subset) => subset.addresses ?? [])
-        .map((address) => address.targetRef?.name);
-      if (
-        Object.keys(service.spec?.selector ?? {}).length === 1 &&
-        service.spec?.selector?.[CONTROL_LABEL] === CONTROL_VALUE &&
-        targets.length === 1 &&
-        targets[0] === controlPodName &&
-        endpointTargets.length === 1 &&
-        endpointTargets[0] === controlPodName
-      )
-        return true;
-      return null;
-    });
-
-    const controlNode = (await stateOf(control)).node;
-    if (controlNode === null) throw new Error("the control pod has not registered its node record");
-    const controlNodeId = controlNode.id;
-    await until("the pinned test API NodePort", DEADLINE_MS, async () => {
-      const answer = await httpGet(apiPort, "/.well-known/scafo/health", {});
-      if (answer.status !== 200) return null;
-      const health = JSON.parse(answer.body) as { node?: string };
-      return health.node === controlNodeId ? answer : null;
-    });
-    await until("the K3s Traefik platform apex", DEADLINE_MS, async () => {
-      const answer = await httpGet(ingressPort, "/.well-known/scafo/health", {
-        host: PLATFORM_DOMAIN,
-      });
-      return answer.status === 200 ? answer : null;
-    });
+    try {
+      await bringUp();
+    } catch (error) {
+      throw new Error(`${describeFailure(error)}\n${await setupLogs()}`, { cause: error });
+    }
   }, SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
@@ -626,7 +638,7 @@ ${await edgeLogs()}`,
  * quiet: the document, or the edge that reads it.
  */
 async function edgeLogs(): Promise<string> {
-  const logs = [await containerLogs(["node", "traefik"])];
+  const logs = [await containerLogs(["node", "traefik", "seaweedfs"])];
   for (const pod of await nodes()) {
     const doc = await podGet(pod, 7400, "/v1/ingress/routes/traefik", {
       authorization: `Bearer ${INGRESS_TOKEN}`,
@@ -634,6 +646,20 @@ async function edgeLogs(): Promise<string> {
     logs.push(`--- ${pod.metadata?.name ?? "pod"} ---\nrouting: ${doc.output.slice(0, 1500)}`);
   }
   return logs.join("\n");
+}
+
+/**
+ * What the store and the nodes logged, for a bring-up that never reached a case.
+ * A bring-up can die before the cluster exists, and before anything was ever
+ * scheduled on it, so collecting nothing is an ordinary outcome here: whatever
+ * goes wrong collecting logs must never replace the failure being reported.
+ */
+async function setupLogs(): Promise<string> {
+  try {
+    return await containerLogs(["seaweedfs", "node"]);
+  } catch (error) {
+    return `no logs could be collected: ${describeFailure(error)}`;
+  }
 }
 
 /** The last lines every container by these names logged, live or exited. */
@@ -709,7 +735,10 @@ async function settledSinglePlacement(env: string): Promise<{
         return null;
       return { placement: { nodes: assignedNodeIds }, owner, nonOwner };
     },
-    { context: async () => `${seen}\n${await containerLogs(["node"])}` },
+    /* The store as well as the nodes: the placement a node publishes is a record
+       it read out of the bucket, so a bucket that went quiet reads as a node
+       that never settled. */
+    { context: async () => `${seen}\n${await containerLogs(["node", "seaweedfs"])}` },
   );
 }
 
