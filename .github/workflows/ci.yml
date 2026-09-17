@@ -23,70 +23,6 @@ env:
   IMAGE: ghcr.io/sandros94/scafo
 
 jobs:
-  changes:
-    # The container suites are the expensive half of this workflow and the half
-    # that depends on the narrowest slice of the tree, so they ask here first.
-    # Everything else stays unconditional: it is cheap and it covers everything.
-    name: detect changes
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      # A dispatch is a deliberate "run it all", so it answers before the filter
-      # is even consulted.
-      docker: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.docker == 'true' }}
-      k3s: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.k3s == 'true' }}
-
-    steps:
-      - name: Checkout code
-        # A push is diffed with git and needs the worktree; a pull request is
-        # diffed through the API and does not.
-        if: github.event_name == 'push'
-        uses: actions/checkout@v7
-
-      - name: Detect changed paths
-        id: filter
-        if: github.event_name != 'workflow_dispatch'
-        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
-        with:
-          # Ignored on pull_request, where the PR's own base decides; on a push
-          # to main it selects the commit that was the tip before the push.
-          base: main
-          # The default quantifier makes a leading "!" match every other file
-          # instead of excluding one, which would leave the docker filter always
-          # true. This one is the intended "matches an include and no exclude".
-          predicate-quantifier: some-with-excludes
-          filters: |
-            docker:
-              - '.github/workflows/ci.yml'
-              - 'src/**'
-              - 'Dockerfile*'
-              - '.dockerignore'
-              - 'build.config.ts'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - 'pnpm-workspace.yaml'
-              - 'tsconfig*.json'
-              - 'vitest*.ts'
-              - 'test/integration/**'
-              - '!test/integration/e2e-k3s.test.ts'
-              - '!test/integration/store.test.ts'
-            k3s:
-              - '.github/workflows/ci.yml'
-              - 'src/**'
-              - 'Dockerfile*'
-              - '.dockerignore'
-              - 'build.config.ts'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - 'pnpm-workspace.yaml'
-              - 'tsconfig*.json'
-              - 'vitest*.ts'
-              - 'examples/k3s/**'
-              - 'test/integration/e2e-k3s.test.ts'
-              - 'test/integration/_harness.ts'
-
   build-image:
     # The node image is built once per run, here, and every consumer downstream
     # takes those exact bits: the container suites load the archive into their
@@ -101,11 +37,11 @@ jobs:
     # ubuntu-latest: the amd64 and arm64 legs must move between OS versions
     # together, and -latest migrates only one of them.
     name: build image (${{ matrix.platform }})
-    needs: changes
+    needs: test-pure
     # success() is spelled out because a custom if replaces the implicit one a
     # "needs" would otherwise carry.
     if: >-
-      ${{ success() && (needs.changes.outputs.docker == 'true' || needs.changes.outputs.k3s == 'true' || github.event_name == 'push') }}
+      ${{ success() && (needs.test-pure.outputs.docker == 'true' || needs.test-pure.outputs.k3s == 'true' || github.event_name == 'push') }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -211,14 +147,67 @@ jobs:
   test-pure:
     # Lint, typecheck and the pure suites share one runner: as separate jobs
     # they each round their billed minute up, and they want the same install.
+    # The container suites ask here whether anything they read changed, for the
+    # same reason: they are the expensive half of this workflow and depend on
+    # the narrowest slice of the tree, and this job runs on every event anyway,
+    # so the answer costs no runner of its own. Everything else stays
+    # unconditional: it is cheap and it covers everything.
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
     timeout-minutes: 15
+    outputs:
+      # A dispatch is a deliberate "run it all", so it answers before the filter
+      # is even consulted.
+      docker: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.docker == 'true' }}
+      k3s: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.k3s == 'true' }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+
+      - name: Detect changed paths
+        id: filter
+        if: github.event_name != 'workflow_dispatch'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          # Ignored on pull_request, where the PR's own base decides; on a push
+          # to main it selects the commit that was the tip before the push.
+          base: main
+          # The default quantifier makes a leading "!" match every other file
+          # instead of excluding one, which would leave the docker filter always
+          # true. This one is the intended "matches an include and no exclude".
+          predicate-quantifier: some-with-excludes
+          filters: |
+            docker:
+              - '.github/workflows/ci.yml'
+              - 'src/**'
+              - 'Dockerfile*'
+              - '.dockerignore'
+              - 'build.config.ts'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'tsconfig*.json'
+              - 'vitest*.ts'
+              - 'test/integration/**'
+              - '!test/integration/e2e-k3s.test.ts'
+              - '!test/integration/store.test.ts'
+            k3s:
+              - '.github/workflows/ci.yml'
+              - 'src/**'
+              - 'Dockerfile*'
+              - '.dockerignore'
+              - 'build.config.ts'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'tsconfig*.json'
+              - 'vitest*.ts'
+              - 'examples/k3s/**'
+              - 'test/integration/e2e-k3s.test.ts'
+              - 'test/integration/_harness.ts'
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -285,10 +274,10 @@ jobs:
   test-docker-e2e:
     # Three shards over the images `build-image` produced: only run them when
     # something they read changed. See the `docker` filter for what that means.
-    needs: [changes, build-image]
+    needs: [test-pure, build-image]
     # success() is spelled out because a custom if replaces the implicit one a
     # "needs" would otherwise carry — a failed build must not reach the suites.
-    if: ${{ success() && needs.changes.outputs.docker == 'true' }}
+    if: ${{ success() && needs.test-pure.outputs.docker == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -381,10 +370,10 @@ jobs:
   test-k3s-e2e:
     # The most expensive job in the workflow: a K3s cluster around the runtime
     # image this run built. Gated on the same terms, see the `k3s` filter.
-    needs: [changes, build-image]
+    needs: [test-pure, build-image]
     # success() is spelled out because a custom if replaces the implicit one a
     # "needs" would otherwise carry — a failed build must not reach the suite.
-    if: ${{ success() && needs.changes.outputs.k3s == 'true' }}
+    if: ${{ success() && needs.test-pure.outputs.k3s == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
