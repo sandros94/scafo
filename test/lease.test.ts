@@ -181,7 +181,7 @@ describe("a superseded holder", () => {
 
     const stale = await held(acquireLease(ctx, "node-a", { ttlMs: TTL_MS }), "node-a");
     tick(86_400_001);
-    const reapOptions = { buildRetention: { maxAgeMs: 1000 } };
+    const reapOptions = { deploymentRetention: { maxAgeMs: 1000 } };
     const plan = await planReap(ctx, reapOptions);
     expect(plan.environments).toHaveLength(1);
 

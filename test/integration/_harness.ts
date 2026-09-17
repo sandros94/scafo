@@ -190,11 +190,11 @@ export async function stageApp(version: string, keep: string[]): Promise<string>
   return dir;
 }
 
-/** The build id the CLI printed for a settled deploy. */
-export function buildIdOf(output: string): string {
-  const build = /scafo: build ([\da-f]{8,64})/.exec(output)?.[1];
-  if (build === undefined) throw new Error(`the deploy named no build:\n${output}`);
-  return build;
+/** The deployment version the CLI printed for a settled deploy. */
+export function deploymentOf(output: string): string {
+  const version = /scafo: deployment ([\da-f]{8,64})/.exec(output)?.[1];
+  if (version === undefined) throw new Error(`the deploy named no deployment:\n${output}`);
+  return version;
 }
 
 export interface HttpAnswer {

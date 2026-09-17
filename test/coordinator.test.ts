@@ -1,13 +1,13 @@
 /* Coordinator lease acquisition, renewal, and immediate authority loss. */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
+import { recordRevision } from "../src/core/registry/_revision.ts";
 import type { DaemonContext } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { type Coordinator, createCoordinator } from "../src/daemon/coordinator.ts";
 import {
   acquireLease,
-  createBuild,
+  createDeployment,
   createEnvironment,
   createProject,
   DEFAULT_RETIREMENT_GRACE_MS,
@@ -15,14 +15,14 @@ import {
   readJson,
   retireEnvironment,
 } from "../src/core/registry/index.ts";
-import { buildKey, coordinatorKey } from "../src/core/registry/paths.ts";
+import { deploymentKey, coordinatorKey } from "../src/core/registry/paths.ts";
 import type { CoordinatorLease } from "../src/core/types/registry.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, type ManualClock, rejectsWith } from "./_helpers.ts";
 
 const PROJECT = "app";
-const BUILD = "b1b1b1b1";
+const VERSION = "b1b1b1b1";
 const TTL_MS = 15_000;
 const HOUR_MS = 3_600_000;
 
@@ -38,8 +38,8 @@ beforeEach(async () => {
     name: "preview",
     ephemeral: true,
   });
-  await createBuild(clock.ctx, PROJECT, { id: BUILD });
-  await recordDeployment(clock.ctx, PROJECT, "preview", BUILD);
+  await createDeployment(clock.ctx, PROJECT, { version: VERSION });
+  await recordRevision(clock.ctx, PROJECT, "preview", VERSION);
 });
 
 describe("createCoordinator", () => {
@@ -197,7 +197,7 @@ describe("createCoordinator", () => {
   it("renews mid-pass, so a pass longer than the TTL does not lose the lease", async () => {
     for (const name of ["one", "two", "three", "four"]) {
       await createEnvironment(clock.ctx, PROJECT, { name });
-      await recordDeployment(clock.ctx, PROJECT, name, BUILD);
+      await recordRevision(clock.ctx, PROJECT, name, VERSION);
     }
     const coordinator = coordinatorFor("node-a");
     await coordinator.runOnce();
@@ -266,24 +266,26 @@ describe("createCoordinator", () => {
     expect((await storedLease()).fence).toBe(1);
   });
 
-  it("reaps nothing at all when no build retention is configured", async () => {
-    const coordinator = coordinatorFor("node-a", { buildRetentionMs: undefined });
+  it("reaps nothing at all when no deployment retention is configured", async () => {
+    const coordinator = coordinatorFor("node-a", { deploymentRetentionMs: undefined });
     await coordinator.runOnce();
     await retireEnvironment(clock.ctx, PROJECT, "preview");
     clock.tick(DEFAULT_RETIREMENT_GRACE_MS + 1);
     await coordinator.runOnce();
 
     await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, "preview"), "not-found");
-    await expect(store.get(buildKey(PROJECT, BUILD))).resolves.not.toBeNull();
+    await expect(store.get(deploymentKey(PROJECT, VERSION))).resolves.not.toBeNull();
   });
 });
 
 /** A coordinator for `nodeId`, reaping on every tick against the shared store. */
-function coordinatorFor(nodeId: string, opts?: { buildRetentionMs?: number }): Coordinator {
+function coordinatorFor(nodeId: string, opts?: { deploymentRetentionMs?: number }): Coordinator {
   return createCoordinator(daemonFor(nodeId), {
     ttlMs: TTL_MS,
     reapIntervalMs: 0,
-    ...(opts?.buildRetentionMs === undefined ? {} : { buildRetentionMs: opts.buildRetentionMs }),
+    ...(opts?.deploymentRetentionMs === undefined
+      ? {}
+      : { deploymentRetentionMs: opts.deploymentRetentionMs }),
   });
 }
 

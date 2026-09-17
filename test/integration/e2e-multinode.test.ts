@@ -153,7 +153,7 @@ let storeFromContainers: string;
 let registry: RegistryContext;
 let keyPath: string;
 let operatorKey: OperatorKeyFile;
-let buildV1: string;
+let versionV1: string;
 /** The one node placement gave {@link SOLO} to; which one is not this test's to pick. */
 let soloHolder: Node;
 /** Its process there, so a survivor that kept it can be shown never to have restarted. */
@@ -262,8 +262,8 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
 
       expectCleanExit(result);
       expect(result.output, daemonLogTail()).toContain("deployed");
-      buildV1 = buildIdOf(result.output);
-      observed.buildV1 = buildV1;
+      versionV1 = deploymentOf(result.output);
+      observed.versionV1 = versionV1;
 
       const servedAt: Record<string, number> = {};
       for (const node of nodes) {
@@ -1009,10 +1009,10 @@ async function stageApp(version: string): Promise<string> {
   return dir;
 }
 
-function buildIdOf(output: string): string {
-  const build = /scafo: build ([\da-f]{8,64})/.exec(output)?.[1];
-  if (build === undefined) throw new Error(`the deploy named no build:\n${output}`);
-  return build;
+function deploymentOf(output: string): string {
+  const version = /scafo: deployment ([\da-f]{8,64})/.exec(output)?.[1];
+  if (version === undefined) throw new Error(`the deploy named no deployment:\n${output}`);
+  return version;
 }
 
 /** A fresh single-use operator token; a spent one is refused as a replay. */

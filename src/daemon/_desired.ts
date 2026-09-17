@@ -1,7 +1,7 @@
 /* Internal: what the registry says THIS node should be serving. */
 
 import type { DesiredEnvironment } from "../core/placement/reconcile.ts";
-import { deploymentRevision } from "../core/registry/_deployment.ts";
+import { deploymentRevision } from "../core/registry/_revision.ts";
 import { readJson } from "../core/registry/cas.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
 import { listEnvironments } from "../core/registry/environments.ts";

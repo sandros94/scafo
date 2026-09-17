@@ -4,12 +4,12 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
+import { recordRevision } from "../src/core/registry/_revision.ts";
 import {
   acquireLease,
   checkDomain,
   claimDomain,
-  createBuild,
+  createDeployment,
   createDeployRecord,
   createEnvironment,
   createProject,
@@ -23,7 +23,7 @@ import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, invariants, type ManualClock, rejectsWith } from "./_helpers.ts";
 
 const PROJECT = "app";
-const BUILD = "b1b1b1b1";
+const VERSION = "b1b1b1b1";
 const HOST = "preview.example.com";
 const HOUR_MS = 3_600_000;
 
@@ -50,8 +50,8 @@ beforeEach(async () => {
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
   await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true });
-  await createBuild(clock.ctx, PROJECT, { id: BUILD });
-  await recordDeployment(clock.ctx, PROJECT, "preview", BUILD);
+  await createDeployment(clock.ctx, PROJECT, { version: VERSION });
+  await recordRevision(clock.ctx, PROJECT, "preview", VERSION);
 
   for (const key of [...FLEET_KEYS, ...SURVIVORS]) await store.put(key, "{}");
 

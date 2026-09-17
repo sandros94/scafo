@@ -12,7 +12,7 @@ import { parseHostPort } from "./config.ts";
 
 /** What one pass ended with, as this node's own routing is rendered from it. */
 export interface IngressInput {
-  /** Environments this node serves, with the builds it resolved for them. */
+  /** Environments this node serves, with the records this pass resolved for them. */
   desired: DesiredEnvironment[];
   /** Processes this node is running and routes. */
   processes: RuntimeProcess[];

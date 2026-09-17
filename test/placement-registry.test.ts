@@ -5,10 +5,10 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
+import { recordRevision } from "../src/core/registry/_revision.ts";
 import {
   acquireLease,
-  createBuild,
+  createDeployment,
   createEnvironment,
   createProject,
   deleteEnvironment,
@@ -43,7 +43,7 @@ import {
 
 const PROJECT = "app";
 const ENV = "prod";
-const BUILD = "b1b1b1b1";
+const VERSION = "b1b1b1b1";
 const NODE_A = "node-a";
 const NODE_B = "node-b";
 
@@ -57,8 +57,8 @@ beforeEach(async () => {
 
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, { name: ENV });
-  await createBuild(clock.ctx, PROJECT, { id: BUILD });
-  await recordDeployment(clock.ctx, PROJECT, ENV, BUILD);
+  await createDeployment(clock.ctx, PROJECT, { version: VERSION });
+  await recordRevision(clock.ctx, PROJECT, ENV, VERSION);
 
   const acquired = await acquireLease(clock.ctx, NODE_A);
   if (acquired === null) throw new Error("the fixture could not take the lease");

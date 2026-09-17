@@ -5,7 +5,7 @@ import { createNodeVerifier, type NodeSigningKey } from "../core/auth/node-token
 import { createOidcVerifier } from "../core/auth/oidc.ts";
 import { ScafoError } from "../core/error.ts";
 import { APEX_ENVIRONMENT } from "../core/placement/routes.ts";
-import { deploymentRevision } from "../core/registry/_deployment.ts";
+import { deploymentRevision } from "../core/registry/_revision.ts";
 import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { checkDomain } from "../core/registry/domains.ts";

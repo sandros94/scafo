@@ -1,9 +1,9 @@
 /* Varsets are named records, edited in place, that an environment's deploys carry. */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
+import { recordRevision } from "../src/core/registry/_revision.ts";
 import {
-  createBuild,
+  createDeployment,
   createEnvironment,
   createProject,
   deleteVarset,
@@ -190,10 +190,10 @@ describe("which environments a varset is carried by", () => {
 });
 
 describe("varsetUses", () => {
-  const BUILD = "aaaaaaaa";
+  const VERSION = "aaaaaaaa";
 
   beforeEach(async () => {
-    await createBuild(clock.ctx, PROJECT, { id: BUILD });
+    await createDeployment(clock.ctx, PROJECT, { version: VERSION });
     await putVarset(clock.ctx, PROJECT, { name: "shared", vars: VARS });
     for (const env of ["staging", "production"]) {
       await createEnvironment(clock.ctx, PROJECT, { name: env });
@@ -213,7 +213,7 @@ describe("varsetUses", () => {
   });
 
   it("reads a deploy that carried this very content as current", async () => {
-    await recordDeployment(clock.ctx, PROJECT, "production", BUILD, {
+    await recordRevision(clock.ctx, PROJECT, "production", VERSION, {
       varset: { name: "shared", hash: await varsetHash(VARS) },
     });
 
@@ -224,10 +224,10 @@ describe("varsetUses", () => {
   });
 
   it("reads a deploy that carried other content, another varset, or none, as stale", async () => {
-    await recordDeployment(clock.ctx, PROJECT, "production", BUILD, {
+    await recordRevision(clock.ctx, PROJECT, "production", VERSION, {
       varset: { name: "shared", hash: await varsetHash({ ...VARS, FEATURE_FLAGS: "stable" }) },
     });
-    await recordDeployment(clock.ctx, PROJECT, "staging", BUILD);
+    await recordRevision(clock.ctx, PROJECT, "staging", VERSION);
 
     expect(await varsetUses(clock.ctx, PROJECT, "shared")).toEqual([
       { env: "production", carried: "stale" },
@@ -235,7 +235,7 @@ describe("varsetUses", () => {
     ]);
 
     /* Editing the varset is what moves a deploy that WAS current to stale. */
-    await recordDeployment(clock.ctx, PROJECT, "staging", BUILD, {
+    await recordRevision(clock.ctx, PROJECT, "staging", VERSION, {
       varset: { name: "shared", hash: await varsetHash(VARS) },
     });
     await putVarset(clock.ctx, PROJECT, { name: "shared", vars: { ...VARS, EXTRA: "1" } });

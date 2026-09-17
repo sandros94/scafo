@@ -2,7 +2,7 @@
 
 import type { H3 } from "h3";
 import { beforeEach, describe, expect, it } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
+import { recordRevision } from "../src/core/registry/_revision.ts";
 import { createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { readDesired } from "../src/daemon/_desired.ts";
@@ -10,7 +10,7 @@ import {
   acquireLease,
   blockProject,
   claimDomain,
-  createBuild,
+  createDeployment,
   createEnvironment,
   createProject,
   registerNode,
@@ -26,7 +26,7 @@ const NODE_ID = "node-a";
 const PROJECT = "shop";
 const NEIGHBOUR = "blog";
 const ENVIRONMENT = "prod";
-const BUILD = "b1b1b1b1";
+const VERSION = "b1b1b1b1";
 const PLATFORM_DOMAIN = "apps.test";
 const CUSTOM_DOMAIN = "shop.example.com";
 
@@ -49,8 +49,8 @@ beforeEach(async () => {
   for (const slug of [PROJECT, NEIGHBOUR]) {
     await createProject(registry, { slug });
     await createEnvironment(registry, slug, { name: ENVIRONMENT });
-    await createBuild(registry, slug, { id: BUILD });
-    await recordDeployment(registry, slug, ENVIRONMENT, BUILD);
+    await createDeployment(registry, slug, { version: VERSION });
+    await recordRevision(registry, slug, ENVIRONMENT, VERSION);
     await writePlacement(registry, slug, ENVIRONMENT, [NODE_ID], lease);
   }
   await claimDomain(registry, CUSTOM_DOMAIN, PROJECT, ENVIRONMENT);

@@ -2,15 +2,15 @@
  * `scafo project`: the things being hosted.
  *
  * A project is what an installation exists to serve — a namespace holding
- * builds, environments and a trust policy — and it comes into being on the first
+ * deployments, environments and a trust policy — and it comes into being on the first
  * deploy that names it rather than through a create verb here. So this group is
  * about projects that already exist: what there is, what state each is in, and
  * the two statements an ADMIN can make about one.
  *
  * BLOCK IS THE VERB WORTH READING TWICE. It is a full stop: a blocked project is
  * served nowhere in the fleet, its hosts leave ingress, it gets no certificates
- * and it accepts no deploys — while every build, environment, deployment notice and domain
- * it has is left exactly where it was. Unblocking is one call, and the next pass
+ * and it accepts no deploys — while every deployment record, environment, deployment notice
+ * and domain it has is left exactly where it was. Unblocking is one call, and the next pass
  * of every node puts it all back. It is admin-only, and deliberately: the case
  * it exists for is a platform stopping a project it hosts, which is precisely
  * the case where the project's own operator would rather it did not.

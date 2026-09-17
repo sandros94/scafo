@@ -4,13 +4,13 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
+import { recordRevision } from "../src/core/registry/_revision.ts";
 import type { DaemonContext } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { type Coordinator, createCoordinator } from "../src/daemon/coordinator.ts";
 import {
   acquireLease,
-  createBuild,
+  createDeployment,
   createEnvironment,
   createProject,
   getEnvironment,
@@ -31,7 +31,7 @@ import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, type ManualClock, rejectsWith } from "./_helpers.ts";
 
 const PROJECT = "app";
-const BUILD = "b1b1b1b1";
+const VERSION = "b1b1b1b1";
 const TTL_MS = 15_000;
 const NODE_A = "node-a";
 const NODE_B = "node-b";
@@ -50,7 +50,7 @@ beforeEach(async () => {
   };
 
   await createProject(clock.ctx, { slug: PROJECT });
-  await createBuild(clock.ctx, PROJECT, { id: BUILD });
+  await createDeployment(clock.ctx, PROJECT, { version: VERSION });
   for (const id of [NODE_A, NODE_B]) await register(id);
 });
 
@@ -499,7 +499,7 @@ function daemonFor(nodeId: string, observability?: DaemonContext["observability"
   };
 }
 
-/** An environment with a build to serve, so it is a real placement target. */
+/** An environment with a deployment to serve, so it is a real placement target. */
 async function environmentNamed(
   name: string,
   opts?: { ephemeral?: boolean; nodeSelector?: NodeSelector },
@@ -509,7 +509,7 @@ async function environmentNamed(
     ...(opts?.ephemeral === undefined ? {} : { ephemeral: opts.ephemeral }),
     ...(opts?.nodeSelector === undefined ? {} : { nodeSelector: opts.nodeSelector }),
   });
-  await recordDeployment(clock.ctx, PROJECT, name, BUILD);
+  await recordRevision(clock.ctx, PROJECT, name, VERSION);
 }
 
 /** Registers `id` as a node that has just beaten, carrying `labels` if any. */

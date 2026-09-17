@@ -4,9 +4,9 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { createBuild, createEnvironment, createProject } from "../src/core/registry/index.ts";
+import { createDeployment, createEnvironment, createProject } from "../src/core/registry/index.ts";
 import {
-  buildKey,
+  deploymentKey,
   deployBlobsPrefix,
   deployPointerKey,
   fleetPrefix,
@@ -124,7 +124,7 @@ describe("what a plan protects", () => {
 });
 
 describe("what a plan selects", () => {
-  it("keeps the newest publications, ordered by when scafo recorded each build", async () => {
+  it("keeps the newest deployments, ordered by when scafo recorded each version", async () => {
     await publishAll();
     await pointAt(V4);
 
@@ -138,7 +138,7 @@ describe("what a plan selects", () => {
     });
   });
 
-  it("counts a publication it has no build record for as the oldest thing there is", async () => {
+  it("counts a deployment it has no record for as the oldest thing there is", async () => {
     await publishAll();
     await pointAt(V4);
     /* Written last, so only the missing record can put it at the back. */
@@ -188,9 +188,9 @@ describe("what a plan selects", () => {
       `${DEPLOY}${SCRIPT}/${V1}/manifest.json`,
       `${DEPLOY}${SCRIPT}/${V1}/modules/index.js`,
     ]);
-    expect(oldest?.buildKey).toBe(buildKey(PROJECT, V1));
-    /* Nothing to delete beside the objects when scafo never recorded the build. */
-    expect(made.delete.find((one) => one.version === "ffff6666")?.buildKey).toBeUndefined();
+    expect(oldest?.recordKey).toBe(deploymentKey(PROJECT, V1));
+    /* Nothing to delete beside the objects when scafo never recorded the deployment. */
+    expect(made.delete.find((one) => one.version === "ffff6666")?.recordKey).toBeUndefined();
   });
 
   it("never names a pointer or a shared asset blob in anything it plans", async () => {
@@ -216,9 +216,9 @@ describe("executePrune", () => {
     expect(result.deleted.sort()).toEqual(
       [
         ...made.delete.flatMap((one) => one.keys),
-        buildKey(PROJECT, V1),
-        buildKey(PROJECT, V2),
-        buildKey(PROJECT, V3),
+        deploymentKey(PROJECT, V1),
+        deploymentKey(PROJECT, V2),
+        deploymentKey(PROJECT, V3),
       ].sort(),
     );
     const left = await store.list("");
@@ -228,7 +228,7 @@ describe("executePrune", () => {
     expect(left.filter((key) => key.startsWith(`${DEPLOY}${SCRIPT}/${V1}/`))).toEqual([]);
   });
 
-  it("deletes a build record before the objects it names, so a crash leaves them findable", async () => {
+  it("deletes a deployment record before the objects it names, so a crash leaves them findable", async () => {
     await publishAll();
     await pointAt(V4);
     const made = await plan({ keep: 3 });
@@ -237,7 +237,7 @@ describe("executePrune", () => {
     await expect(executePrune(clock.ctx, made)).rejects.toThrow("bucket went away");
 
     const left = await store.list("");
-    expect(left).not.toContain(buildKey(PROJECT, V1));
+    expect(left).not.toContain(deploymentKey(PROJECT, V1));
     /* Still there, and a later run counts a publication with no record as the
          oldest one, so nothing is stranded. */
     expect(left).toContain(`${DEPLOY}${SCRIPT}/${V1}/manifest.json`);
@@ -255,7 +255,7 @@ describe("executePrune", () => {
 
     const left = await store.list("");
     expect(left).toContain(`${DEPLOY}${SCRIPT}/${V2}/manifest.json`);
-    expect(left).toContain(buildKey(PROJECT, V2));
+    expect(left).toContain(deploymentKey(PROJECT, V2));
   });
 
   it("does nothing at all for a plan that names nothing", async () => {
@@ -282,12 +282,12 @@ function plan(opts: { keep?: number; olderThanMs?: number } = {}): Promise<Prune
   });
 }
 
-/** The four versions of {@link SCRIPT}, one hour apart, each with its build record. */
+/** The four versions of {@link SCRIPT}, one hour apart, each with its deployment record. */
 async function publishAll(): Promise<void> {
   for (const version of [V1, V2, V3, V4]) await publish(version);
 }
 
-/** One Celld publication, an hour after the last, with the record scafo files for it. */
+/** One Celld deployment, an hour after the last, with the record scafo files for it. */
 async function publish(
   version: string,
   opts: { script?: string; record?: boolean } = {},
@@ -299,7 +299,7 @@ async function publish(
   await store.put(`${prefix}manifest.json`, JSON.stringify({ version }));
   await store.put(`${prefix}modules/index.js`, "export default {};");
   if (opts.record !== false) {
-    await createBuild(clock.ctx, PROJECT, { id: version, celldVersionId: version });
+    await createDeployment(clock.ctx, PROJECT, { version });
   }
 }
 

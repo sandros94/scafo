@@ -1,6 +1,6 @@
 /*
- * `scafo build`: what an environment has published, and how an operator takes
- * the old ones back.
+ * `scafo deployment`: what an environment has published, and how an operator
+ * takes the old ones back.
  *
  * Celld publishes every deploy under the environment's fleet prefix and deletes
  * none of them, so a long-lived environment keeps every bundle it has ever run.
@@ -14,10 +14,10 @@ import { ScafoError } from "../../core/error.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
 import {
   executePrune,
-  type KeptPublication,
+  type KeptDeployment,
   planPrune,
   type PrunePlan,
-  type Publication,
+  type StoredDeployment,
 } from "../../core/registry/prune.ts";
 import { createRegistry } from "../_bootstrap.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
@@ -34,28 +34,28 @@ const bucketArgs: ArgsDef = {
   "secret-key": { type: "string", description: "Bucket secret access key" },
 };
 
-/** Publications kept when the operator named no count of their own. */
+/** Deployments kept when the operator named no count of their own. */
 const DEFAULT_KEEP = 3;
 
 const pruneArgs: ArgsDef = {
   ...bucketArgs,
   "project": { type: "string", description: "Project the environment belongs to", required: true },
-  "env": { type: "string", description: "Environment to prune publications of", required: true },
+  "env": { type: "string", description: "Environment to prune deployments of", required: true },
   "keep": {
     type: "string",
-    description: `How many of the newest publications to keep (default ${String(DEFAULT_KEEP)})`,
+    description: `How many of the newest deployments to keep (default ${String(DEFAULT_KEEP)})`,
   },
   "older-than": {
     type: "string",
-    description: "Only delete publications older than this: 30d, 12h, 45m, or seconds (3600)",
+    description: "Only delete deployments older than this: 30d, 12h, 45m, or seconds (3600)",
   },
   "dry-run": { type: "boolean", description: "Print what would go, and delete nothing" },
 };
 
 /** The command an operator types, as the warning names it. */
-const PRUNE_COMMAND = "scafo build prune";
+const PRUNE_COMMAND = "scafo deployment prune";
 
-/** Why `scafo build prune` may change under the operator who scripted it. */
+/** Why `scafo deployment prune` may change under the operator who scripted it. */
 export const PRUNE_UNSTABLE_WHY: string =
   `Celld may grow a native deployment lifecycle (denoland/celld#181), and this command ` +
   `follows upstream when it does`;
@@ -67,7 +67,7 @@ const prune: CommandDef = defineCommand({
   meta: {
     name: "prune",
     description:
-      `Delete the old Celld publications of one environment; what a pointer names is ` +
+      `Delete the old Celld deployments of one environment; what a pointer names is ` +
       `never deleted and ${BLOBS_LEFT_ALONE}`,
   },
   args: pruneArgs,
@@ -80,8 +80,11 @@ const prune: CommandDef = defineCommand({
   },
 });
 
-export const build: CommandDef = defineCommand({
-  meta: { name: "build", description: "Manage what a project's environments have published" },
+export const deployment: CommandDef = defineCommand({
+  meta: {
+    name: "deployment",
+    description: "Manage what a project's environments have published",
+  },
   subCommands: { prune },
 });
 
@@ -111,7 +114,7 @@ async function runPrune(flags: Record<string, unknown>): Promise<void> {
   for (const line of lines) console.log(line);
 }
 
-/** What `scafo build prune` was told to do, once every flag has been read. */
+/** What `scafo deployment prune` was told to do, once every flag has been read. */
 export interface PruneFlags {
   project: string;
   env: string;
@@ -173,7 +176,7 @@ function readKeep(value: unknown): number {
   const keep = Number(given);
   if (given === "" || !Number.isInteger(keep) || keep < 0) {
     throw new ScafoError("invalid-input", "Invalid --keep", {
-      detail: `"${given}" must be a whole number of publications to keep, zero or more`,
+      detail: `"${given}" must be a whole number of deployments to keep, zero or more`,
     });
   }
   return keep;
@@ -185,10 +188,10 @@ function keepText(value: unknown): string {
   return typeof value === "number" && Number.isFinite(value) ? String(value) : "";
 }
 
-/** A plan as the terminal reads it: one line per publication, then the summary. */
+/** A plan as the terminal reads it: one line per deployment, then the summary. */
 export interface PruneReport {
   plan: PrunePlan;
-  /** How many of the newest publications the plan was told to keep. */
+  /** How many of the newest deployments the plan was told to keep. */
   keep: number;
   /** The age window exactly as the operator typed it, when they gave one. */
   olderThan?: string;
@@ -196,7 +199,7 @@ export interface PruneReport {
   dryRun?: boolean;
 }
 
-/** Every line `scafo build prune` prints, in the order it prints them. */
+/** Every line `scafo deployment prune` prints, in the order it prints them. */
 export function describePrune(report: PruneReport): string[] {
   const lines = report.plan.keep.map((kept) => `keep ${nameOf(kept)}: ${whyKept(kept, report)}`);
 
@@ -209,17 +212,17 @@ export function describePrune(report: PruneReport): string[] {
   return lines;
 }
 
-function nameOf(publication: Publication): string {
-  return `${publication.script}/${publication.version}`;
+function nameOf(deployment: StoredDeployment): string {
+  return `${deployment.script}/${deployment.version}`;
 }
 
-function whyKept(kept: KeptPublication, report: PruneReport): string {
+function whyKept(kept: KeptDeployment, report: PruneReport): string {
   switch (kept.reason) {
     case "current": {
       return "current, the fleet's selector points at it";
     }
     case "within-keep": {
-      return `within the newest ${String(report.keep)} publications`;
+      return `within the newest ${String(report.keep)} deployments`;
     }
     case "within-age": {
       return `younger than ${report.olderThan ?? "the window given"}`;
@@ -227,8 +230,8 @@ function whyKept(kept: KeptPublication, report: PruneReport): string {
   }
 }
 
-function whatGoes(doomed: Publication): string {
-  const record = doomed.buildKey === undefined ? "no build record" : "its build record";
+function whatGoes(doomed: StoredDeployment): string {
+  const record = doomed.recordKey === undefined ? "no deployment record" : "its deployment record";
   return `${plural(doomed.keys.length, "object")} and ${record}`;
 }
 
@@ -240,12 +243,13 @@ function summarize(report: PruneReport): string {
   }
 
   const objects = report.plan.delete.reduce((total, one) => total + one.keys.length, 0);
-  const records = report.plan.delete.filter((one) => one.buildKey !== undefined).length;
+  const records = report.plan.delete.filter((one) => one.recordKey !== undefined).length;
   const verb = report.dryRun === true ? "would prune" : "pruned";
 
   return (
-    `scafo: ${verb} ${plural(report.plan.delete.length, "publication")} ` +
-    `(${plural(objects, "object")}, ${plural(records, "build record")}) of ${where}, ${kept}; ` +
+    `scafo: ${verb} ${plural(report.plan.delete.length, "deployment")} ` +
+    `(${plural(objects, "object")}, ${plural(records, "deployment record")}) of ${where}, ` +
+    `${kept}; ` +
     `${BLOBS_LEFT_ALONE}`
   );
 }

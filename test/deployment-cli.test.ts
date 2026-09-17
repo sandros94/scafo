@@ -1,19 +1,19 @@
 /*
- * `scafo build prune`: the surface it presents, what it refuses before it reads
- * a bucket, and every line it puts on the terminal.
+ * `scafo deployment prune`: the surface it presents, what it refuses before it
+ * reads a bucket, and every line it puts on the terminal.
  */
 
 import type { ArgsDef, CommandDef } from "citty";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  build,
+  deployment,
   describePrune,
   parseOlderThan,
   PRUNE_UNSTABLE_WHY,
   readPruneFlags,
-} from "../src/cli/commands/build.ts";
+} from "../src/cli/commands/deployment.ts";
 import { warnUnstable } from "../src/cli/_warn.ts";
-import type { Publication, PrunePlan } from "../src/core/registry/prune.ts";
+import type { PrunePlan, StoredDeployment } from "../src/core/registry/prune.ts";
 import { rejectsWith } from "./_helpers.ts";
 
 const DAY_MS = 86_400_000;
@@ -32,11 +32,11 @@ function argsOf(command: CommandDef, name: string): ArgsDef {
   return sub.args as ArgsDef;
 }
 
-describe("the surface `scafo build` presents", () => {
-  it("prunes an environment's publications, and takes the bucket the way every other command does", () => {
-    expect(Object.keys(build.subCommands as Record<string, CommandDef>)).toEqual(["prune"]);
+describe("the surface `scafo deployment` presents", () => {
+  it("prunes an environment's deployments, and takes the bucket the way every other command does", () => {
+    expect(Object.keys(deployment.subCommands as Record<string, CommandDef>)).toEqual(["prune"]);
 
-    const args = Object.keys(argsOf(build, "prune"));
+    const args = Object.keys(argsOf(deployment, "prune"));
     for (const flag of ["project", "env", "keep", "older-than", "dry-run"]) {
       expect(args, flag).toContain(flag);
     }
@@ -46,7 +46,7 @@ describe("the surface `scafo build` presents", () => {
   });
 
   it("says in its own help that the shared asset blobs are left alone", () => {
-    const prune = (build.subCommands as Record<string, CommandDef>).prune;
+    const prune = (deployment.subCommands as Record<string, CommandDef>).prune;
     const description = (prune.meta as { description?: string }).description ?? "";
 
     expect(description).toContain("deploy-blobs/");
@@ -59,10 +59,10 @@ describe("the surface `scafo build` presents", () => {
       lines.push(args.map(String).join(" "));
     });
 
-    warnUnstable("scafo build prune", PRUNE_UNSTABLE_WHY);
+    warnUnstable("scafo deployment prune", PRUNE_UNSTABLE_WHY);
 
     expect(lines).toEqual([
-      `scafo: warning: "scafo build prune" is subject to change: Celld may grow a native ` +
+      `scafo: warning: "scafo deployment prune" is subject to change: Celld may grow a native ` +
         `deployment lifecycle (denoland/celld#181), and this command follows upstream when it does`,
     ]);
   });
@@ -93,7 +93,7 @@ describe("reading a duration", () => {
 describe("reading the flags", () => {
   const target = { project: "shop", env: "production" };
 
-  it("keeps three publications, deletes for real, and reads no window by default", () => {
+  it("keeps three deployments, deletes for real, and reads no window by default", () => {
     expect(readPruneFlags({ ...target })).toEqual({
       project: "shop",
       env: "production",
@@ -141,26 +141,26 @@ describe("reading the flags", () => {
 });
 
 describe("what the command prints", () => {
-  it("gives a line per publication and counts what went, for a run, a dry run, and an empty one", () => {
+  it("gives a line per deployment and counts what went, for a run, a dry run, and an empty one", () => {
     expect(describePrune({ plan: PLAN, keep: 3, olderThan: "12h" })).toEqual([
       `keep app/dddd4444: current, the fleet's selector points at it`,
-      `keep app/cccc3333: within the newest 3 publications`,
+      `keep app/cccc3333: within the newest 3 deployments`,
       `keep app/bbbb2222: younger than 12h`,
-      `delete app/aaaa1111: 2 objects and its build record`,
-      `delete worker/ffff6666: 1 object and no build record`,
-      `scafo: pruned 2 publications (3 objects, 1 build record) of "shop/production", kept 3; ` +
-        `shared asset blobs under deploy-blobs/ are left in place`,
+      `delete app/aaaa1111: 2 objects and its deployment record`,
+      `delete worker/ffff6666: 1 object and no deployment record`,
+      `scafo: pruned 2 deployments (3 objects, 1 deployment record) of "shop/production", ` +
+        `kept 3; shared asset blobs under deploy-blobs/ are left in place`,
     ]);
 
     /* A dry run says what WOULD go, and only that. */
     const dry = describePrune({ plan: PLAN, keep: 3, olderThan: "12h", dryRun: true });
 
     expect(dry.filter((line) => line.startsWith("would delete "))).toEqual([
-      `would delete app/aaaa1111: 2 objects and its build record`,
-      `would delete worker/ffff6666: 1 object and no build record`,
+      `would delete app/aaaa1111: 2 objects and its deployment record`,
+      `would delete worker/ffff6666: 1 object and no deployment record`,
     ]);
     expect(dry.at(-1)).toBe(
-      `scafo: would prune 2 publications (3 objects, 1 build record) of "shop/production", ` +
+      `scafo: would prune 2 deployments (3 objects, 1 deployment record) of "shop/production", ` +
         `kept 3; shared asset blobs under deploy-blobs/ are left in place`,
     );
 
@@ -173,27 +173,27 @@ describe("what the command prints", () => {
   });
 });
 
-/** One plan of each kept reason and of both kinds of doomed publication. */
+/** One plan of each kept reason and of both kinds of doomed deployment. */
 const PLAN: PrunePlan = {
   project: "shop",
   env: "production",
   current: ["dddd4444"],
   keep: [
-    { ...publication("app", "dddd4444", { record: true }), reason: "current" },
-    { ...publication("app", "cccc3333", { record: true }), reason: "within-keep" },
-    { ...publication("app", "bbbb2222", { record: true }), reason: "within-age" },
+    { ...storedDeployment("app", "dddd4444", { record: true }), reason: "current" },
+    { ...storedDeployment("app", "cccc3333", { record: true }), reason: "within-keep" },
+    { ...storedDeployment("app", "bbbb2222", { record: true }), reason: "within-age" },
   ],
   delete: [
-    publication("app", "aaaa1111", { record: true }),
-    publication("worker", "ffff6666", { objects: 1 }),
+    storedDeployment("app", "aaaa1111", { record: true }),
+    storedDeployment("worker", "ffff6666", { objects: 1 }),
   ],
 };
 
-function publication(
+function storedDeployment(
   script: string,
   version: string,
   opts: { record?: boolean; objects?: number },
-): Publication {
+): StoredDeployment {
   const prefix = `fleets/shop/production/deploy/${script}/${version}/`;
   return {
     script,
@@ -203,6 +203,8 @@ function publication(
       { length: opts.objects ?? 2 },
       (_unused, index) => `${prefix}file-${String(index)}.js`,
     ),
-    ...(opts.record === true ? { buildKey: `_scafo/projects/shop/builds/${version}.json` } : {}),
+    ...(opts.record === true
+      ? { recordKey: `_scafo/projects/shop/deployments/${version}.json` }
+      : {}),
   };
 }

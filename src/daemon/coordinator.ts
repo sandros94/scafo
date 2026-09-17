@@ -60,8 +60,8 @@ export interface CoordinatorOptions {
   ttlMs?: number;
   /** Time between reaps while holding. Defaults to {@link DEFAULT_REAP_INTERVAL_MS}. */
   reapIntervalMs?: number;
-  /** Unreferenced build retention. Omitted disables build reaping. */
-  buildRetentionMs?: number;
+  /** Unreferenced deployment retention. Omitted disables deployment reaping. */
+  deploymentRetentionMs?: number;
   /** How long a node counts as live for placement; defaults to three heartbeats. */
   livenessWindowMs?: number;
 }
@@ -79,9 +79,9 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
   };
   const reapOptions: ReapOptions = {
     keepAlive,
-    ...(opts?.buildRetentionMs === undefined
+    ...(opts?.deploymentRetentionMs === undefined
       ? {}
-      : { buildRetention: { maxAgeMs: opts.buildRetentionMs } }),
+      : { deploymentRetention: { maxAgeMs: opts.deploymentRetentionMs } }),
   };
 
   let held: LeaseHandle | null = null;

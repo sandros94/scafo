@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
+import { recordRevision } from "../src/core/registry/_revision.ts";
 import { readDesired } from "../src/daemon/_desired.ts";
 import {
   acquireLease,
-  createBuild,
+  createDeployment,
   createEnvironment,
   createProject,
   deletePlacement,
@@ -21,7 +21,7 @@ import { ctxWith, type ManualClock, ObservingStore } from "./_helpers.ts";
 
 const PROJECT = "shop";
 const OTHER_PROJECT = "blog";
-const BUILD = "b1b1b1b1";
+const VERSION = "b1b1b1b1";
 const SELF = "node-a";
 const PEER = "node-b";
 const PREVIEW = "preview";
@@ -36,7 +36,7 @@ beforeEach(async () => {
 
   for (const project of [PROJECT, OTHER_PROJECT]) {
     await createProject(registry, { slug: project });
-    await createBuild(registry, project, { id: BUILD });
+    await createDeployment(registry, project, { version: VERSION });
   }
   await deployed(PROJECT, "prod");
 
@@ -267,7 +267,7 @@ describe("what is left out for reasons other than placement", () => {
 describe("an old ephemeral environment", () => {
   it("remains desired indefinitely", async () => {
     await createEnvironment(registry, PROJECT, { name: PREVIEW, ephemeral: true });
-    await recordDeployment(registry, PROJECT, PREVIEW, BUILD);
+    await recordRevision(registry, PROJECT, PREVIEW, VERSION);
     await writePlacement(registry, PROJECT, PREVIEW, [SELF], lease);
     clock.tick(365 * 24 * 60 * 60 * 1000);
 
@@ -325,7 +325,7 @@ describe("how a pass reads all of that", () => {
 /** An environment with a deployment notice, ready to be served. */
 async function deployed(project: string, name: string): Promise<void> {
   await createEnvironment(registry, project, { name });
-  await recordDeployment(registry, project, name, BUILD);
+  await recordRevision(registry, project, name, VERSION);
 }
 
 /** Whether this node would run `name`. */
@@ -346,7 +346,7 @@ async function watchedInstallation(): Promise<{
   const observing = new ObservingStore(new MemoryCasStore());
   const { ctx } = ctxWith(observing);
   await createProject(ctx, { slug: PROJECT });
-  await createBuild(ctx, PROJECT, { id: BUILD });
+  await createDeployment(ctx, PROJECT, { version: VERSION });
 
   const taken = await acquireLease(ctx, SELF);
   if (taken === null) throw new Error("the fixture could not take the lease");
@@ -354,7 +354,7 @@ async function watchedInstallation(): Promise<{
   const names = Array.from({ length: 12 }, (_, index) => `env-${String(index).padStart(2, "0")}`);
   for (const name of names) {
     await createEnvironment(ctx, PROJECT, { name });
-    await recordDeployment(ctx, PROJECT, name, BUILD);
+    await recordRevision(ctx, PROJECT, name, VERSION);
     await writePlacement(ctx, PROJECT, name, [SELF], taken);
   }
   return { ctx, observing, names };

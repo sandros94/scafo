@@ -1,12 +1,12 @@
 /* The reaper only deletes retired environments and old deployment history. */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
+import { recordRevision } from "../src/core/registry/_revision.ts";
 import {
   acquireLease,
   checkDomain,
   claimDomain,
-  createBuild,
+  createDeployment,
   createDeployRecord,
   createEnvironment,
   createProject,
@@ -26,7 +26,7 @@ import {
   updateDeployRecord,
 } from "../src/core/registry/index.ts";
 import {
-  buildKey,
+  deploymentKey,
   deployKey,
   domainKey,
   environmentKey,
@@ -36,7 +36,7 @@ import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, invariants, type ManualClock, rejectsWith } from "./_helpers.ts";
 
 const PROJECT = "app";
-const BUILD = "b1b1b1b1";
+const VERSION = "b1b1b1b1";
 const HOUR_MS = 3_600_000;
 const RETENTION_MS = 1_800_000;
 const FLEET_KEYS = [
@@ -59,15 +59,15 @@ beforeEach(async () => {
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
   await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true });
-  await createBuild(clock.ctx, PROJECT, { id: BUILD });
-  await recordDeployment(clock.ctx, PROJECT, "preview", BUILD);
+  await createDeployment(clock.ctx, PROJECT, { version: VERSION });
+  await recordRevision(clock.ctx, PROJECT, "preview", VERSION);
   for (const key of [...FLEET_KEYS, SURVIVOR]) await store.put(key, "{}");
 
   clock.tick(HOUR_MS);
   const acquired = await acquireLease(clock.ctx, "node-a");
   if (acquired === null) throw new Error("the reaper fixture could not take the lease");
   lease = acquired;
-  opts = { buildRetention: { maxAgeMs: RETENTION_MS } };
+  opts = { deploymentRetention: { maxAgeMs: RETENTION_MS } };
 });
 
 describe("planReap", () => {
@@ -100,10 +100,10 @@ describe("planReap", () => {
     expect(plan.environments.map((target) => target.env)).toEqual(["prod"]);
   });
 
-  it("treats builds as immutable history governed only by retention", async () => {
-    expect((await planReap(clock.ctx)).builds).toEqual([]);
-    expect((await planReap(clock.ctx, opts)).builds).toEqual([
-      expect.objectContaining({ id: BUILD, reason: expect.stringContaining("old") }),
+  it("treats deployments as immutable history governed only by retention", async () => {
+    expect((await planReap(clock.ctx)).deployments).toEqual([]);
+    expect((await planReap(clock.ctx, opts)).deployments).toEqual([
+      expect.objectContaining({ version: VERSION, reason: expect.stringContaining("old") }),
     ]);
   });
 });
@@ -126,7 +126,7 @@ describe("executeReap", () => {
       domainKey(host),
       ...FLEET_KEYS,
       environmentKey(PROJECT, "preview"),
-      buildKey(PROJECT, BUILD),
+      deploymentKey(PROJECT, VERSION),
     ]);
     await expect(checkDomain(clock.ctx, host)).resolves.toBeNull();
     await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, "preview"), "not-found");
@@ -211,7 +211,7 @@ describe("deploy records", () => {
     });
     await updateDeployRecord(clock.ctx, PROJECT, FINISHED, {
       state: "deployed",
-      build: BUILD,
+      deployment: VERSION,
     });
   }
 
@@ -303,7 +303,10 @@ describe("deploy records", () => {
       await running();
       clock.tick(NODE_LIVENESS_WINDOW_MS + 1);
       const plan = await planReap(clock.ctx, opts);
-      await updateDeployRecord(clock.ctx, PROJECT, RUNNING, { state: "deployed", build: BUILD });
+      await updateDeployRecord(clock.ctx, PROJECT, RUNNING, {
+        state: "deployed",
+        deployment: VERSION,
+      });
 
       const result = await executeReap(clock.ctx, plan, lease, opts);
 

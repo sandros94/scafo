@@ -34,7 +34,7 @@ import {
   blockProject,
   createEnvironment,
   createProject,
-  getBuild,
+  getDeployment,
   getDeployRecord,
   getEnvironment,
   putVarset,
@@ -51,14 +51,14 @@ import type {
   DeployRunner,
   StagedArtifact,
 } from "../src/core/types/deploy.ts";
-import type { BuildSource, DeployRecord, NodeRecord } from "../src/core/types/registry.ts";
+import type { DeploymentSource, DeployRecord, NodeRecord } from "../src/core/types/registry.ts";
 import type { RuntimeProcess } from "../src/core/types/runtime.ts";
 import type { CasStore } from "../src/core/types/store.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { packDirectory } from "../src/drivers/archive/tar-zst.ts";
 import { createFileArtifactStager } from "../src/drivers/artifact/file.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, FaultStore, type ManualClock } from "./_helpers.ts";
+import { ctxWith, FaultStore, type ManualClock, rejectsWith } from "./_helpers.ts";
 
 const OPERATOR = "op-1234abcd";
 /** A trusted key scoped to another project than the one being deployed. */
@@ -73,7 +73,7 @@ const PEER_ADDRESS = { internal: "10.0.0.2", apiPort: 7400 };
 /** The Celld this node booted with; what every other node's is compared against. */
 const CELLD_VERSION = "0.5.0";
 /** What a pipeline says about the commit it is deploying. */
-const SOURCE: BuildSource = {
+const SOURCE: DeploymentSource = {
   provider: "github",
   repo: "acme/shop",
   ref: "refs/heads/main",
@@ -491,14 +491,14 @@ describe("who may deploy", () => {
     });
 
     const status = await settled((await responseId(response)) as string);
-    const build = await getBuild(clock.ctx, PROJECT, status.build as string);
-    expect(build.source).toEqual({
+    const deployment = await getDeployment(clock.ctx, PROJECT, status.deployment as string);
+    expect(deployment.source).toEqual({
       provider: "forge",
       repo: "acme/shop",
       ref: "refs/heads/main",
       commit: "abc123",
     });
-    expect(build.oidc).toEqual({ issuer: ISS, subject: SUBJECT });
+    expect(deployment.oidc).toEqual({ issuer: ISS, subject: SUBJECT });
   });
 
   it("rejects caller-supplied OIDC provenance and leaves node deploys without it", async () => {
@@ -524,7 +524,9 @@ describe("who may deploy", () => {
 
     const accepted = await upload(await operatorToken());
     const status = await settled((await responseId(accepted)) as string);
-    expect((await getBuild(clock.ctx, PROJECT, status.build as string)).oidc).toBeUndefined();
+    expect(
+      (await getDeployment(clock.ctx, PROJECT, status.deployment as string)).oidc,
+    ).toBeUndefined();
   });
 });
 
@@ -810,7 +812,6 @@ describe("what an upload must carry", () => {
     const bad = [
       { project: "Not A Slug" },
       { environment: "UPPER" },
-      { buildId: "nothex" },
       { noBundle: false },
       { noBundle: "true" },
       { replicas: 0 },
@@ -840,10 +841,13 @@ describe("what happens to an accepted deploy", () => {
     expect(runs[0]).toMatchObject({ noBundle: true });
   });
 
-  it("publishes the artifact, records the build and makes it current", async () => {
+  it("publishes the artifact, records the deployment and makes it current", async () => {
     const id = (await responseId(await upload(await operatorToken()))) as string;
 
-    await expect(settled(id)).resolves.toMatchObject({ state: "deployed", build: VERSION_ID });
+    await expect(settled(id)).resolves.toMatchObject({
+      state: "deployed",
+      deployment: VERSION_ID,
+    });
     expect(runs).toHaveLength(1);
     expect(runs[0]).toMatchObject({
       project: PROJECT,
@@ -855,8 +859,8 @@ describe("what happens to an accepted deploy", () => {
     /* The bytes the client packed arrive intact through the raw body. */
     expect(receivedArtifacts[0]).toEqual(artifactBytes);
 
-    const build = await getBuild(clock.ctx, PROJECT, VERSION_ID);
-    expect(build).toMatchObject({ celldVersionId: VERSION_ID });
+    const deployment = await getDeployment(clock.ctx, PROJECT, VERSION_ID);
+    expect(deployment).toMatchObject({ version: VERSION_ID });
 
     const environment = await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
     expect(environment.deployment?.revision).toBe(1);
@@ -980,15 +984,16 @@ describe("what happens to an accepted deploy", () => {
     });
   });
 
-  it("records the build under the id the upload chose, when it chose one", async () => {
+  it("files the deployment under the runtime's version, whatever the upload asks", async () => {
+    /* A version is the digest of what was published, so it is the runtime's to
+       assign: an upload that names one must not be able to file a deployment
+       under an id of its own choosing. */
     const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), buildId: "0f0f0f0f" }),
+      await upload(await operatorToken(), { ...meta(), deployment: "0f0f0f0f" }),
     )) as string;
 
-    await expect(settled(id)).resolves.toMatchObject({ build: "0f0f0f0f" });
-    await expect(getBuild(clock.ctx, PROJECT, "0f0f0f0f")).resolves.toMatchObject({
-      celldVersionId: VERSION_ID,
-    });
+    await expect(settled(id)).resolves.toMatchObject({ deployment: VERSION_ID });
+    await rejectsWith(() => getDeployment(clock.ctx, PROJECT, "0f0f0f0f"), "not-found");
   });
 
   it("reports a publish that threw as failed, and says why", async () => {
@@ -999,7 +1004,7 @@ describe("what happens to an accepted deploy", () => {
     const status = await settled(id);
     expect(status.state).toBe("failed");
     expect(status.detail).toContain("celld exited with code 1");
-    expect(status.build).toBeUndefined();
+    expect(status.deployment).toBeUndefined();
   });
 
   it("caps every retained background failure detail on a UTF-8 boundary", async () => {
@@ -1034,7 +1039,7 @@ describe("what happens to an accepted deploy", () => {
   it("keeps a deploy the cancellation only caught after its commit point", async () => {
     /*
      * Writing the deployment revision is the commit point: past it the
-     * environment IS serving the build, and no abort undoes that. The task
+     * environment IS serving the deployment, and no abort undoes that. The task
      * deadline elapses here while the revision's own write is in flight, so the
      * write lands and the signal is aborted by the time it returns — which used
      * to be reported to the operator as a deploy that failed.
@@ -1068,7 +1073,10 @@ describe("what happens to an accepted deploy", () => {
 
     const id = (await responseId(await upload(await operatorToken()))) as string;
 
-    await expect(settled(id)).resolves.toMatchObject({ state: "deployed", build: VERSION_ID });
+    await expect(settled(id)).resolves.toMatchObject({
+      state: "deployed",
+      deployment: VERSION_ID,
+    });
     /* And the abort the scheduler reports afterwards does not rewrite it. */
     await new Promise((wake) => setTimeout(wake, 50));
     expect(daemon.deploys?.get(id)).toMatchObject({ state: "deployed" });
@@ -1189,7 +1197,7 @@ describe("the record a deploy leaves in the registry", () => {
       environment: ENVIRONMENT,
       node: OPERATOR,
       state: "deployed",
-      build: VERSION_ID,
+      deployment: VERSION_ID,
       /* The audit trail a failed deploy would otherwise leave nowhere. */
       source: SOURCE,
     });
@@ -1231,7 +1239,7 @@ describe("the record a deploy leaves in the registry", () => {
     const record = await getDeployRecord(clock.ctx, PROJECT, id);
     expect(record.state).toBe("failed");
     expect(record.detail).toContain("celld exited with code 1");
-    expect(record.build).toBeUndefined();
+    expect(record.deployment).toBeUndefined();
   });
 
   it("refuses the deploy outright when its record cannot be written", async () => {
@@ -1280,7 +1288,7 @@ describe("polling a deploy on another node of the fleet", () => {
       id,
       project: PROJECT,
       state: "deployed",
-      build: VERSION_ID,
+      deployment: VERSION_ID,
     });
   });
 
@@ -1376,7 +1384,7 @@ describe("retired deployment-selection endpoints", () => {
     ["alias", `/v1/projects/${PROJECT}/environments/${ENVIRONMENT}/alias`],
     ["split", `/v1/environments/${PROJECT}/${ENVIRONMENT}/split`],
   ])("keeps the removed %s mutation unavailable", async (_name, path) => {
-    const response = await post(path, await operatorToken(), { build: VERSION_ID });
+    const response = await post(path, await operatorToken(), { deployment: VERSION_ID });
     expect(response.status).toBe(404);
   });
 });

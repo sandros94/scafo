@@ -3,7 +3,7 @@
 import { generateJWK } from "unjwt/jwk";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { beforeEach, describe, expect, it } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
+import { recordRevision } from "../src/core/registry/_revision.ts";
 import { createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import {
@@ -18,7 +18,7 @@ import {
 import { signNodeToken } from "../src/core/auth/index.ts";
 import {
   acquireLease,
-  createBuild,
+  createDeployment,
   createEnvironment,
   createProject,
   DEFAULT_RETIREMENT_GRACE_MS,
@@ -42,8 +42,8 @@ import {
 
 const NODE_ID = "node-a";
 const PROJECT = "app";
-const BUILD = "b1b1b1b1";
-const OTHER_BUILD = "b2b2b2b2";
+const VERSION = "b1b1b1b1";
+const OTHER_VERSION = "b2b2b2b2";
 const NODE_URL = "http://10.0.0.4:7400";
 const HOUR_MS = 3_600_000;
 
@@ -70,12 +70,12 @@ beforeEach(async () => {
     addresses: { internal: "10.0.0.4", apiPort: 7400 },
   });
   await createProject(clock.ctx, { slug: PROJECT });
-  for (const id of [BUILD, OTHER_BUILD]) {
-    await createBuild(clock.ctx, PROJECT, { id });
+  for (const version of [VERSION, OTHER_VERSION]) {
+    await createDeployment(clock.ctx, PROJECT, { version });
   }
   await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
   await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true });
-  await recordDeployment(clock.ctx, PROJECT, "prod", BUILD);
+  await recordRevision(clock.ctx, PROJECT, "prod", VERSION);
 });
 
 describe.each([

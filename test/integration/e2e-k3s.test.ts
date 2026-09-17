@@ -24,7 +24,7 @@ import {
 import type { NodeRecord, PlacementRecord } from "../../src/core/types/registry.ts";
 import type { ProcessStatus } from "../../src/core/types/supervisor.ts";
 import {
-  buildIdOf,
+  deploymentOf,
   buildRepo,
   describeFailure,
   type BucketSettings,
@@ -361,7 +361,7 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
       );
       expect(deploy.code, deploy.output).toBe(0);
       expect(deploy.output).toContain("deployed");
-      expect(buildIdOf(deploy.output)).toMatch(/^[\da-f]+$/);
+      expect(deploymentOf(deploy.output)).toMatch(/^[\da-f]+$/);
       await serves(`${PROJECT}.${PLATFORM_DOMAIN}`, "v1");
 
       const production = await until(

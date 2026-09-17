@@ -11,7 +11,7 @@ import {
   updateDeployRecord,
 } from "../src/core/registry/index.ts";
 import { deployKey, deploysPrefix } from "../src/core/registry/paths.ts";
-import type { BuildSource, CarriedVarset, OidcActor } from "../src/core/types/registry.ts";
+import type { DeploymentSource, CarriedVarset, OidcActor } from "../src/core/types/registry.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, type ManualClock, rejectsWith } from "./_helpers.ts";
 
@@ -22,7 +22,7 @@ const ID = `${PROJECT}.a1b2c3d4e5f60718`;
 const OTHER = `${PROJECT}.00112233445566ff`;
 const MINUTE_MS = 60_000;
 
-const SOURCE: BuildSource = {
+const SOURCE: DeploymentSource = {
   provider: "github",
   repo: "acme/shop",
   ref: "refs/heads/main",
@@ -122,14 +122,14 @@ describe("updateDeployRecord", () => {
     clock.tick(MINUTE_MS);
     const deployed = await updateDeployRecord(clock.ctx, PROJECT, ID, {
       state: "deployed",
-      build: "b1b1b1b1",
+      deployment: "b1b1b1b1",
       varset: VARSET,
     });
 
     expect(uploading.updatedAt).not.toBe(accepted.updatedAt);
     expect(deployed).toMatchObject({
       state: "deployed",
-      build: "b1b1b1b1",
+      deployment: "b1b1b1b1",
       varset: VARSET,
       acceptedAt: accepted.acceptedAt,
       updatedAt: new Date(clock.nowMs()).toISOString(),
@@ -147,7 +147,7 @@ describe("updateDeployRecord", () => {
   });
 
   it("never reopens a deploy that has already finished", async () => {
-    await updateDeployRecord(clock.ctx, PROJECT, ID, { state: "deployed", build: "b1b1b1b1" });
+    await updateDeployRecord(clock.ctx, PROJECT, ID, { state: "deployed", deployment: "b1b1b1b1" });
 
     const error = await rejectsWith(
       () => updateDeployRecord(clock.ctx, PROJECT, ID, { state: "uploading" }),
@@ -157,7 +157,7 @@ describe("updateDeployRecord", () => {
     expect(error.detail).toContain("deployed");
     await expect(getDeployRecord(clock.ctx, PROJECT, ID)).resolves.toMatchObject({
       state: "deployed",
-      build: "b1b1b1b1",
+      deployment: "b1b1b1b1",
     });
   });
 
@@ -168,7 +168,10 @@ describe("updateDeployRecord", () => {
     const store = new FaultStore(new MemoryCasStore());
     const faulty = ctxWith(store);
     await createDeployRecord(faulty.ctx, PROJECT, { id: ID, environment: ENVIRONMENT, node: NODE });
-    await updateDeployRecord(faulty.ctx, PROJECT, ID, { state: "deployed", build: "b1b1b1b1" });
+    await updateDeployRecord(faulty.ctx, PROJECT, ID, {
+      state: "deployed",
+      deployment: "b1b1b1b1",
+    });
     const reads = store.gets;
     const writes = store.puts;
 
@@ -184,7 +187,7 @@ describe("updateDeployRecord", () => {
   it("does not rewrite a deploy that succeeded as one that failed", async () => {
     /* The accepting node's own failure handler runs after the commit point too:
        the deploy HAPPENED, and a late refusal must not say otherwise. */
-    await updateDeployRecord(clock.ctx, PROJECT, ID, { state: "deployed", build: "b1b1b1b1" });
+    await updateDeployRecord(clock.ctx, PROJECT, ID, { state: "deployed", deployment: "b1b1b1b1" });
 
     await rejectsWith(
       () => updateDeployRecord(clock.ctx, PROJECT, ID, { state: "failed", detail: "too late" }),

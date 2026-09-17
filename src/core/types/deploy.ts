@@ -77,7 +77,7 @@ export interface ArtifactStager {
 
 /** What publishing an artifact produced. */
 export interface DeployRunResult {
-  /** Version id the runtime assigned; the build record records it. */
+  /** Version id the runtime assigned; the deployment record is filed under it. */
   celldVersionId: string;
 }
 

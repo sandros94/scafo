@@ -1,9 +1,9 @@
 /* Environment records and their monotonic deployment notice. */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { deploymentRevision, recordDeployment } from "../src/core/registry/_deployment.ts";
+import { deploymentRevision, recordRevision } from "../src/core/registry/_revision.ts";
 import {
-  createBuild,
+  createDeployment,
   createEnvironment,
   createProject,
   environmentKey,
@@ -16,7 +16,7 @@ import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
 
 const PROJECT = "app";
 const ENV = "prod";
-const BUILD = "aaaaaaaa";
+const VERSION = "aaaaaaaa";
 
 let clock: ManualClock;
 
@@ -24,7 +24,7 @@ beforeEach(async () => {
   clock = ctxWith(new MemoryCasStore());
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, { name: ENV });
-  await createBuild(clock.ctx, PROJECT, { id: BUILD });
+  await createDeployment(clock.ctx, PROJECT, { version: VERSION });
 });
 
 describe("environment records", () => {
@@ -70,7 +70,7 @@ describe("environment records", () => {
 
 describe("deployment revision", () => {
   it("records only a monotonic revision and timestamp", async () => {
-    const update = await recordDeployment(clock.ctx, PROJECT, ENV, BUILD);
+    const update = await recordRevision(clock.ctx, PROJECT, ENV, VERSION);
     expect(update.environment.deployment).toEqual({
       revision: 1,
       deployedAt: new Date(clock.nowMs()).toISOString(),
@@ -79,7 +79,7 @@ describe("deployment revision", () => {
 
   it("commutes concurrent records into consecutive revisions", async () => {
     const successor = "bbbbbbbb";
-    await createBuild(clock.ctx, PROJECT, { id: successor });
+    await createDeployment(clock.ctx, PROJECT, { version: successor });
     const inner = clock.ctx.store;
     let collide = true;
     clock.ctx.store = {
@@ -93,7 +93,7 @@ describe("deployment revision", () => {
           (JSON.parse(body) as { deployment?: { revision?: number } }).deployment?.revision === 1
         ) {
           collide = false;
-          await recordDeployment({ ...clock.ctx, store: inner }, PROJECT, ENV, successor);
+          await recordRevision({ ...clock.ctx, store: inner }, PROJECT, ENV, successor);
         }
         return inner.put(key, body, cas);
       },
@@ -101,14 +101,14 @@ describe("deployment revision", () => {
       list: (prefix) => inner.list(prefix),
     };
 
-    await recordDeployment(clock.ctx, PROJECT, ENV, BUILD);
+    await recordRevision(clock.ctx, PROJECT, ENV, VERSION);
     await expect(getEnvironment(clock.ctx, PROJECT, ENV)).resolves.toMatchObject({
       deployment: { revision: 2 },
     });
   });
 
   it("stamps the varset the publication carried", async () => {
-    const update = await recordDeployment(clock.ctx, PROJECT, ENV, BUILD, {
+    const update = await recordRevision(clock.ctx, PROJECT, ENV, VERSION, {
       varset: { name: "shared", hash: "a".repeat(64) },
     });
 
@@ -120,13 +120,13 @@ describe("deployment revision", () => {
   });
 
   it("clears the stamp when the next publication carries no varset", async () => {
-    await recordDeployment(clock.ctx, PROJECT, ENV, BUILD, {
+    await recordRevision(clock.ctx, PROJECT, ENV, VERSION, {
       varset: { name: "shared", hash: "a".repeat(64) },
     });
 
     /* Kept, the stamp would claim the environment still deploys with variables
        it was deliberately taken off. */
-    const update = await recordDeployment(clock.ctx, PROJECT, ENV, BUILD);
+    const update = await recordRevision(clock.ctx, PROJECT, ENV, VERSION);
 
     expect(update.environment.deployment).toEqual({
       revision: 2,
@@ -186,6 +186,6 @@ describe("deployment revision", () => {
       }),
       {},
     );
-    await rejectsWith(() => recordDeployment(clock.ctx, PROJECT, ENV, BUILD), "invalid-input");
+    await rejectsWith(() => recordRevision(clock.ctx, PROJECT, ENV, VERSION), "invalid-input");
   });
 });

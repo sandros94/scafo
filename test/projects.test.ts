@@ -1,4 +1,4 @@
-/* The project record: what a project IS in the registry, beyond a slug that happens to have builds under it. */
+/* The project record: what a project IS in the registry, beyond a slug that happens to have deployments under it. */
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { putJson, readJson } from "../src/core/registry/cas.ts";
@@ -121,7 +121,7 @@ describe("blocking a project", () => {
     await blockProject(clock.ctx, PROJECT);
     await unblockProject(clock.ctx, PROJECT);
 
-    /* The whole promise of the verb: env and build records are untouched and so
+    /* The whole promise of the verb: env and deployment records are untouched and so
        is the project's own configuration, so unblocking restores what was there
        rather than something reconstructed. */
     await expect(getProject(clock.ctx, PROJECT)).resolves.toEqual(before);

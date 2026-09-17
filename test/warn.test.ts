@@ -42,10 +42,10 @@ describe("warnUnstable", () => {
   it("names the command, says it may change, and says why", () => {
     const said = capture();
 
-    warnUnstable("scafo build prune", "upstream may replace it");
+    warnUnstable("scafo deployment prune", "upstream may replace it");
 
     expect(said()).toEqual([
-      `scafo: warning: "scafo build prune" is subject to change: upstream may replace it`,
+      `scafo: warning: "scafo deployment prune" is subject to change: upstream may replace it`,
     ]);
   });
 });

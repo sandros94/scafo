@@ -359,7 +359,7 @@ function environment(name: string, domains: string[]): EnvironmentRecord {
 }
 
 /** A supervised process, which is the only kind the routing ever names. */
-function process_(project: string, env: string, _build: string, port: number): RuntimeProcess {
+function process_(project: string, env: string, _version: string, port: number): RuntimeProcess {
   return {
     processId: `${project}--${env}`,
     project,

@@ -1,12 +1,12 @@
 /* A node that is stopping on purpose, and the difference it makes. */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
+import { recordRevision } from "../src/core/registry/_revision.ts";
 import { runAssignment } from "../src/daemon/_assign.ts";
 import { drainThisNode } from "../src/cli/_bootstrap.ts";
 import {
   acquireLease,
-  createBuild,
+  createDeployment,
   createEnvironment,
   createProject,
   drainNode,
@@ -23,7 +23,7 @@ import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, type ManualClock, rejectionOf, rejectsWith } from "./_helpers.ts";
 
 const PROJECT = "app";
-const BUILD = "b1b1b1b1";
+const VERSION = "b1b1b1b1";
 const NODE_A = "node-a";
 const NODE_B = "node-b";
 
@@ -39,7 +39,7 @@ beforeEach(async () => {
   logged = [];
 
   await createProject(clock.ctx, { slug: PROJECT });
-  await createBuild(clock.ctx, PROJECT, { id: BUILD });
+  await createDeployment(clock.ctx, PROJECT, { version: VERSION });
   for (const id of [NODE_A, NODE_B]) await register(id);
 
   const acquired = await acquireLease(clock.ctx, NODE_A);
@@ -217,10 +217,10 @@ describe("drainThisNode, as a shutdown calls it", () => {
   });
 });
 
-/** An environment with a build to serve, so it is a real placement target. */
+/** An environment with a deployment to serve, so it is a real placement target. */
 async function deployed(name: string): Promise<void> {
   await createEnvironment(clock.ctx, PROJECT, { name });
-  await recordDeployment(clock.ctx, PROJECT, name, BUILD);
+  await recordRevision(clock.ctx, PROJECT, name, VERSION);
 }
 
 /** Registers `id` as a node that has just beaten, exactly as a boot does. */

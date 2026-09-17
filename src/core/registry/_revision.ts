@@ -1,9 +1,9 @@
 /* Internal monotonic notice that celld moved an environment's current deployment. */
 
-import type { BuildRecord, CarriedVarset, EnvironmentRecord } from "../types/registry.ts";
+import type { DeploymentRecord, CarriedVarset, EnvironmentRecord } from "../types/registry.ts";
 import { requireJson, updateJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
-import { buildKey, environmentKey } from "./paths.ts";
+import { deploymentKey, environmentKey } from "./paths.ts";
 import { ScafoError } from "../error.ts";
 
 export interface DeploymentUpdate {
@@ -13,24 +13,24 @@ export interface DeploymentUpdate {
 
 /**
  * Advances an environment's deployment revision after celld publishes, and
- * stamps the varset that publication carried.
+ * stamps the varset that deployment carried.
  *
- * The record deliberately carries no build or celld version. Concurrent writers
- * retry against the latest value, so each successful publication increments the
- * monotonic notice instead of restoring a stale claimed version.
+ * The record deliberately names no version. Concurrent writers retry against
+ * the latest value, so each successful deployment increments the monotonic
+ * notice instead of restoring a stale claimed version.
  *
- * The notice is rewritten whole, so a publication carrying no varset clears an
+ * The notice is rewritten whole, so a deployment carrying no varset clears an
  * earlier stamp: kept, it would claim an environment still deploys with
  * variables it was taken off.
  */
-export async function recordDeployment(
+export async function recordRevision(
   ctx: RegistryContext,
   project: string,
   env: string,
-  buildId: string,
+  version: string,
   opts?: { signal?: AbortSignal; varset?: CarriedVarset },
 ): Promise<DeploymentUpdate> {
-  await requireJson<BuildRecord>(ctx, buildKey(project, buildId));
+  await requireJson<DeploymentRecord>(ctx, deploymentKey(project, version));
   const updated = await updateJson<EnvironmentRecord>(
     ctx,
     environmentKey(project, env),

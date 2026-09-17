@@ -142,8 +142,8 @@ export interface ProjectRecord {
   labels?: Record<string, string>;
 }
 
-/** Self-asserted source metadata stated by the caller that uploaded a build. */
-export interface BuildSource {
+/** Self-asserted source metadata stated by the caller that uploaded a deployment. */
+export interface DeploymentSource {
   provider: string;
   repo: string;
   ref: string;
@@ -157,31 +157,32 @@ export interface OidcActor {
 }
 
 /**
- * An immutable deployment-history record. Key: `_scafo/projects/<project>/builds/<id>.json`.
+ * An immutable deployment-history record, one per thing Celld serves.
+ * Key: `_scafo/projects/<project>/deployments/<version>.json`.
  */
-export interface BuildRecord {
+export interface DeploymentRecord {
   v: 1;
-  id: string;
-  celldVersionId?: string;
-  source?: BuildSource;
-  /** Present only when a verified workload token uploaded this build. */
+  /** The Celld version this deployment is published as; it is also the key segment. */
+  version: string;
+  source?: DeploymentSource;
+  /** Present only when a verified workload token uploaded this deployment. */
   oidc?: OidcActor;
   createdAt: string;
 }
 
 /**
- * Caller-supplied half of a {@link BuildRecord}; `createdAt` is stamped by the registry.
+ * Caller-supplied half of a {@link DeploymentRecord}; `createdAt` is stamped by the registry.
  */
-export interface BuildInput {
-  id: string;
-  celldVersionId?: string;
-  source?: BuildSource;
+export interface DeploymentInput {
+  /** The version the runtime assigned; nothing else may name a deployment. */
+  version: string;
+  source?: DeploymentSource;
   /** Auth-owned workload identity; deploy intake, not request metadata, sets this. */
   oidc?: OidcActor;
 }
 
 /**
- * The varset a publication carried, and the digest of its variables at that
+ * The varset a deployment carried, and the digest of its variables at that
  * moment. A later read of the varset says whether it still holds what was
  * deployed, which is the whole of what makes an edited varset visible.
  */
@@ -192,11 +193,11 @@ export interface CarriedVarset {
 
 /** Monotonic notice that celld's current deployment changed. */
 export interface DeploymentRevision {
-  /** Increased once for every successful celld publication. */
+  /** Increased once for every deployment celld adopts. */
   revision: number;
   /** When this revision was recorded. */
   deployedAt: string;
-  /** Varset this publication carried; absent when it carried none. */
+  /** Varset this deployment carried; absent when it carried none. */
   varset?: CarriedVarset;
 }
 
@@ -283,18 +284,18 @@ export interface DeployRecord {
   acceptedAt: string;
   /** When the state last moved; the reaper reads it to spot an abandoned deploy. */
   updatedAt: string;
-  /** Build the deploy produced; absent until one has been recorded. */
-  build?: string;
+  /** Deployment the deploy produced, by version; absent until one has been recorded. */
+  deployment?: string;
   /** Varset the deploy carried; absent when it carried none. */
   varset?: CarriedVarset;
   /** Why it failed, when it did. */
   detail?: string;
   /**
    * What the caller said it was deploying, and the workload identity that was
-   * verified at intake. A build record carries both for a deploy that reached
-   * one; these are the same trail for a deploy that never did.
+   * verified at intake. A deployment record carries both for a deploy that
+   * reached one; these are the same trail for a deploy that never did.
    */
-  source?: BuildSource;
+  source?: DeploymentSource;
   oidc?: OidcActor;
 }
 

@@ -1,16 +1,16 @@
 /* Fault injection proves multi-write flows remain referentially safe and retryable. */
 
 import { describe, expect, it } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
+import { recordRevision } from "../src/core/registry/_revision.ts";
 import {
   acquireLease,
   checkDomain,
   claimDomain,
-  createBuild,
+  createDeployment,
   createEnvironment,
   createProject,
   executeReap,
-  getBuild,
+  getDeployment,
   getEnvironment,
   planReap,
   putVarset,
@@ -30,7 +30,7 @@ import {
 } from "./_helpers.ts";
 
 const PROJECT = "app";
-const BUILD = "0f0f0f0f";
+const VERSION = "0f0f0f0f";
 const HOST = "flow.example.com";
 const HOUR_MS = 3_600_000;
 
@@ -45,21 +45,23 @@ interface Flow {
   invariantOptions?: InvariantOptions;
 }
 
-const REAP_OPTIONS: ReapOptions = { buildRetention: { maxAgeMs: HOUR_MS } };
+const REAP_OPTIONS: ReapOptions = { deploymentRetention: { maxAgeMs: HOUR_MS } };
 
 const FLOWS: Flow[] = [
   {
-    name: "createBuild then recordDeployment",
+    name: "createDeployment then recordRevision",
     seed: async ({ ctx }) => {
       await createProject(ctx, { slug: PROJECT });
       await createEnvironment(ctx, PROJECT, { name: "prod" });
     },
     run: async ({ ctx }) => {
-      await createBuild(ctx, PROJECT, { id: BUILD });
-      await recordDeployment(ctx, PROJECT, "prod", BUILD);
+      await createDeployment(ctx, PROJECT, { version: VERSION });
+      await recordRevision(ctx, PROJECT, "prod", VERSION);
     },
     settled: async ({ ctx }) => {
-      await expect(getBuild(ctx, PROJECT, BUILD)).resolves.toMatchObject({ id: BUILD });
+      await expect(getDeployment(ctx, PROJECT, VERSION)).resolves.toMatchObject({
+        version: VERSION,
+      });
       await expect(getEnvironment(ctx, PROJECT, "prod")).resolves.toMatchObject({
         deployment: { revision: 1 },
       });

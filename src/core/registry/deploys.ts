@@ -5,7 +5,7 @@
 
 import { ScafoError } from "../error.ts";
 import type {
-  BuildSource,
+  DeploymentSource,
   CarriedVarset,
   DeployRecord,
   DeployState,
@@ -22,7 +22,7 @@ import { deployKey, deploysPrefix, parseDeployId } from "./paths.ts";
  * A week: long enough that an operator coming back to a pipeline run from last
  * Friday still finds out what happened to it, and short enough that a busy
  * project's deploy history does not grow without bound. Nothing reads these
- * records after the fact — a build record is what a deploy that succeeded
+ * records after the fact — a deployment record is what a deploy that succeeded
  * leaves behind — so this is a support window, not history.
  */
 export const DEPLOY_RECORD_RETENTION_MS: number = 7 * 24 * 60 * 60 * 1000;
@@ -42,7 +42,7 @@ export interface DeployRecordInput {
   environment: string;
   /** Node accepting the deploy; the reaper measures its liveness against this. */
   node: string;
-  source?: BuildSource;
+  source?: DeploymentSource;
   /** Auth-owned workload identity; deploy intake, not request metadata, sets this. */
   oidc?: OidcActor;
 }
@@ -50,7 +50,8 @@ export interface DeployRecordInput {
 /** What one state transition writes; `updatedAt` is the registry's to stamp. */
 export interface DeployRecordPatch {
   state: DeployState;
-  build?: string;
+  /** The deployment the deploy produced, by version. */
+  deployment?: string;
   varset?: CarriedVarset;
   detail?: string;
 }
@@ -101,9 +102,9 @@ export async function createDeployRecord(
  *
  * Throws `ScafoError("cas-conflict")` for a deploy that has already finished.
  * Terminal means terminal: a deploy that reached `deployed` HAPPENED — its
- * revision is in the registry and the environment is serving the build — and a
- * late refusal from the accepting node, or a reaper that decided the node was
- * gone, must not rewrite the outcome.
+ * revision is in the registry and the environment is serving the deployment —
+ * and a late refusal from the accepting node, or a reaper that decided the node
+ * was gone, must not rewrite the outcome.
  */
 export async function updateDeployRecord(
   ctx: RegistryContext,

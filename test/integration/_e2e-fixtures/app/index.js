@@ -1,8 +1,8 @@
 /*
  * The end-to-end fixture application.
  *
- * Every request to `/` answers with the build's own version, so a response says
- * which build served it, and with the URL it saw, so the host header the ingress
+ * Every request to `/` answers with the deployment's own version, so a response
+ * says which deployment served it, and with the URL it saw, so the host header the ingress
  * forwarded is visible to the assertions.
  *
  * `/count` answers from a single durable object instead. Whichever node takes

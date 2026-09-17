@@ -4,13 +4,13 @@ import type { H3 } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
+import { recordRevision } from "../src/core/registry/_revision.ts";
 import { createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import type { DeployMeta, DeployService, DeployStatus } from "../src/daemon/deploys.ts";
 import { signNodeToken } from "../src/core/auth/index.ts";
 import {
-  createBuild,
+  createDeployment,
   createEnvironment,
   createProject,
   getEnvironment,
@@ -34,8 +34,8 @@ const MINE = "acme";
 const THEIRS = "globex";
 const ENVIRONMENT = "prod";
 const PREVIEW = "preview";
-const BUILD = "aaaa1111";
-const OTHER_BUILD = "bbbb2222";
+const VERSION = "aaaa1111";
+const OTHER_VERSION = "bbbb2222";
 
 const ADMIN_ID = "op-admin111";
 /** An operator-tier key scoped to {@link MINE} and to nothing else. */
@@ -74,10 +74,10 @@ beforeEach(async () => {
     await createProject(clock.ctx, { slug: project });
     await createEnvironment(clock.ctx, project, { name: ENVIRONMENT });
     await createEnvironment(clock.ctx, project, { name: PREVIEW, ephemeral: true });
-    for (const id of [BUILD, OTHER_BUILD]) {
-      await createBuild(clock.ctx, project, { id });
+    for (const version of [VERSION, OTHER_VERSION]) {
+      await createDeployment(clock.ctx, project, { version });
     }
-    await recordDeployment(clock.ctx, project, ENVIRONMENT, BUILD);
+    await recordRevision(clock.ctx, project, ENVIRONMENT, VERSION);
   }
 
   deploys = stubDeploys();

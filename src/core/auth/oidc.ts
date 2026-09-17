@@ -56,7 +56,7 @@ export interface OidcVerifierOptions {
 
 /** Who a verified workload token belongs to, and which policy entry admitted it. */
 export interface OidcIdentity {
-  /** The auth-owned identity persisted with an admitted workload build. */
+  /** The auth-owned identity persisted with an admitted workload deployment. */
   actor: OidcActor;
   project: string;
   issuer: TrustIssuer;

@@ -7,7 +7,7 @@ import { assertSlug, isSlug } from "../utils/slug.ts";
 /** Prefix all registry documents live under. */
 const ROOT = "_scafo";
 
-/** Content ids (builds) are lowercase hex digests. */
+/** Content ids (deployment versions) are lowercase hex digests. */
 export const ID_RE: RegExp = /^[a-f\d]{8,64}$/;
 
 /** Node ids double as celld session ids, which may contain underscores. */
@@ -191,14 +191,15 @@ export function trustKey(project: string): string {
   return `${projectsPrefix()}${project}/trust.json`;
 }
 
-export function buildsPrefix(project: string): string {
+/** Prefix one project's deployment records live under, keyed by Celld version. */
+export function deploymentsPrefix(project: string): string {
   assertSlug(project);
-  return `${projectsPrefix()}${project}/builds/`;
+  return `${projectsPrefix()}${project}/deployments/`;
 }
 
-export function buildKey(project: string, id: string): string {
-  assertId(id);
-  return `${buildsPrefix(project)}${id}.json`;
+export function deploymentKey(project: string, version: string): string {
+  assertId(version);
+  return `${deploymentsPrefix(project)}${version}.json`;
 }
 
 /** The unguessable half of a deploy id, as it is written and as it is read. */

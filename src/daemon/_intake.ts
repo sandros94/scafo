@@ -7,9 +7,8 @@ import type { OidcIdentity, OidcVerifier } from "../core/auth/oidc.ts";
 import { isScafoError, ScafoError } from "../core/error.ts";
 import { assertReplicas } from "../core/placement/replicas.ts";
 import { assertSelector } from "../core/placement/selector.ts";
-import { assertId } from "../core/registry/paths.ts";
 import { assertProjectScope } from "./_scope.ts";
-import type { BuildSource, NodeSelector } from "../core/types/registry.ts";
+import type { DeploymentSource, NodeSelector } from "../core/types/registry.ts";
 import { assertSlug } from "../core/utils/slug.ts";
 import { fromBase64Url, toBase64Url } from "../core/utils/base64.ts";
 import { stableStringify } from "../core/utils/json.ts";
@@ -198,18 +197,13 @@ function parseMeta(parsed: unknown, project: string): DeployMeta {
     meta.nodeSelector = body.nodeSelector;
   }
 
-  const buildId = text(body, "buildId");
-  if (buildId !== undefined) {
-    assertId(buildId);
-    meta.buildId = buildId;
-  }
   const source = readSource(body.source);
   if (source !== undefined) meta.source = source;
 
   return meta;
 }
 
-function readSource(value: unknown): BuildSource | undefined {
+function readSource(value: unknown): DeploymentSource | undefined {
   if (value === undefined || value === null) return undefined;
 
   const raw = asObject(value, `"source"`);
@@ -218,7 +212,7 @@ function readSource(value: unknown): BuildSource | undefined {
       `"source.oidcSub" is not accepted; OIDC provenance is recorded from the verified workload token`,
     );
   }
-  const source: BuildSource = {
+  const source: DeploymentSource = {
     provider: text(raw, "provider", true),
     repo: text(raw, "repo", true),
     ref: text(raw, "ref", true),

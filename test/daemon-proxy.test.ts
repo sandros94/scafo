@@ -4,7 +4,7 @@ import type { H3 } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
+import { recordRevision } from "../src/core/registry/_revision.ts";
 import { type DaemonContext, type DaemonState, createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { type Coordinator, createCoordinator } from "../src/daemon/coordinator.ts";
@@ -12,7 +12,7 @@ import { signNodeToken } from "../src/core/auth/index.ts";
 import type { ProblemDetails } from "../src/core/error.ts";
 import {
   acquireLease,
-  createBuild,
+  createDeployment,
   createEnvironment,
   createProject,
   getEnvironment,
@@ -30,7 +30,7 @@ const OTHER = "node-b";
 const OPERATOR = "operator-1";
 const PROJECT = "app";
 const ENVIRONMENT = "preview";
-const BUILD = "b1b1b1b1";
+const VERSION = "b1b1b1b1";
 const TTL_MS = 15_000;
 
 /** Where node-b says it is reached; what a forwarded request must be addressed to. */
@@ -68,8 +68,8 @@ beforeEach(async () => {
     name: ENVIRONMENT,
     ephemeral: true,
   });
-  await createBuild(clock.ctx, PROJECT, { id: BUILD });
-  await recordDeployment(clock.ctx, PROJECT, ENVIRONMENT, BUILD);
+  await createDeployment(clock.ctx, PROJECT, { version: VERSION });
+  await recordRevision(clock.ctx, PROJECT, ENVIRONMENT, VERSION);
 });
 
 describe("DELETE /v1/environments/:project/:env", () => {

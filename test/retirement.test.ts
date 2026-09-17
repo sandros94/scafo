@@ -1,10 +1,10 @@
 /* Retiring an environment, taking it back, and the rule that decides when it may finally be deleted. */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
+import { recordRevision } from "../src/core/registry/_revision.ts";
 import {
   acquireLease,
-  createBuild,
+  createDeployment,
   createEnvironment,
   createProject,
   DEFAULT_RETIREMENT_GRACE_MS,
@@ -28,7 +28,7 @@ import {
 } from "./_helpers.ts";
 
 const PROJECT = "app";
-const BUILD = "b1b1b1b1";
+const VERSION = "b1b1b1b1";
 const HOUR_MS = 3_600_000;
 const GRACE_MS = DEFAULT_RETIREMENT_GRACE_MS;
 
@@ -41,10 +41,10 @@ beforeEach(async () => {
   clock = ctxWith(store);
 
   await createProject(clock.ctx, { slug: PROJECT });
-  await createBuild(clock.ctx, PROJECT, { id: BUILD });
+  await createDeployment(clock.ctx, PROJECT, { version: VERSION });
   await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
   await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true });
-  await recordDeployment(clock.ctx, PROJECT, "prod", BUILD);
+  await recordRevision(clock.ctx, PROJECT, "prod", VERSION);
 
   const acquired = await acquireLease(clock.ctx, "node-a");
   if (acquired === null) throw new Error("the fixture could not take the lease");
@@ -58,7 +58,7 @@ describe("retiring and taking it back", () => {
     const retired = await retireEnvironment(clock.ctx, PROJECT, "prod");
 
     expect(retired).toEqual({ ...before, retiredAt: new Date(clock.nowMs()).toISOString() });
-    /* Its build, its domains and its varset are untouched: retirement takes an
+    /* Its deployment, its domains and its varset are untouched: retirement takes an
        environment out of service, it does not begin taking it apart. */
     expect(retired.deployment?.revision).toBe(1);
   });

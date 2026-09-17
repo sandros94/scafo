@@ -2,7 +2,7 @@
 
 import { ScafoError } from "../error.ts";
 import type {
-  BuildRecord,
+  DeploymentRecord,
   DeployRecord,
   DomainClaim,
   EnvironmentRecord,
@@ -11,7 +11,7 @@ import type {
 import { formatDuration } from "./_shared.ts";
 import { deleteKey, readJson, requireJson } from "./cas.ts";
 import { nowDate, type RegistryContext } from "./context.ts";
-import { listBuilds } from "./builds.ts";
+import { listDeployments } from "./deployments.ts";
 import {
   DEPLOY_RECORD_RETENTION_MS,
   isDeployTerminal,
@@ -23,7 +23,7 @@ import { listEnvironments } from "./environments.ts";
 import { type KeepAlive, type LeaseHandle, verifyLease } from "./lease.ts";
 import { isNodeAnswering, listNodeRecords, NODE_LIVENESS_WINDOW_MS } from "./nodes.ts";
 import {
-  buildKey,
+  deploymentKey,
   deployKey,
   domainsPrefix,
   environmentKey,
@@ -39,15 +39,16 @@ import {
 } from "./retirement.ts";
 
 export interface ReapOptions extends RetirementOptions {
-  /** Without `maxAgeMs` no build is ever a candidate. */
-  buildRetention?: { maxAgeMs?: number };
+  /** Without `maxAgeMs` no deployment is ever a candidate. */
+  deploymentRetention?: { maxAgeMs?: number };
   /** Called before each item, so a long reap keeps the lease it runs under. */
   keepAlive?: KeepAlive;
 }
 
 export interface ReapPlan {
   environments: Array<{ project: string; env: string; reason: string }>;
-  builds: Array<{ project: string; id: string; reason: string }>;
+  /** Unreferenced deployment records, by the version each is filed under. */
+  deployments: Array<{ project: string; version: string; reason: string }>;
   /**
    * Deploys still on their way whose accepting node stopped answering. Nobody
    * else will ever finish them: the state lived in that daemon, and a poll would
@@ -75,9 +76,9 @@ export interface DeleteEnvironmentOptions extends RetirementOptions {
 
 /** Plans reapable items. Execution rechecks fresh state before deletion. */
 export async function planReap(ctx: RegistryContext, opts?: ReapOptions): Promise<ReapPlan> {
-  const plan: ReapPlan = { environments: [], builds: [], staleDeploys: [], deploys: [] };
+  const plan: ReapPlan = { environments: [], deployments: [], staleDeploys: [], deploys: [] };
   const now = nowDate(ctx).getTime();
-  const maxAgeMs = opts?.buildRetention?.maxAgeMs;
+  const maxAgeMs = opts?.deploymentRetention?.maxAgeMs;
   /* Read once, and only if a deploy has gone quiet long enough to be worth
      asking about: every one of them is then judged against the same fleet,
      whoever beat while the walk was going on. */
@@ -109,15 +110,15 @@ export async function planReap(ctx: RegistryContext, opts?: ReapOptions): Promis
     }
 
     if (maxAgeMs === undefined) continue;
-    for (const id of await listBuilds(ctx, project)) {
-      const build = await readJson<BuildRecord>(ctx, buildKey(project, id));
-      if (build === null) continue;
+    for (const version of await listDeployments(ctx, project)) {
+      const deployment = await readJson<DeploymentRecord>(ctx, deploymentKey(project, version));
+      if (deployment === null) continue;
 
-      const age = now - Date.parse(build.value.createdAt);
+      const age = now - Date.parse(deployment.value.createdAt);
       if (!Number.isFinite(age) || age < maxAgeMs) continue;
-      plan.builds.push({
+      plan.deployments.push({
         project,
-        id,
+        version,
         reason: `${String(Math.floor(age / 1000))}s old`,
       });
     }
@@ -169,21 +170,21 @@ export async function executeReap(
     );
   }
 
-  const maxAgeMs = opts.buildRetention?.maxAgeMs;
-  for (const target of plan.builds) {
+  const maxAgeMs = opts.deploymentRetention?.maxAgeMs;
+  for (const target of plan.deployments) {
     if (keepAlive !== undefined) lease = await keepAlive();
     await assertLease(ctx, lease);
 
-    const key = buildKey(target.project, target.id);
-    const found = await readJson<BuildRecord>(ctx, key);
+    const key = deploymentKey(target.project, target.version);
+    const found = await readJson<DeploymentRecord>(ctx, key);
     if (found === null) {
-      result.skipped.push({ target: key, reason: "build no longer exists" });
+      result.skipped.push({ target: key, reason: "deployment no longer exists" });
       continue;
     }
 
     const age = nowDate(ctx).getTime() - Date.parse(found.value.createdAt);
     if (maxAgeMs !== undefined && age < maxAgeMs) {
-      result.skipped.push({ target: key, reason: "build is within the retention window" });
+      result.skipped.push({ target: key, reason: "deployment is within the retention window" });
       continue;
     }
 

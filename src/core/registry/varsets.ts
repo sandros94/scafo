@@ -14,7 +14,7 @@ import { ENV_NAME_RULE, isEnvName, RESERVED_ENV_NAMES } from "../utils/env.ts";
 import { sha256Hex } from "../utils/hash.ts";
 import { assertSlug } from "../utils/slug.ts";
 import { stableStringify } from "../utils/json.ts";
-import { deploymentRevision } from "./_deployment.ts";
+import { deploymentRevision } from "./_revision.ts";
 import { isCasConflict, namesFromKeys } from "./_shared.ts";
 import { createJson, deleteKey, readJson, requireJson, updateJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";

@@ -105,16 +105,16 @@ describe("watching a deploy the node already accepted", () => {
     expect(error.message).toBe("Authentication failed");
   });
 
-  it("follows a deploy to the build it recorded", async () => {
+  it("follows a deploy to the deployment it recorded", async () => {
     const watched = await watchDeploy(WATCHED, () => Promise.resolve("minted"), ACCEPTED, {
       pollMs: 0,
       fetchFn: answering([
         { ...ACCEPTED, state: "uploading" },
-        { ...ACCEPTED, state: "deployed", build: "0f0f0f0f" },
+        { ...ACCEPTED, state: "deployed", deployment: "0f0f0f0f" },
       ]),
     });
 
-    expect(watched).toMatchObject({ state: "deployed", build: "0f0f0f0f" });
+    expect(watched).toMatchObject({ state: "deployed", deployment: "0f0f0f0f" });
   });
 
   it("says which varset the deploy carried and what it held, and nothing at all when it carried none", async () => {
@@ -125,20 +125,20 @@ describe("watching a deploy the node already accepted", () => {
           {
             ...ACCEPTED,
             state: "deployed",
-            build: "0f0f0f0f",
+            deployment: "0f0f0f0f",
             varset: { name: "shared", hash: "0123456789abcdef0123456789abcdef" },
           },
         ]),
       }),
     );
 
-    expect(carried).toContain("scafo: build 0f0f0f0f");
+    expect(carried).toContain("scafo: deployment 0f0f0f0f");
     expect(carried).toContain('scafo: carried varset "shared" (0123456789ab)');
 
     const bare = await printedBy(() =>
       watchDeploy(WATCHED, () => Promise.resolve("minted"), ACCEPTED, {
         pollMs: 0,
-        fetchFn: answering([{ ...ACCEPTED, state: "deployed", build: "0f0f0f0f" }]),
+        fetchFn: answering([{ ...ACCEPTED, state: "deployed", deployment: "0f0f0f0f" }]),
       }),
     );
 

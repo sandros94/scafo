@@ -2,43 +2,43 @@
  * Operator-driven cleanup of the deployments Celld has published for one
  * environment.
  *
- * UNSTABLE. Celld keeps every publication it has ever written and deletes none
+ * UNSTABLE. Celld keeps every deployment it has ever written and deletes none
  * of them (denoland/celld#181); until it grows a lifecycle of its own, the only
  * thing that can free that space is an operator saying so. This module is that
  * operator's hands, and it follows upstream the moment upstream has an answer.
  *
  * Two things make it safe to delete inside a fleet scafo does not own. The
- * first is that CELLD'S OWN POINTERS decide what survives: a publication any
+ * first is that CELLD'S OWN POINTERS decide what survives: a deployment any
  * pointer names is never a candidate, and a fleet whose fleet-wide pointer
  * cannot be read is refused outright rather than guessed at. The second is that
  * the shared asset blobs are out of scope entirely — they are content
- * addressed, so a blob the current publication needs is the same object an old
- * publication referenced, and nothing here can tell those two apart.
+ * addressed, so a blob the current deployment needs is the same object an old
+ * deployment referenced, and nothing here can tell those two apart.
  */
 
 import { ScafoError } from "../error.ts";
-import type { BuildRecord } from "../types/registry.ts";
+import type { DeploymentRecord } from "../types/registry.ts";
 import { deleteKey, readJson } from "./cas.ts";
 import type { RegistryContext } from "./context.ts";
-import { buildKey, deployPointerKey, deployPrefix, ID_RE } from "./paths.ts";
+import { deploymentKey, deployPointerKey, deployPrefix, ID_RE } from "./paths.ts";
 
 /** One deployment Celld published, as the bucket still holds it. */
-export interface Publication {
+export interface StoredDeployment {
   /** Celld script name: the first segment under the environment's `deploy/`. */
   script: string;
-  /** Celld version id, which is also the id scafo files its build record under. */
+  /** Celld version id, which is also what scafo files its deployment record under. */
   version: string;
   /** Prefix its objects live under, including the trailing separator. */
   prefix: string;
-  /** Every key beneath {@link Publication.prefix}, lexicographically sorted. */
+  /** Every key beneath {@link StoredDeployment.prefix}, lexicographically sorted. */
   keys: string[];
-  /** When scafo recorded the build of this version, when it recorded one. */
+  /** When scafo recorded this version, when it recorded it at all. */
   createdAt?: string;
-  /** Key of that build record, when there is one to delete alongside the objects. */
-  buildKey?: string;
+  /** Key of that deployment record, when there is one to delete alongside the objects. */
+  recordKey?: string;
 }
 
-/** Why a publication survived the plan it was weighed in. */
+/** Why a deployment survived the plan it was weighed in. */
 export type PruneKeepReason =
   /** A Celld pointer names it; it is what the environment serves, or could serve. */
   | "current"
@@ -47,7 +47,7 @@ export type PruneKeepReason =
   /** Younger than the age the plan was told to delete past. */
   | "within-age";
 
-export interface KeptPublication extends Publication {
+export interface KeptDeployment extends StoredDeployment {
   reason: PruneKeepReason;
 }
 
@@ -57,15 +57,15 @@ export interface PrunePlan {
   /** Versions a Celld pointer names, sorted; none of these is ever deleted. */
   current: string[];
   /** Everything that stays, newest first, each with why it stays. */
-  keep: KeptPublication[];
+  keep: KeptDeployment[];
   /** Everything that goes, in the same newest-first order. */
-  delete: Publication[];
+  delete: StoredDeployment[];
 }
 
 export interface PlanPruneOptions {
   project: string;
   env: string;
-  /** How many of the newest publications survive regardless of their age. */
+  /** How many of the newest deployments survive regardless of their age. */
   keep: number;
   /** Without it age plays no part, and every candidate past `keep` is selected. */
   olderThanMs?: number;
@@ -86,7 +86,7 @@ interface DeployPointer {
 }
 
 /**
- * Weighs one environment's publications against its own pointers, the count to
+ * Weighs one environment's deployments against its own pointers, the count to
  * keep, and the optional age window. Reads only; {@link executePrune} deletes.
  */
 export async function planPrune(ctx: RegistryContext, opts: PlanPruneOptions): Promise<PrunePlan> {
@@ -94,53 +94,53 @@ export async function planPrune(ctx: RegistryContext, opts: PlanPruneOptions): P
   const keys = await ctx.store.list(prefix);
 
   const current = await readPointers(ctx, opts, prefix, keys);
-  const ordered = (await readPublications(ctx, opts.project, prefix, keys)).sort(byNewestFirst);
+  const ordered = (await readDeployments(ctx, opts.project, prefix, keys)).sort(byNewestFirst);
 
   const plan: PrunePlan = { project: opts.project, env: opts.env, current, keep: [], delete: [] };
   const named = new Set(current);
   const nowMs = opts.now.getTime();
 
-  for (const [index, publication] of ordered.entries()) {
-    if (named.has(publication.version)) {
-      plan.keep.push({ ...publication, reason: "current" });
+  for (const [index, deployment] of ordered.entries()) {
+    if (named.has(deployment.version)) {
+      plan.keep.push({ ...deployment, reason: "current" });
     } else if (index < opts.keep) {
-      plan.keep.push({ ...publication, reason: "within-keep" });
+      plan.keep.push({ ...deployment, reason: "within-keep" });
     } else if (
       opts.olderThanMs !== undefined &&
-      !isOlderThan(publication, nowMs, opts.olderThanMs)
+      !isOlderThan(deployment, nowMs, opts.olderThanMs)
     ) {
-      plan.keep.push({ ...publication, reason: "within-age" });
+      plan.keep.push({ ...deployment, reason: "within-age" });
     } else {
-      plan.delete.push(publication);
+      plan.delete.push(deployment);
     }
   }
   return plan;
 }
 
 /**
- * Deletes what a plan selected: each publication's build record, then its
+ * Deletes what a plan selected: each deployment's registry record, then its
  * objects.
  *
  * THE RECORD GOES FIRST, which is the same order the reaper deletes in — the
  * reference before the referent. A run interrupted between the two leaves
- * objects nothing points at, and the next plan reads a publication with no
- * build record as the oldest thing in the fleet, so it comes back as a
+ * objects nothing points at, and the next plan reads a deployment with no
+ * record as the oldest thing in the fleet, so it comes back as a
  * candidate. The other order would leave a record naming objects that are gone,
  * which only the coordinator's retention window ever tidies up.
  */
 export async function executePrune(ctx: RegistryContext, plan: PrunePlan): Promise<PruneResult> {
   const deleted: string[] = [];
 
-  for (const publication of plan.delete) {
+  for (const deployment of plan.delete) {
     /* The pointers are read again before EVERY deletion, not once for the run:
-       a rollback can land while an earlier publication is still being removed,
+       a rollback can land while an earlier deployment is still being removed,
        and a plan is only as current as its last read. */
-    await assertUnnamed(ctx, plan, publication);
-    if (publication.buildKey !== undefined) {
-      await deleteKey(ctx, publication.buildKey);
-      deleted.push(publication.buildKey);
+    await assertUnnamed(ctx, plan, deployment);
+    if (deployment.recordKey !== undefined) {
+      await deleteKey(ctx, deployment.recordKey);
+      deleted.push(deployment.recordKey);
     }
-    for (const key of publication.keys) {
+    for (const key of deployment.keys) {
       await deleteKey(ctx, key);
       deleted.push(key);
     }
@@ -149,7 +149,7 @@ export async function executePrune(ctx: RegistryContext, plan: PrunePlan): Promi
 }
 
 /**
- * Throws `ScafoError("cas-conflict")` when a pointer now names the publication
+ * Throws `ScafoError("cas-conflict")` when a pointer now names the deployment
  * a plan selected for deletion: the plan was made against a fleet that has
  * since chosen it, and deleting what is being served is not a stale decision to
  * carry out but one to make again.
@@ -157,16 +157,16 @@ export async function executePrune(ctx: RegistryContext, plan: PrunePlan): Promi
 async function assertUnnamed(
   ctx: RegistryContext,
   plan: Pick<PrunePlan, "project" | "env">,
-  publication: Publication,
+  deployment: StoredDeployment,
 ): Promise<void> {
   const prefix = deployPrefix(plan.project, plan.env);
   const named = await readPointers(ctx, plan, prefix, await ctx.store.list(prefix));
-  if (!named.includes(publication.version)) return;
+  if (!named.includes(deployment.version)) return;
 
-  throw new ScafoError("cas-conflict", "Publication is in use again", {
+  throw new ScafoError("cas-conflict", "Deployment is in use again", {
     detail:
       `a Celld pointer of "${plan.project}/${plan.env}" now names version ` +
-      `"${publication.version}", which the plan had selected for deletion; nothing of it ` +
+      `"${deployment.version}", which the plan had selected for deletion; nothing of it ` +
       `was deleted — plan the prune again`,
   });
 }
@@ -233,26 +233,25 @@ function asPointer(value: unknown, key: string): DeployPointer {
 function pointerProblem(key: string, wrong: string): ScafoError {
   return new ScafoError("store-nonconforming", "Deployment pointer is not a pointer", {
     detail:
-      `"${key}" ${wrong}, so it cannot say which publication is in use; scafo will not ` +
+      `"${key}" ${wrong}, so it cannot say which deployment is in use; scafo will not ` +
       `delete anything in a fleet whose selector it cannot read`,
   });
 }
 
 /**
- * Every publication under `prefix`, paired with the build record scafo filed
- * for it.
+ * Every deployment under `prefix`, paired with the record scafo filed for it.
  *
  * Grouped by the first two segments, which is Celld's own layout:
  * `deploy/<script>/<version>/...`. A key with fewer segments is a pointer
- * rather than a publication, and is skipped here.
+ * rather than a deployment, and is skipped here.
  */
-async function readPublications(
+async function readDeployments(
   ctx: RegistryContext,
   project: string,
   prefix: string,
   keys: string[],
-): Promise<Publication[]> {
-  const found = new Map<string, Publication>();
+): Promise<StoredDeployment[]> {
+  const found = new Map<string, StoredDeployment>();
 
   for (const key of keys) {
     const rest = key.slice(prefix.length).split("/");
@@ -262,33 +261,33 @@ async function readPublications(
     if (script === "" || version === "") continue;
 
     const id = `${script}/${version}`;
-    const publication = found.get(id);
-    if (publication === undefined) {
+    const deployment = found.get(id);
+    if (deployment === undefined) {
       found.set(id, { script, version, prefix: `${prefix}${id}/`, keys: [key] });
     } else {
-      publication.keys.push(key);
+      deployment.keys.push(key);
     }
   }
 
-  for (const publication of found.values()) {
-    /* Only an id the registry could have filed a build under is worth a read;
-       Celld's version ids are content digests, but nothing here guarantees that
-       every directory under `deploy/` was written by a version of it that
+  for (const deployment of found.values()) {
+    /* Only an id the registry could have filed a deployment under is worth a
+       read; Celld's version ids are content digests, but nothing here guarantees
+       that every directory under `deploy/` was written by a version of it that
        agreed. */
-    if (!ID_RE.test(publication.version)) continue;
+    if (!ID_RE.test(deployment.version)) continue;
 
-    const key = buildKey(project, publication.version);
-    const record = await readJson<BuildRecord>(ctx, key);
+    const key = deploymentKey(project, deployment.version);
+    const record = await readJson<DeploymentRecord>(ctx, key);
     if (record === null) continue;
 
-    publication.createdAt = record.value.createdAt;
-    publication.buildKey = key;
+    deployment.createdAt = record.value.createdAt;
+    deployment.recordKey = key;
   }
   return [...found.values()];
 }
 
-/** Newest first; a publication scafo has no record of sorts last, as the oldest. */
-function byNewestFirst(a: Publication, b: Publication): number {
+/** Newest first; a deployment scafo has no record of sorts last, as the oldest. */
+function byNewestFirst(a: StoredDeployment, b: StoredDeployment): number {
   const at = recordedAt(a);
   const bt = recordedAt(b);
   if (at !== bt) return bt - at;
@@ -296,15 +295,15 @@ function byNewestFirst(a: Publication, b: Publication): number {
   return a.version < b.version ? -1 : 1;
 }
 
-/** When scafo recorded the build, or `-Infinity` when it has no usable record. */
-function recordedAt(publication: Publication): number {
-  if (publication.createdAt === undefined) return Number.NEGATIVE_INFINITY;
-  const at = Date.parse(publication.createdAt);
+/** When scafo recorded the deployment, or `-Infinity` when it has no usable record. */
+function recordedAt(deployment: StoredDeployment): number {
+  if (deployment.createdAt === undefined) return Number.NEGATIVE_INFINITY;
+  const at = Date.parse(deployment.createdAt);
   return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
 }
 
-/** A publication with no usable record is older than any window, being the oldest there is. */
-function isOlderThan(publication: Publication, nowMs: number, olderThanMs: number): boolean {
-  const at = recordedAt(publication);
+/** A deployment with no usable record is older than any window, being the oldest there is. */
+function isOlderThan(deployment: StoredDeployment, nowMs: number, olderThanMs: number): boolean {
+  const at = recordedAt(deployment);
   return Number.isFinite(at) ? nowMs - at > olderThanMs : true;
 }

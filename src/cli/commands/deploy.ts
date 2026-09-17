@@ -221,7 +221,9 @@ export async function watchDeploy(
     if (status.state === "failed") {
       throw new ScafoError("invalid-input", "Deploy failed", { detail: status.detail });
     }
-    if (status.build !== undefined) console.log(`scafo: build ${status.build}`);
+    if (status.deployment !== undefined) {
+      console.log(`scafo: deployment ${status.deployment}`);
+    }
     /* Short enough to read out, long enough to tell two edits of one varset
        apart; the whole digest is in the environment's deployment notice. */
     if (status.varset !== undefined) {

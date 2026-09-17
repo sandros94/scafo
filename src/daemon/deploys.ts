@@ -4,7 +4,7 @@
 import { describeError, isScafoError, ScafoError } from "../core/error.ts";
 import { servingKey } from "../core/placement/serving.ts";
 import { findVersionSkew, versionSkewError } from "../core/placement/version-skew.ts";
-import { createBuild } from "../core/registry/builds.ts";
+import { createDeployment } from "../core/registry/deployments.ts";
 import { nowDate } from "../core/registry/context.ts";
 import {
   createDeployRecord,
@@ -12,7 +12,7 @@ import {
   updateDeployRecord,
 } from "../core/registry/deploys.ts";
 import { listNodeRecords } from "../core/registry/nodes.ts";
-import { recordDeployment } from "../core/registry/_deployment.ts";
+import { recordRevision } from "../core/registry/_revision.ts";
 import { createEnvironment, getEnvironment } from "../core/registry/environments.ts";
 import { fleetPrefix } from "../core/registry/paths.ts";
 import { setNodeSelector, setReplicas } from "../core/registry/placement.ts";
@@ -24,8 +24,8 @@ import {
   type StagedArtifact,
 } from "../core/types/deploy.ts";
 import type {
-  BuildRecord,
-  BuildSource,
+  DeploymentRecord,
+  DeploymentSource,
   CarriedVarset,
   DeployRecord,
   DeployState,
@@ -62,8 +62,8 @@ export type { DeployState } from "../core/types/registry.ts";
 export interface DeployStatus {
   id: string;
   project: string;
-  /** Build the deploy produced; absent until it has been recorded. */
-  build?: string;
+  /** Deployment the deploy produced, by version; absent until it has been recorded. */
+  deployment?: string;
   state: DeployState;
   /** Varset the deploy carried; set once it has been deployed, absent when none. */
   varset?: CarriedVarset;
@@ -79,13 +79,11 @@ export interface DeployMeta {
   script: string;
   /** Ask Celld to use the artifact's already self-contained Worker entry. */
   noBundle?: true;
-  /** Id to record the build as; defaults to the version the runtime assigned. */
-  buildId?: string;
   /** Optional placement intent; existing environments keep it when omitted. */
   replicas?: ReplicaCount;
   /** Optional placement intent; existing environments keep it when omitted. */
   nodeSelector?: NodeSelector;
-  source?: BuildSource;
+  source?: DeploymentSource;
   /** Verified workload identity, assigned only by the deploy-auth boundary. */
   oidc?: OidcActor;
 }
@@ -128,7 +126,7 @@ export function deployStatusOf(record: DeployRecord): DeployStatus {
     id: record.id,
     project: record.project,
     state: record.state,
-    ...(record.build === undefined ? {} : { build: record.build }),
+    ...(record.deployment === undefined ? {} : { deployment: record.deployment }),
     ...(record.varset === undefined ? {} : { varset: record.varset }),
     ...(record.detail === undefined ? {} : { detail: record.detail }),
   };
@@ -168,7 +166,7 @@ export function createDeployService(
     const current = statuses.get(id);
     if (current === undefined) return null;
     /* Terminal means terminal. A deploy that reached `deployed` HAPPENED — its
-       revision is in the registry, and the environment is serving the build —
+       revision is in the registry, and the environment is serving the deployment —
        so a cancellation that lands afterwards has nothing left to cancel and
        must not rewrite the outcome as a failure. The scheduler reports one
        whenever the task's signal was aborted, whatever the task returned. */
@@ -185,7 +183,7 @@ export function createDeployService(
     carried: CarriedVars | undefined,
     artifact: StagedArtifact,
     signal: AbortSignal,
-  ): Promise<BuildRecord> {
+  ): Promise<DeploymentRecord> {
     /* What was handed to the runtime is what the notice is stamped with: both
        come from the one read taken at admission, so an edit made while the
        artifact was uploading cannot leave the two disagreeing. */
@@ -227,28 +225,27 @@ export function createDeployService(
       celldVersionId = published.celldVersionId;
 
       throwIfStopped(signal);
-      const build = await createBuild(daemon.registry, meta.project, {
-        id: meta.buildId ?? published.celldVersionId,
-        celldVersionId: published.celldVersionId,
+      const deployment = await createDeployment(daemon.registry, meta.project, {
+        version: published.celldVersionId,
         ...(meta.source === undefined ? {} : { source: meta.source }),
         ...(meta.oidc === undefined ? {} : { oidc: meta.oidc }),
       });
-      update(id, { build: build.id });
+      update(id, { deployment: deployment.version });
       throwIfStopped(signal);
       /* The commit point. Past it the deployment revision is written and there
          is nothing left to abandon, so the signal is not consulted again: a
          cancellation that arrives now would only mislabel work that is done. */
-      await recordDeployment(daemon.registry, meta.project, meta.environment, build.id, {
+      await recordRevision(daemon.registry, meta.project, meta.environment, deployment.version, {
         signal,
         ...(stamp === undefined ? {} : { varset: stamp }),
       });
       await updateDeployRecord(daemon.registry, meta.project, id, {
         state: "deployed",
-        build: build.id,
+        deployment: deployment.version,
         ...(stamp === undefined ? {} : { varset: stamp }),
       });
       update(id, { state: "deployed", ...(stamp === undefined ? {} : { varset: stamp }) });
-      return build;
+      return deployment;
     } catch (error) {
       if (celldVersionId === undefined) throw error;
       throw new Error(

@@ -19,7 +19,7 @@ import type { OperatorKeyFile } from "../../src/cli/_operator-key.ts";
 import { signNodeToken } from "../../src/core/auth/node-token.ts";
 import {
   getEnvironment,
-  listBuilds,
+  listDeployments,
   readJson,
   readMeta,
   type RegistryContext,
@@ -33,10 +33,10 @@ import {
   BOOT_DEADLINE_MS,
   BRIDGE_NETWORK,
   type BucketSettings,
-  buildIdOf,
   buildRepo,
   type CommandResult,
   DEADLINE_MS,
+  deploymentOf,
   FIXTURES,
   type HttpAnswer,
   httpGet,
@@ -122,9 +122,9 @@ let apiPort: number;
 let registry: RegistryContext;
 let keyPath: string;
 let operatorKey: OperatorKeyFile;
-let buildV1: string;
-let buildV2: string;
-let buildCi: string;
+let versionV1: string;
+let versionV2: string;
+let versionCi: string;
 
 const tmpDirs: string[] = [];
 /** Daemon output retained for failure context. */
@@ -256,7 +256,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   );
 
   it(
-    "deploys the first build and reports it deployed",
+    "deploys the first version and reports it deployed",
     async () => {
       const started = Date.now();
       const result = await runCli(deployArgs(await stageApp("v1")), {});
@@ -266,15 +266,15 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expectCleanExit(result);
       expect(result.output, daemonLogTail()).toContain("deployed");
 
-      buildV1 = buildIdOf(result.output);
-      expect(await listBuilds(registry, PROJECT)).toContain(buildV1);
-      observed.buildV1 = buildV1;
+      versionV1 = deploymentOf(result.output);
+      expect(await listDeployments(registry, PROJECT)).toContain(versionV1);
+      observed.versionV1 = versionV1;
     },
     STEP_TIMEOUT_MS,
   );
 
   it(
-    "serves the first build through Caddy on the environment host and apex",
+    "serves the first deployment through Caddy on the environment host and apex",
     async () => {
       for (const host of [envHost(), apexHost()]) {
         const answer = await untilServes(host, "v1");
@@ -410,7 +410,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   );
 
   it(
-    "deploys a second build for the existing environment",
+    "deploys a second version for the existing environment",
     async () => {
       const started = Date.now();
       const result = await runCli(deployArgs(await stageApp("v2")), {});
@@ -419,9 +419,9 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
 
       expectCleanExit(result);
       expect(result.output, daemonLogTail()).toContain("deployed");
-      buildV2 = buildIdOf(result.output);
-      expect(buildV2).not.toBe(buildV1);
-      observed.buildV2 = buildV2;
+      versionV2 = deploymentOf(result.output);
+      expect(versionV2).not.toBe(versionV1);
+      observed.versionV2 = versionV2;
 
       await untilServes(envHost(), "v2");
       await untilServes(apexHost(), "v2");
@@ -513,9 +513,9 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expectCleanExit(result);
       expect(result.output, daemonLogTail()).toContain("deployed");
 
-      buildCi = buildIdOf(result.output);
-      expect(await listBuilds(registry, PROJECT)).toContain(buildCi);
-      observed.workloadBuild = buildCi;
+      versionCi = deploymentOf(result.output);
+      expect(await listDeployments(registry, PROJECT)).toContain(versionCi);
+      observed.workloadDeployment = versionCi;
       observed.workloadSubject = WORKLOAD_SUBJECT;
 
       const answer = await untilServes(ciHost(), "v3");

@@ -2,12 +2,12 @@
 
 import { S3Client } from "uns3";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { recordDeployment } from "../../src/core/registry/_deployment.ts";
+import { recordRevision } from "../../src/core/registry/_revision.ts";
 import {
   acquireLease,
   checkDomain,
   claimDomain,
-  createBuild,
+  createDeployment,
   createEnvironment,
   createProject,
   getVarset,
@@ -213,7 +213,7 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
       "bootstraps, deploys, configures and releases",
       async () => {
         const project = `smoke${randomHex(3)}`;
-        const buildId = randomHex(8);
+        const version = randomHex(8);
         const host = `${project}.example.test`;
 
         const meta = await initRegistry(ctx, { platformDomains: ["apps.example.test"] });
@@ -223,11 +223,11 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
         await createProject(ctx, { slug: project });
         await expect(listProjects(ctx)).resolves.toContain(project);
 
-        const build = await createBuild(ctx, project, { id: buildId });
-        expect(build.id).toBe(buildId);
+        const deployment = await createDeployment(ctx, project, { version });
+        expect(deployment.version).toBe(version);
 
         await createEnvironment(ctx, project, { name: "prod" });
-        const flipped = await recordDeployment(ctx, project, "prod", buildId);
+        const flipped = await recordRevision(ctx, project, "prod", version);
         expect(flipped.environment.deployment).toMatchObject({ revision: 1 });
 
         await putVarset(ctx, project, { name: "shared", vars: { TOKEN: "s3cr3t" } });

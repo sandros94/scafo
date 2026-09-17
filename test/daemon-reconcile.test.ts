@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
-import { createBuild } from "../src/core/registry/builds.ts";
+import { recordRevision } from "../src/core/registry/_revision.ts";
+import { createDeployment } from "../src/core/registry/deployments.ts";
 import { createEnvironment } from "../src/core/registry/environments.ts";
 import { acquireLease } from "../src/core/registry/lease.ts";
 import { getNode, registerNode } from "../src/core/registry/nodes.ts";
@@ -21,8 +21,8 @@ import { ctxWith } from "./_helpers.ts";
 
 const PROJECT = "shop";
 const ENV = "production";
-const BUILD_ONE = "1111aaaa";
-const BUILD_TWO = "2222bbbb";
+const VERSION_ONE = "1111aaaa";
+const VERSION_TWO = "2222bbbb";
 /** The Celld this node booted with; what every other node's is compared against. */
 const CELLD_VERSION = "0.5.0";
 
@@ -62,8 +62,8 @@ describe("environment-owned reconciliation", () => {
     const world = await seededWorld();
     await world.reconciler.runOnce();
     world.events.length = 0;
-    await createBuild(world.daemon.registry, PROJECT, { id: BUILD_TWO, celldVersionId: BUILD_TWO });
-    await recordDeployment(world.daemon.registry, PROJECT, ENV, BUILD_TWO);
+    await createDeployment(world.daemon.registry, PROJECT, { version: VERSION_TWO });
+    await recordRevision(world.daemon.registry, PROJECT, ENV, VERSION_TWO);
 
     expect(await world.reconciler.runOnce()).toEqual([]);
     expect(world.events).toEqual(["ingress:2"]);
@@ -357,8 +357,8 @@ async function seededWorld() {
   const registry = ctxWith(new MemoryCasStore());
   await createProject(registry.ctx, { slug: PROJECT });
   await createEnvironment(registry.ctx, PROJECT, { name: ENV });
-  await createBuild(registry.ctx, PROJECT, { id: BUILD_ONE, celldVersionId: BUILD_ONE });
-  await recordDeployment(registry.ctx, PROJECT, ENV, BUILD_ONE);
+  await createDeployment(registry.ctx, PROJECT, { version: VERSION_ONE });
+  await recordRevision(registry.ctx, PROJECT, ENV, VERSION_ONE);
   const lease = await acquireLease(registry.ctx, "coordinator");
   if (lease === null) throw new Error("lease unavailable");
   await writePlacement(registry.ctx, PROJECT, ENV, ["node-a"], lease);

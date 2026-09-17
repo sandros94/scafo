@@ -7,7 +7,7 @@ import { H3, HTTPError } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
+import { recordRevision } from "../src/core/registry/_revision.ts";
 import { type DaemonState, createNodeApp, type EnvironmentResult } from "../src/daemon/app.ts";
 import type { AssignmentFailure } from "../src/daemon/_assign.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
@@ -18,7 +18,7 @@ import { ScafoError } from "../src/core/error.ts";
 import {
   acquireLease,
   claimDomain,
-  createBuild,
+  createDeployment,
   createEnvironment,
   createProject,
   deleteKey,
@@ -39,7 +39,7 @@ const ENVIRONMENT = "prod";
 const CUSTOM_DOMAIN = "shop.example.com";
 /** The one platform domain this node serves; its bare apex is the fleet's API. */
 const PLATFORM_DOMAIN = "apps.test";
-const BUILD = "aaaa1111";
+const VERSION = "aaaa1111";
 
 /** What the stand-in supervisor reports; the state route must pass it through. */
 const PROCESSES: ProcessStatus[] = [
@@ -376,13 +376,13 @@ describe("GET /v1/state, on the node that is coordinating", () => {
 describe("GET /v1/ingress/ask", () => {
   it("answers for a platform label only when something real is behind it", async () => {
     await deployable();
-    await createBuild(clock.ctx, PROJECT, { id: BUILD });
-    await recordDeployment(clock.ctx, PROJECT, ENVIRONMENT, BUILD);
+    await createDeployment(clock.ctx, PROJECT, { version: VERSION });
+    await recordRevision(clock.ctx, PROJECT, ENVIRONMENT, VERSION);
     const real = await app.request(`/v1/ingress/ask?domain=${PROJECT}--${ENVIRONMENT}.apps.test`);
     expect(real.status).toBe(200);
 
-    const directBuild = await app.request(`/v1/ingress/ask?domain=${PROJECT}--${BUILD}.apps.test`);
-    expect(directBuild.status).toBe(404);
+    const direct = await app.request(`/v1/ingress/ask?domain=${PROJECT}--${VERSION}.apps.test`);
+    expect(direct.status).toBe(404);
 
     await createEnvironment(clock.ctx, PROJECT, { name: "undeployed" });
     const undeployed = await app.request(`/v1/ingress/ask?domain=${PROJECT}--undeployed.apps.test`);
@@ -645,8 +645,8 @@ async function deployable(): Promise<void> {
 
 async function deployedEnvironment(): Promise<void> {
   await deployable();
-  await createBuild(clock.ctx, PROJECT, { id: BUILD });
-  await recordDeployment(clock.ctx, PROJECT, ENVIRONMENT, BUILD);
+  await createDeployment(clock.ctx, PROJECT, { version: VERSION });
+  await recordRevision(clock.ctx, PROJECT, ENVIRONMENT, VERSION);
 }
 
 /** One call to the selector route with `sent` as the whole body. */
