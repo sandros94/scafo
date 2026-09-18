@@ -25,7 +25,6 @@ import type { NodeRecord, PlacementRecord } from "../../src/core/types/registry.
 import type { ProcessStatus } from "../../src/core/types/supervisor.ts";
 import {
   deploymentOf,
-  buildRepo,
   describeFailure,
   type BucketSettings,
   type CommandResult,
@@ -119,7 +118,6 @@ const tmpDirs: string[] = [];
  * the store is what went wrong, names the CLI and never the bucket.
  */
 async function bringUp(): Promise<void> {
-  await buildRepo();
   if (PREBUILT_IMAGE === "")
     await GenericContainer.fromDockerfile(REPO_ROOT, "Dockerfile")
       .withCache(true)

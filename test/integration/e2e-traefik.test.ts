@@ -24,7 +24,6 @@ import {
   NODE_IMAGE,
   BOOT_DEADLINE_MS,
   type BucketSettings,
-  buildRepo,
   type CommandResult,
   DEADLINE_MS,
   deploymentOf,
@@ -103,7 +102,6 @@ const observed: Record<string, unknown> = {};
 
 describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   beforeAll(async () => {
-    await buildRepo();
     store = await startStore(BUCKET);
 
     const staticConfig = (await readFile(join(FIXTURES, "traefik.yml"), "utf8")).replace(
@@ -123,7 +121,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
 
     daemon = await new GenericContainer(NODE_IMAGE)
       .withNetworkMode(`container:${traefik.getId()}`)
-      .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "rw" }])
+      .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "ro" }])
       .withWorkingDir("/work")
       .withEnvironment({
         ...storeEnv(store.fromContainers, BUCKET),

@@ -822,7 +822,7 @@ async function startNode(id: string, labels?: string): Promise<Node> {
 
   const daemon = await new GenericContainer(NODE_IMAGE)
     .withNetworkMode(`container:${ingress.getId()}`)
-    .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "rw" }])
+    .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "ro" }])
     .withWorkingDir("/work")
     .withEnvironment({
       SCAFO_S3_ENDPOINT: storeFromContainers,

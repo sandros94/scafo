@@ -25,7 +25,7 @@ Ask before acting when intent is ambiguous. For design or product decisions, run
 
 The ordinary integration suite starts an S3 store with testcontainers. Set `SCAFO_TEST_STORE=seaweedfs|rustfs`, or supply `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, and `S3_BUCKET`.
 
-Docker E2E is opt-in; absent Docker skips a suite, not a product failure. Run `pnpm build` first (the suites run `dist/cli/index.mjs`) and `docker build --target probe -t scafo-probe .` once (the node host the suites bind-mount the build into). Use `vitest.no-store.config.ts`; these suites own their containers.
+Docker E2E is opt-in; absent Docker skips a suite, not a product failure. A run builds `dist/` once, before any suite starts (`test/integration/_global-setup.ts`); no suite builds for itself and every node container bind-mounts the worktree read-only, so several suites may share one command and run in parallel. Run `docker build --target probe -t scafo-probe .` once (the node host the suites mount the build into). Use `vitest.no-store.config.ts`; these suites own their containers.
 
 - `SCAFO_E2E=1 pnpm vitest run --config vitest.no-store.config.ts test/integration/e2e.test.ts` — Caddy, deploy adoption, OIDC, retirement.
 - `SCAFO_E2E=1 pnpm vitest run --config vitest.no-store.config.ts test/integration/e2e-traefik.test.ts` — Traefik pull provider.

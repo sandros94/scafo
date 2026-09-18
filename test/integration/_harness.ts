@@ -13,7 +13,7 @@ import { createUns3Store } from "../../src/drivers/store/uns3.ts";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 
-/** Root of the worktree the suites build and bind-mount into the node image. */
+/** Root of the worktree, built once per run and bind-mounted read-only into the node image. */
 export const REPO_ROOT: string = resolve(HERE, "../..");
 /** Fixtures every suite copies from: the application, and the ingress configs. */
 export const FIXTURES: string = join(HERE, "_e2e-fixtures");
@@ -364,12 +364,6 @@ export function run(
     child.on("error", failOnce);
     child.on("close", (code) => finish({ code: code ?? -1, output }));
   });
-}
-
-/** Builds `dist/`, which the daemon container runs off the bind-mounted worktree. */
-export async function buildRepo(): Promise<void> {
-  const built = await run("pnpm", ["build"], REPO_ROOT, process.env as Record<string, string>);
-  if (built.code !== 0) throw new Error(`"pnpm build" failed:\n${built.output}`);
 }
 
 export function delay(ms: number): Promise<void> {

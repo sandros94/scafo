@@ -33,7 +33,6 @@ import {
   BOOT_DEADLINE_MS,
   BRIDGE_NETWORK,
   type BucketSettings,
-  buildRepo,
   type CommandResult,
   DEADLINE_MS,
   deploymentOf,
@@ -134,8 +133,6 @@ const tmpDirs: string[] = [];
 /** Daemon output retained for failure context. */
 const daemonLog: string[] = [];
 /** Raw observations the report is written from; printed once at the end. */
-    await buildRepo();
-
 const observed: Record<string, unknown> = {};
 
 describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
@@ -162,7 +159,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
 
     daemon = await new GenericContainer(NODE_IMAGE)
       .withNetworkMode(`container:${caddy.getId()}`)
-      .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "rw" }])
+      .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "ro" }])
       .withWorkingDir("/work")
       .withEnvironment({
         SCAFO_S3_ENDPOINT: storeFromContainers,

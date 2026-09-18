@@ -6,6 +6,7 @@ export default defineConfig({
   ...baseConfig,
   test: {
     ...baseConfig.test,
-    globalSetup: [],
+    /* No store container; the container suites share one build instead. */
+    globalSetup: ["./test/integration/_global-setup.ts"],
   },
 });

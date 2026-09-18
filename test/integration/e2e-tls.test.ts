@@ -27,7 +27,6 @@ import {
   NODE_IMAGE,
   BOOT_DEADLINE_MS,
   type BucketSettings,
-  buildRepo,
   type CommandResult,
   DEADLINE_MS,
   registryAt,
@@ -152,8 +151,6 @@ interface Caddy {
 
 describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () => {
   beforeAll(async () => {
-    await buildRepo();
-
     network = await new Network().start();
     store = await startStore(BUCKET);
     registry = registryAt(store.fromHost, BUCKET);
@@ -190,7 +187,7 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
     daemon = await new GenericContainer(NODE_IMAGE)
       .withNetwork(network)
       .withNetworkAliases(NODE_ALIAS)
-      .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "rw" }])
+      .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "ro" }])
       .withWorkingDir("/work")
       .withEnvironment({
         ...storeEnv(store.fromContainers, BUCKET),

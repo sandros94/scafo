@@ -17,7 +17,6 @@ import type { NodeRecord } from "../../src/core/types/registry.ts";
 import {
   BOOT_DEADLINE_MS,
   type BucketSettings,
-  buildRepo,
   type CommandResult,
   DEADLINE_MS,
   deploymentOf,
@@ -125,8 +124,6 @@ const observed: Record<string, unknown> = {};
 
 describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () => {
   beforeAll(async () => {
-    await buildRepo();
-
     const started = Date.now();
     const image =
       PREBUILT_IMAGE === ""

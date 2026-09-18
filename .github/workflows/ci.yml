@@ -325,9 +325,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build packages
-        run: pnpm build
-
       - name: Download the test host image
         uses: actions/download-artifact@v4
         with:
@@ -365,7 +362,7 @@ jobs:
 
       - name: Test Docker end to end
         run: >-
-          pnpm vitest run --config vitest.no-store.config.ts --no-file-parallelism --slowTestThreshold=1000 ${{ matrix.files }}
+          pnpm vitest run --config vitest.no-store.config.ts --slowTestThreshold=1000 ${{ matrix.files }}
 
   test-k3s-e2e:
     # The most expensive job in the workflow: a K3s cluster around the runtime
