@@ -43,7 +43,6 @@ beforeEach(async () => {
   await createProject(clock.ctx, { slug: PROJECT });
   await createDeployment(clock.ctx, PROJECT, { version: VERSION });
   await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
-  await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true });
   await recordRevision(clock.ctx, PROJECT, "prod", VERSION);
 
   const acquired = await acquireLease(clock.ctx, "node-a");
@@ -58,7 +57,7 @@ describe("retiring and taking it back", () => {
     const retired = await retireEnvironment(clock.ctx, PROJECT, "prod");
 
     expect(retired).toEqual({ ...before, retiredAt: new Date(clock.nowMs()).toISOString() });
-    /* Its deployment, its domains and its varset are untouched: retirement takes an
+    /* Its deployment and its domains are untouched: retirement takes an
        environment out of service, it does not begin taking it apart. */
     expect(retired.deployment?.revision).toBe(1);
   });
@@ -154,14 +153,6 @@ describe("retirementState", () => {
 });
 
 describe("what deleteEnvironment will act on", () => {
-  it("deletes an ephemeral environment, as it always has", async () => {
-    const { deleted } = await deleteEnvironment(clock.ctx, PROJECT, "preview", lease);
-
-    expect(deleted).toContain(environmentKey(PROJECT, "preview"));
-    await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, "preview"), "not-found");
-    await invariants(store);
-  });
-
   it("deletes a retired environment once its grace has run out", async () => {
     await retireEnvironment(clock.ctx, PROJECT, "prod");
     clock.tick(GRACE_MS);
@@ -177,8 +168,8 @@ describe("what deleteEnvironment will act on", () => {
 
     const { deleted } = await deleteEnvironment(clock.ctx, PROJECT, "prod", lease, { force: true });
 
-    /* Neither ephemeral nor retired: force is the one path that discards a
-       long-lived environment in a single call. */
+    /* Never retired: force is the one path that discards an environment in a
+       single call. */
     expect(deleted).toContain(environmentKey(PROJECT, "prod"));
     expect(store.dels).toBeGreaterThan(deletesBefore);
     await invariants(store);

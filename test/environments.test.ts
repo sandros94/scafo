@@ -44,14 +44,20 @@ describe("environment records", () => {
     await expect(listEnvironments(clock.ctx, PROJECT)).resolves.toEqual(["alpha", ENV, "zeta"]);
   });
 
-  it("is idempotent for identity and refuses a different one", async () => {
+  it("is idempotent for identity and refuses a record that does not match it", async () => {
     await expect(createEnvironment(clock.ctx, PROJECT, { name: ENV })).resolves.toEqual(
       await getEnvironment(clock.ctx, PROJECT, ENV),
     );
-    await rejectsWith(
-      () => createEnvironment(clock.ctx, PROJECT, { name: ENV, ephemeral: true }),
-      "immutable",
+
+    /* A prefix is fixed at creation and never moves, so a record carrying
+       another one is not this environment however it came to be there. */
+    const stored = await getEnvironment(clock.ctx, PROJECT, ENV);
+    await clock.ctx.store.put(
+      environmentKey(PROJECT, ENV),
+      JSON.stringify({ ...stored, prefix: `${stored.prefix}-moved` }),
     );
+
+    await rejectsWith(() => createEnvironment(clock.ctx, PROJECT, { name: ENV }), "immutable");
   });
 
   it("records replicas and selectors on first creation without making them identity", async () => {
@@ -106,55 +112,6 @@ describe("deployment revision", () => {
     await expect(getEnvironment(clock.ctx, PROJECT, ENV)).resolves.toMatchObject({
       deployment: { revision: 2 },
     });
-  });
-
-  it("stamps the varset the publication carried", async () => {
-    const update = await recordRevision(clock.ctx, PROJECT, ENV, VERSION, {
-      varset: { name: "shared", hash: "a".repeat(64) },
-    });
-
-    expect(update.environment.deployment).toEqual({
-      revision: 1,
-      deployedAt: new Date(clock.nowMs()).toISOString(),
-      varset: { name: "shared", hash: "a".repeat(64) },
-    });
-  });
-
-  it("clears the stamp when the next publication carries no varset", async () => {
-    await recordRevision(clock.ctx, PROJECT, ENV, VERSION, {
-      varset: { name: "shared", hash: "a".repeat(64) },
-    });
-
-    /* Kept, the stamp would claim the environment still deploys with variables
-       it was deliberately taken off. */
-    const update = await recordRevision(clock.ctx, PROJECT, ENV, VERSION);
-
-    expect(update.environment.deployment).toEqual({
-      revision: 2,
-      deployedAt: new Date(clock.nowMs()).toISOString(),
-    });
-    const stored = await getEnvironment(clock.ctx, PROJECT, ENV);
-    expect(stored.deployment).not.toHaveProperty("varset");
-  });
-
-  it("refuses a malformed varset stamp as it refuses a malformed revision", async () => {
-    const environment = await getEnvironment(clock.ctx, PROJECT, ENV);
-
-    for (const varset of [
-      "shared",
-      null,
-      { name: "shared" },
-      { hash: "aaaa" },
-      { name: 1, hash: "aaaa" },
-      { name: "shared", hash: 1 },
-    ]) {
-      expect(() =>
-        deploymentRevision({
-          ...environment,
-          deployment: { revision: 1, deployedAt: environment.createdAt, varset } as never,
-        }),
-      ).toThrow(expect.objectContaining({ code: "invalid-input" }));
-    }
   });
 
   it("refuses malformed and exhausted revisions instead of wrapping them", async () => {

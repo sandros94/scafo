@@ -11,7 +11,6 @@ export * from "./deploys.ts";
 export * from "./environments.ts";
 export * from "./retirement.ts";
 export * from "./placement.ts";
-export * from "./varsets.ts";
 export * from "./nodes.ts";
 export * from "./identity.ts";
 export * from "./operators.ts";

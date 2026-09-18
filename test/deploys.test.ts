@@ -27,12 +27,7 @@ import {
 } from "../src/daemon/_intake.ts";
 import type { Reconciler } from "../src/daemon/reconcile.ts";
 import { OIDC_AUDIENCE, signNodeToken } from "../src/core/auth/index.ts";
-import {
-  deploysPrefix,
-  environmentKey,
-  projectKey,
-  varsetKey,
-} from "../src/core/registry/paths.ts";
+import { deploysPrefix, environmentKey, projectKey } from "../src/core/registry/paths.ts";
 import { ScafoError, type ProblemDetails } from "../src/core/error.ts";
 import { NODE_LIVENESS_WINDOW_MS } from "../src/core/registry/nodes.ts";
 import {
@@ -43,14 +38,11 @@ import {
   getDeployment,
   getDeployRecord,
   getEnvironment,
-  putVarset,
   registerNode,
-  setEnvironmentVarset,
   setTrustPolicy,
   trustOperator,
   unblockProject,
   unfreezeDeploys,
-  varsetHash,
 } from "../src/core/registry/index.ts";
 import type {
   DeployRunInput,
@@ -688,77 +680,6 @@ describe("an environment another node serves on a different Celld", () => {
   });
 });
 
-describe("the varset an environment's deploys carry", () => {
-  const VARS = { DATABASE_URL: "postgres://db.test/app", FEATURE_FLAGS: "beta" };
-
-  /** An environment of the project pointed at a varset holding {@link VARS}. */
-  async function pointedAt(name: string): Promise<void> {
-    await createEnvironment(clock.ctx, PROJECT, { name: ENVIRONMENT });
-    await putVarset(clock.ctx, PROJECT, { name, vars: VARS });
-    await setEnvironmentVarset(clock.ctx, PROJECT, ENVIRONMENT, name);
-  }
-
-  it("hands the runner the variables and stamps what it carried", async () => {
-    await pointedAt("shared");
-
-    const id = (await responseId(await upload(await operatorToken()))) as string;
-    await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
-
-    const stamp = { name: "shared", hash: await varsetHash(VARS) };
-    expect(runs[0]?.vars).toEqual(VARS);
-    expect(daemon.deploys?.get(id)).toMatchObject({ varset: stamp });
-    const environment = await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
-    expect(environment.deployment).toMatchObject({ revision: 1, varset: stamp });
-  });
-
-  it("carries and stamps nothing for an environment pointed at no varset", async () => {
-    const id = (await responseId(await upload(await operatorToken()))) as string;
-    await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
-
-    expect(runs[0]).not.toHaveProperty("vars");
-    expect(daemon.deploys?.get(id)).not.toHaveProperty("varset");
-    const environment = await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
-    expect(environment.deployment).not.toHaveProperty("varset");
-  });
-
-  it("refuses the deploy when the varset it names cannot be read, naming both ways out", async () => {
-    await pointedAt("shared");
-    await clock.ctx.store.put(
-      varsetKey(PROJECT, "shared"),
-      JSON.stringify({ v: 1, alg: "A256GCM", iv: "aaaa", ct: "bbbb" }),
-    );
-
-    const response = await upload(await operatorToken());
-
-    expect(response.status).toBe(400);
-    const problem = await problemOf(response);
-    expect(problem.type).toBe("urn:scafo:invalid-varset");
-    expect(problem.detail).toContain("cannot read");
-    expect(problem.detail).toContain("scafo varset set");
-    expect(problem.detail).toContain("--none");
-    expect(runs).toEqual([]);
-  });
-
-  it("refuses the deploy when the varset it names is gone, naming both ways out", async () => {
-    await pointedAt("shared");
-    await clock.ctx.store.del(varsetKey(PROJECT, "shared"));
-
-    const response = await upload(await operatorToken());
-
-    expect(response.status).toBe(404);
-    const problem = await problemOf(response);
-    expect(problem.type).toBe("urn:scafo:not-found");
-    expect(problem.detail).toContain(ENVIRONMENT);
-    expect(problem.detail).toContain("shared");
-    expect(problem.detail).toContain("scafo varset set");
-    expect(problem.detail).toContain("scafo env varset");
-
-    /* Refused at intake: nothing is published into an environment whose
-       variables cannot be read. */
-    expect(runs).toEqual([]);
-  });
-});
-
 describe("what an upload must carry", () => {
   it("does not retain the legacy body-selected deploy route", async () => {
     const response = await app.request("/v1/deploys", {
@@ -873,8 +794,6 @@ describe("what an upload must carry", () => {
     const bad = [
       { project: "Not A Slug" },
       { environment: "UPPER" },
-      { noBundle: false },
-      { noBundle: "true" },
       { replicas: 0 },
       { replicas: "every" },
       { nodeSelector: "tier=fast" },
@@ -892,14 +811,22 @@ describe("what an upload must carry", () => {
 });
 
 describe("what happens to an accepted deploy", () => {
-  it("carries the no-bundle assertion to the deploy runner", async () => {
+  it("ignores metadata fields it has no setting for, as it always has", async () => {
+    /* Artifact-shaping settings live in the artifact's own config now. A client
+       built against an older node still deploys: intake reads the fields it
+       knows and says nothing about the rest. */
     const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), noBundle: true }),
+      await upload(await operatorToken(), {
+        ...meta(),
+        script: "worker",
+        noBundle: true,
+      } as never),
     )) as string;
 
     await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
     expect(runs).toHaveLength(1);
-    expect(runs[0]).toMatchObject({ noBundle: true });
+    expect(runs[0]).not.toHaveProperty("script");
+    expect(runs[0]).not.toHaveProperty("noBundle");
   });
 
   it("publishes the artifact, records the deployment and makes it current", async () => {
@@ -913,8 +840,6 @@ describe("what happens to an accepted deploy", () => {
     expect(runs[0]).toMatchObject({
       project: PROJECT,
       environment: ENVIRONMENT,
-      /* Defaulted from the project when the upload named no script. */
-      script: PROJECT,
       target: { prefix: `${PREFIX}/fleets/${PROJECT}/${ENVIRONMENT}`, bucket: "registry" },
     });
     /* The bytes the client packed arrive intact through the raw body. */
@@ -927,17 +852,13 @@ describe("what happens to an accepted deploy", () => {
     expect(environment.deployment?.revision).toBe(1);
   });
 
-  it("deploys into an ephemeral environment somebody else created", async () => {
+  it("deploys into an environment somebody else created", async () => {
     /*
-     * A preview environment is created ephemeral, with an idle window that
-     * eventually reaps it. A deploy only needs that environment to exist — it
-     * expresses no opinion about how it was set up — so it must not be refused
-     * for disagreeing with settings it never named.
+     * A deploy only needs the environment to exist — it expresses no opinion
+     * about how it was set up — so it must not be refused for disagreeing with
+     * settings it never named.
      */
-    await createEnvironment(clock.ctx, PROJECT, {
-      name: "preview",
-      ephemeral: true,
-    });
+    await createEnvironment(clock.ctx, PROJECT, { name: "preview" });
 
     const id = (await responseId(
       await upload(await operatorToken(), { ...meta(), environment: "preview" }),
@@ -945,9 +866,7 @@ describe("what happens to an accepted deploy", () => {
 
     await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
     /* And it is still the environment it was: the deploy created nothing. */
-    await expect(getEnvironment(clock.ctx, PROJECT, "preview")).resolves.toMatchObject({
-      ephemeral: true,
-    });
+    await expect(getEnvironment(clock.ctx, PROJECT, "preview")).resolves.toMatchObject({});
   });
 
   it("creates the environment with the replica count the upload asked for", async () => {
@@ -1175,7 +1094,6 @@ describe("what happens to an accepted deploy", () => {
     const admission = await daemon.deploys?.admit({
       project: PROJECT,
       environment: ENVIRONMENT,
-      script: PROJECT,
     });
     const status = await admission?.start(
       {
@@ -1296,21 +1214,6 @@ describe("the record a deploy leaves in the registry", () => {
     await expect(getDeployRecord(clock.ctx, PROJECT, id)).resolves.toMatchObject({
       state: "deployed",
       oidc: { issuer: ISS, subject: SUBJECT },
-    });
-  });
-
-  it("records the varset the deploy carried", async () => {
-    const vars = { DATABASE_URL: "postgres://db.test/app" };
-    await createEnvironment(clock.ctx, PROJECT, { name: ENVIRONMENT });
-    await putVarset(clock.ctx, PROJECT, { name: "shared", vars });
-    await setEnvironmentVarset(clock.ctx, PROJECT, ENVIRONMENT, "shared");
-
-    const id = (await responseId(await upload(await operatorToken()))) as string;
-    await settled(id);
-
-    await expect(getDeployRecord(clock.ctx, PROJECT, id)).resolves.toMatchObject({
-      state: "deployed",
-      varset: { name: "shared", hash: await varsetHash(vars) },
     });
   });
 

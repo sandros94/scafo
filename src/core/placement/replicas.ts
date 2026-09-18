@@ -12,19 +12,15 @@ import type { EnvironmentRecord, ReplicaCount } from "../types/registry.ts";
 /**
  * What an environment gets when its record names no replica count.
  *
- * These defaults are what makes the whole feature invisible to an installation
- * that never asked for it: a long-lived environment runs on every node exactly
- * as it did before placement existed, and an ephemeral preview — which exists to
- * answer a handful of requests and be thrown away — runs on one. On a single
- * node the two are the same answer.
+ * This default is what makes the whole feature invisible to an installation that
+ * never asked for it: the environment runs on every node that may serve it, and
+ * a count is only ever a narrowing an operator asked for.
  */
-export function defaultReplicas(ephemeral: boolean): ReplicaCount {
-  return ephemeral ? 1 : "all";
-}
+export const DEFAULT_REPLICAS: ReplicaCount = "all";
 
 /** The replica count an environment record asks for, defaults resolved. */
 export function resolveReplicas(env: EnvironmentRecord): ReplicaCount {
-  return env.replicas ?? defaultReplicas(env.ephemeral);
+  return env.replicas ?? DEFAULT_REPLICAS;
 }
 
 /**

@@ -264,9 +264,9 @@ describe("what is left out for reasons other than placement", () => {
   });
 });
 
-describe("an old ephemeral environment", () => {
+describe("an old environment", () => {
   it("remains desired indefinitely", async () => {
-    await createEnvironment(registry, PROJECT, { name: PREVIEW, ephemeral: true });
+    await createEnvironment(registry, PROJECT, { name: PREVIEW });
     await recordRevision(registry, PROJECT, PREVIEW, VERSION);
     await writePlacement(registry, PROJECT, PREVIEW, [SELF], lease);
     clock.tick(365 * 24 * 60 * 60 * 1000);

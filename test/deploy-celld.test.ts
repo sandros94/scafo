@@ -49,12 +49,16 @@ it("accepts positive safe-integer endpoints at the runner boundary", () => {
   }
 });
 
-it("hands Celld the no-bundle assertion and upstream builder path", async () => {
-  const root = await mkdtemp(join(tmpdir(), "scafo-deploy-no-bundle-"));
+it("hands Celld the artifact's own config and the upstream builder path", async () => {
+  const root = await mkdtemp(join(tmpdir(), "scafo-deploy-config-"));
   const source = join(root, "source");
   const staging = join(root, "staging");
   const bin = join(root, "celld-test");
   const observed = join(root, "observed.json");
+  /* Comments, ordering and spacing included: what celld reads is the file as its
+     author wrote it, and a rewrite of any kind would show up here. */
+  const written =
+    '{\n  /* kept */\n  "name": "other",\n  "no_bundle": true,\n  "vars": { "A": "1" },\n}\n';
   try {
     await writeFile(
       bin,
@@ -62,67 +66,44 @@ it("hands Celld the no-bundle assertion and upstream builder path", async () => 
         `#!${process.execPath}`,
         'const { readFileSync, writeFileSync, writeSync } = require("node:fs");',
         'const config = process.argv[process.argv.indexOf("--config") + 1];',
-        `writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ config: JSON.parse(readFileSync(config, "utf8")), env: { esbuild: process.env.CELLD_ESBUILD } }));`,
+        `writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ config: readFileSync(config, "utf8"), name: config.split("/").pop(), env: { esbuild: process.env.CELLD_ESBUILD } }));`,
         'writeSync(1, JSON.stringify({ worker: "shop", version: "abcdef12", location: "s3://bucket/deploy/shop/abcdef12", dry_run: false }) + "\\n");',
       ].join("\n"),
     );
     await chmod(bin, 0o755);
     await Promise.all([mkdir(source), mkdir(staging)]);
-    await writeFile(join(source, "wrangler.jsonc"), '{ "name": "other", "no_bundle": false }');
+    await writeFile(join(source, "wrangler.jsonc"), written);
 
     const artifact = await packDirectory(source);
     await createCelldDeployRunner({
       binPath: bin,
       stagingDir: staging,
       baseEnv: { CELLD_ESBUILD: "/opt/esbuild" },
-    }).run({ ...input(artifact), noBundle: true }, { signal: new AbortController().signal });
+    }).run(input(artifact), { signal: new AbortController().signal });
 
-    await expect(readFile(observed, "utf8")).resolves.toContain('"no_bundle":true');
-    await expect(readFile(observed, "utf8")).resolves.toContain('"esbuild":"/opt/esbuild"');
+    const seen = JSON.parse(await readFile(observed, "utf8")) as Record<string, unknown>;
+    expect(seen.config).toBe(written);
+    expect(seen.name).toBe("wrangler.jsonc");
+    expect(seen.env).toEqual({ esbuild: "/opt/esbuild" });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-it.each([
-  ["wrangler.jsonc", true],
-  ["wrangler.json", false],
-] as const)(
-  "preserves %s no_bundle when the deploy carries no assertion",
-  async (name, noBundle) => {
-    const root = await mkdtemp(join(tmpdir(), "scafo-deploy-no-bundle-preserve-"));
-    const source = join(root, "source");
-    const staging = join(root, "staging");
-    const bin = join(root, "celld-test");
-    const observed = join(root, "observed.json");
-    try {
-      await writeFile(
-        bin,
-        [
-          `#!${process.execPath}`,
-          'const { readFileSync, writeFileSync, writeSync } = require("node:fs");',
-          'const config = process.argv[process.argv.indexOf("--config") + 1];',
-          `writeFileSync(${JSON.stringify(observed)}, readFileSync(config));`,
-          'writeSync(1, JSON.stringify({ worker: "shop", version: "abcdef12", location: "s3://bucket/deploy/shop/abcdef12", dry_run: false }) + "\\n");',
-        ].join("\n"),
-      );
-      await chmod(bin, 0o755);
-      await Promise.all([mkdir(source), mkdir(staging)]);
-      await writeFile(join(source, name), JSON.stringify({ name: "other", no_bundle: noBundle }));
+it("reads wrangler.json when the artifact carries no wrangler.jsonc", async () => {
+  const written = '{ "name": "other", "no_bundle": true }';
+  const seen = await deployedConfig("wrangler.json", written);
 
-      await createCelldDeployRunner({ binPath: bin, stagingDir: staging }).run(
-        input(await packDirectory(source)),
-        { signal: new AbortController().signal },
-      );
+  expect(seen.config).toBe(written);
+  expect(seen.name).toBe("wrangler.json");
+});
 
-      await expect(readFile(observed, "utf8").then(JSON.parse)).resolves.toMatchObject({
-        no_bundle: noBundle,
-      });
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  },
-);
+it("refuses an artifact that carries no runtime config at all", async () => {
+  await expect(deployedConfig(null, "")).rejects.toMatchObject({
+    code: "invalid-input",
+    message: "Artifact carries no runtime config",
+  });
+});
 
 it("cancels mid-expansion and removes the partial extraction directory", async () => {
   const root = await mkdtemp(join(tmpdir(), "scafo-deploy-expand-cancel-"));
@@ -489,80 +470,12 @@ it("bounds failed publish detail by UTF-8 bytes", async () => {
   }
 });
 
-it("writes the carried variables into a config that declares none", async () => {
-  await expect(
-    deployedConfig('{ "name": "other" }', { DATABASE_URL: "postgres://db.test/app" }),
-  ).resolves.toMatchObject({ vars: { DATABASE_URL: "postgres://db.test/app" } });
-});
-
-it("adds the carried variables to the ones the artifact declares", async () => {
-  const written = await deployedConfig('{ "name": "other", "vars": { "APP_VERSION": "v1" } }', {
-    DATABASE_URL: "postgres://db.test/app",
-  });
-
-  expect(written.vars).toEqual({ APP_VERSION: "v1", DATABASE_URL: "postgres://db.test/app" });
-});
-
-it("leaves the config alone when the deploy carries no variables at all", async () => {
-  const written = await deployedConfig('{ "name": "other", "vars": { "APP_VERSION": "v1" } }');
-
-  expect(written).toEqual({ name: "shop", vars: { APP_VERSION: "v1" } });
-});
-
-it("refuses every name both sides declare rather than picking a winner", async () => {
-  const failure = deployedConfig('{ "name": "other", "vars": { "A": "1", "B": "2", "C": "3" } }', {
-    A: "x",
-    C: "y",
-  });
-
-  await expect(failure).rejects.toMatchObject({
-    code: "invalid-input",
-    message: "Variable declared twice",
-  });
-  const detail = await failure.catch((error: unknown) => (error as ScafoError).detail ?? "");
-  expect(detail).toContain("A");
-  expect(detail).toContain("C");
-  expect(detail).not.toContain("B");
-  expect(detail).toContain("varset");
-});
-
-it.each(['["A=1"]', '"A=1"', "null", "5"])(
-  "refuses a config whose vars is %s",
-  async (declared) => {
-    await expect(
-      deployedConfig(`{ "name": "other", "vars": ${declared} }`, { A: "1" }),
-    ).rejects.toMatchObject({
-      code: "invalid-input",
-      detail: expect.stringContaining("vars"),
-    });
-  },
-);
-
-it("publishes the config without a key every object answers for on its own", async () => {
-  const written = await deployedConfig(
-    '{ "name": "other", "constructor": { "cheat": true }, "vars": { "A": "1" } }',
-    { B: "2" },
-  );
-
-  expect(Object.keys(written)).toEqual(["name", "vars"]);
-  expect(written.vars).toEqual({ A: "1", B: "2" });
-});
-
-it("refuses a config variable named after something every object answers for", async () => {
-  await expect(
-    deployedConfig('{ "name": "other", "vars": { "constructor": "1" } }', { A: "1" }),
-  ).rejects.toMatchObject({
-    code: "invalid-input",
-    detail: expect.stringContaining("constructor"),
-  });
-});
-
-/** Publishes `config` with `vars` carried, and hands back the config celld read. */
+/** Publishes an artifact carrying `config` as `name`, and hands back what celld read. */
 async function deployedConfig(
+  name: string | null,
   config: string,
-  vars?: Record<string, string>,
 ): Promise<Record<string, unknown>> {
-  const root = await mkdtemp(join(tmpdir(), "scafo-deploy-vars-"));
+  const root = await mkdtemp(join(tmpdir(), "scafo-deploy-config-"));
   const source = join(root, "source");
   const staging = join(root, "staging");
   const bin = join(root, "celld-test");
@@ -574,16 +487,20 @@ async function deployedConfig(
         `#!${process.execPath}`,
         'const { readFileSync, writeFileSync, writeSync } = require("node:fs");',
         'const config = process.argv[process.argv.indexOf("--config") + 1];',
-        `writeFileSync(${JSON.stringify(observed)}, readFileSync(config));`,
+        `writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ config: readFileSync(config, "utf8"), name: config.split("/").pop() }));`,
         'writeSync(1, JSON.stringify({ worker: "shop", version: "abcdef12", location: "s3://bucket/deploy/shop/abcdef12", dry_run: false }) + "\\n");',
       ].join("\n"),
     );
     await chmod(bin, 0o755);
     await Promise.all([mkdir(source), mkdir(staging)]);
-    await writeFile(join(source, "wrangler.jsonc"), config);
+    /* An artifact needs SOMETHING in it to be a readable archive. */
+    await writeFile(
+      join(source, name ?? "index.js"),
+      name === null ? "export default {};" : config,
+    );
 
     await createCelldDeployRunner({ binPath: bin, stagingDir: staging }).run(
-      { ...input(await packDirectory(source)), ...(vars === undefined ? {} : { vars }) },
+      input(await packDirectory(source)),
       { signal: new AbortController().signal },
     );
     return JSON.parse(await readFile(observed, "utf8")) as Record<string, unknown>;
@@ -596,7 +513,6 @@ function input(artifact: StagedArtifact): DeployRunInput {
   return {
     project: "shop",
     environment: "prod",
-    script: "shop",
     artifact,
     target: {
       endpoint: "http://store.test:9000",

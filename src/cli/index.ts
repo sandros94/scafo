@@ -15,7 +15,6 @@ import { remote } from "./commands/remote.ts";
 import { sail, up } from "./commands/sail.ts";
 import { traces } from "./commands/traces.ts";
 import { trust } from "./commands/trust.ts";
-import { varset } from "./commands/varset.ts";
 import { wg } from "./commands/wg.ts";
 
 const main = defineCommand({
@@ -46,7 +45,6 @@ const main = defineCommand({
     project,
     deploy,
     env,
-    varset,
     deployment,
     trust,
     metrics,

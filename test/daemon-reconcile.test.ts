@@ -7,7 +7,6 @@ import { getNode, registerNode } from "../src/core/registry/nodes.ts";
 import { nodeKey } from "../src/core/registry/paths.ts";
 import { writePlacement } from "../src/core/registry/placement.ts";
 import { createProject } from "../src/core/registry/projects.ts";
-import { putVarset, setEnvironmentVarset } from "../src/core/registry/varsets.ts";
 import type { NodeRecord } from "../src/core/types/registry.ts";
 import type { RuntimeDriver, RuntimeSpecInput } from "../src/core/types/runtime.ts";
 import type { ProcessSpec, ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
@@ -68,20 +67,6 @@ describe("environment-owned reconciliation", () => {
     expect(await world.reconciler.runOnce()).toEqual([]);
     expect(world.events).toEqual(["ingress:2"]);
     expect(world.supervisor.started).toHaveLength(1);
-  });
-
-  it("takes no runtime action when the environment's varset changes", async () => {
-    /* A varset travels with the next deploy, so nothing running is touched. */
-    const world = await seededWorld();
-    await world.reconciler.runOnce();
-    world.events.length = 0;
-    await putVarset(world.daemon.registry, PROJECT, { name: "shared", vars: { TOKEN: "next" } });
-    await setEnvironmentVarset(world.daemon.registry, PROJECT, ENV, "shared");
-
-    expect(await world.reconciler.runOnce()).toEqual([]);
-    expect(world.events).toEqual(["ingress:2"]);
-    expect(world.supervisor.started).toHaveLength(1);
-    expect(world.supervisor.stopped).toEqual([]);
   });
 
   it("stops a process whose spawn completes after reconciliation shuts down", async () => {

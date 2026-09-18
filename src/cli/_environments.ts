@@ -23,7 +23,7 @@ export interface EnvironmentTarget {
 }
 
 export interface DeleteOptions {
-  /** Skips both the ephemeral and the retirement-grace requirement. */
+  /** Skips the retirement-grace requirement. */
   force?: boolean;
 }
 

@@ -5,7 +5,7 @@
  * This is the operator's half of the workload-deploy path: a CI job holds
  * nothing but its own OIDC token — no operator key, no bucket credential — and
  * what admits it is the policy edited here. Written straight into the bucket the
- * way `scafo operator keygen --register` and `scafo varset` are, because a trust policy
+ * way `scafo operator keygen --register` is, because a trust policy
  * is usually set up before there is a node to ask.
  */
 

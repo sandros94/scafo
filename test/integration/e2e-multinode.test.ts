@@ -65,7 +65,7 @@ const REGION = "us-east-1";
 const PLATFORM_DOMAIN = "scafo.test";
 const PROJECT = "app";
 const ENVIRONMENT = "production";
-/** Deployed, deleted through the coordinator, and reaped: the ephemeral one. */
+/** Deployed, then deleted through the coordinator and reaped. */
 const PREVIEW = "preview";
 /**
  * Scaled down to a single node, then carried through the coordinator's death.
@@ -334,12 +334,9 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   );
 
   it(
-    "deletes an ephemeral environment asked of the node that is NOT the coordinator",
+    "deletes an environment outright when asked of the node that is NOT the coordinator",
     async () => {
-      await createEnvironment(registry, PROJECT, {
-        name: PREVIEW,
-        ephemeral: true,
-      });
+      await createEnvironment(registry, PROJECT, { name: PREVIEW });
       expectCleanExit(
         await runCli(deployArgs(await stageApp("v1"), PREVIEW, ["--replicas", "all"]), {}),
       );
@@ -349,9 +346,11 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       await untilServes(asked, previewHost(), "v1");
 
       const started = Date.now();
+      /* Forced: the environment was never retired, and this case is about which
+         node carries the deletion out, not about the two steps that precede it. */
       const answer = await httpDelete(
         asked.apiPort,
-        `/v1/environments/${PROJECT}/${PREVIEW}`,
+        `/v1/environments/${PROJECT}/${PREVIEW}?force=1`,
         await operatorToken(),
       );
       observed.proxiedDelete = {

@@ -73,7 +73,7 @@ beforeEach(async () => {
   for (const project of [MINE, THEIRS]) {
     await createProject(clock.ctx, { slug: project });
     await createEnvironment(clock.ctx, project, { name: ENVIRONMENT });
-    await createEnvironment(clock.ctx, project, { name: PREVIEW, ephemeral: true });
+    await createEnvironment(clock.ctx, project, { name: PREVIEW });
     for (const version of [VERSION, OTHER_VERSION]) {
       await createDeployment(clock.ctx, project, { version });
     }

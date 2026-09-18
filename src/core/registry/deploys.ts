@@ -4,13 +4,7 @@
  */
 
 import { ScafoError, type ScafoErrorCode } from "../error.ts";
-import type {
-  DeploymentSource,
-  CarriedVarset,
-  DeployRecord,
-  DeployState,
-  OidcActor,
-} from "../types/registry.ts";
+import type { DeploymentSource, DeployRecord, DeployState, OidcActor } from "../types/registry.ts";
 import { formatDuration, isCasConflict, namesFromKeys } from "./_shared.ts";
 import { createJson, readJson, updateJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
@@ -52,7 +46,6 @@ export interface DeployRecordPatch {
   state: DeployState;
   /** The deployment the deploy produced, by version. */
   deployment?: string;
-  varset?: CarriedVarset;
   /** The code of the error that failed it, when it was a typed one. */
   code?: ScafoErrorCode;
   detail?: string;

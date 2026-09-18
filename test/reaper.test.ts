@@ -58,7 +58,7 @@ beforeEach(async () => {
 
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
-  await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true });
+  await createEnvironment(clock.ctx, PROJECT, { name: "preview" });
   await createDeployment(clock.ctx, PROJECT, { version: VERSION });
   await recordRevision(clock.ctx, PROJECT, "preview", VERSION);
   for (const key of [...FLEET_KEYS, SURVIVOR]) await store.put(key, "{}");
@@ -71,7 +71,7 @@ beforeEach(async () => {
 });
 
 describe("planReap", () => {
-  it("keeps every active environment, including old ephemeral ones", async () => {
+  it("keeps every active environment, however old", async () => {
     clock.tick(365 * 24 * HOUR_MS);
 
     const plan = await planReap(clock.ctx, opts);

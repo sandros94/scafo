@@ -18,7 +18,6 @@ import { createEnvironment, getEnvironment } from "../core/registry/environments
 import { fleetPrefix } from "../core/registry/paths.ts";
 import { setNodeSelector, setReplicas } from "../core/registry/placement.ts";
 import { assertProjectUnblocked, createProject } from "../core/registry/projects.ts";
-import { getVarset, varsetHash } from "../core/registry/varsets.ts";
 import {
   DEFAULT_ARTIFACT_BYTES,
   type DeployRunner,
@@ -27,7 +26,6 @@ import {
 import type {
   DeploymentRecord,
   DeploymentSource,
-  CarriedVarset,
   DeployRecord,
   DeployState,
   NodeSelector,
@@ -66,8 +64,6 @@ export interface DeployStatus {
   /** Deployment the deploy produced, by version; absent until it has been recorded. */
   deployment?: string;
   state: DeployState;
-  /** Varset the deploy carried; set once it has been deployed, absent when none. */
-  varset?: CarriedVarset;
   /** The code of the error that failed it, when it was a typed one. */
   code?: ScafoErrorCode;
   /** Why it failed, when it did. */
@@ -78,10 +74,6 @@ export interface DeployStatus {
 export interface DeployMeta {
   project: string;
   environment: string;
-  /** Name the runtime files this application under within the environment's fleet. */
-  script: string;
-  /** Ask Celld to use the artifact's already self-contained Worker entry. */
-  noBundle?: true;
   /** Optional placement intent; existing environments keep it when omitted. */
   replicas?: ReplicaCount;
   /** Optional placement intent; existing environments keep it when omitted. */
@@ -130,7 +122,6 @@ export function deployStatusOf(record: DeployRecord): DeployStatus {
     project: record.project,
     state: record.state,
     ...(record.deployment === undefined ? {} : { deployment: record.deployment }),
-    ...(record.varset === undefined ? {} : { varset: record.varset }),
     ...(record.code === undefined ? {} : { code: record.code }),
     ...(record.detail === undefined ? {} : { detail: record.detail }),
   };
@@ -184,14 +175,9 @@ export function createDeployService(
   async function publish(
     id: string,
     meta: DeployMeta,
-    carried: CarriedVars | undefined,
     artifact: StagedArtifact,
     signal: AbortSignal,
   ): Promise<DeploymentRecord> {
-    /* What was handed to the runtime is what the notice is stamped with: both
-       come from the one read taken at admission, so an edit made while the
-       artifact was uploading cannot leave the two disagreeing. */
-    const stamp = carried === undefined ? undefined : { name: carried.name, hash: carried.hash };
     update(id, { state: "uploading" });
     /* The terminal write is the one that matters, so a lost `uploading` is
        reported and the deploy goes on: the record is a state behind for as long
@@ -211,9 +197,6 @@ export function createDeployService(
         {
           project: meta.project,
           environment: meta.environment,
-          script: meta.script,
-          ...(meta.noBundle === true ? { noBundle: true } : {}),
-          ...(carried === undefined ? {} : { vars: carried.vars }),
           artifact,
           target: {
             endpoint: bucket.endpoint,
@@ -241,14 +224,12 @@ export function createDeployService(
          cancellation that arrives now would only mislabel work that is done. */
       await recordRevision(daemon.registry, meta.project, meta.environment, deployment.version, {
         signal,
-        ...(stamp === undefined ? {} : { varset: stamp }),
       });
       await updateDeployRecord(daemon.registry, meta.project, id, {
         state: "deployed",
         deployment: deployment.version,
-        ...(stamp === undefined ? {} : { varset: stamp }),
       });
-      update(id, { state: "deployed", ...(stamp === undefined ? {} : { varset: stamp }) });
+      update(id, { state: "deployed" });
       return deployment;
     } catch (error) {
       if (celldVersionId === undefined) throw error;
@@ -322,7 +303,6 @@ export function createDeployService(
         ...(meta.nodeSelector === undefined ? {} : { nodeSelector: meta.nodeSelector }),
       });
       await assertOneCelldVersion(daemon, meta.project, meta.environment);
-      const carried = await carriedVars(daemon, meta.project, meta.environment);
 
       return {
         async start(artifact, reserved): Promise<DeployStatus> {
@@ -350,7 +330,7 @@ export function createDeployService(
           };
           /* Enqueue before exposing an id to avoid ghost statuses. */
           const scheduled = reserved.enqueue(artifact, (signal) =>
-            publish(id, meta, carried, artifact, signal),
+            publish(id, meta, artifact, signal),
           );
           statuses.set(id, accepted);
           forget(statuses, history);
@@ -400,50 +380,6 @@ async function assertOneCelldVersion(
     now: nowDate(daemon.registry),
   });
   if (skew.length > 0) throw versionSkewError(skew, about);
-}
-
-/** A varset as one deploy carries it: its name, its variables, and their digest. */
-interface CarriedVars extends CarriedVarset {
-  vars: Record<string, string>;
-}
-
-/**
- * The variables the environment's deploys carry, read once at intake.
- *
- * A varset the environment names but that is not there stops the deploy HERE,
- * before a byte of the artifact is read: publishing without it would start the
- * application on variables nobody chose for it, and which of the two ways out is
- * meant — write the varset again, or stop carrying one — is not Scafo's to guess.
- */
-async function carriedVars(
-  daemon: DaemonContext,
-  project: string,
-  environment: string,
-): Promise<CarriedVars | undefined> {
-  const name = (await getEnvironment(daemon.registry, project, environment)).varset;
-  if (name === undefined) return undefined;
-
-  try {
-    const varset = await getVarset(daemon.registry, project, name);
-    return { name, vars: varset.vars, hash: await varsetHash(varset.vars) };
-  } catch (error) {
-    if (!isScafoError(error)) throw error;
-    if (error.code !== "not-found" && error.code !== "invalid-varset") throw error;
-
-    /* Two ways out, and which is meant is not scafo's to guess: the name
-       may be a slug to write again, or one an earlier build filed the record
-       under, which only a new record and a new pointer replace. */
-    const why = error.code === "not-found" ? "no longer exists" : "this build cannot read";
-    throw new ScafoError(error.code, "Varset cannot be carried", {
-      detail:
-        `"${project}/${environment}" carries varset "${name}", which ${why}: write a varset ` +
-        `with "scafo varset set --project ${project} --name <name> --file <file>" and point ` +
-        `the environment at it with "scafo env varset --project ${project} --env ` +
-        `${environment} --name <name>", or stop it carrying one with "scafo env varset ` +
-        `--project ${project} --env ${environment} --none"`,
-      cause: error,
-    });
-  }
 }
 
 /** Ensures an environment exists. Existing placement changes only when requested;

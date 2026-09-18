@@ -54,7 +54,6 @@ function environment(name: string, domains: string[] = []): EnvironmentRecord {
     prefix: `fleets/${PROJECT}/${name}`,
     deployment: { revision: 2, deployedAt: "2026-01-01T00:00:00.000Z" },
     domains,
-    ephemeral: false,
     createdAt: "2026-01-01T00:00:00.000Z",
   };
 }

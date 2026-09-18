@@ -2,8 +2,9 @@
  * The end-to-end fixture application.
  *
  * Every request to `/` answers with the deployment's own version, so a response
- * says which deployment served it, and with the URL it saw, so the host header the ingress
- * forwarded is visible to the assertions.
+ * says which deployment served it, with the two variables a `--var` deploy is
+ * judged by, and with the URL it saw, so the host header the ingress forwarded
+ * is visible to the assertions.
  *
  * `/count` answers from a single durable object instead. Whichever node takes
  * the request, it is routed to the one cell that owns the counter, so the
@@ -36,8 +37,14 @@ export default {
       return env.COUNTER.get(id).fetch(request);
     }
 
-    return new Response(JSON.stringify({ version: env.APP_VERSION, url: request.url }), {
-      headers: { "content-type": "application/json" },
-    });
+    return new Response(
+      JSON.stringify({
+        version: env.APP_VERSION,
+        greeting: env.GREETING,
+        kept: env.KEPT,
+        url: request.url,
+      }),
+      { headers: { "content-type": "application/json" } },
+    );
   },
 };

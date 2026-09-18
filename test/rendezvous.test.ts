@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   assignNodes,
   assertReplicas,
-  defaultReplicas,
+  DEFAULT_REPLICAS,
   eligibleNodes,
   parseReplicas,
   rendezvousOrder,
@@ -288,19 +288,14 @@ describe("a selector and a replica count together", () => {
 });
 
 describe("how many replicas an environment asks for", () => {
-  it("serves a long-lived environment everywhere, exactly as it was served before", async () => {
-    expect(defaultReplicas(false)).toBe("all");
-    expect(resolveReplicas(environment({ ephemeral: false }))).toBe("all");
+  it("serves an environment that never said on every node that may serve it", async () => {
+    expect(DEFAULT_REPLICAS).toBe("all");
+    expect(resolveReplicas(environment({}))).toBe("all");
   });
 
-  it("serves an ephemeral one on a single node", async () => {
-    expect(defaultReplicas(true)).toBe(1);
-    expect(resolveReplicas(environment({ ephemeral: true }))).toBe(1);
-  });
-
-  it("takes what the record says over what its kind would imply", async () => {
-    expect(resolveReplicas(environment({ ephemeral: false, replicas: 2 }))).toBe(2);
-    expect(resolveReplicas(environment({ ephemeral: true, replicas: "all" }))).toBe("all");
+  it("takes what the record says over the default", async () => {
+    expect(resolveReplicas(environment({ replicas: 2 }))).toBe(2);
+    expect(resolveReplicas(environment({ replicas: "all" }))).toBe("all");
   });
 });
 
@@ -358,14 +353,13 @@ function node(id: string, labels: Record<string, string>): NodeRecord {
   };
 }
 
-function environment(opts: { ephemeral: boolean; replicas?: ReplicaCount }): EnvironmentRecord {
+function environment(opts: { replicas?: ReplicaCount }): EnvironmentRecord {
   return {
     v: 1,
     name: "prod",
     prefix: `fleets/${PROJECT}/prod`,
     deployment: null,
     domains: [],
-    ephemeral: opts.ephemeral,
     ...(opts.replicas === undefined ? {} : { replicas: opts.replicas }),
     createdAt: "2026-01-01T00:00:00.000Z",
   };

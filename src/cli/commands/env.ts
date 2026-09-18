@@ -6,8 +6,7 @@
  * decisions. Retirement stops an environment being served and is reversible for
  * as long as its grace runs; deletion is the one act nothing in the registry can
  * undo, and it is refused until either the grace has passed or the operator has
- * said `--force`. A preview environment is disposable by construction and skips
- * straight to the deletion.
+ * said `--force`.
  */
 
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
@@ -27,8 +26,6 @@ import {
 import { resolveOperatorHome } from "../_home.ts";
 import { OPERATOR_KEY_FORMS, operatorFlags, resolveOperator } from "../_operator.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
-import { describeEnvironmentVarset, readVarsetFlags } from "../_varset.ts";
-import { setEnvironmentVarset } from "../../core/registry/varsets.ts";
 
 /* The bucket the registry lives in, exactly as `scafo sail` takes it. Only read
    when no --node is given: with one, the node holds the bucket credentials and
@@ -61,16 +58,8 @@ const deleteArgs: ArgsDef = {
   ...targetArgs,
   force: {
     type: "boolean",
-    description: "Delete whatever state it is in, skipping the ephemeral and grace requirements",
+    description: "Delete whatever state it is in, skipping the retirement and grace requirements",
   },
-};
-
-const varsetArgs: ArgsDef = {
-  ...bucketArgs,
-  project: { type: "string", description: "Project the environment belongs to", required: true },
-  env: { type: "string", description: "Environment to act on", required: true },
-  name: { type: "string", description: "Varset of the project its deploys should carry" },
-  none: { type: "boolean", description: "Stop it carrying a varset at all" },
 };
 
 const selectorArgs: ArgsDef = {
@@ -107,7 +96,7 @@ const unretire: CommandDef = defineCommand({
 });
 
 const remove: CommandDef = defineCommand({
-  meta: { name: "delete", description: "Delete a retired, ephemeral or forced environment" },
+  meta: { name: "delete", description: "Delete a retired or forced environment" },
   args: deleteArgs,
   async run({ args }): Promise<void> {
     try {
@@ -130,24 +119,12 @@ const selector: CommandDef = defineCommand({
   },
 });
 
-const varset: CommandDef = defineCommand({
-  meta: { name: "varset", description: "Choose which variables an environment's deploys carry" },
-  args: varsetArgs,
-  async run({ args }): Promise<void> {
-    try {
-      await runVarset(args as Record<string, unknown>);
-    } catch (error) {
-      reportFailure(error);
-    }
-  },
-});
-
 export const env: CommandDef = defineCommand({
   meta: {
     name: "env",
     description: "Retire, restore, target and delete environments",
   },
-  subCommands: { retire, unretire, selector, varset, delete: remove },
+  subCommands: { retire, unretire, selector, delete: remove },
 });
 
 async function runRetire(flags: Record<string, unknown>): Promise<void> {
@@ -182,25 +159,6 @@ async function runSelector(flags: Record<string, unknown>): Promise<void> {
   console.log(describeSelectorChange(target, await ops.setSelector(target, wanted)));
 }
 
-/* Written straight into the bucket, as `scafo varset` is: a varset is registry
-   configuration a deploy reads, so no node has to be running to point at one. */
-async function runVarset(flags: Record<string, unknown>): Promise<void> {
-  const target = environmentTarget(flags);
-  /* Read before the bucket is opened, so a command that states both intentions
-     or neither costs no request. */
-  const wanted = readVarsetFlags({ name: text(flags.name), none: flags.none === true });
-
-  const config = await loadDaemonConfig({
-    configPath: text(flags.config),
-    flags: stringFlags(flags),
-    env: process.env,
-    readFile: readTextFile,
-  });
-  await setEnvironmentVarset(createRegistry(config), target.project, target.env, wanted);
-
-  console.log(describeEnvironmentVarset(target, wanted));
-}
-
 async function runDelete(flags: Record<string, unknown>): Promise<void> {
   const target = environmentTarget(flags);
   const force = flags.force === true;
@@ -219,7 +177,7 @@ async function runDelete(flags: Record<string, unknown>): Promise<void> {
  * Which way this invocation reaches the installation. A node is asked whenever
  * one is named — by `--node`, or by the remote this operator's home resolved —
  * and everything else falls back to the bucket, which is what an installation
- * with no node running has, and what `scafo trust` and `scafo varset` do too.
+ * with no node running has, and what `scafo trust` does too.
  */
 async function opsFor(flags: Record<string, unknown>): Promise<EnvironmentOps> {
   const resolved = await resolveOperator({

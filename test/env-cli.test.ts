@@ -74,8 +74,12 @@ beforeEach(async () => {
     await createDeployment(clock.ctx, PROJECT, { version });
   }
   await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
-  await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true });
+  await createEnvironment(clock.ctx, PROJECT, { name: "preview" });
   await recordRevision(clock.ctx, PROJECT, "prod", VERSION);
+  /* Preview stands for the environment an operator has already decided to be
+     rid of: retired, and past its grace, so a plain delete may act on it. */
+  await retireEnvironment(clock.ctx, PROJECT, "preview");
+  clock.tick(DEFAULT_RETIREMENT_GRACE_MS);
 });
 
 describe.each([

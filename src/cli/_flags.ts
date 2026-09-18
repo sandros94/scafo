@@ -1,14 +1,13 @@
 /*
- * Internal: the one way a flag carries more than one value.
+ * Internal: the one way a flag carries more than one value without repeating.
  *
- * COMMA-SEPARATED, in a single flag. Repeating the flag would read more
- * naturally, but the argument parser keeps only the last occurrence of one — so
- * a command that read a repeated flag would act on one of the several things an
- * operator listed and say nothing about the rest. Every list-valued flag is
- * written the same way, and every one of them says so in its own description.
+ * COMMA-SEPARATED, in a single flag. Every list-valued flag is written the same
+ * way, and every one of them says so in its own description. A flag whose values
+ * may contain a comma is declared `multiple: true` instead and repeated, which
+ * the argument parser collects into an array on its own.
  *
- * An array is accepted all the same, so that a parser which one day hands the
- * repeats over is honoured rather than silently truncated.
+ * An array is accepted here all the same, so that a repeated flag reaching a
+ * comma-separated one is honoured rather than silently truncated.
  */
 
 /** Every value a list-valued flag names; blank entries and surrounding spaces are dropped. */

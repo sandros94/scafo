@@ -98,7 +98,6 @@ function specInput(overrides?: Partial<RuntimeSpecInput>): RuntimeSpecInput {
       prefix: "fleets/shop/production",
       deployment: { revision: 1, deployedAt: "2026-01-01T00:00:00.000Z" },
       domains: [],
-      ephemeral: false,
       createdAt: "2026-01-01T00:00:00.000Z",
     },
     ports: { public: 42010, internal: 42011 },

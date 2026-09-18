@@ -253,7 +253,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
   );
 
   /* Deletion is coordinator-gated and transparently forwarded. `force=1` skips
-     ephemeral and retirement-grace checks. */
+     the retirement-grace check. */
   app.delete(
     "/v1/environments/:project/:env",
     async (event): Promise<Response | EnvironmentDeleted> => {

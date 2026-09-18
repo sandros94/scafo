@@ -200,24 +200,12 @@ export interface DeploymentInput {
   oidc?: OidcActor;
 }
 
-/**
- * The varset a deployment carried, and the digest of its variables at that
- * moment. A later read of the varset says whether it still holds what was
- * deployed, which is the whole of what makes an edited varset visible.
- */
-export interface CarriedVarset {
-  name: string;
-  hash: string;
-}
-
 /** Monotonic notice that celld's current deployment changed. */
 export interface DeploymentRevision {
   /** Increased once for every deployment celld adopts. */
   revision: number;
   /** When this revision was recorded. */
   deployedAt: string;
-  /** Varset this deployment carried; absent when it carried none. */
-  varset?: CarriedVarset;
 }
 
 /**
@@ -231,11 +219,8 @@ export interface EnvironmentRecord {
   prefix: string;
   /** Deployment notice; `null` until the first successful deploy. Never names a version. */
   deployment: DeploymentRevision | null;
-  /** Name of the project varset whose variables this environment's deploys carry. */
-  varset?: string;
   domains: string[];
-  ephemeral: boolean;
-  /** Replica count; omitted resolves to all long-lived nodes or one ephemeral node. */
+  /** Replica count; omitted resolves to every live node that may serve it. */
   replicas?: ReplicaCount;
   /** Eligible-node selector; `"all"` replicas means all matching live nodes. */
   nodeSelector?: NodeSelector;
@@ -305,8 +290,6 @@ export interface DeployRecord {
   updatedAt: string;
   /** Deployment the deploy produced, by version; absent until one has been recorded. */
   deployment?: string;
-  /** Varset the deploy carried; absent when it carried none. */
-  varset?: CarriedVarset;
   /**
    * The code of the error that failed it, when it was a typed one. The prose
    * says what went wrong; the code is what an operator or a pipeline acts on —
@@ -323,15 +306,4 @@ export interface DeployRecord {
    */
   source?: DeploymentSource;
   oidc?: OidcActor;
-}
-
-/**
- * Variables an environment's deploys carry, named per project and edited in
- * place. Key: `_scafo/projects/<project>/varsets/<name>.json`.
- */
-export interface VarsetRecord {
-  v: 1;
-  name: string;
-  vars: Record<string, string>;
-  updatedAt: string;
 }

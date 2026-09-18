@@ -70,7 +70,7 @@ export interface ReapResult {
 
 /** What {@link deleteEnvironment} is allowed to act on; see {@link assertDeletable}. */
 export interface DeleteEnvironmentOptions extends RetirementOptions {
-  /** Bypasses ephemeral and retirement-grace deletion requirements. */
+  /** Bypasses the retirement-grace deletion requirement. */
   force?: boolean;
 }
 
@@ -252,8 +252,6 @@ export async function executeReap(
     result.deleted.push(key);
   }
 
-  /* Varsets are named and shared on purpose, and an operator deletes one
-     explicitly once no environment points at it. Nothing here reaps them. */
   return result;
 }
 

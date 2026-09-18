@@ -79,14 +79,14 @@ export function retirementState(
   return { retiredAt, elapsedMs, remainingMs, expired: remainingMs === 0 };
 }
 
-/** Allows deletion only for force, ephemeral, or grace-expired environments. */
+/** Allows deletion only for forced or grace-expired environments. */
 export function assertDeletable(
   ctx: RegistryContext,
   project: string,
   environment: EnvironmentRecord,
   opts?: RetirementOptions & { force?: boolean },
 ): void {
-  if (opts?.force === true || environment.ephemeral) return;
+  if (opts?.force === true) return;
 
   const target = `"${project}/${environment.name}"`;
   const graceMs = opts?.graceMs ?? DEFAULT_RETIREMENT_GRACE_MS;
@@ -97,8 +97,8 @@ export function assertDeletable(
     throw new ScafoError("invalid-input", "Environment is not retired", {
       status: 409,
       detail:
-        `${target} is neither ephemeral nor retired, and deleting a long-lived environment ` +
-        `takes two steps so the decision to discard it is made once and on its own: retire it ` +
+        `${target} is not retired, and deleting an environment takes two steps so the ` +
+        `decision to discard it is made once and on its own: retire it ` +
         `("scafo env retire"), then delete it after the ${formatDuration(graceMs)} grace — or ` +
         `delete it now with force, which skips both`,
     });

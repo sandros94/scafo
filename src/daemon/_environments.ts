@@ -15,8 +15,8 @@ import { forwardToNode } from "./_forward.ts";
 import { isProxiedHop } from "./_peer.ts";
 
 /**
- * Whether the request asked for a forced deletion, which bypasses both the
- * ephemeral and the retirement-grace requirement.
+ * Whether the request asked for a forced deletion, which bypasses the
+ * retirement-grace requirement.
  *
  * Only `force=1` and `force=true` count, and anything else — a typo, a `yes`, an
  * empty value — reads as NOT forced. That direction is the safe one: a caller

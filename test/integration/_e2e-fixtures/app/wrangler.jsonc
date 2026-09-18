@@ -1,6 +1,9 @@
 {
-  /* The end-to-end fixture application. `name` is rewritten by the deploy runner
-     to the script name scafo recorded, so its value here is only a placeholder.
+  /* The end-to-end fixture application. This file reaches celld byte for byte,
+     `name` included: scafo never rewrites it.
+
+     `GREETING` is what a deploy that passes `--var GREETING:...` overrides, and
+     `KEPT` is what such a deploy must leave exactly as it is written here.
 
      The counter is what makes a multi-node run meaningful: one cell owns it
      however many nodes serve the environment, so a count that keeps rising
@@ -9,7 +12,7 @@
   "name": "app",
   "main": "index.js",
   "compatibility_date": "2025-01-01",
-  "vars": { "APP_VERSION": "v1" },
+  "vars": { "APP_VERSION": "v1", "GREETING": "from-config", "KEPT": "kept" },
   "durable_objects": { "bindings": [{ "name": "COUNTER", "class_name": "Counter" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Counter"] }],
 }

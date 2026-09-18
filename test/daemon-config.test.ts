@@ -819,7 +819,7 @@ describe("the variables an operator hands every runtime process", () => {
   });
 
   it.each(RESERVED_ENV_NAMES)(
-    "refuses %s under the rule a varset is read by, naming what a name may be",
+    "refuses %s under the one rule every variable name is read by, naming what a name may be",
     async (name) => {
       const error = await rejectsWith(
         () => loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_CELLD_ENV: `${name}=1` } }),

@@ -58,7 +58,7 @@ scafo deploy ./app --project shop --env production
 
 The command progresses through `accepted`, `uploading`, and `deployed`, then prints the immutable build id recorded by Scafo. Celld publishes that deployment as the environment's current one; no activation flag is needed.
 
-The node bundles the Worker entry with esbuild before Celld publishes it. Pass `--no-bundle` when the entry is already a self-contained module (bundled by your own toolchain, no bare imports); the node then records `no_bundle` in the Celld config and skips esbuild.
+Celld bundles the Worker entry with esbuild before it publishes it. Declare `"no_bundle": true` in the app's `wrangler.jsonc` when the entry is already a self-contained module (bundled by your own toolchain, no bare imports), or pass `--no-bundle`, which writes that setting into the config the deploy packs.
 
 ## 5. Reach Scafo and Celld
 

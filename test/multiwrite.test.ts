@@ -13,10 +13,8 @@ import {
   getDeployment,
   getEnvironment,
   planReap,
-  putVarset,
   retireEnvironment,
   type ReapOptions,
-  setEnvironmentVarset,
 } from "../src/core/registry/index.ts";
 import { fleetPrefix } from "../src/core/registry/paths.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
@@ -84,28 +82,11 @@ const FLOWS: Flow[] = [
     },
   },
   {
-    name: "createEnvironment then setEnvironmentVarset",
-    seed: async ({ ctx }) => {
-      await createProject(ctx, { slug: PROJECT });
-      await putVarset(ctx, PROJECT, { name: "shared", vars: { TOKEN: "opaque" } });
-    },
-    run: async ({ ctx }) => {
-      await createEnvironment(ctx, PROJECT, { name: "preview" });
-      await setEnvironmentVarset(ctx, PROJECT, "preview", "shared");
-    },
-    settled: async ({ ctx }) => {
-      await expect(getEnvironment(ctx, PROJECT, "preview")).resolves.toMatchObject({
-        varset: "shared",
-      });
-    },
-  },
-  {
     name: "executeReap of an environment with a domain and fleet keys",
     seed: async (clock) => {
       await createProject(clock.ctx, { slug: PROJECT });
       await createEnvironment(clock.ctx, PROJECT, {
         name: "preview",
-        ephemeral: true,
       });
       await claimDomain(clock.ctx, HOST, PROJECT, "preview");
       await retireEnvironment(clock.ctx, PROJECT, "preview");

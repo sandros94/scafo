@@ -67,17 +67,6 @@ describe("assigning environments to nodes", () => {
     });
   });
 
-  it("places an ephemeral one on a single node", async () => {
-    await environmentNamed("preview", { ephemeral: true });
-    const coordinator = coordinatorFor(NODE_A);
-
-    await coordinator.runOnce();
-
-    const placement = await readPlacement(clock.ctx, PROJECT, "preview");
-    expect(placement?.nodes).toHaveLength(1);
-    expect([NODE_A, NODE_B]).toContain(placement?.nodes[0]);
-  });
-
   it("places on as many nodes as the environment asks for", async () => {
     await environmentNamed("prod");
     await setReplicas(clock.ctx, PROJECT, "prod", 1);
@@ -340,7 +329,7 @@ describe("what the coordinator refuses to decide", () => {
   });
 
   it("keeps the lease and reaps anyway when the assignment fails", async () => {
-    await environmentNamed("preview", { ephemeral: true });
+    await environmentNamed("preview");
     await retireEnvironment(clock.ctx, PROJECT, "preview");
     const coordinator = coordinatorFor(NODE_A);
     await coordinator.runOnce();
@@ -502,11 +491,10 @@ function daemonFor(nodeId: string, observability?: DaemonContext["observability"
 /** An environment with a deployment to serve, so it is a real placement target. */
 async function environmentNamed(
   name: string,
-  opts?: { ephemeral?: boolean; nodeSelector?: NodeSelector },
+  opts?: { nodeSelector?: NodeSelector },
 ): Promise<void> {
   await createEnvironment(clock.ctx, PROJECT, {
     name,
-    ...(opts?.ephemeral === undefined ? {} : { ephemeral: opts.ephemeral }),
     ...(opts?.nodeSelector === undefined ? {} : { nodeSelector: opts.nodeSelector }),
   });
   await recordRevision(clock.ctx, PROJECT, name, VERSION);

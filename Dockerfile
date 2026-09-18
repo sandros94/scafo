@@ -9,7 +9,9 @@ RUN corepack enable
 
 WORKDIR /app
 
-# Keep dependency installation cacheable across source changes.
+# Keep dependency installation cacheable across source changes. `patches/` is
+# part of the manifest: an install without it cannot resolve a patched package.
+COPY patches ./patches
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile --ignore-scripts
 

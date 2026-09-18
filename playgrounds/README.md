@@ -41,4 +41,4 @@ The Caddy image includes `caddy.storage.scafo` for TLS material and the `scafo` 
 
 [`../examples/`](../examples/) contains production-shaped Compose and Kubernetes configurations. Playgrounds use fake credentials, local bucket containers, and overridable ports. Both retain the 50-second stop grace, shared ingress/node namespace, and one-bucket-prefix-per-fleet boundary.
 
-The playgrounds use plain HTTP because `*.scafo.test` has no DNS or certificate authority. They omit custom domains, varsets, and CI deploys.
+The playgrounds use plain HTTP because `*.scafo.test` has no DNS or certificate authority. They omit custom domains and CI deploys.

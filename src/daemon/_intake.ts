@@ -171,19 +171,8 @@ function parseMeta(parsed: unknown, project: string): DeployMeta {
   assertSlug(project);
   const environment = text(body, "environment") ?? DEFAULT_ENVIRONMENT;
   assertSlug(environment);
-  const script = text(body, "script") ?? project;
-  assertSlug(script);
 
-  const meta: DeployMeta = {
-    project,
-    environment,
-    script,
-  };
-
-  if (body.noBundle !== undefined) {
-    if (body.noBundle !== true) throw invalid(`"noBundle" must be true when given`);
-    meta.noBundle = true;
-  }
+  const meta: DeployMeta = { project, environment };
 
   /* Omitted placement preserves existing environment settings. */
   if (body.replicas !== undefined && body.replicas !== null) {

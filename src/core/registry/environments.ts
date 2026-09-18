@@ -12,11 +12,9 @@ import { getProject } from "./projects.ts";
 
 export interface CreateEnvironmentInput {
   name: string;
-  ephemeral?: boolean;
   /**
-   * How many nodes should serve it. Left absent the environment takes the
-   * default its kind implies, which is what every environment created before
-   * this setting existed keeps doing.
+   * How many nodes should serve it. Left absent it runs on every node that may,
+   * which is what every environment that never asked keeps doing.
    */
   replicas?: ReplicaCount;
   /**
@@ -28,7 +26,7 @@ export interface CreateEnvironmentInput {
 
 /**
  * Creates an environment under an existing project, or returns the existing one
- * when its immutable identity (name, prefix, `ephemeral`) matches — settings
+ * when its immutable identity (name, prefix) matches — settings
  * beyond that identity apply on first creation only, so retried creates stay
  * idempotent no matter how the environment has been used since. `prefix` is
  * fixed at creation and never moves. An identity mismatch throws
@@ -50,7 +48,6 @@ export async function createEnvironment(
     prefix: fleetPrefix(project, input.name),
     deployment: null,
     domains: [],
-    ephemeral: input.ephemeral ?? false,
     createdAt: nowIso(ctx),
   };
   if (input.replicas !== undefined) record.replicas = input.replicas;
@@ -87,10 +84,8 @@ export async function listEnvironments(ctx: RegistryContext, project: string): P
 }
 
 /* Set at creation and never rewritten, so they identify the record. Everything
-   else (deployment, domains, varset, replicas, nodeSelector) is mutable state
-   and must not break create-retry idempotency. */
-function identity(
-  record: EnvironmentRecord,
-): Pick<EnvironmentRecord, "v" | "name" | "prefix" | "ephemeral"> {
-  return { v: record.v, name: record.name, prefix: record.prefix, ephemeral: record.ephemeral };
+   else (deployment, domains, replicas, nodeSelector) is mutable state and must
+   not break create-retry idempotency. */
+function identity(record: EnvironmentRecord): Pick<EnvironmentRecord, "v" | "name" | "prefix"> {
+  return { v: record.v, name: record.name, prefix: record.prefix };
 }

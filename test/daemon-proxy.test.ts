@@ -37,6 +37,9 @@ const TTL_MS = 15_000;
 const OTHER_ADDRESS = { internal: "10.0.0.5", apiPort: 7500 };
 
 const DELETE_PATH = `/v1/environments/${PROJECT}/${ENVIRONMENT}`;
+/* The environment was never retired, so the deletions carried out here — rather
+   than forwarded — are the forced ones an operator asks for outright. */
+const FORCED_DELETE_PATH = `${DELETE_PATH}?force=1`;
 
 /** One forwarded request, as the stub recorded it. */
 interface Forwarded {
@@ -66,7 +69,6 @@ beforeEach(async () => {
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, {
     name: ENVIRONMENT,
-    ephemeral: true,
   });
   await createDeployment(clock.ctx, PROJECT, { version: VERSION });
   await recordRevision(clock.ctx, PROJECT, ENVIRONMENT, VERSION);
@@ -78,7 +80,7 @@ describe("DELETE /v1/environments/:project/:env", () => {
     await coordinator.runOnce();
     expect(coordinator.status().holding).toBe(true);
 
-    const response = await app.request(DELETE_PATH, {
+    const response = await app.request(FORCED_DELETE_PATH, {
       method: "DELETE",
       headers: await operatorBearer(),
     });
@@ -96,7 +98,7 @@ describe("DELETE /v1/environments/:project/:env", () => {
     const { app } = await nodeApp();
     expect(await readJson<CoordinatorLease>(clock.ctx, coordinatorKey())).toBeNull();
 
-    const response = await app.request(DELETE_PATH, {
+    const response = await app.request(FORCED_DELETE_PATH, {
       method: "DELETE",
       headers: await operatorBearer(),
     });
@@ -156,7 +158,7 @@ describe("DELETE /v1/environments/:project/:env", () => {
     await givenCoordinatorIs(OTHER);
     const problem: ProblemDetails = {
       type: "urn:scafo:invalid-input",
-      title: "Environment is not ephemeral",
+      title: "Environment is not retired",
       status: 409,
       detail: "the coordinator's own words",
     };

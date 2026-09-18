@@ -8,7 +8,7 @@
  * routing document has to be fetched before the new host resolves.
  */
 
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
@@ -99,6 +99,10 @@ const NODE_ID = "node-e2e";
 
 /** Environment the CI-shaped deploy creates; it exists nowhere until then. */
 const CI_ENVIRONMENT = "ci";
+/** Environment the `--var` deploy creates, so nothing else is disturbed by it. */
+const VARS_ENVIRONMENT = "vars";
+/** Environment the already-bundled artifact is published into, with no flag. */
+const PREBUNDLED_ENVIRONMENT = "prebundled";
 /** The subject pattern the project's policy trusts, as an operator would write it. */
 const WORKLOAD_GLOB = "repo:acme/shop:ref:refs/heads/*";
 /** A workload the glob above admits. */
@@ -130,12 +134,12 @@ const tmpDirs: string[] = [];
 /** Daemon output retained for failure context. */
 const daemonLog: string[] = [];
 /** Raw observations the report is written from; printed once at the end. */
+    await buildRepo();
+
 const observed: Record<string, unknown> = {};
 
 describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   beforeAll(async () => {
-    await buildRepo();
-
     store = await startStore(BUCKET_SETTINGS);
     storeFromHost = store.fromHost;
     storeFromContainers = store.fromContainers;
@@ -525,6 +529,62 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expect(environment.deployment).toMatchObject({ revision: 1 });
 
       await untilServes(apexHost(), "v2");
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "lets --var override the config's own variable and leaves the others as written",
+    async () => {
+      const result = await runCli(
+        [
+          ...deployArgs(await stageApp("v5"), VARS_ENVIRONMENT),
+          "--key",
+          keyPath,
+          "--var",
+          "GREETING:from-flag",
+        ],
+        {},
+      );
+      observed.varDeployOutput = result.output;
+
+      expectCleanExit(result);
+      expect(result.output, daemonLogTail()).toContain("deployed");
+
+      const host = `${PROJECT}--${VARS_ENVIRONMENT}.${PLATFORM_DOMAIN}`;
+      const answer = await untilServes(host, "v5");
+      const body = JSON.parse(answer.body) as Record<string, unknown>;
+
+      /* The running application is the proof: the flag's value reached it, and
+         the variable the flag never named arrived exactly as the config has it. */
+      expect(body.greeting).toBe("from-flag");
+      expect(body.kept).toBe("kept");
+      observed.varDeployBody = body;
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "publishes an already-bundled artifact on its own config, with no flag at all",
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), "scafo-e2e-prebundled-"));
+      tmpDirs.push(dir);
+      await cp(join(FIXTURES, "prebundled"), dir, { recursive: true });
+
+      const args = [...deployArgs(dir, PREBUNDLED_ENVIRONMENT), "--key", keyPath];
+      expect(args).not.toContain("--no-bundle");
+      expect(args).not.toContain("--var");
+
+      const result = await runCli(args, {});
+      observed.prebundledDeployOutput = result.output;
+
+      expectCleanExit(result);
+      expect(result.output, daemonLogTail()).toContain("deployed");
+
+      const host = `${PROJECT}--${PREBUNDLED_ENVIRONMENT}.${PLATFORM_DOMAIN}`;
+      const answer = await untilServes(host, "prebundled");
+      expect(JSON.parse(answer.body).url).toContain(host);
+      observed.prebundled = JSON.parse(answer.body);
     },
     STEP_TIMEOUT_MS,
   );

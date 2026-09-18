@@ -11,7 +11,7 @@ import {
   updateDeployRecord,
 } from "../src/core/registry/index.ts";
 import { deployKey, deploysPrefix } from "../src/core/registry/paths.ts";
-import type { DeploymentSource, CarriedVarset, OidcActor } from "../src/core/types/registry.ts";
+import type { DeploymentSource, OidcActor } from "../src/core/types/registry.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, type ManualClock, rejectsWith } from "./_helpers.ts";
 
@@ -29,7 +29,6 @@ const SOURCE: DeploymentSource = {
   commit: "c0ffee",
 };
 const OIDC: OidcActor = { issuer: "https://issuer.test", subject: "repo:acme/shop" };
-const VARSET: CarriedVarset = { name: "prod", hash: "d1d1d1d1" };
 
 let clock: ManualClock;
 
@@ -123,14 +122,12 @@ describe("updateDeployRecord", () => {
     const deployed = await updateDeployRecord(clock.ctx, PROJECT, ID, {
       state: "deployed",
       deployment: "b1b1b1b1",
-      varset: VARSET,
     });
 
     expect(uploading.updatedAt).not.toBe(accepted.updatedAt);
     expect(deployed).toMatchObject({
       state: "deployed",
       deployment: "b1b1b1b1",
-      varset: VARSET,
       acceptedAt: accepted.acceptedAt,
       updatedAt: new Date(clock.nowMs()).toISOString(),
     });

@@ -176,7 +176,7 @@ describe("a superseded holder", () => {
     const { ctx, tick } = ctxWith(store);
 
     await createProject(ctx, { slug: "app" });
-    await createEnvironment(ctx, "app", { name: "preview", ephemeral: true });
+    await createEnvironment(ctx, "app", { name: "preview" });
     await retireEnvironment(ctx, "app", "preview");
 
     const stale = await held(acquireLease(ctx, "node-a", { ttlMs: TTL_MS }), "node-a");

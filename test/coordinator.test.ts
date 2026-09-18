@@ -36,7 +36,6 @@ beforeEach(async () => {
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, {
     name: "preview",
-    ephemeral: true,
   });
   await createDeployment(clock.ctx, PROJECT, { version: VERSION });
   await recordRevision(clock.ctx, PROJECT, "preview", VERSION);
@@ -68,7 +67,7 @@ describe("createCoordinator", () => {
     expect(Date.parse(second.acquiredAt)).toBeGreaterThan(Date.parse(first.acquiredAt));
   });
 
-  it("does not reap an ephemeral environment merely because it is old", async () => {
+  it("does not reap an active environment merely because it is old", async () => {
     const coordinator = coordinatorFor("node-a");
     await coordinator.runOnce();
 

@@ -10,17 +10,14 @@ import {
   createDeployment,
   createEnvironment,
   createProject,
-  getVarset,
   initRegistry,
   type LeaseHandle,
   listProjects,
   probeStore,
-  putVarset,
   readMeta,
   type RegistryContext,
   releaseDomain,
   renewLease,
-  setEnvironmentVarset,
 } from "../../src/core/registry/index.ts";
 import type { CasStore } from "../../src/core/types/store.ts";
 import { createUns3Store } from "../../src/drivers/store/uns3.ts";
@@ -243,15 +240,6 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
         await createEnvironment(ctx, project, { name: "prod" });
         const flipped = await recordRevision(ctx, project, "prod", version);
         expect(flipped.environment.deployment).toMatchObject({ revision: 1 });
-
-        await putVarset(ctx, project, { name: "shared", vars: { TOKEN: "s3cr3t" } });
-        await expect(getVarset(ctx, project, "shared")).resolves.toMatchObject({
-          name: "shared",
-          vars: { TOKEN: "s3cr3t" },
-        });
-
-        const configured = await setEnvironmentVarset(ctx, project, "prod", "shared");
-        expect(configured.varset).toBe("shared");
 
         await claimDomain(ctx, host, project, "prod");
         await expect(checkDomain(ctx, host)).resolves.toMatchObject({

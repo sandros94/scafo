@@ -13,10 +13,12 @@ import {
   createDeployRecord,
   createEnvironment,
   createProject,
+  DEFAULT_RETIREMENT_GRACE_MS,
   deleteEnvironment,
   getDeployRecord,
   getEnvironment,
   type LeaseHandle,
+  retireEnvironment,
 } from "../src/core/registry/index.ts";
 import { deployKey, domainKey, environmentKey, fleetPrefix } from "../src/core/registry/paths.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
@@ -49,11 +51,16 @@ beforeEach(async () => {
 
   await createProject(clock.ctx, { slug: PROJECT });
   await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
-  await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true });
+  await createEnvironment(clock.ctx, PROJECT, { name: "preview" });
   await createDeployment(clock.ctx, PROJECT, { version: VERSION });
   await recordRevision(clock.ctx, PROJECT, "preview", VERSION);
 
   for (const key of [...FLEET_KEYS, ...SURVIVORS]) await store.put(key, "{}");
+
+  /* Preview is the one every case here takes apart, so the fixture puts it in
+     the one state a deletion is allowed from: retired, and past its grace. */
+  await retireEnvironment(clock.ctx, PROJECT, "preview");
+  clock.tick(DEFAULT_RETIREMENT_GRACE_MS);
 
   const acquired = await acquireLease(clock.ctx, "node-a");
   if (acquired === null) throw new Error("the fixture could not take the lease");
@@ -61,7 +68,7 @@ beforeEach(async () => {
 });
 
 describe("deleteEnvironment", () => {
-  it("refuses a non-ephemeral environment, and deletes nothing at all", async () => {
+  it("refuses an environment that is not retired, and deletes nothing at all", async () => {
     const deletesBefore = store.dels;
 
     const error = await rejectsWith(
@@ -72,7 +79,7 @@ describe("deleteEnvironment", () => {
     /* 409 rather than 400: the request is well-formed, the environment is simply
        not in a state this call may act on. */
     expect(error.status).toBe(409);
-    expect(error.detail).toContain("ephemeral");
+    expect(error.detail).toContain("not retired");
     expect(store.dels).toBe(deletesBefore);
     await expect(getEnvironment(clock.ctx, PROJECT, "prod")).resolves.toMatchObject({
       name: "prod",
@@ -92,11 +99,13 @@ describe("deleteEnvironment", () => {
     await invariants(store);
   });
 
-  it("deletes an ephemeral environment without retirement", async () => {
-    const { deleted } = await deleteEnvironment(clock.ctx, PROJECT, "preview", lease);
+  it("deletes an environment that never retired when force says so", async () => {
+    const { deleted } = await deleteEnvironment(clock.ctx, PROJECT, "prod", lease, {
+      force: true,
+    });
 
-    expect(deleted).toContain(environmentKey(PROJECT, "preview"));
-    await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, "preview"), "not-found");
+    expect(deleted).toContain(environmentKey(PROJECT, "prod"));
+    await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, "prod"), "not-found");
   });
 
   it("leaves a domain another environment took over alone", async () => {

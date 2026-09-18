@@ -43,20 +43,6 @@ describe("runtime-owned deployment lifecycle", () => {
     ).toEqual([]);
   });
 
-  it("takes no action for an environment whose varset changed", () => {
-    /* A varset is carried by the next deploy, not by the running process, so
-       nothing here reacts to one changing. */
-    const wanted = desired("shop", "prod", 2);
-    wanted.env.varset = "shared";
-    expect(
-      planReconcile({
-        desired: [wanted],
-        actual: [runtimeProcess("shop", "prod")],
-        ports: countingPorts(),
-      }),
-    ).toEqual([]);
-  });
-
   it("retries a pending teardown before anything else", () => {
     const running = { ...runtimeProcess("shop", "prod"), teardownPending: true as const };
     expect(
@@ -136,7 +122,6 @@ function desired(project: string, env: string, revision: number): DesiredEnviron
       prefix: `fleets/${project}/${env}`,
       deployment: { revision, deployedAt: CREATED_AT },
       domains: [],
-      ephemeral: false,
       createdAt: CREATED_AT,
     },
   };

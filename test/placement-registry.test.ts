@@ -282,10 +282,12 @@ describe("deletePlacement", () => {
 
 describe("an environment that is deleted", () => {
   it("takes its placement with it, before the record that named it", async () => {
-    await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true });
+    await createEnvironment(clock.ctx, PROJECT, { name: "preview" });
     await writePlacement(clock.ctx, PROJECT, "preview", [NODE_A], lease);
 
-    const { deleted } = await deleteEnvironment(clock.ctx, PROJECT, "preview", lease);
+    const { deleted } = await deleteEnvironment(clock.ctx, PROJECT, "preview", lease, {
+      force: true,
+    });
 
     /* Before the record: a placement left behind names an environment that is
        gone, and nothing iterates an environment that no longer exists. */
@@ -294,9 +296,11 @@ describe("an environment that is deleted", () => {
   });
 
   it("deletes nothing extra for an environment that was never placed", async () => {
-    await createEnvironment(clock.ctx, PROJECT, { name: "preview", ephemeral: true });
+    await createEnvironment(clock.ctx, PROJECT, { name: "preview" });
 
-    const { deleted } = await deleteEnvironment(clock.ctx, PROJECT, "preview", lease);
+    const { deleted } = await deleteEnvironment(clock.ctx, PROJECT, "preview", lease, {
+      force: true,
+    });
 
     expect(deleted).toEqual([environmentKey(PROJECT, "preview")]);
   });

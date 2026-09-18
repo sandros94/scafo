@@ -1,6 +1,11 @@
-import { parseArgs } from "citty";
+import { parseArgs, renderUsage } from "citty";
 import { describe, expect, it, vi } from "vitest";
-import { deploy, deployMetadataFrom, watchDeploy } from "../src/cli/commands/deploy.ts";
+import {
+  configEditFrom,
+  deploy,
+  deployMetadataFrom,
+  watchDeploy,
+} from "../src/cli/commands/deploy.ts";
 import type { ProblemDetails } from "../src/core/error.ts";
 import type { DeployStatus } from "../src/daemon/deploys.ts";
 import { rejectsWith } from "./_helpers.ts";
@@ -11,17 +16,33 @@ function flagsOf(argv: string[]): Record<string, unknown> {
 }
 
 describe("scafo deploy flags", () => {
-  it("asks the node for a pre-bundled entry only under --no-bundle", () => {
-    const bundled = deployMetadataFrom(flagsOf(["--project", "app"]), "app");
-    expect(bundled).not.toHaveProperty("noBundle");
-
-    const raw = deployMetadataFrom(flagsOf(["--project", "app", "--no-bundle"]), "app");
-    expect(raw).toMatchObject({ noBundle: true });
+  it("edits the config only when a flag asks for it", () => {
+    expect(configEditFrom(flagsOf(["--project", "app"]))).toEqual({ vars: {}, noBundle: false });
+    expect(configEditFrom(flagsOf(["--project", "app", "--no-bundle"]))).toEqual({
+      vars: {},
+      noBundle: true,
+    });
   });
 
-  it("defaults the environment and script, and carries the placement flags only when named", () => {
-    const bare = deployMetadataFrom(flagsOf(["--project", "app"]), "app");
-    expect(bare).toEqual({ environment: "production", script: "app" });
+  it("reads every --var it was given, not just the last one", () => {
+    expect(
+      configEditFrom(flagsOf(["--project", "app", "--var", "A:1", "--var", "B:2"])).vars,
+    ).toEqual({ A: "1", B: "2" });
+    expect(configEditFrom(flagsOf(["--project", "app", "--var=A:1"])).vars).toEqual({ A: "1" });
+  });
+
+  it("splits a --var at its first colon and takes the rest verbatim", () => {
+    expect(
+      configEditFrom(flagsOf(["--project", "app", "--var", "URL:https://x.test:8080/a,b"])).vars,
+    ).toEqual({ URL: "https://x.test:8080/a,b" });
+    expect(configEditFrom(flagsOf(["--project", "app", "--var", "EMPTY:"])).vars).toEqual({
+      EMPTY: "",
+    });
+  });
+
+  it("defaults the environment, and carries the placement flags only when named", () => {
+    const bare = deployMetadataFrom(flagsOf(["--project", "app"]));
+    expect(bare).toEqual({ environment: "production" });
 
     const placed = deployMetadataFrom(
       flagsOf([
@@ -29,21 +50,24 @@ describe("scafo deploy flags", () => {
         "app",
         "--env",
         "staging",
-        "--script",
-        "worker",
         "--replicas",
         "2",
         "--node-selector",
         "tier=fast",
       ]),
-      "app",
     );
     expect(placed).toEqual({
       environment: "staging",
-      script: "worker",
       replicas: 2,
       nodeSelector: { tier: "fast" },
     });
+  });
+
+  it("names --var in its help, with what a value written there is visible to", async () => {
+    const usage = await renderUsage(deploy);
+
+    expect(usage).toContain("--var");
+    expect(usage).toContain("process list");
   });
 });
 
@@ -105,44 +129,20 @@ describe("watching a deploy the node already accepted", () => {
     expect(error.message).toBe("Authentication failed");
   });
 
-  it("follows a deploy to the deployment it recorded", async () => {
-    const watched = await watchDeploy(WATCHED, () => Promise.resolve("minted"), ACCEPTED, {
-      pollMs: 0,
-      fetchFn: answering([
-        { ...ACCEPTED, state: "uploading" },
-        { ...ACCEPTED, state: "deployed", deployment: "0f0f0f0f" },
-      ]),
+  it("follows a deploy to the deployment it recorded, and names it", async () => {
+    let watched: unknown;
+    const printed = await printedBy(async () => {
+      watched = await watchDeploy(WATCHED, () => Promise.resolve("minted"), ACCEPTED, {
+        pollMs: 0,
+        fetchFn: answering([
+          { ...ACCEPTED, state: "uploading" },
+          { ...ACCEPTED, state: "deployed", deployment: "0f0f0f0f" },
+        ]),
+      });
     });
 
     expect(watched).toMatchObject({ state: "deployed", deployment: "0f0f0f0f" });
-  });
-
-  it("says which varset the deploy carried and what it held, and nothing at all when it carried none", async () => {
-    const carried = await printedBy(() =>
-      watchDeploy(WATCHED, () => Promise.resolve("minted"), ACCEPTED, {
-        pollMs: 0,
-        fetchFn: answering([
-          {
-            ...ACCEPTED,
-            state: "deployed",
-            deployment: "0f0f0f0f",
-            varset: { name: "shared", hash: "0123456789abcdef0123456789abcdef" },
-          },
-        ]),
-      }),
-    );
-
-    expect(carried).toContain("scafo: deployment 0f0f0f0f");
-    expect(carried).toContain('scafo: carried varset "shared" (0123456789ab)');
-
-    const bare = await printedBy(() =>
-      watchDeploy(WATCHED, () => Promise.resolve("minted"), ACCEPTED, {
-        pollMs: 0,
-        fetchFn: answering([{ ...ACCEPTED, state: "deployed", deployment: "0f0f0f0f" }]),
-      }),
-    );
-
-    expect(bare.join("\n")).not.toContain("varset");
+    expect(printed).toContain("scafo: deployment 0f0f0f0f");
   });
 
   it("fails on a deploy the node reports as failed, and says why", async () => {

@@ -21,7 +21,6 @@ export type ScafoErrorCode =
   | "reference-held"
   | "resource-limit"
   | "invalid-slug"
-  | "invalid-varset"
   | "invalid-input"
   | "version-skew"
   | "store-unavailable"
@@ -70,7 +69,6 @@ const DEFAULT_STATUS: Record<ScafoErrorCode, number> = {
   "reference-held": 409,
   "resource-limit": 413,
   "invalid-slug": 400,
-  "invalid-varset": 400,
   "invalid-input": 400,
   /* Two Celld versions over one environment's fleet. A CONFLICT rather than a
      capability that is missing: every binary involved is one scafo runs, and

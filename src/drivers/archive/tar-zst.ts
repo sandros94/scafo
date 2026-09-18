@@ -23,20 +23,63 @@ interface TarEntry {
   linkpath?: string;
 }
 
+interface TarHeader {
+  path: string;
+  mode: number;
+  size: number;
+  type: "File";
+  mtime: Date;
+}
+
+interface TarReadEntry {
+  write(chunk: Uint8Array): unknown;
+  end(): unknown;
+}
+
+interface TarPack extends NodeJS.ReadableStream {
+  add(entry: string | TarReadEntry): unknown;
+  end(): unknown;
+}
+
 interface TarModule {
   create(
     opts: { cwd: string; portable: boolean; gzip: false },
     entries: string[],
   ): NodeJS.ReadableStream;
+  Pack: new (opts: {
+    cwd: string;
+    portable: boolean;
+    gzip: false;
+    filter(path: string, entry: unknown): boolean;
+  }) => TarPack;
+  Header: new (data: TarHeader) => object;
+  ReadEntry: new (header: object) => TarReadEntry;
   extract(opts: {
     cwd: string;
     filter(path: string, entry: TarEntry): boolean;
   }): NodeJS.WritableStream;
 }
 
+/** One root file of the packed directory, archived with these bytes instead. */
+export interface FileSubstitution {
+  /** File name at the root of `dir`, such as `wrangler.jsonc`. */
+  name: string;
+  /** Text archived under that entry; the file on disk is never touched. */
+  contents: string;
+}
+
 export interface PackDirectoryOptions {
   signal?: AbortSignal;
+  /**
+   * Archives one root file with different bytes, leaving the directory on disk
+   * exactly as it is. The entry keeps its name and the portable mode every other
+   * file of the archive gets; nothing else about the archive changes.
+   */
+  substitute?: FileSubstitution;
 }
+
+/** Mode every substituted entry is archived with; `portable` normalizes to it. */
+const SUBSTITUTED_MODE = 0o644;
 
 export interface UnpackArchiveOptions {
   maxBytes?: number;
@@ -57,7 +100,9 @@ export async function packDirectory(
 
   try {
     await pipeline(
-      tar.create({ cwd: dir, portable: true, gzip: false }, ["."]),
+      opts?.substitute === undefined
+        ? tar.create({ cwd: dir, portable: true, gzip: false }, ["."])
+        : packSubstituted(tar, dir, opts.substitute),
       createZstdCompress(),
       createWriteStream(stage.path, { flags: "w", mode: 0o600 }),
       ...(opts?.signal === undefined ? [] : [{ signal: opts.signal }]),
@@ -67,6 +112,45 @@ export async function packDirectory(
     await stage.dispose();
     throw error;
   }
+}
+
+/**
+ * The directory, with the substituted file written from memory in place of the
+ * one on disk.
+ *
+ * The replacement is added as a tar entry of its own, under the name the walked
+ * file would have had, and the walk's own copy is filtered out so the archive
+ * holds exactly one. The two share a path, so the filter tells them apart by
+ * what it is handed beside it: the entry itself for one that was added, the
+ * file's stat for one the walk found. Entry ORDER is the one thing that differs
+ * from an untouched pack, and nothing that reads a tar depends on it.
+ */
+function packSubstituted(tar: TarModule, dir: string, file: FileSubstitution): TarPack {
+  const path = `./${file.name}`;
+  const bytes = new TextEncoder().encode(file.contents);
+  const pack = new tar.Pack({
+    cwd: dir,
+    portable: true,
+    gzip: false,
+    filter: (name, entry) => name !== path || entry instanceof tar.ReadEntry,
+  });
+
+  const entry = new tar.ReadEntry(
+    new tar.Header({
+      path,
+      mode: SUBSTITUTED_MODE,
+      size: bytes.byteLength,
+      type: "File",
+      mtime: new Date(),
+    }),
+  );
+  pack.add(entry);
+  entry.write(bytes);
+  entry.end();
+
+  pack.add(".");
+  pack.end();
+  return pack;
 }
 
 /** Streams a staged zstd or gzip tar into `dir`, enforcing expansion and entry caps. */

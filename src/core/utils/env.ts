@@ -26,8 +26,8 @@ export const RESERVED_ENV_NAMES: readonly string[] = ["__proto__", "constructor"
 
 /**
  * The whole rule a variable name has to meet, worded for a refusal. Said once
- * so every surface that carries variables — a varset, the runtime policy an
- * operator hands a node — refuses the same names in the same words.
+ * so every surface that carries variables — `scafo deploy --var`, the runtime
+ * policy an operator hands a node — refuses the same names in the same words.
  */
 export const ENV_NAME_RULE: string =
   "letters, digits and underscores, never beginning on a digit, and never " +

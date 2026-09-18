@@ -5,7 +5,7 @@
  */
 
 import { gzipSync } from "node:zlib";
-import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -57,6 +57,67 @@ describe("a directory packed and unpacked again", () => {
 
     expect(archive.byteLength).toBe(bytes.byteLength);
     expect(magic).toEqual([0x28, 0xb5, 0x2f, 0xfd]);
+  });
+});
+
+describe("one root file substituted as the directory is packed", () => {
+  const EDITED = '{"name":"demo","no_bundle":true}';
+
+  it("archives the substituted bytes and leaves every other entry alone", async () => {
+    const archive = await packDirectory(source, {
+      substitute: { name: "wrangler.jsonc", contents: EDITED },
+    });
+    const dest = await scratch();
+
+    try {
+      await unpackArchive(archive, dest);
+    } finally {
+      await archive.dispose();
+    }
+
+    expect((await readdir(dest)).sort()).toEqual(["assets", "index.mjs", "wrangler.jsonc"]);
+    await expect(readFile(join(dest, "wrangler.jsonc"), "utf8")).resolves.toBe(EDITED);
+    await expect(readFile(join(dest, "index.mjs"), "utf8")).resolves.toBe(ENTRY);
+    await expect(readFile(join(dest, "assets", "logo.svg"), "utf8")).resolves.toBe("<svg/>");
+  });
+
+  it("writes nothing into the directory it packed", async () => {
+    const archive = await packDirectory(source, {
+      substitute: { name: "wrangler.jsonc", contents: EDITED },
+    });
+    await archive.dispose();
+
+    await expect(readFile(join(source, "wrangler.jsonc"), "utf8")).resolves.toBe(CONFIG);
+  });
+
+  it("gives the substituted entry the portable mode every other file gets", async () => {
+    const substituted = await packDirectory(source, {
+      substitute: { name: "wrangler.jsonc", contents: EDITED },
+    });
+    const dest = await scratch();
+
+    try {
+      await unpackArchive(substituted, dest);
+    } finally {
+      await substituted.dispose();
+    }
+
+    const config = await stat(join(dest, "wrangler.jsonc"));
+    const entry = await stat(join(dest, "index.mjs"));
+    expect(config.mode & 0o777).toBe(entry.mode & 0o777);
+  });
+
+  it("carries the file byte for byte when nothing is substituted", async () => {
+    const archive = await packDirectory(source);
+    const dest = await scratch();
+
+    try {
+      await unpackArchive(archive, dest);
+    } finally {
+      await archive.dispose();
+    }
+
+    await expect(readFile(join(dest, "wrangler.jsonc"), "utf8")).resolves.toBe(CONFIG);
   });
 });
 

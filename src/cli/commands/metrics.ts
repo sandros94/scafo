@@ -2,7 +2,7 @@
  * `scafo metrics`: what the fleet served over a window, per project and
  * environment.
  *
- * Read STRAIGHT OUT OF THE BUCKET, like `scafo trust` and `scafo varset` and for
+ * Read STRAIGHT OUT OF THE BUCKET, like `scafo trust` and for
  * the same reason: the numbers were flushed there by whichever nodes were
  * running at the time, and the nodes that wrote them may well be gone. No node
  * is asked and none has to be up.

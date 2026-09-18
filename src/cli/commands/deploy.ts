@@ -12,6 +12,7 @@ import { isScafoError, ScafoError } from "../../core/error.ts";
 import { parseReplicas } from "../../core/placement/replicas.ts";
 import { parseLabels } from "../../core/utils/labels.ts";
 import { packDirectory } from "../../drivers/archive/tar-zst.ts";
+import { type ConfigEdit, editedConfig, isEmptyEdit, parseVarFlags } from "../_deploy-config.ts";
 import { nodeBaseUrl, nodeRequest, type Authorize, operatorSigner } from "../_node.ts";
 import { resolveOperatorHome } from "../_home.ts";
 import { OPERATOR_KEY_FORMS, operatorFlags, resolveOperator } from "../_operator.ts";
@@ -37,7 +38,16 @@ const deployArgs: ArgsDef = {
   "remote": { type: "string", description: "Remote to deploy to, out of this operator's home" },
   "project": { type: "string", description: "Project slug to deploy into", required: true },
   "env": { type: "string", description: "Environment to deploy into (production)" },
-  "script": { type: "string", description: "Name the runtime files the app under" },
+  "var": {
+    type: "string",
+    multiple: true,
+    valueHint: "KEY:VALUE",
+    description:
+      "Set a variable in the artifact's runtime config, overriding the config's own vars; " +
+      "repeat for more. The value is split at the first colon, so it may contain colons. " +
+      "A value written here is visible to the process list and the CI log of the machine " +
+      "running this command, and the runtime stores it as plain text in the bucket",
+  },
   "bundle": {
     type: "boolean",
     default: true,
@@ -103,9 +113,14 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
   const authorize = async (): Promise<string> => fixed ?? (await (signer as Authorize)());
 
   /* Read before the directory is packed, so a malformed flag costs nothing. */
-  const meta = deployMetadataFrom(flags, project);
+  const meta = deployMetadataFrom(flags);
+  const edit = configEditFrom(flags);
+  /* Only what was asked for is edited. With neither flag the archive carries the
+     project's config byte for byte, which is what the node publishes. */
+  const substitute = isEmptyEdit(edit) ? undefined : await editedConfig(dir, edit);
+
   console.log(`scafo: packing ${dir}`);
-  const artifact = await packDirectory(dir);
+  const artifact = await packDirectory(dir, substitute === undefined ? undefined : { substitute });
 
   let accepted: Response;
   try {
@@ -128,11 +143,28 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
   });
 }
 
+/**
+ * What the flags ask the project's runtime config to say.
+ *
+ * `--var` is declared `multiple`, so the parser hands over every occurrence as
+ * an array and an absent flag as an empty one. The comma means nothing here: a
+ * value is whatever follows the first colon, commas and all.
+ */
+export function configEditFrom(flags: Record<string, unknown>): ConfigEdit {
+  const given = Array.isArray(flags.var) ? (flags.var as unknown[]) : [];
+  return {
+    vars: parseVarFlags(
+      given.filter((entry): entry is string => typeof entry === "string"),
+      "--var",
+    ),
+    /* citty turns `--no-bundle` into `bundle: false`; the negated name itself
+       never reaches the parsed flags. */
+    noBundle: flags.bundle === false,
+  };
+}
+
 /** What the flags say about the deploy, in the shape the node's intake reads. */
-export function deployMetadataFrom(
-  flags: Record<string, unknown>,
-  project: string,
-): DeployMetadata {
+export function deployMetadataFrom(flags: Record<string, unknown>): DeployMetadata {
   const wantedReplicas = text(flags.replicas);
   const replicas = wantedReplicas === undefined ? undefined : parseReplicas(wantedReplicas);
   const wantedSelector = text(flags["node-selector"]);
@@ -141,10 +173,6 @@ export function deployMetadataFrom(
 
   return {
     environment: text(flags.env) ?? "production",
-    script: text(flags.script) ?? project,
-    /* citty turns `--no-bundle` into `bundle: false`; the negated name itself
-       never reaches the parsed flags. */
-    ...(flags.bundle === false ? { noBundle: true as const } : {}),
     /* Only when they were asked for: a deploy that names no replica count and no
        selector must leave whatever the environment already carries exactly as it
        is. Neither flag can lift a constraint — that is `scafo env selector`. */
@@ -230,12 +258,6 @@ export async function watchDeploy(
     }
     if (status.deployment !== undefined) {
       console.log(`scafo: deployment ${status.deployment}`);
-    }
-    /* Short enough to read out, long enough to tell two edits of one varset
-       apart; the whole digest is in the environment's deployment notice. */
-    if (status.varset !== undefined) {
-      const { name, hash } = status.varset;
-      console.log(`scafo: carried varset "${name}" (${hash.slice(0, 12)})`);
     }
     return status;
   }
