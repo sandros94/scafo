@@ -131,7 +131,10 @@ export function createOidcVerifier(ctx: RegistryContext, opts?: OidcVerifierOpti
 
       const issuer = matchAudiences(policy.value, audiences, { iss, sub });
       if (issuer === null) {
-        throw trustMismatch(`"${sub}" is not a trusted subject of "${iss}" for "${application}"`);
+        throw trustMismatch(
+          `"${sub}" is not a trusted subject of "${iss}" for "${application}"; ` +
+            admitHint({ application, iss, aud: audiences[0] ?? OIDC_AUDIENCE, sub }),
+        );
       }
       return { actor: { issuer: iss, subject: sub }, application, issuer };
     },
@@ -175,6 +178,38 @@ function assertWindow(claims: Record<string, unknown>, nowS: number, skewS: numb
   if (claims.nbf !== undefined && nowS < numberClaim(claims, "nbf") - skewS) {
     throw authInvalid("Token is not valid yet");
   }
+}
+
+/** Characters a printed command carries unquoted, with nothing a shell or the flag parser reads. */
+const PRINTABLE_ARGUMENT_RE = /^[\w:/.,@=+-]+$/;
+
+/**
+ * How an admin admits the subject that was just refused, as the last words of
+ * the refusal: whoever reads it is usually looking at their first CI run.
+ *
+ * `trust add`, never `trust set`: an issuer that refused this subject is trusted
+ * for others, and `set` would replace them. ONLY WHAT THE TOKEN ITSELF SAID is
+ * echoed — any workload of a shared issuer can earn this refusal, so the
+ * subjects the application does trust are not its to read. A subject carrying a
+ * glob, a quote or whitespace is not turned into a command at all: pasted, it
+ * would grant something other than the one subject that was refused.
+ */
+function admitHint(refused: {
+  application: string;
+  iss: string;
+  aud: string;
+  sub: string;
+}): string {
+  const parts = [refused.iss, refused.aud, refused.sub];
+  if (!parts.every((part) => PRINTABLE_ARGUMENT_RE.test(part))) {
+    return `an admin of this fleet admits it with "scafo trust add", naming that subject exactly`;
+  }
+
+  const audience = refused.aud === OIDC_AUDIENCE ? "" : ` --audience ${refused.aud}`;
+  return (
+    `an admin of this fleet admits exactly that subject with "scafo trust add --name ` +
+    `${refused.application} --issuer ${refused.iss}${audience} --subject ${refused.sub}"`
+  );
 }
 
 function trustMismatch(detail: string): ScafoError {

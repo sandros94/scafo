@@ -6,11 +6,13 @@
 
 import { describe, expect, it } from "vitest";
 import { OIDC_AUDIENCE } from "../src/core/auth/index.ts";
-import { flagList } from "../src/cli/_flags.ts";
+import { type ArgsDef, type CommandDef, parseArgs } from "citty";
+import { trust as trustCommand, trustSubjects } from "../src/cli/commands/trust.ts";
 import {
   DEFAULT_TRUST_AUDIENCE,
   formatTrustPolicy,
   readTrustPolicy,
+  addTrustSubjects,
   removeTrustIssuer,
   setTrustIssuer,
 } from "../src/cli/_trust.ts";
@@ -139,13 +141,122 @@ describe("trusting an issuer", () => {
   });
 });
 
+describe("adding a subject to what an issuer is already trusted for", () => {
+  it("keeps every subject the issuer had and appends the new one", async () => {
+    const registry = ctxWith(new MemoryCasStore()).ctx;
+    await setTrustIssuer(registry, {
+      application: APPLICATION,
+      iss: GITHUB,
+      aud: "scafo",
+      subjects: [TAGS],
+    });
+
+    const { policy, added } = await addTrustSubjects(registry, {
+      application: APPLICATION,
+      iss: GITHUB,
+      aud: "scafo",
+      subjects: [MAIN],
+    });
+
+    expect(added).toEqual([MAIN]);
+    expect(policy.issuers).toEqual([{ iss: GITHUB, aud: "scafo", subjects: [TAGS, MAIN] }]);
+  });
+
+  it("adds nothing twice, and says what it did add", async () => {
+    const registry = ctxWith(new MemoryCasStore()).ctx;
+    const once = { application: APPLICATION, iss: GITHUB, aud: "scafo", subjects: [MAIN, TAGS] };
+    await addTrustSubjects(registry, once);
+
+    const again = await addTrustSubjects(registry, { ...once, subjects: [TAGS, BRANCHES] });
+
+    expect(again.added).toEqual([BRANCHES]);
+    expect(again.policy.issuers[0]?.subjects).toEqual([MAIN, TAGS, BRANCHES]);
+  });
+
+  it("writes the policy and the issuer when neither is there yet", async () => {
+    const registry = ctxWith(new MemoryCasStore()).ctx;
+
+    const { policy } = await addTrustSubjects(registry, {
+      application: APPLICATION,
+      iss: GITLAB,
+      aud: "scafo",
+      subjects: [MAIN],
+    });
+
+    expect(policy).toEqual({ v: 1, issuers: [{ iss: GITLAB, aud: "scafo", subjects: [MAIN] }] });
+  });
+
+  it("refuses an issuer that is no URL and a call that names no subject", async () => {
+    const registry = ctxWith(new MemoryCasStore()).ctx;
+    const base = { application: APPLICATION, aud: "scafo" };
+
+    await expect(
+      addTrustSubjects(registry, { ...base, iss: "github", subjects: [MAIN] }),
+    ).rejects.toMatchObject({ code: "invalid-input", message: "Invalid issuer" });
+    await expect(
+      addTrustSubjects(registry, { ...base, iss: GITHUB, subjects: [] }),
+    ).rejects.toMatchObject({ code: "invalid-input", message: "No subject given" });
+    /* Refused before anything is written. */
+    await expect(readTrustPolicy(registry, APPLICATION)).resolves.toEqual({ v: 1, issuers: [] });
+  });
+});
+
+describe("two edits of one policy made at once", () => {
+  it("keeps both, whichever is written second", async () => {
+    const registry = ctxWith(new MemoryCasStore()).ctx;
+    await setTrustIssuer(registry, {
+      application: APPLICATION,
+      iss: GITHUB,
+      aud: "scafo",
+      subjects: [TAGS],
+    });
+
+    await Promise.all([
+      addTrustSubjects(registry, {
+        application: APPLICATION,
+        iss: GITHUB,
+        aud: "scafo",
+        subjects: [MAIN],
+      }),
+      setTrustIssuer(registry, {
+        application: APPLICATION,
+        iss: GITLAB,
+        aud: "scafo",
+        subjects: [BRANCHES],
+      }),
+    ]);
+
+    const policy = await readTrustPolicy(registry, APPLICATION);
+    expect(policy.issuers.find((issuer) => issuer.iss === GITHUB)?.subjects).toEqual([TAGS, MAIN]);
+    expect(policy.issuers.find((issuer) => issuer.iss === GITLAB)?.subjects).toEqual([BRANCHES]);
+  });
+});
+
 describe("reading the subjects off the flag", () => {
-  it("takes them comma-separated, and repeated for good measure", () => {
-    expect(flagList(`${BRANCHES}, ${TAGS}`)).toEqual([BRANCHES, TAGS]);
-    expect(flagList([`${BRANCHES},${TAGS}`, MAIN])).toEqual([BRANCHES, TAGS, MAIN]);
-    expect(flagList(undefined)).toEqual([]);
-    expect(flagList("")).toEqual([]);
-    expect(flagList(" , ")).toEqual([]);
+  it.each(["set", "add"])("takes one subject per --subject on `scafo trust %s`", (verb) => {
+    const args = ((trustCommand.subCommands as Record<string, CommandDef>)[verb] as CommandDef)
+      .args as ArgsDef;
+    const parsed = parseArgs(
+      ["--name", "shop", "--issuer", GITHUB, "--subject", BRANCHES, `--subject=${TAGS}`],
+      args,
+    );
+
+    expect(trustSubjects(parsed)).toEqual([BRANCHES, TAGS]);
+  });
+
+  it("keeps a comma inside the subject it was written in", () => {
+    /* A subject is whatever the issuer minted, and nothing says it holds no
+       comma: each occurrence of the flag is one subject, whole. */
+    expect(trustSubjects({ subject: ["repo:acme/a,b:ref:main", ` ${MAIN} `] })).toEqual([
+      "repo:acme/a,b:ref:main",
+      MAIN,
+    ]);
+  });
+
+  it("reads no subject out of a flag that was not given, or given empty", () => {
+    expect(trustSubjects({})).toEqual([]);
+    expect(trustSubjects({ subject: [] })).toEqual([]);
+    expect(trustSubjects({ subject: ["", "  "] })).toEqual([]);
   });
 });
 

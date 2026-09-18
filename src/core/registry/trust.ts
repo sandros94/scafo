@@ -2,9 +2,12 @@
 
 import type { TrustIssuer, TrustPolicy } from "../types/registry.ts";
 import { isCasConflict } from "./_shared.ts";
-import { createJson, requireJson, updateJson } from "./cas.ts";
+import { createJson, readJson, requireJson, updateJson } from "./cas.ts";
 import type { RegistryContext } from "./context.ts";
 import { trustKey } from "./paths.ts";
+
+/** The policy every application starts with: no issuer is trusted. */
+export const EMPTY_TRUST_POLICY: TrustPolicy = { v: 1, issuers: [] };
 
 /**
  * Replaces the application's trust policy, creating it when absent.
@@ -17,17 +20,40 @@ export async function setTrustPolicy(
   application: string,
   policy: TrustPolicy,
 ): Promise<TrustPolicy> {
+  return updateTrustPolicy(ctx, application, () => policy);
+}
+
+/**
+ * Edits the application's trust policy as it stands NOW, creating it when absent.
+ *
+ * `mutate` is handed the stored policy — an empty one when there is none — and
+ * is run again on whatever is there if another edit lands first, so two
+ * operators changing different issuers at once both keep their change. What it
+ * throws refuses the edit and writes nothing.
+ */
+export async function updateTrustPolicy(
+  ctx: RegistryContext,
+  application: string,
+  mutate: (current: TrustPolicy) => TrustPolicy,
+): Promise<TrustPolicy> {
   const key = trustKey(application);
 
-  try {
-    await createJson(ctx, key, policy);
-    return policy;
-  } catch (error) {
-    if (!isCasConflict(error)) throw error;
-
-    const updated = await updateJson<TrustPolicy>(ctx, key, () => policy);
-    return updated.value;
+  /* Read before creating: an edit that refuses an empty policy — taking out an
+     issuer nobody trusted — has to be judged against what is stored, not
+     against the nothing a create would start from. */
+  if ((await readJson<TrustPolicy>(ctx, key)) === null) {
+    try {
+      const created = mutate(EMPTY_TRUST_POLICY);
+      await createJson(ctx, key, created);
+      return created;
+    } catch (error) {
+      /* Someone wrote one in between; edit theirs. */
+      if (!isCasConflict(error)) throw error;
+    }
   }
+
+  const updated = await updateJson<TrustPolicy>(ctx, key, mutate);
+  return updated.value;
 }
 
 export async function getTrustPolicy(

@@ -629,6 +629,68 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   );
 
   it(
+    "admits the refused subject with the command the refusal ends on, keeping what was trusted",
+    async () => {
+      /* A third application, so that nothing else in the suite sees its deploys.
+         It trusts one repository; a token from another earns the refusal, and
+         the refusal's last words are run exactly as printed. */
+      const hintEnv = "hint";
+      const hinted = `${APPLICATION}-${hintEnv}`;
+      const granted = await runCli(
+        [
+          "trust",
+          "set",
+          "--name",
+          APPLICATION,
+          "--env",
+          hintEnv,
+          "--issuer",
+          issuer.iss,
+          "--subject",
+          CI_SUBJECT_GLOB,
+        ],
+        storeEnv(),
+      );
+      expectCleanExit(granted);
+
+      const token = await issuer.mint({ sub: HOSTILE_SUBJECT });
+      const refused = await runCli(
+        [...deployArgs(await stageApp("v7"), hintEnv), "--token", token],
+        {},
+      );
+      expect(refused.code, refused.output).not.toBe(0);
+      expect(refused.output).toContain("urn:scafo:trust-mismatch");
+      /* Nothing of what the application does trust is told to whoever was refused. */
+      expect(refused.output).not.toContain(CI_SUBJECT_GLOB);
+
+      const printed = /"(scafo trust add [^"]+)"/.exec(refused.output)?.[1];
+      expect(printed, refused.output).toBe(
+        `scafo trust add --name ${hinted} --issuer ${issuer.iss} --subject ${HOSTILE_SUBJECT}`,
+      );
+      observed.trustHint = printed;
+
+      const admitted = await runCli((printed ?? "").split(" ").slice(1), storeEnv());
+      expectCleanExit(admitted);
+      const policy = await readJson<TrustPolicy>(registry, trustKey(hinted));
+      expect(policy?.value.issuers).toEqual([
+        { iss: issuer.iss, aud: "scafo", subjects: [CI_SUBJECT_GLOB, HOSTILE_SUBJECT] },
+      ]);
+
+      const accepted = await runCli(
+        [
+          ...deployArgs(await stageApp("v7"), hintEnv),
+          "--token",
+          await issuer.mint({ sub: HOSTILE_SUBJECT }),
+        ],
+        {},
+      );
+      expectCleanExit(accepted);
+      await untilServes(`${hinted}.${PLATFORM_DOMAIN}`, "v7");
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
     "refuses a token one application trusts when it is presented for another",
     async () => {
       /* The same token that just deployed `app-ci`, offered to `app`. Trust is

@@ -5,12 +5,10 @@ import { ScafoError } from "../core/error.ts";
 import { readJson } from "../core/registry/cas.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
 import { trustKey } from "../core/registry/paths.ts";
-import { setTrustPolicy } from "../core/registry/trust.ts";
+import { EMPTY_TRUST_POLICY, updateTrustPolicy } from "../core/registry/trust.ts";
 import type { TrustIssuer, TrustPolicy } from "../core/types/registry.ts";
 
 /** An empty policy: an application that admits no workload token at all. */
-export const EMPTY_TRUST_POLICY: TrustPolicy = { v: 1, issuers: [] };
-
 export interface SetTrustIssuerOptions {
   application: string;
   /** Issuer URL, exactly as the tokens it mints carry it in `iss`. */
@@ -39,57 +37,73 @@ export async function setTrustIssuer(
   opts: SetTrustIssuerOptions,
 ): Promise<TrustPolicy> {
   assertIssuerUrl(opts.iss);
-  if (opts.subjects.length === 0) {
-    throw new ScafoError("invalid-input", "No subject given", {
-      detail:
-        `--subject must name at least one subject the issuer is trusted for, such as ` +
-        `"repo:acme/shop:ref:refs/heads/*"; an issuer with no subject admits nothing and ` +
-        `is indistinguishable from not being trusted at all`,
-    });
-  }
+  assertSubjects(opts.subjects);
 
-  const current = await readTrustPolicy(registry, opts.application);
   const entry: TrustIssuer = { iss: opts.iss, aud: opts.aud, subjects: [...opts.subjects] };
 
-  const replaced = current.issuers.some(
-    (issuer) => issuer.iss === opts.iss && issuer.aud === opts.aud,
-  );
-  const issuers = replaced
-    ? current.issuers.map((issuer) =>
-        issuer.iss === opts.iss && issuer.aud === opts.aud ? entry : issuer,
-      )
-    : [...current.issuers, entry];
+  return updateTrustPolicy(registry, opts.application, (current) => {
+    const replaced = current.issuers.some((issuer) => sameGrant(issuer, entry));
+    const issuers = replaced
+      ? current.issuers.map((issuer) => (sameGrant(issuer, entry) ? entry : issuer))
+      : [...current.issuers, entry];
+    return { v: 1, issuers };
+  });
+}
 
-  return setTrustPolicy(registry, opts.application, { v: 1, issuers });
+/** What {@link addTrustSubjects} did: the policy as it now stands, and what was new in it. */
+export interface AddedTrustSubjects {
+  policy: TrustPolicy;
+  /** The subjects that were not trusted yet, in the order they were given. */
+  added: string[];
 }
 
 /**
- * Removes every entry naming `iss`, whatever audience it was granted for.
+ * Trusts more subjects of an issuer, KEEPING the ones it is trusted for already.
  *
- * The document stays, with no issuers left in it: an empty policy and a missing
- * one deny the same tokens, and one that is there says the application has a
- * policy somebody has looked at.
- *
- * Throws `ScafoError("not-found")` when the application does not trust that issuer
- * at all — a mistyped URL that reported success would leave the issuer it was
- * meant to revoke still trusted.
+ * The other half of {@link setTrustIssuer}, which states the whole list and so
+ * drops whatever it does not name. A subject already trusted is left where it
+ * is, so running the same command twice changes nothing; an issuer or a policy
+ * that is not there yet is written.
  */
+export async function addTrustSubjects(
+  registry: RegistryContext,
+  opts: SetTrustIssuerOptions,
+): Promise<AddedTrustSubjects> {
+  assertIssuerUrl(opts.iss);
+  assertSubjects(opts.subjects);
+
+  let added: string[] = [];
+  const policy = await updateTrustPolicy(registry, opts.application, (current) => {
+    const grant = { iss: opts.iss, aud: opts.aud };
+    const held = current.issuers.find((issuer) => sameGrant(issuer, grant))?.subjects ?? [];
+    added = [...new Set(opts.subjects)].filter((subject) => !held.includes(subject));
+    const entry: TrustIssuer = { ...grant, subjects: [...held, ...added] };
+
+    const issuers = current.issuers.some((issuer) => sameGrant(issuer, grant))
+      ? current.issuers.map((issuer) => (sameGrant(issuer, grant) ? entry : issuer))
+      : [...current.issuers, entry];
+    return { v: 1, issuers };
+  });
+  return { policy, added };
+}
+
 export async function removeTrustIssuer(
   registry: RegistryContext,
   application: string,
   iss: string,
 ): Promise<TrustPolicy> {
-  const current = await readTrustPolicy(registry, application);
-  const issuers = current.issuers.filter((issuer) => issuer.iss !== iss);
+  return updateTrustPolicy(registry, application, (current) => {
+    const issuers = current.issuers.filter((issuer) => issuer.iss !== iss);
 
-  if (issuers.length === current.issuers.length) {
-    throw new ScafoError("not-found", "Issuer is not trusted", {
-      detail:
-        `"${application}" does not trust "${iss}"; it trusts ` +
-        `${current.issuers.length === 0 ? "no issuer at all" : current.issuers.map((issuer) => `"${issuer.iss}"`).join(", ")}`,
-    });
-  }
-  return setTrustPolicy(registry, application, { v: 1, issuers });
+    if (issuers.length === current.issuers.length) {
+      throw new ScafoError("not-found", "Issuer is not trusted", {
+        detail:
+          `"${application}" does not trust "${iss}"; it trusts ` +
+          `${current.issuers.length === 0 ? "no issuer at all" : current.issuers.map((issuer) => `"${issuer.iss}"`).join(", ")}`,
+      });
+    }
+    return { v: 1, issuers };
+  });
 }
 
 /**
@@ -130,6 +144,26 @@ export function formatTrustPolicy(policy: TrustPolicy): string {
 
 /** Audience a workload requests its token for when the operator names none. */
 export const DEFAULT_TRUST_AUDIENCE: string = OIDC_AUDIENCE;
+
+/** An issuer trusted for nothing admits nothing, so at least one subject is required. */
+function assertSubjects(subjects: string[]): void {
+  if (subjects.length > 0) return;
+
+  throw new ScafoError("invalid-input", "No subject given", {
+    detail:
+      `--subject must name at least one subject the issuer is trusted for, such as ` +
+      `"repo:acme/shop:ref:refs/heads/*"; an issuer with no subject admits nothing and ` +
+      `is indistinguishable from not being trusted at all`,
+  });
+}
+
+/** Whether two entries are the same grant: one issuer, minting for one audience. */
+function sameGrant(
+  a: Pick<TrustIssuer, "iss" | "aud">,
+  b: Pick<TrustIssuer, "iss" | "aud">,
+): boolean {
+  return a.iss === b.iss && a.aud === b.aud;
+}
 
 /**
  * An issuer is an https URL: discovery is `<iss>/.well-known/openid-configuration`,

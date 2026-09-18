@@ -15,9 +15,9 @@ import { ScafoError } from "../../core/error.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
 import { resolveApplication } from "../_application.ts";
 import { createRegistry } from "../_bootstrap.ts";
-import { flagList } from "../_flags.ts";
 import {
   DEFAULT_TRUST_AUDIENCE,
+  addTrustSubjects,
   formatTrustPolicy,
   readTrustPolicy,
   removeTrustIssuer,
@@ -55,9 +55,11 @@ const setArgs: ArgsDef = {
   },
   subject: {
     type: "string",
-    description:
-      "Subject pattern to trust, * matching any run of characters; comma-separated for several",
+    multiple: true,
     required: true,
+    valueHint: "pattern",
+    description:
+      "Subject pattern to trust, * matching any run of characters; repeat the flag for several",
   },
 };
 
@@ -67,7 +69,11 @@ const removeArgs: ArgsDef = {
 };
 
 const set: CommandDef = defineCommand({
-  meta: { name: "set", description: "Trust an issuer's subjects to deploy an application" },
+  meta: {
+    name: "set",
+    description:
+      "State every subject an issuer is trusted for, replacing the ones it had; see add to keep them",
+  },
   args: setArgs,
   async run({ args }): Promise<void> {
     try {
@@ -90,6 +96,21 @@ const show: CommandDef = defineCommand({
   },
 });
 
+const add: CommandDef = defineCommand({
+  meta: {
+    name: "add",
+    description: "Trust more subjects of an issuer, keeping the ones it is trusted for already",
+  },
+  args: setArgs,
+  async run({ args }): Promise<void> {
+    try {
+      await runAdd(args as Record<string, unknown>);
+    } catch (error) {
+      reportFailure(error);
+    }
+  },
+});
+
 const remove: CommandDef = defineCommand({
   meta: { name: "remove", description: "Stop trusting an issuer" },
   args: removeArgs,
@@ -104,13 +125,13 @@ const remove: CommandDef = defineCommand({
 
 export const trust: CommandDef = defineCommand({
   meta: { name: "trust", description: "Manage which CI issuers may deploy an application" },
-  subCommands: { set, show, remove },
+  subCommands: { set, add, show, remove },
 });
 
 async function runSet(flags: Record<string, unknown>): Promise<void> {
   const application = target(flags);
   const iss = required(flags, "issuer");
-  const subjects = flagList(flags.subject);
+  const subjects = trustSubjects(flags);
 
   const policy = await setTrustIssuer(await registryFor(flags), {
     application,
@@ -123,6 +144,27 @@ async function runSet(flags: Record<string, unknown>): Promise<void> {
   console.log(
     `scafo: "${application}" now trusts ${iss} for ${String(count)} ` +
       `subject${count === 1 ? "" : "s"}`,
+  );
+  console.log(formatTrustPolicy(policy));
+}
+
+async function runAdd(flags: Record<string, unknown>): Promise<void> {
+  const application = target(flags);
+  const iss = required(flags, "issuer");
+
+  const { policy, added } = await addTrustSubjects(await registryFor(flags), {
+    application,
+    iss,
+    aud: text(flags.audience) ?? DEFAULT_TRUST_AUDIENCE,
+    subjects: trustSubjects(flags),
+  });
+
+  const count = added.length;
+  console.log(
+    count === 0
+      ? `scafo: "${application}" already trusts ${iss} for every subject given; nothing changed`
+      : `scafo: "${application}" now also trusts ${iss} for ${String(count)} ` +
+          `subject${count === 1 ? "" : "s"}`,
   );
   console.log(formatTrustPolicy(policy));
 }
@@ -143,6 +185,18 @@ async function runRemove(flags: Record<string, unknown>): Promise<void> {
 
   console.log(`scafo: "${application}" no longer trusts ${iss}`);
   console.log(formatTrustPolicy(policy));
+}
+
+/**
+ * The subjects the flags name: one per `--subject`, whole. Nothing is split —
+ * a subject is whatever the issuer minted, commas included.
+ */
+export function trustSubjects(flags: Record<string, unknown>): string[] {
+  const given = Array.isArray(flags.subject) ? (flags.subject as unknown[]) : [];
+  return given
+    .filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
 }
 
 /** The application this invocation addresses, `--env` resolved. */

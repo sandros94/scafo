@@ -167,6 +167,33 @@ describe("trust is checked before anything is fetched", () => {
 });
 
 describe("subject glob semantics", () => {
+  it("ends the refusal with the command that admits exactly that subject", async () => {
+    const error = await refusal(await mint({ sub: "repo:acme/other:ref:refs/heads/main" }));
+
+    expect(error).toMatchObject(TRUST_MISMATCH);
+    /* `add` and never `set`: a policy that refused this subject trusts others,
+       and replacing them is not what fixes a refusal. */
+    expect(error.detail).toContain(
+      `scafo trust add --name ${TRUSTING} --issuer ${ISS} --subject repo:acme/other:ref:refs/heads/main`,
+    );
+    /* What the application already trusts is nobody's to learn from a refusal:
+       any workload of a shared issuer can earn one. */
+    expect(error.detail).not.toContain(SUBJECT_GLOB);
+  });
+
+  it.each([
+    ["a glob", "repo:acme/*"],
+    ["a quote", `repo:acme/o'ther`],
+    ["a space", "repo:acme/other ref"],
+    ["a line break", "repo:acme/other\nscafo trust add --name x"],
+  ])("prints no command for a subject carrying %s", async (_what, sub) => {
+    const error = await refusal(await mint({ sub }));
+
+    expect(error).toMatchObject(TRUST_MISMATCH);
+    expect(error.detail).not.toContain("--subject");
+    expect(error.detail).toContain("scafo trust add");
+  });
+
   it("lets * span a path, but not the segment before it", async () => {
     await expect(
       verifier.verify(await mint({ sub: "repo:acme/app:ref:refs/heads/feat/x" }), TRUSTING),
