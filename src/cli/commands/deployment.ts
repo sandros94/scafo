@@ -5,7 +5,9 @@
  * Celld publishes every deploy under the environment's fleet prefix and deletes
  * none of them, so a long-lived environment keeps every bundle it has ever run.
  * `prune` is the operator's hands on that, and it is UNSTABLE on purpose: the
- * moment Celld grows a deployment lifecycle of its own, this follows it.
+ * moment Celld grows a deployment lifecycle of its own, this follows it. It is
+ * also PINNED, because it reads formats Celld owns: it plans nothing unless the
+ * installation is answering on a release this build was verified against.
  */
 
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
@@ -19,6 +21,7 @@ import {
   type PrunePlan,
   type StoredDeployment,
 } from "../../core/registry/prune.ts";
+import { verifiedReleaseList } from "../../core/registry/_celld-contract.ts";
 import { createRegistry } from "../_bootstrap.ts";
 import { confirm } from "../_confirm.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
@@ -76,7 +79,8 @@ const PRUNE_COMMAND = "scafo deployment prune";
 /** Why `scafo deployment prune` may change under the operator who scripted it. */
 export const PRUNE_UNSTABLE_WHY: string =
   `Celld may grow a native deployment lifecycle (denoland/celld#181), and this command ` +
-  `follows upstream when it does`;
+  `follows upstream when it does; it reads Celld's own bucket formats, so it runs only ` +
+  `against the Celld releases it was verified against (${verifiedReleaseList()})`;
 
 /** Said in the help and again in the summary, because it is what prune does past the deployments. */
 const BLOBS_COLLECTED =
@@ -106,7 +110,8 @@ const prune: CommandDef = defineCommand({
     name: "prune",
     description:
       `Delete the old Celld deployments of one environment; what a pointer names is ` +
-      `never deleted and ${BLOBS_COLLECTED}`,
+      `never deleted, ${BLOBS_COLLECTED}, and the run is refused unless the installation is ` +
+      `answering on Celld ${verifiedReleaseList()}`,
   },
   args: pruneArgs,
   async run({ args }): Promise<void> {

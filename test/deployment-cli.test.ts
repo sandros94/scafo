@@ -18,6 +18,7 @@ import {
 } from "../src/cli/commands/deployment.ts";
 import { warnUnstable } from "../src/cli/_warn.ts";
 import type { PrunePlan, StoredDeployment } from "../src/core/registry/prune.ts";
+import { VERIFIED_CELLD_RELEASES } from "../src/core/registry/_celld-contract.ts";
 import { rejectsWith } from "./_helpers.ts";
 
 const DAY_MS = 86_400_000;
@@ -27,6 +28,14 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
+
+/** The description one subcommand presents in `--help`. */
+function argsDescription(command: CommandDef, name: string): string {
+  const subCommands = command.subCommands as Record<string, CommandDef>;
+  const sub = subCommands[name];
+  if (sub === undefined) throw new Error(`no "${name}" subcommand`);
+  return (sub.meta as { description: string }).description;
+}
 
 /** Declared flags of one subcommand, by the name an operator types. */
 function argsOf(command: CommandDef, name: string): ArgsDef {
@@ -102,6 +111,15 @@ describe("the surface `scafo deployment` presents", () => {
     ).toEqual([]);
   });
 
+  it("names the Celld releases it was verified against, from the constant that pins them", () => {
+    const description = argsDescription(deployment, "prune");
+
+    for (const release of VERIFIED_CELLD_RELEASES) {
+      expect(description, "the help an operator reads").toContain(release);
+      expect(PRUNE_UNSTABLE_WHY, "the warning every run prints").toContain(release);
+    }
+  });
+
   it("warns that it follows upstream before it does anything", () => {
     const lines: string[] = [];
     vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
@@ -111,9 +129,9 @@ describe("the surface `scafo deployment` presents", () => {
     warnUnstable("scafo deployment prune", PRUNE_UNSTABLE_WHY);
 
     expect(lines).toEqual([
-      `scafo: warning: "scafo deployment prune" is subject to change: Celld may grow a native ` +
-        `deployment lifecycle (denoland/celld#181), and this command follows upstream when it does`,
+      `scafo: warning: "scafo deployment prune" is subject to change: ${PRUNE_UNSTABLE_WHY}`,
     ]);
+    expect(PRUNE_UNSTABLE_WHY).toContain("denoland/celld#181");
   });
 });
 

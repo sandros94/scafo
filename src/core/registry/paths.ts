@@ -7,7 +7,11 @@ import { assertSlug, isSlug } from "../utils/slug.ts";
 /** Prefix all registry documents live under. */
 const ROOT = "_scafo";
 
-/** Content ids (deployment versions) are lowercase hex digests. */
+/**
+ * Content ids (deployment versions) are lowercase hex digests; Celld's own are
+ * the first sixteen characters of a sha256.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L467-L500 (v0.5.0)
+ */
 export const ID_RE: RegExp = /^[a-f\d]{8,64}$/;
 
 /** Node ids double as celld session ids, which may contain underscores. */
@@ -285,9 +289,16 @@ export function fleetPrefix(project: string, env: string): string {
  * prefix. They are named here all the same, because this file is where a key is
  * built and a caller that assembled one by hand would be the thing that put a
  * deletion one segment away from the wrong prefix.
+ *
+ * Their shapes are pinned to the Celld releases `_celld-contract.ts` names, and
+ * every one below links the upstream lines it mirrors.
  */
 
-/** Prefix Celld publishes an environment's deployments under. */
+/**
+ * Prefix Celld publishes an environment's deployments under; one deployment is
+ * `<script>/<version>/` beneath it.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L575 (v0.5.0)
+ */
 export function deployPrefix(project: string, env: string): string {
   return `${fleetPrefix(project, env)}/deploy/`;
 }
@@ -296,6 +307,8 @@ export function deployPrefix(project: string, env: string): string {
  * The fleet-wide pointer: the SOLE selector of what an environment serves, and
  * the one object that says which publication must survive anything scafo
  * deletes underneath it.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L450-L460 (v0.5.0)
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L842-L848 (v0.5.0)
  */
 export function deployPointerKey(project: string, env: string): string {
   return `${deployPrefix(project, env)}current.json`;
@@ -305,8 +318,11 @@ export function deployPointerKey(project: string, env: string): string {
  * Prefix the static-asset blobs every deployment shares.
  *
  * Content-addressed, so two deployments that ship the same file name the same
- * blob: `assets/sha256/<first two hex>/<digest>` beneath here. Only
- * `scafo deployment prune` deletes under this prefix, and only by reference —
+ * blob: `assets/sha256/<first two hex>/<digest>` beneath here.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L433-L448 (v0.5.0)
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L998-L1008 (v0.5.0)
+ *
+ * Only `scafo deployment prune` deletes under this prefix, and only by reference —
  * a blob every deployment that stays has stopped naming, once it is older than
  * the window that covers a deploy in flight.
  */
@@ -320,6 +336,7 @@ export function deployBlobsPrefix(project: string, env: string): string {
  *
  * A KEYSPACE OF CELLD'S PROTOCOL, not a deployment. Nothing here reads it, and
  * `scafo deployment prune` never weighs what is under it as one.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/container.rs#L67-L73 (v0.5.0)
  */
 export function deployImagesPrefix(project: string, env: string): string {
   return `${deployPrefix(project, env)}images/`;
@@ -334,6 +351,7 @@ export function deployImagesPrefix(project: string, env: string): string {
  * depth as one. Nothing here reads it and `scafo deployment prune` never
  * deletes under it: an attachment outlives the deploy that wrote it, and the
  * fleet that stops consuming a queue is Celld's to decide, not scafo's.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L119-L141 (v0.5.0)
  */
 export function deployQueuesPrefix(project: string, env: string): string {
   return `${deployPrefix(project, env)}queues/`;

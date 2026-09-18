@@ -15,13 +15,27 @@
  * addressed, so a blob is deleted only once no deployment that stays names its
  * digest, and an asset index that cannot be read refuses the whole plan rather
  * than being read as a deployment that references nothing.
+ *
+ * Both of those read formats Celld owns and changes between releases, so the
+ * whole module is PINNED: it plans nothing — a dry run included — unless the
+ * installation answers on a release `_celld-contract.ts` names and every
+ * manifest it lists carries markers that module knows.
  */
 
 import { ScafoError } from "../error.ts";
 import type { DeploymentRecord } from "../types/registry.ts";
 import type { StoredEntry } from "../types/store.ts";
+import {
+  ASSET_INDEX_SCHEMA_VERSION,
+  DEPLOYMENT_FEATURES,
+  LEGACY_MANIFEST_SCHEMA_VERSION,
+  MANIFEST_SCHEMA_VERSIONS,
+  VERIFIED_CELLD_RELEASES,
+  verifiedReleaseList,
+} from "./_celld-contract.ts";
 import { deleteKey, readJson } from "./cas.ts";
 import type { RegistryContext } from "./context.ts";
+import { isNodeAnswering, listNodeRecords } from "./nodes.ts";
 import {
   deployBlobsPrefix,
   deployImagesPrefix,
@@ -101,19 +115,31 @@ export interface PruneResult {
   deleted: string[];
 }
 
-/** What Celld's pointers hold; scafo reads these three fields and writes none. */
+/**
+ * What Celld's pointers hold; scafo reads these three fields and writes none.
+ * `script_name` is upstream's own `Option`: the fleet-wide pointer carries it
+ * and a named pointer written by an older Celld may not.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L450-L460 (v0.5.0)
+ */
 interface DeployPointer {
   version: string;
   prefix: string;
-  script_name: string;
+  script_name?: string;
 }
 
 /**
  * Weighs one environment's deployments against its own pointers, the count to
  * keep, and the age window. BOTH GATES ARE WEIGHED: what goes is past the count
  * AND older than the window. Reads only; {@link executePrune} deletes.
+ *
+ * Refuses with `ScafoError("capability-missing")` before it reads the
+ * environment at all when the installation is not answering on a Celld release
+ * this build was verified against, and again when any deployment it lists
+ * carries a format marker `_celld-contract.ts` does not name.
  */
 export async function planPrune(ctx: RegistryContext, opts: PlanPruneOptions): Promise<PrunePlan> {
+  await assertVerifiedRelease(ctx, opts.now);
+
   const prefix = deployPrefix(opts.project, opts.env);
   const keys = await ctx.store.list(prefix);
 
@@ -226,7 +252,10 @@ async function planBlobs(
   return { keep: entries.length - doomed.length, delete: doomed };
 }
 
-/** Celld's own name for a deployment's asset index, and the only one it serves. */
+/**
+ * Celld's own name for a deployment's asset index, and the only one it serves.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L811-L818 (v0.5.0)
+ */
 const ASSET_INDEX_FILE = "assets.json";
 
 /**
@@ -253,9 +282,14 @@ async function readAssetDigests(
     throw assetIndexProblem(key, "is not an object");
   }
 
-  /* Read through the one field the digests live in rather than through
-     `schema_version`: an index this cannot read refuses here anyway, and
-     pinning a number would refuse a Celld that only added a field. */
+  const schema = record.schema_version;
+  if (schema !== ASSET_INDEX_SCHEMA_VERSION) {
+    throw contractProblem(
+      `"${key}" is asset index schema version ${JSON.stringify(schema)}, and this build reads ` +
+        String(ASSET_INDEX_SCHEMA_VERSION),
+    );
+  }
+
   const entries = record.entries;
   if (typeof entries !== "object" || entries === null || Array.isArray(entries)) {
     throw assetIndexProblem(key, `has no "entries"`);
@@ -280,13 +314,20 @@ function assetIndexProblem(key: string, wrong: string): ScafoError {
   });
 }
 
-/** A full asset digest, exactly as Celld writes one: lowercase hexadecimal. */
+/**
+ * A full asset digest, exactly as Celld writes one: lowercase hexadecimal, and
+ * the `sha256` of every entry of an asset index.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L390-L397 (v0.5.0)
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L433-L448 (v0.5.0)
+ */
 const DIGEST_RE = /^[a-f\d]{64}$/;
 
 /**
  * The digest a blob key names, or nothing when the key is not one Celld wrote.
  *
  * Celld's layout is `deploy-blobs/assets/sha256/<first two hex>/<digest>`.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L433-L448 (v0.5.0)
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L998-L1008 (v0.5.0)
  * ANYTHING ELSE UNDER THE PREFIX IS LEFT ALONE: a key this cannot read as a
  * digest is one nothing here can reference-count, and an object of unknown
  * shape is not one to delete on a guess.
@@ -340,6 +381,131 @@ async function assertUnnamed(
 }
 
 /**
+ * Refuses unless every node of the installation that is still answering reports
+ * a Celld release this build was verified against.
+ *
+ * Prune reads and deletes inside Celld's own keyspace, and a release nothing
+ * here has been run against may have written it in shapes this cannot read. The
+ * fleet's own records are the only thing that says which release wrote it, so
+ * they are the gate — and an installation with nothing answering says nothing
+ * at all, which is a refusal rather than a guess.
+ */
+async function assertVerifiedRelease(ctx: RegistryContext, now: Date): Promise<void> {
+  /* Records of nodes that stopped answering are IGNORED, using the same
+     liveness rule the version-skew gate uses. Nothing ever reaps a node record,
+     so a machine retired two years ago would otherwise block every prune of the
+     installation forever on whatever it happened to be running. */
+  const answering = (await listNodeRecords(ctx)).filter((record) => isNodeAnswering(record, now));
+  if (answering.length === 0) {
+    throw releaseProblem(
+      "no node of this installation is answering, so nothing says which Celld release wrote " +
+        "this bucket",
+      "start a node, or wait for one to heartbeat, and prune again",
+    );
+  }
+
+  for (const record of answering) {
+    const celld = record.versions?.celld;
+    if (celld === undefined) {
+      throw releaseProblem(
+        `node "${record.id}" is answering and its record names no Celld version`,
+        "restart that node on a build that records what it runs",
+      );
+    }
+    if (!VERIFIED_CELLD_RELEASES.includes(celld)) {
+      throw releaseProblem(
+        `node "${record.id}" is answering on celld ${celld}`,
+        "run a scafo verified against that release",
+      );
+    }
+  }
+}
+
+/** The release refusal, in the voice of the boot-time Celld floor. */
+function releaseProblem(found: string, fix: string): ScafoError {
+  return new ScafoError("capability-missing", "Celld release is not one prune was verified on", {
+    detail:
+      `${found}; scafo deployment prune reads Celld's own bucket formats and this build was ` +
+      `verified against ${verifiedReleaseList()} only, so nothing was planned or deleted — ${fix}`,
+  });
+}
+
+/**
+ * Celld's own name for a deployment's manifest: the last file a deploy writes
+ * into a version, and the first thing that says what format wrote it.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L819-L824 (v0.5.0)
+ */
+const MANIFEST_FILE = "manifest.json";
+
+/**
+ * Refuses unless one deployment's manifest carries only markers this build
+ * knows: a schema version, and the features the deployment requires.
+ *
+ * READ FOR EVERY DEPLOYMENT THE PLAN LISTS, kept and deleted alike. What a kept
+ * deployment references is what decides which shared blobs survive, so a
+ * manifest this cannot read is a plan this cannot make — not a deployment to
+ * quietly weigh as referencing nothing.
+ *
+ * A VERSION DIRECTORY WITH NO MANIFEST IS A DEPLOY IN FLIGHT, not an unknown
+ * format: upstream writes the blobs, the modules and `assets.json` before the
+ * manifest, and the pointers after it, so a directory can exist without one
+ * only while a deploy is happening or after one died. It carries no marker to
+ * check, and the age window — the same thing that protects a young blob — is
+ * what keeps it. See the write order in `_celld-contract.ts`.
+ */
+async function assertManifestVerified(
+  ctx: RegistryContext,
+  deployment: StoredDeployment,
+): Promise<void> {
+  const key = `${deployment.prefix}${MANIFEST_FILE}`;
+  if (!deployment.keys.includes(key)) return;
+
+  let manifest: unknown;
+  try {
+    const found = await readJson<unknown>(ctx, key);
+    if (found === null) throw new Error("it is not there any more");
+    manifest = found.value;
+  } catch (error) {
+    throw contractProblem(`"${key}" cannot be read as a manifest`, { cause: error });
+  }
+
+  const record = manifest as Record<string, unknown> | null;
+  if (typeof record !== "object" || record === null || Array.isArray(record)) {
+    throw contractProblem(`"${key}" is not an object`);
+  }
+
+  const schema = record.schema_version ?? LEGACY_MANIFEST_SCHEMA_VERSION;
+  if (typeof schema !== "number" || !MANIFEST_SCHEMA_VERSIONS.includes(schema)) {
+    throw contractProblem(
+      `"${key}" is manifest schema version ${JSON.stringify(schema)}, and this build reads ` +
+        MANIFEST_SCHEMA_VERSIONS.join(", "),
+    );
+  }
+
+  const required = record.required_features ?? [];
+  if (!Array.isArray(required))
+    throw contractProblem(`"${key}" has a "required_features" that is not a list`);
+  for (const feature of required) {
+    if (typeof feature === "string" && DEPLOYMENT_FEATURES.includes(feature)) continue;
+    throw contractProblem(
+      `"${key}" requires the deployment feature ${JSON.stringify(feature)}, and this build ` +
+        `knows ${DEPLOYMENT_FEATURES.join(", ")}`,
+    );
+  }
+}
+
+/** The structural refusal: a bucket marker outside what this build was verified on. */
+function contractProblem(found: string, opts?: { cause?: unknown }): ScafoError {
+  return new ScafoError("capability-missing", "Celld bucket format is not one prune reads", {
+    detail:
+      `${found}; scafo deployment prune reads Celld's own bucket formats and this build was ` +
+      `verified against celld ${verifiedReleaseList()}, so nothing was planned or deleted — a ` +
+      `newer scafo, verified against the release that wrote this, is what lifts it`,
+    ...(opts?.cause === undefined ? {} : { cause: opts.cause }),
+  });
+}
+
+/**
  * Every version a Celld pointer names: the fleet-wide selector, and each
  * script's own.
  *
@@ -377,7 +543,10 @@ async function readPointers(
   return [...versions].sort();
 }
 
-/** Filename of both pointers Celld keeps: the fleet's, and each script's. */
+/**
+ * Filename of both pointers Celld keeps: the fleet's, and each script's.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L842-L848 (v0.5.0)
+ */
 const POINTER_FILE = "current.json";
 
 /** The pointer `value` is, or `ScafoError("store-nonconforming")` naming the key. */
@@ -392,10 +561,13 @@ function asPointer(value: unknown, key: string): DeployPointer {
   const script = record.script_name;
   if (typeof version !== "string" || version === "") throw pointerProblem(key, `has no "version"`);
   if (typeof prefix !== "string" || prefix === "") throw pointerProblem(key, `has no "prefix"`);
-  if (typeof script !== "string" || script === "") {
-    throw pointerProblem(key, `has no "script_name"`);
-  }
-  return { version, prefix, script_name: script };
+  /* `script_name` is optional upstream and nothing here reads it, so a named
+     pointer an older Celld wrote without one is still a pointer. */
+  return {
+    version,
+    prefix,
+    ...(typeof script === "string" && script !== "" ? { script_name: script } : {}),
+  };
 }
 
 function pointerProblem(key: string, wrong: string): ScafoError {
@@ -412,6 +584,7 @@ function pointerProblem(key: string, wrong: string): ScafoError {
  * Grouped by the first two segments, which is Celld's own layout:
  * `deploy/<script>/<version>/...`. A key with fewer segments is a pointer
  * rather than a deployment, and is skipped here.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L575 (v0.5.0)
  */
 async function readDeployments(
   ctx: RegistryContext,
@@ -422,7 +595,9 @@ async function readDeployments(
   const found = new Map<string, StoredDeployment>();
   /* Celld's own keyspaces beneath `deploy/`, skipped by the prefix they live
      under rather than by the look of the names inside them: a queue called
-     `abcdef0123456789` is still a queue. */
+     `abcdef0123456789` is still a queue.
+       https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/container.rs#L67-L73 (v0.5.0)
+       https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L138-L141 (v0.5.0) */
   const protocols = [
     deployImagesPrefix(opts.project, opts.env),
     deployQueuesPrefix(opts.project, opts.env),
@@ -453,6 +628,7 @@ async function readDeployments(
   }
 
   for (const deployment of found.values()) {
+    await assertManifestVerified(ctx, deployment);
     /* Every version that got this far is one scafo could have filed a record
        under, so the read needs no guard of its own. A version with no record is
        still a deployment Celld published — one scafo never filed — and stays a
@@ -471,6 +647,7 @@ async function readDeployments(
  * A script name Celld accepts, and so the only kind of first segment a
  * publication has: one to 63 bytes of lowercase letters, digits and hyphens,
  * beginning and ending on a letter or a digit.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L2055-L2068 (v0.5.0)
  */
 const SCRIPT_NAME_RE = /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/;
 
@@ -481,6 +658,8 @@ const SCRIPT_NAME_RE = /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/;
  * on purpose: were upstream to stop truncating, an exact match would make
  * prune read no deployment at all and free nothing, without a word — while
  * nothing else under `deploy/<script>/` is ever named in hexadecimal.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L467-L500 (v0.5.0)
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L570-L575 (v0.5.0)
  */
 const VERSION_RE = /^[a-f\d]{16,64}$/;
 

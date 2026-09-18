@@ -18,6 +18,7 @@ import type { DaemonState } from "../../src/daemon/app.ts";
 import type { OperatorKeyFile } from "../../src/cli/_operator-key.ts";
 import { signNodeToken } from "../../src/core/auth/node-token.ts";
 import {
+  deployPrefix,
   getEnvironment,
   listDeployments,
   readJson,
@@ -94,6 +95,9 @@ const PLATFORM_DOMAIN = "scafo.test";
 const OPERATOR_HOST = "operator.test";
 const PROJECT = "app";
 const ENVIRONMENT = "production";
+/** The Celld script name the fixture's `wrangler.jsonc` carries, and the first
+    segment of every deployment Celld publishes for it. */
+const SCRIPT_NAME = "app";
 const NODE_ID = "node-e2e";
 
 /** Environment the CI-shaped deploy creates; it exists nowhere until then. */
@@ -608,7 +612,99 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
     },
     STEP_TIMEOUT_MS,
   );
+
+  it(
+    "prunes the environment's old Celld deployments straight out of the bucket",
+    async () => {
+      /* Bucket-direct, like every other command that holds no node: the store
+         settings come from the environment, and no `--node` is passed. The
+         environment has published two versions and its pointer names the
+         second, so one deployment is past `--keep 1` and the age gate is
+         lifted. */
+      const before = await deployedPrefixes();
+      expect(before, "the two versions this suite deployed").toEqual(
+        expect.arrayContaining([versionV1, versionV2]),
+      );
+
+      const result = await runCli(
+        [
+          "deployment",
+          "prune",
+          "--project",
+          PROJECT,
+          "--env",
+          ENVIRONMENT,
+          "--keep",
+          "1",
+          "--older-than",
+          "0",
+          "--yes",
+        ],
+        storeEnv(),
+      );
+      observed.pruneOutput = result.output;
+      expectCleanExit(result);
+
+      const after = await deployedPrefixes();
+      expect(after, "the version the fleet's own pointer names").toContain(versionV2);
+      expect(after, "the old version prune was told to take").not.toContain(versionV1);
+
+      /* The proof that what was deleted was old and not live: the application
+         answers on the version it was serving before the prune. */
+      const answer = await untilServes(envHost(), "v2");
+      expect(JSON.parse(answer.body).url).toContain(envHost());
+      observed.prunedAway = versionV1;
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "refuses to prune an installation no node is answering for",
+    async () => {
+      /* The release gate reads the Celld every answering node reports. Another
+         prefix of the same bucket is an installation no node ever started in,
+         so nothing says which Celld wrote it — and a prune that cannot tell
+         refuses rather than guesses. The same refusal meets a stopped fleet once
+         its last heartbeat has left the liveness window. */
+      const result = await runCli(
+        [
+          "deployment",
+          "prune",
+          "--project",
+          PROJECT,
+          "--env",
+          ENVIRONMENT,
+          "--keep",
+          "0",
+          "--older-than",
+          "0",
+          "--yes",
+        ],
+        { ...storeEnv(), SCAFO_S3_PREFIX: `${BUCKET_SETTINGS.prefix}-unserved` },
+      );
+      observed.pruneRefusalOutput = result.output;
+
+      expect(result.code, result.output).not.toBe(0);
+      expect(result.output).toContain("urn:scafo:capability-missing");
+      expect(result.output).toContain("no node of this installation is answering");
+    },
+    STEP_TIMEOUT_MS,
+  );
 });
+
+/** Every Celld version directory the environment still holds in the bucket. */
+async function deployedPrefixes(): Promise<string[]> {
+  const prefix = `${deployPrefix(PROJECT, ENVIRONMENT)}${SCRIPT_NAME}/`;
+  const versions = new Set<string>();
+  for (const key of await registry.store.list(prefix)) {
+    /* A version is a DIRECTORY under the script, so only a key with something
+       beneath it names one; the script's own `current.json` sits here too. */
+    const rest = key.slice(prefix.length);
+    const slash = rest.indexOf("/");
+    if (slash > 0) versions.add(rest.slice(0, slash));
+  }
+  return [...versions].sort();
+}
 
 function envHost(): string {
   return `${PROJECT}--${ENVIRONMENT}.${PLATFORM_DOMAIN}`;

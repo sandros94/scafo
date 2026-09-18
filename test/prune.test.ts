@@ -4,21 +4,31 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
+import {
+  DEPLOYMENT_FEATURES,
+  VERIFIED_CELLD_RELEASES,
+} from "../src/core/registry/_celld-contract.ts";
 import { createDeployment, createEnvironment, createProject } from "../src/core/registry/index.ts";
+import { NODE_LIVENESS_WINDOW_MS } from "../src/core/registry/nodes.ts";
 import {
   deploymentKey,
   deployBlobsPrefix,
   deployPointerKey,
   deployQueuesPrefix,
   fleetPrefix,
+  nodeKey,
 } from "../src/core/registry/paths.ts";
 import { executePrune, planPrune, type PrunePlan } from "../src/core/registry/prune.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, FaultStore, type ManualClock, rejectsWith } from "./_helpers.ts";
+import { ctxWith, FaultStore, type ManualClock, rejectsWith, TEST_VERSIONS } from "./_helpers.ts";
 
 const PROJECT = "shop";
 const ENV = "production";
 const SCRIPT = "app";
+/** The one node of the fixture installation; the release gate reads its record. */
+const NODE_ID = "node-a";
+/** A Celld release prune has been verified against, as a node record reports it. */
+const VERIFIED = VERIFIED_CELLD_RELEASES[0];
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
 
@@ -75,13 +85,25 @@ describe("reading the fleet's own selector", () => {
     ["a bare string", `"dddd4444dddd4444"`],
     ["a pointer with no version", JSON.stringify({ prefix: "deploy/app/x", script_name: "app" })],
     ["a pointer with no prefix", JSON.stringify({ version: "x", script_name: "app" })],
-    ["a pointer with no script", JSON.stringify({ version: "x", prefix: "deploy/app/x" })],
   ])("refuses %s in place of the fleet-wide pointer", async (_case, body) => {
     await store.put(deployPointerKey(PROJECT, ENV), body);
 
     const error = await rejectsWith(() => plan(), "store-nonconforming");
 
     expect(error.detail).toContain("deploy/current.json");
+  });
+
+  it("reads a pointer with no script name, which is what an older Celld wrote", async () => {
+    /* `script_name` is an option upstream and nothing here reads it: a named
+       pointer written before the field existed still says what is served. */
+    await store.put(
+      deployPointerKey(PROJECT, ENV),
+      JSON.stringify({ version: V4, prefix: `deploy/${SCRIPT}/${V4}` }),
+    );
+
+    const made = await plan({ keep: 0, olderThanMs: 0 });
+
+    expect(made.current).toEqual([V4]);
   });
 
   it("refuses a selector that is not JSON at all", async () => {
@@ -98,6 +120,201 @@ describe("reading the fleet's own selector", () => {
     const error = await rejectsWith(() => plan(), "store-nonconforming");
 
     expect(error.detail).toContain(`${SCRIPT}/current.json`);
+  });
+});
+
+/*
+ * The pin. Prune reads and deletes inside Celld's own keyspace, and Celld is
+ * alpha, so nothing is planned — a dry run included — unless the installation
+ * is answering on a release this build was verified against and every marker it
+ * meets is one `_celld-contract.ts` names.
+ */
+describe("the Celld release the installation is answering on", () => {
+  beforeEach(async () => {
+    await publishAll();
+    await pointAt(V4);
+  });
+
+  it("refuses when no node of the installation is answering at all", async () => {
+    const error = await rejectsWith(() => rawPlan(), "capability-missing");
+
+    expect(error.detail).toContain("no node of this installation is answering");
+    expect(error.detail).toContain("wait for one to heartbeat");
+    expect(error.detail).toContain(VERIFIED);
+  });
+
+  it("refuses when the only node that answers stopped answering long enough ago", async () => {
+    await answeringNode({ beatAgoMs: NODE_LIVENESS_WINDOW_MS });
+
+    const error = await rejectsWith(() => rawPlan(), "capability-missing");
+
+    expect(error.detail).toContain("no node of this installation is answering");
+  });
+
+  it("refuses an answering node running a release prune was never verified on", async () => {
+    await answeringNode({ celld: "0.4.1" });
+
+    const error = await rejectsWith(() => rawPlan(), "capability-missing");
+
+    expect(error.detail).toContain(NODE_ID);
+    expect(error.detail).toContain("celld 0.4.1");
+    expect(error.detail).toContain(VERIFIED);
+    expect(error.detail).toContain("nothing was planned or deleted");
+  });
+
+  it("refuses an answering node whose record names no Celld version at all", async () => {
+    await answeringNode({ celld: null });
+
+    const error = await rejectsWith(() => rawPlan(), "capability-missing");
+
+    expect(error.detail).toContain("names no Celld version");
+    expect(error.detail).toContain(NODE_ID);
+  });
+
+  it("ignores the record of a machine that stopped answering on an old release", async () => {
+    /* Node records are never reaped, so a machine retired on 0.4.1 would block
+       every prune of this installation forever if its record still counted. */
+    await answeringNode({ id: "node-retired", celld: "0.4.1", beatAgoMs: NODE_LIVENESS_WINDOW_MS });
+    await answeringNode();
+
+    const made = await rawPlan({ keep: 1, olderThanMs: 0 });
+
+    expect(names(made.delete)).toEqual([`${SCRIPT}/${V3}`, `${SCRIPT}/${V2}`, `${SCRIPT}/${V1}`]);
+  });
+
+  it("refuses before it reads the environment, so a dry run is refused by the same gate", async () => {
+    /* A dry run plans and prints; the plan is the only bucket work it does, so
+       a gate that refuses the plan is what refuses the dry run. Proved by
+       emptying the environment: the missing pointer would be its own refusal,
+       and this one comes first. */
+    await store.del(deployPointerKey(PROJECT, ENV));
+    await answeringNode({ celld: "0.4.1" });
+
+    const error = await rejectsWith(() => rawPlan(), "capability-missing");
+
+    expect(error.detail).not.toContain("deploy/current.json");
+  });
+});
+
+/*
+ * The format markers upstream writes into its own objects. Prune reads the
+ * manifest of EVERY deployment it lists, kept and deleted alike: what a kept
+ * deployment references is what decides which shared blobs survive.
+ */
+describe("the bucket formats prune was verified against", () => {
+  it("reads a manifest with no schema version at all as the first one", async () => {
+    await publish(V1, { assets: [], manifest: { schema_version: undefined } });
+    await publish(V2, { assets: [] });
+    await pointAt(V2);
+
+    const made = await plan({ keep: 1, olderThanMs: 0 });
+
+    expect(names(made.delete)).toEqual([`${SCRIPT}/${V1}`]);
+  });
+
+  it("accepts every feature this build knows, all at once", async () => {
+    await publish(V1, { assets: [], manifest: { required_features: [...DEPLOYMENT_FEATURES] } });
+    await pointAt(V1);
+
+    const made = await plan({ keep: 0, olderThanMs: 0 });
+
+    expect(reasons(made)).toEqual({ [`${SCRIPT}/${V1}`]: "current" });
+  });
+
+  it.each([
+    ["a schema version nothing here reads", { schema_version: 3 }, "manifest schema version 3"],
+    ["a schema version that is not a number", { schema_version: "2" }, "manifest schema version"],
+    [
+      "a feature nothing here knows",
+      { required_features: ["assets-v1", "hyperdrive-v1"] },
+      `"hyperdrive-v1"`,
+    ],
+    ["a required-features that is no list", { required_features: "assets-v1" }, "not a list"],
+  ])("refuses a manifest carrying %s", async (_case, fields, said) => {
+    await publishAll();
+    await pointAt(V4);
+    await store.put(
+      `${DEPLOY}${SCRIPT}/${V4}/manifest.json`,
+      JSON.stringify({ schema_version: 2, version: V4, script_name: SCRIPT, ...fields }),
+    );
+
+    const error = await rejectsWith(() => plan({ keep: 0, olderThanMs: 0 }), "capability-missing");
+
+    expect(error.detail).toContain(`${V4}/manifest.json`);
+    expect(error.detail).toContain(said);
+    expect(error.detail).toContain("a newer scafo");
+  });
+
+  it.each([
+    ["is not JSON at all", "not json", "cannot be read as a manifest"],
+    ["is not an object", "[]", "is not an object"],
+  ])("refuses a manifest that %s", async (_case, body, said) => {
+    await publishAll();
+    await pointAt(V4);
+    await store.put(`${DEPLOY}${SCRIPT}/${V4}/manifest.json`, body);
+
+    const error = await rejectsWith(() => plan({ keep: 0, olderThanMs: 0 }), "capability-missing");
+
+    expect(error.detail).toContain(said);
+  });
+
+  it("refuses over the manifest of a deployment it was going to delete anyway", async () => {
+    /* Kept and deleted alike: a manifest this cannot read is a bucket this
+       cannot weigh, whichever side of the plan it was about to fall on. */
+    await publishAll();
+    await pointAt(V4);
+    await store.put(
+      `${DEPLOY}${SCRIPT}/${V1}/manifest.json`,
+      JSON.stringify({ schema_version: 9, version: V1, script_name: SCRIPT }),
+    );
+
+    const error = await rejectsWith(() => plan({ keep: 1, olderThanMs: 0 }), "capability-missing");
+
+    expect(error.detail).toContain(`${V1}/manifest.json`);
+  });
+
+  it("refuses an asset index whose schema version is not the one it reads", async () => {
+    await publishAll();
+    await pointAt(V4);
+    await store.put(
+      `${DEPLOY}${SCRIPT}/${V4}/assets.json`,
+      JSON.stringify({ schema_version: 2, entries: {}, config: {} }),
+    );
+
+    const error = await rejectsWith(() => plan({ keep: 0, olderThanMs: 0 }), "capability-missing");
+
+    expect(error.detail).toContain(`${V4}/assets.json`);
+    expect(error.detail).toContain("asset index schema version 2");
+  });
+
+  it("refuses an asset index that names no schema version at all", async () => {
+    await publishAll();
+    await pointAt(V4);
+    await store.put(
+      `${DEPLOY}${SCRIPT}/${V4}/assets.json`,
+      JSON.stringify({ entries: {}, config: {} }),
+    );
+
+    const error = await rejectsWith(() => plan({ keep: 0, olderThanMs: 0 }), "capability-missing");
+
+    expect(error.detail).toContain("asset index schema version undefined");
+  });
+
+  it("weighs a version directory with no manifest by the age window, and refuses nothing", async () => {
+    /* Celld writes the blobs, the modules and the index BEFORE the manifest and
+       the pointers, so a directory without one is a deploy in flight or one
+       that died — not a format this cannot read. */
+    await publishAll();
+    await pointAt(V4);
+    await publish("ffff6666ffff6666", { manifest: false });
+
+    /* Young by its record, so the window keeps it exactly as it keeps any
+       other deployment; the window lifted, it goes like any other too. */
+    const young = await plan({ keep: 0, olderThanMs: DAY_MS });
+    expect(names(young.delete)).toEqual([]);
+
+    const old = await plan({ keep: 0, olderThanMs: 0 });
+    expect(names(old.delete)).toContain(`${SCRIPT}/ffff6666ffff6666`);
   });
 });
 
@@ -498,7 +715,7 @@ describe("the shared asset blobs", () => {
     ["names no entries", JSON.stringify({ schema_version: 1, config: {} })],
     [
       "names a digest that is not one",
-      JSON.stringify({ entries: { "/a.js": { sha256: "abcd" } } }),
+      JSON.stringify({ schema_version: 1, entries: { "/a.js": { sha256: "abcd" } } }),
     ],
   ])("refuses the whole plan when a kept deployment's asset index %s", async (_case, body) => {
     await publishAll();
@@ -611,8 +828,22 @@ describe("executePrune", () => {
   });
 });
 
-/** A plan over the fixture, as of the clock's current moment. */
-function plan(opts: { keep?: number; olderThanMs?: number } = {}): Promise<PrunePlan> {
+/**
+ * A plan over the fixture, as of the clock's current moment, with the
+ * installation's one node beating at that same moment.
+ *
+ * The heartbeat is stamped here rather than once in `beforeEach` because the
+ * fixture's clock moves an hour per publication, and the release gate reads the
+ * same liveness window the rest of the fleet does. A test about the gate itself
+ * writes the records it wants and calls {@link rawPlan}.
+ */
+async function plan(opts: { keep?: number; olderThanMs?: number } = {}): Promise<PrunePlan> {
+  await answeringNode();
+  return rawPlan(opts);
+}
+
+/** The same plan, over whatever node records the test has written itself. */
+function rawPlan(opts: { keep?: number; olderThanMs?: number } = {}): Promise<PrunePlan> {
   return planPrune(clock.ctx, {
     project: PROJECT,
     env: ENV,
@@ -638,17 +869,31 @@ async function publish(
     after?: number;
     /** Digests its asset index names; none at all ships no index, as a bundle with no assets does. */
     assets?: string[];
+    /** Fields overriding the manifest's own, or `false` for a version directory with none. */
+    manifest?: Record<string, unknown> | false;
   } = {},
 ): Promise<void> {
   const script = opts.script ?? SCRIPT;
   clock.tick(opts.after ?? HOUR_MS);
 
   const prefix = `${DEPLOY}${script}/${version}/`;
-  await store.put(`${prefix}manifest.json`, JSON.stringify({ version }));
-  await store.put(`${prefix}modules/index.js`, "export default {};");
-
   const assets = opts.assets ?? [SHARED];
+  await store.put(`${prefix}modules/index.js`, "export default {};");
   if (assets.length > 0) await store.put(`${prefix}assets.json`, assetIndex(assets));
+  /* Written last, as Celld writes it: the manifest is what makes a version
+     directory a publication rather than a deploy in flight. */
+  if (opts.manifest !== false) {
+    await store.put(
+      `${prefix}manifest.json`,
+      JSON.stringify({
+        schema_version: assets.length > 0 ? 2 : 1,
+        version,
+        script_name: script,
+        ...(assets.length > 0 ? { required_features: ["assets-v1"] } : {}),
+        ...opts.manifest,
+      }),
+    );
+  }
   if (opts.record !== false) {
     await createDeployment(clock.ctx, PROJECT, { version });
   }
@@ -697,6 +942,30 @@ async function attachQueue(queue: string, version: string): Promise<void> {
 /** Where Celld files that attachment: `deploy/queues/<queue>/consumer.json`. */
 function queueKey(queue: string): string {
   return `${deployQueuesPrefix(PROJECT, ENV)}${queue}/consumer.json`;
+}
+
+/**
+ * One node record of the fixture installation, as the release gate reads it:
+ * beating at the clock's current moment unless the test says otherwise.
+ */
+async function answeringNode(
+  opts: { id?: string; celld?: string | null; beatAgoMs?: number } = {},
+): Promise<string> {
+  const id = opts.id ?? NODE_ID;
+  const celld = opts.celld === undefined ? VERIFIED : opts.celld;
+
+  await store.put(
+    nodeKey(id),
+    JSON.stringify({
+      v: 1,
+      id,
+      publicKey: { kty: "OKP", crv: "Ed25519", x: "fixture" },
+      addresses: { internal: "127.0.0.1", apiPort: 7400 },
+      heartbeatAt: new Date(clock.nowMs() - (opts.beatAgoMs ?? 0)).toISOString(),
+      ...(celld === null ? {} : { versions: { ...TEST_VERSIONS, celld } }),
+    }),
+  );
+  return id;
 }
 
 /** A full digest made of one repeated hex character, readable in a failure message. */
