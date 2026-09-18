@@ -19,7 +19,7 @@ import { metaKey, probeKey } from "./paths.ts";
  * THE RANGED READ IS THE LAST STEP AND IT IS NOT ABOUT THE REGISTRY. celld
  * requires `Range` of its bucket and stops a runtime whose store answers the
  * whole object instead, so a bucket that ignores the header kills a process per
- * environment at reconcile, long after the operator was told the fleet was
+ * application at reconcile, long after the operator was told the fleet was
  * healthy. Asking here means it fails once, at `scafo sail`,
  * with the store named as the thing that is wrong.
  */

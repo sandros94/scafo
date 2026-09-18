@@ -1,6 +1,6 @@
 /*
  * Operator-driven cleanup of the deployments Celld has published for one
- * environment.
+ * application.
  *
  * UNSTABLE. Celld keeps every deployment it has ever written and deletes none
  * of them (denoland/celld#181); until it grows a lifecycle of its own, the only
@@ -47,7 +47,7 @@ import {
 
 /** One deployment Celld published, as the bucket still holds it. */
 export interface StoredDeployment {
-  /** Celld script name: the first segment under the environment's `deploy/`. */
+  /** Celld script name: the first segment under the application's `deploy/`. */
   script: string;
   /** Celld version id, which is also what scafo files its deployment record under. */
   version: string;
@@ -63,7 +63,7 @@ export interface StoredDeployment {
 
 /** Why a deployment survived the plan it was weighed in. */
 export type PruneKeepReason =
-  /** A Celld pointer names it; it is what the environment serves, or could serve. */
+  /** A Celld pointer names it; it is what the application serves, or could serve. */
   | "current"
   /** Among the newest the plan was told to keep. */
   | "within-keep"
@@ -75,8 +75,7 @@ export interface KeptDeployment extends StoredDeployment {
 }
 
 export interface PrunePlan {
-  project: string;
-  env: string;
+  application: string;
   /** Versions a Celld pointer names, sorted; none of these is ever deleted. */
   current: string[];
   /** Everything that stays, newest first, each with why it stays. */
@@ -87,7 +86,7 @@ export interface PrunePlan {
   blobs: PrunedBlobs;
 }
 
-/** What becomes of the content-addressed asset blobs an environment shares. */
+/** What becomes of the content-addressed asset blobs an application shares. */
 export interface PrunedBlobs {
   /** How many objects under `deploy-blobs/` the plan leaves where they are. */
   keep: number;
@@ -96,8 +95,7 @@ export interface PrunedBlobs {
 }
 
 export interface PlanPruneOptions {
-  project: string;
-  env: string;
+  application: string;
   /** How many of the newest deployments survive regardless of their age. */
   keep: number;
   /**
@@ -128,27 +126,26 @@ interface DeployPointer {
 }
 
 /**
- * Weighs one environment's deployments against its own pointers, the count to
+ * Weighs one application's deployments against its own pointers, the count to
  * keep, and the age window. BOTH GATES ARE WEIGHED: what goes is past the count
  * AND older than the window. Reads only; {@link executePrune} deletes.
  *
  * Refuses with `ScafoError("capability-missing")` before it reads the
- * environment at all when the installation is not answering on a Celld release
+ * application at all when the installation is not answering on a Celld release
  * this build was verified against, and again when any deployment it lists
  * carries a format marker `_celld-contract.ts` does not name.
  */
 export async function planPrune(ctx: RegistryContext, opts: PlanPruneOptions): Promise<PrunePlan> {
   await assertVerifiedRelease(ctx, opts.now);
 
-  const prefix = deployPrefix(opts.project, opts.env);
+  const prefix = deployPrefix(opts.application);
   const keys = await ctx.store.list(prefix);
 
   const current = await readPointers(ctx, opts, prefix, keys);
   const ordered = (await readDeployments(ctx, opts, prefix, keys)).sort(byNewestFirst);
 
   const plan: PrunePlan = {
-    project: opts.project,
-    env: opts.env,
+    application: opts.application,
     current,
     keep: [],
     delete: [],
@@ -230,7 +227,7 @@ export async function executePrune(ctx: RegistryContext, plan: PrunePlan): Promi
  */
 async function planBlobs(
   ctx: RegistryContext,
-  opts: Pick<PlanPruneOptions, "project" | "env" | "olderThanMs">,
+  opts: Pick<PlanPruneOptions, "application" | "olderThanMs">,
   kept: KeptDeployment[],
   nowMs: number,
 ): Promise<PrunedBlobs> {
@@ -239,7 +236,7 @@ async function planBlobs(
     for (const digest of await readAssetDigests(ctx, deployment)) referenced.add(digest);
   }
 
-  const prefix = deployBlobsPrefix(opts.project, opts.env);
+  const prefix = deployBlobsPrefix(opts.application);
   const entries = await ctx.store.listEntries(prefix);
   const doomed: string[] = [];
 
@@ -365,16 +362,16 @@ function isBlobOlderThan(entry: StoredEntry, nowMs: number, olderThanMs: number)
  */
 async function assertUnnamed(
   ctx: RegistryContext,
-  plan: Pick<PrunePlan, "project" | "env">,
+  plan: Pick<PrunePlan, "application">,
   deployment: StoredDeployment,
 ): Promise<void> {
-  const prefix = deployPrefix(plan.project, plan.env);
+  const prefix = deployPrefix(plan.application);
   const named = await readPointers(ctx, plan, prefix, await ctx.store.list(prefix));
   if (!named.includes(deployment.version)) return;
 
   throw new ScafoError("cas-conflict", "Deployment is in use again", {
     detail:
-      `a Celld pointer of "${plan.project}/${plan.env}" now names version ` +
+      `a Celld pointer of "${plan.application}" now names version ` +
       `"${deployment.version}", which the plan had selected for deletion; nothing of it ` +
       `was deleted — plan the prune again`,
   });
@@ -511,22 +508,22 @@ function contractProblem(found: string, opts?: { cause?: unknown }): ScafoError 
  *
  * A pointer that is missing or unreadable is a refusal rather than an empty
  * answer. Reading no pointer would mean nothing is protected, and the first
- * thing an unprotected plan would delete is whatever the environment is
+ * thing an unprotected plan would delete is whatever the application is
  * serving.
  */
 async function readPointers(
   ctx: RegistryContext,
-  opts: Pick<PlanPruneOptions, "project" | "env">,
+  opts: Pick<PlanPruneOptions, "application">,
   prefix: string,
   keys: string[],
 ): Promise<string[]> {
-  const fleetKey = deployPointerKey(opts.project, opts.env);
+  const fleetKey = deployPointerKey(opts.application);
   const fleet = await readJson<unknown>(ctx, fleetKey);
   if (fleet === null) {
     throw new ScafoError("store-nonconforming", "Fleet has no current deployment pointer", {
       detail:
-        `"${fleetKey}" does not exist, so nothing says what "${opts.project}/${opts.env}" is ` +
-        `serving: deploy the environment before pruning it, or check that the installation's ` +
+        `"${fleetKey}" does not exist, so nothing says what "${opts.application}" is ` +
+        `serving: deploy the application before pruning it, or check that the installation's ` +
         `key prefix is the one this fleet was published under`,
     });
   }
@@ -588,7 +585,7 @@ function pointerProblem(key: string, wrong: string): ScafoError {
  */
 async function readDeployments(
   ctx: RegistryContext,
-  opts: Pick<PlanPruneOptions, "project" | "env">,
+  opts: Pick<PlanPruneOptions, "application">,
   prefix: string,
   keys: string[],
 ): Promise<StoredDeployment[]> {
@@ -598,10 +595,7 @@ async function readDeployments(
      `abcdef0123456789` is still a queue.
        https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/container.rs#L67-L73 (v0.5.0)
        https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L138-L141 (v0.5.0) */
-  const protocols = [
-    deployImagesPrefix(opts.project, opts.env),
-    deployQueuesPrefix(opts.project, opts.env),
-  ];
+  const protocols = [deployImagesPrefix(opts.application), deployQueuesPrefix(opts.application)];
 
   for (const key of keys) {
     if (protocols.some((one) => key.startsWith(one))) continue;
@@ -633,7 +627,7 @@ async function readDeployments(
        under, so the read needs no guard of its own. A version with no record is
        still a deployment Celld published — one scafo never filed — and stays a
        candidate, weighed as the oldest thing in the fleet. */
-    const key = deploymentKey(opts.project, deployment.version);
+    const key = deploymentKey(opts.application, deployment.version);
     const record = await readJson<DeploymentRecord>(ctx, key);
     if (record === null) continue;
 

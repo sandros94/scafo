@@ -1,38 +1,34 @@
-/* Lease-holding coordinator derives and writes assignments from environments and
+/* Lease-holding coordinator derives and writes assignments from applications and
    live nodes. */
 
 import { ScafoError } from "../core/error.ts";
 import { assignNodes } from "../core/placement/rendezvous.ts";
 import { resolveReplicas } from "../core/placement/replicas.ts";
 import { describeSelector, eligibleNodes } from "../core/placement/selector.ts";
-import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
-import { listEnvironments } from "../core/registry/environments.ts";
+import { listApplicationRecords } from "../core/registry/applications.ts";
 import type { KeepAlive, LeaseHandle } from "../core/registry/lease.ts";
 import { isNodeLive, listNodeRecords } from "../core/registry/nodes.ts";
-import { environmentKey } from "../core/registry/paths.ts";
 import {
   deletePlacement,
   listPlacements,
   type PlacementOutcome,
   writePlacement,
 } from "../core/registry/placement.ts";
-import { isProjectBlocked, listProjects } from "../core/registry/projects.ts";
-import type { EnvironmentRecord, NodeRecord, NodeSelector } from "../core/types/registry.ts";
-import { DEFAULT_CONCURRENCY, mapConcurrent } from "../core/utils/concurrency.ts";
+import type { NodeRecord, NodeSelector } from "../core/types/registry.ts";
 
 /**
- * Why one environment could not be placed on a pass, as a stable code.
+ * Why one application could not be placed on a pass, as a stable code.
  *
  * `placement-unavailable` — no live node was eligible to run it. Today that is
  * always a selector no live node satisfies: an empty FLEET refuses the whole
- * pass instead, before any environment is considered.
+ * pass instead, before any application is considered.
  */
 export type AssignmentFailureReason = "placement-unavailable";
 
-/** One environment a pass could decide nothing for, and why. */
+/** One application a pass could decide nothing for, and why. */
 export interface AssignmentFailure {
-  /** `<project>/<env>`. */
+  /** The application's name. */
   target: string;
   reason: AssignmentFailureReason;
   /** What an operator has to act on, naming the constraint that went unsatisfied. */
@@ -43,17 +39,17 @@ export interface AssignmentFailure {
 export interface AssignmentResult {
   /** Ids of the nodes every decision in this pass was made over. */
   live: string[];
-  /** Environments whose placement was rewritten. */
+  /** Applications whose placement was rewritten. */
   changed: Array<{ target: string; nodes: string[] }>;
   /**
    * Placement objects removed because nothing should be serving what they name:
-   * the environment is gone, or it has been retired.
+   * the application is gone, or it has been retired.
    */
   removed: string[];
-  /** Environments whose placement was left exactly as it was, and why. */
+  /** Applications whose placement was left exactly as it was, and why. */
   skipped: Array<{ target: string; reason: PlacementOutcome }>;
   /**
-   * Environments the pass could NOT place, whose previous placement — if they
+   * Applications the pass could NOT place, whose previous placement — if they
    * had one — is left standing untouched. This is the operator's only sign that
    * a constraint has gone unsatisfiable, so it is reported rather than logged.
    */
@@ -63,12 +59,12 @@ export interface AssignmentResult {
 export interface AssignmentOptions {
   /** How long a node counts as live after its last heartbeat; see `isNodeLive`. */
   livenessWindowMs?: number;
-  /** Called between environments, so a pass longer than the lease TTL keeps it. */
+  /** Called between applications, so a pass longer than the lease TTL keeps it. */
   keepAlive?: KeepAlive;
 }
 
 /**
- * Decides and records the placement of every environment in the installation.
+ * Decides and records the placement of every application in the installation.
  *
  * Throws `ScafoError("placement-unavailable")` when NO node is live, having
  * written nothing. That refusal is the point: a bucket that briefly cannot be
@@ -78,9 +74,9 @@ export interface AssignmentOptions {
  * runs, and the installation would take itself down over a hiccup. Leaving the
  * last decision standing keeps whatever is running, running.
  *
- * The same reasoning applies one environment at a time to a node SELECTOR no
+ * The same reasoning applies one application at a time to a node SELECTOR no
  * live node satisfies, and there it is reported rather than thrown: that
- * environment is left with the placement it already had, every other environment
+ * application is left with the placement it already had, every other application
  * in the pass is decided normally, and the failure is answered in
  * {@link AssignmentResult.unplaced}.
  *
@@ -94,7 +90,7 @@ export async function runAssignment(
 ): Promise<AssignmentResult> {
   const now = nowDate(ctx);
   const window = opts?.livenessWindowMs;
-  /* Kept as RECORDS rather than reduced to ids here: an environment's selector
+  /* Kept as RECORDS rather than reduced to ids here: an application's selector
      is matched against the labels an operator set on a node, and only the record
      carries them. */
   const fleet: NodeRecord[] = (await listNodeRecords(ctx)).filter((record) =>
@@ -130,75 +126,65 @@ async function runAssignmentOverFleet(
   result: AssignmentResult,
   keepAlive?: KeepAlive,
 ): Promise<AssignmentResult> {
-  const projects = await listProjects(ctx);
-  const removals: Array<{ project: string; env: string }> = [];
+  const [records, placements] = await Promise.all([
+    listApplicationRecords(ctx),
+    listPlacements(ctx),
+  ]);
   /* The handle every write is fenced with, refreshed as the pass goes on. */
   let lease = initial;
+  const served = new Set<string>();
 
-  for (const project of projects) {
+  for (const record of records) {
     /* Blocking is the canonical reversible full stop. Runtime desired state
-       omits this project; skip before the placement listing as well, because
-       every nested record must survive for unblocking rather than being
-       mistaken for orphaned state. */
-    if (await isProjectBlocked(ctx, project)) continue;
-
-    const [names, placements] = await Promise.all([
-      listEnvironments(ctx, project),
-      listPlacements(ctx, project),
-    ]);
-    const records = await mapConcurrent(names, DEFAULT_CONCURRENCY, async (env) =>
-      readJson<EnvironmentRecord>(ctx, environmentKey(project, env)),
-    );
-    const served = new Set<string>();
-    for (const [index, env] of names.entries()) {
-      const found = records[index];
-      if (found === undefined || found === null) continue;
-      if (found.value.retiredAt !== undefined) continue;
-      served.add(env);
-      if (keepAlive !== undefined) lease = await keepAlive();
-      const target = `${project}/${env}`;
-      const candidates = eligibleNodes(fleet, found.value.nodeSelector);
-      if (candidates.length === 0) {
-        result.unplaced.push({
-          target,
-          reason: "placement-unavailable",
-          detail:
-            `no live node carries every label of ` +
-            `"${describeSelector(found.value.nodeSelector as NodeSelector)}", which "${target}" selects`,
-        });
-        continue;
-      }
-
-      const nodes = await assignNodes({
-        project,
-        env,
-        nodes: candidates.map((record) => record.id),
-        replicas: resolveReplicas(found.value),
-      });
-      const previous = placements.get(env)?.nodes ?? [];
-      if (sameNodes(previous, nodes)) {
-        result.skipped.push({ target, reason: "unchanged" });
-        continue;
-      }
-
-      const write = await writePlacement(ctx, project, env, nodes, lease);
-      if (write.outcome === "written") result.changed.push({ target, nodes });
-      else if (write.outcome === "unchanged" || write.outcome === "cas-conflict")
-        result.skipped.push({ target, reason: write.outcome });
-      else if (write.outcome === "stale") {
-        throw new ScafoError("lease-lost", "Coordinator placement fence is stale", {
-          detail: `refusing later placement writes after "${target}" was decided at a higher fence`,
-        });
-      }
+       omits this application, and its placement stays where it is: every record
+       must survive for unblocking rather than be mistaken for orphaned state. */
+    if (record.blocked === true) {
+      served.add(record.name);
+      continue;
     }
-    for (const env of placements.keys()) if (!served.has(env)) removals.push({ project, env });
+    if (record.retiredAt !== undefined) continue;
+
+    const target = record.name;
+    served.add(target);
+    if (keepAlive !== undefined) lease = await keepAlive();
+
+    const candidates = eligibleNodes(fleet, record.nodeSelector);
+    if (candidates.length === 0) {
+      result.unplaced.push({
+        target,
+        reason: "placement-unavailable",
+        detail:
+          `no live node carries every label of ` +
+          `"${describeSelector(record.nodeSelector as NodeSelector)}", which "${target}" selects`,
+      });
+      continue;
+    }
+
+    const nodes = await assignNodes({
+      application: target,
+      nodes: candidates.map((entry) => entry.id),
+      replicas: resolveReplicas(record),
+    });
+    const previous = placements.get(target)?.nodes ?? [];
+    if (sameNodes(previous, nodes)) {
+      result.skipped.push({ target, reason: "unchanged" });
+      continue;
+    }
+
+    const write = await writePlacement(ctx, target, nodes, lease);
+    if (write.outcome === "written") result.changed.push({ target, nodes });
+    else if (write.outcome === "unchanged" || write.outcome === "cas-conflict")
+      result.skipped.push({ target, reason: write.outcome });
+    else if (write.outcome === "stale") {
+      throw new ScafoError("lease-lost", "Coordinator placement fence is stale", {
+        detail: `refusing later placement writes after "${target}" was decided at a higher fence`,
+      });
+    }
   }
 
-  for (const entry of removals.sort((left, right) =>
-    compare(`${left.project}/${left.env}`, `${right.project}/${right.env}`),
-  )) {
+  for (const name of [...placements.keys()].filter((key) => !served.has(key)).sort(compare)) {
     if (keepAlive !== undefined) lease = await keepAlive();
-    const removed = await deletePlacement(ctx, entry.project, entry.env, lease);
+    const removed = await deletePlacement(ctx, name, lease);
     if (removed !== null) result.removed.push(removed);
   }
   return result;

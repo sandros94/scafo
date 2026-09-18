@@ -3,44 +3,29 @@
  *
  * A counting node attributes a host through the routing it published, and falls
  * back to a PURE, REGISTRY-FREE host grammar for everything the routing does not
- * name. That grammar cannot tell a real environment from a label a crawler
- * invented, because only the registry can. So the reader checks: two listings'
- * worth of names, and every counted pair held against them.
+ * name. That grammar cannot tell a real application from a label a crawler
+ * invented, because only the registry can. So the reader checks the counted
+ * names against the registry's own listing.
  *
- * LISTINGS ONLY, AND THAT IS THE BUDGET. One listing for the projects, then one
- * of environments per project the window actually counted — never a record
- * read, and never a project nothing in the window named.
+ * ONE LISTING, AND THAT IS THE BUDGET: never a record read, and never a name
+ * nothing in the window counted.
  */
 
+import { listApplications } from "../core/registry/applications.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
-import { listEnvironments } from "../core/registry/environments.ts";
-import { listProjects } from "../core/registry/projects.ts";
-import { DEFAULT_CONCURRENCY, mapConcurrent } from "../core/utils/concurrency.ts";
 import type { MetricsNaming } from "./_metrics.ts";
 
 /**
- * What the registry holds about the projects a window named.
+ * What the registry holds about the applications a window named.
  *
- * `wanted` is what {@link projectsCounted} answered; a name that is not a
- * project is left out of every map here, which is exactly what makes it read as
- * unmatched rather than as a project row of its own.
+ * `wanted` is what {@link applicationsCounted} answered; a name the registry
+ * does not hold is left out, which is exactly what makes it read as unmatched
+ * rather than as a row of its own.
  */
 export async function readMetricsNaming(
   ctx: RegistryContext,
   wanted: readonly string[],
 ): Promise<MetricsNaming> {
-  const projects = new Set(await listProjects(ctx));
-  const named = wanted.filter((project) => projects.has(project));
-
-  /* Independent reads, so they overlap under the same bound every other fan-out
-     in the codebase takes. */
-  const held = await mapConcurrent(
-    named,
-    DEFAULT_CONCURRENCY,
-    async (project) => new Set(await listEnvironments(ctx, project)),
-  );
-
-  const environments = new Map<string, ReadonlySet<string>>();
-  for (const [index, project] of named.entries()) environments.set(project, held[index]);
-  return { projects, environments };
+  const held = new Set(await listApplications(ctx));
+  return { applications: new Set(wanted.filter((name) => held.has(name))) };
 }

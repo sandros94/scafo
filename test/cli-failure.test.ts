@@ -39,11 +39,11 @@ describe("how a failure is printed", () => {
     const said = capture();
 
     reportFailure(
-      new ScafoError("not-found", "No such environment", { detail: `"shop/preview" is not there` }),
+      new ScafoError("not-found", "No such application", { detail: `"shop-preview" is not there` }),
     );
 
     expect(said()).toEqual([
-      `scafo: No such environment: "shop/preview" is not there [urn:scafo:not-found]`,
+      `scafo: No such application: "shop-preview" is not there [urn:scafo:not-found]`,
     ]);
     expect(process.exitCode).toBe(1);
   });

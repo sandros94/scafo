@@ -3,15 +3,14 @@
 import { describe, expect, it } from "vitest";
 import {
   acquireLease,
-  createEnvironment,
-  createProject,
+  createApplication,
   executeReap,
   isLeaseExpired,
   type LeaseHandle,
   planReap,
   readJson,
   releaseLease,
-  retireEnvironment,
+  retireApplication,
   renewLease,
   verifyLease,
 } from "../src/core/registry/index.ts";
@@ -175,15 +174,14 @@ describe("a superseded holder", () => {
     const store = new FaultStore(new MemoryCasStore());
     const { ctx, tick } = ctxWith(store);
 
-    await createProject(ctx, { slug: "app" });
-    await createEnvironment(ctx, "app", { name: "preview" });
-    await retireEnvironment(ctx, "app", "preview");
+    await createApplication(ctx, { name: "app-preview" });
+    await retireApplication(ctx, "app-preview");
 
     const stale = await held(acquireLease(ctx, "node-a", { ttlMs: TTL_MS }), "node-a");
     tick(86_400_001);
     const reapOptions = { deploymentRetention: { maxAgeMs: 1000 } };
     const plan = await planReap(ctx, reapOptions);
-    expect(plan.environments).toHaveLength(1);
+    expect(plan.applications).toHaveLength(1);
 
     await held(acquireLease(ctx, "node-b", { ttlMs: TTL_MS }), "node-b");
     const deletesBefore = store.dels;

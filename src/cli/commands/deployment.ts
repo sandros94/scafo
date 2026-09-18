@@ -1,9 +1,9 @@
 /*
- * `scafo deployment`: what an environment has published, and how an operator
+ * `scafo deployment`: what an application has published, and how an operator
  * takes the old ones back.
  *
- * Celld publishes every deploy under the environment's fleet prefix and deletes
- * none of them, so a long-lived environment keeps every bundle it has ever run.
+ * Celld publishes every deploy under the application's fleet prefix and deletes
+ * none of them, so a long-lived application keeps every bundle it has ever run.
  * `prune` is the operator's hands on that, and it is UNSTABLE on purpose: the
  * moment Celld grows a deployment lifecycle of its own, this follows it. It is
  * also PINNED, because it reads formats Celld owns: it plans nothing unless the
@@ -22,6 +22,7 @@ import {
   type StoredDeployment,
 } from "../../core/registry/prune.ts";
 import { verifiedReleaseList } from "../../core/registry/_celld-contract.ts";
+import { resolveApplication } from "../_application.ts";
 import { createRegistry } from "../_bootstrap.ts";
 import { confirm } from "../_confirm.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
@@ -52,8 +53,8 @@ const DEFAULT_OLDER_THAN = "24h";
 
 const pruneArgs: ArgsDef = {
   ...bucketArgs,
-  "project": { type: "string", description: "Project the environment belongs to", required: true },
-  "env": { type: "string", description: "Environment to prune deployments of", required: true },
+  "name": { type: "string", description: "Application to prune deployments of", required: true },
+  "env": { type: "string", description: "Address the application <name>-<env> instead" },
   "keep": {
     type: "string",
     description:
@@ -109,7 +110,7 @@ const prune: CommandDef = defineCommand({
   meta: {
     name: "prune",
     description:
-      `Delete the old Celld deployments of one environment; what a pointer names is ` +
+      `Delete the old Celld deployments of one application; what a pointer names is ` +
       `never deleted, ${BLOBS_COLLECTED}, and the run is refused unless the installation is ` +
       `answering on Celld ${verifiedReleaseList()}`,
   },
@@ -126,7 +127,7 @@ const prune: CommandDef = defineCommand({
 export const deployment: CommandDef = defineCommand({
   meta: {
     name: "deployment",
-    description: "Manage what a project's environments have published",
+    description: "Manage what an application has published",
   },
   subCommands: { prune },
 });
@@ -143,8 +144,7 @@ async function runPrune(flags: Record<string, unknown>): Promise<void> {
 
   const registry = await openRegistry(flags);
   const plan = await planPrune(registry, {
-    project: wanted.project,
-    env: wanted.env,
+    application: wanted.application,
     keep: wanted.keep,
     olderThanMs: wanted.olderThan.ms,
     now: new Date(),
@@ -244,13 +244,12 @@ function deletionQuestion(plan: PrunePlan): string {
   }
   if (plan.blobs.delete.length > 0) parts.push(plural(plan.blobs.delete.length, "asset blob"));
 
-  return `Delete ${parts.join(" and ")} of "${plan.project}/${plan.env}"? [y/N] `;
+  return `Delete ${parts.join(" and ")} of "${plan.application}"? [y/N] `;
 }
 
 /** What `scafo deployment prune` was told to do, once every flag has been read. */
 export interface PruneFlags {
-  project: string;
-  env: string;
+  application: string;
   keep: number;
   /** The age window as the operator typed it, and what it means in milliseconds. */
   olderThan: { text: string; ms: number };
@@ -266,8 +265,7 @@ export function readPruneFlags(flags: Record<string, unknown>): PruneFlags {
   const window = text(flags["older-than"] ?? flags.olderThan) ?? DEFAULT_OLDER_THAN;
 
   return {
-    project: required(flags, "project"),
-    env: required(flags, "env"),
+    application: resolveApplication({ name: text(flags.name), env: text(flags.env) }),
     keep: readKeep(flags.keep),
     olderThan: { text: window, ms: parseOlderThan(window) },
     dryRun: (flags["dry-run"] ?? flags.dryRun) === true,
@@ -355,7 +353,7 @@ function planLines(report: PruneReport): string[] {
 
 /**
  * The one line the shared blobs get: what goes, or, when nothing does, how many
- * stayed and what kept them. An environment with no blobs at all says nothing.
+ * stayed and what kept them. An application with no blobs at all says nothing.
  */
 function blobLine(report: PruneReport): string | undefined {
   const blobs = report.plan.blobs;
@@ -393,7 +391,7 @@ function whatGoes(doomed: StoredDeployment): string {
 }
 
 function summarize(report: PruneReport): string {
-  const where = `"${report.plan.project}/${report.plan.env}"`;
+  const where = `"${report.plan.application}"`;
   const kept = `kept ${String(report.plan.keep.length)}`;
   if (!deletesAnything(report.plan)) {
     return `scafo: nothing to prune in ${where}, ${kept}; ${BLOBS_COLLECTED}`;
@@ -431,15 +429,6 @@ async function openRegistry(flags: Record<string, unknown>): Promise<RegistryCon
     readFile: readTextFile,
   });
   return createRegistry(config);
-}
-
-function required(flags: Record<string, unknown>, name: string): string {
-  const value = text(flags[name]);
-  if (value !== undefined) return value;
-
-  throw new ScafoError("invalid-input", "Missing required argument", {
-    detail: `--${name} must be given`,
-  });
 }
 
 function text(value: unknown): string | undefined {

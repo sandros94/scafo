@@ -14,15 +14,14 @@
  * half of what the fleet document is assembled out of.
  */
 
-/** One routable backend: a running runtime process serving an environment. */
+/** One routable backend: a running runtime process serving an application. */
 export interface IngressBackend {
-  project: string;
-  env: string;
+  application: string;
   /** Loopback port the process answers public traffic on. */
   port: number;
 }
 
-/** One host and the current environment process that answers on it. */
+/** One host and the current application process that answers on it. */
 export interface IngressRoute {
   host: string;
   backend: IngressBackend;
@@ -56,7 +55,7 @@ export interface ApiRouting {
 export interface IngressDesired {
   /**
    * Host to backend, sorted by host. Hosts are fully qualified: a host label
-   * under one of the platform domains, or a custom domain an environment claimed.
+   * under one of the platform domains, or a custom domain an application claimed.
    */
   routes: IngressRoute[];
   /**
@@ -99,8 +98,7 @@ export interface FleetUpstream {
  */
 export interface FleetRoute {
   host: string;
-  project: string;
-  env: string;
+  application: string;
   upstreams: FleetUpstream[];
 }
 
@@ -117,7 +115,7 @@ export interface FleetApiRouting {
 
 /**
  * The routing of the whole fleet, as any ingress in front of it reads it: every
- * host any environment answers on, and every node currently answering. Rendered
+ * host any application answers on, and every node currently answering. Rendered
  * by every node from the same registry, so every node's copy says the same
  * thing, give or take a heartbeat.
  *

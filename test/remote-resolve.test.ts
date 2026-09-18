@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
-import { nodeOps } from "../src/cli/_environments.ts";
+import { nodeOps } from "../src/cli/_applications.ts";
 import { addRemote, exportRemote } from "../src/cli/_remotes.ts";
 import { homeKeyPath } from "../src/cli/_home.ts";
 import { operatorSigner } from "../src/cli/_node.ts";
@@ -22,7 +22,7 @@ import {
   SCAFO_REMOTE_ENV,
 } from "../src/cli/_operator.ts";
 import { registerNode } from "../src/core/registry/nodes.ts";
-import { createEnvironment, createProject, getEnvironment } from "../src/core/registry/index.ts";
+import { createApplication, getApplication } from "../src/core/registry/index.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { toBase64 } from "../src/core/utils/base64.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
@@ -65,7 +65,7 @@ describe("which remote a command acts on", () => {
     expect(resolved.remote).toBe("staging");
   });
 
-  it("takes the one the project pinned when neither names one", async () => {
+  it("takes the one the working directory pinned when neither names one", async () => {
     const home = await twoFleets();
 
     const resolved = await resolveOperator({
@@ -338,8 +338,7 @@ describe("the resolved remote against a real node", () => {
       publicKey: { kty: "OKP", crv: "Ed25519", x: key.publicKey.x },
       addresses: { internal: "operator", apiPort: 0 },
     });
-    await createProject(clock.ctx, { slug: "app" });
-    await createEnvironment(clock.ctx, "app", { name: "prod" });
+    await createApplication(clock.ctx, { name: "shop" });
 
     const app = createNodeApp({
       config: daemonConfig(),
@@ -355,10 +354,10 @@ describe("the resolved remote against a real node", () => {
       fetchFn: async (input, init) => app.request(urlOf(input), init),
     });
 
-    const environment = await ops.retire({ project: "app", env: "prod" });
+    const application = await ops.retire("shop");
 
-    expect(environment.retiredAt).toBe(new Date(clock.nowMs()).toISOString());
-    expect((await getEnvironment(clock.ctx, "app", "prod")).retiredAt).toBe(environment.retiredAt);
+    expect(application.retiredAt).toBe(new Date(clock.nowMs()).toISOString());
+    expect((await getApplication(clock.ctx, "shop")).retiredAt).toBe(application.retiredAt);
   });
 });
 
@@ -408,7 +407,7 @@ async function readText(path: string): Promise<string> {
   return readFile(path, "utf8");
 }
 
-/** A project directory that pins a remote by name, and holds nothing else. */
+/** A working directory that pins a remote by name, and holds nothing else. */
 function pinned(name: string): (path: string) => Promise<string | null> {
   return async (path) =>
     path.endsWith("scafo.config.jsonc") ? `{ /* no secrets here */ "remote": "${name}" }` : null;

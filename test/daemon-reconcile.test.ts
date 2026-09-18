@@ -1,12 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { recordRevision } from "../src/core/registry/_revision.ts";
+import { createApplication } from "../src/core/registry/applications.ts";
 import { createDeployment } from "../src/core/registry/deployments.ts";
-import { createEnvironment } from "../src/core/registry/environments.ts";
 import { acquireLease } from "../src/core/registry/lease.ts";
 import { getNode, registerNode } from "../src/core/registry/nodes.ts";
 import { nodeKey } from "../src/core/registry/paths.ts";
 import { writePlacement } from "../src/core/registry/placement.ts";
-import { createProject } from "../src/core/registry/projects.ts";
 import type { NodeRecord } from "../src/core/types/registry.ts";
 import type { RuntimeDriver, RuntimeSpecInput } from "../src/core/types/runtime.ts";
 import type { ProcessSpec, ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
@@ -18,42 +17,38 @@ import { createReconciler } from "../src/daemon/reconcile.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith } from "./_helpers.ts";
 
-const PROJECT = "shop";
-const ENV = "production";
+const APP = "shop";
 const VERSION_ONE = "1111aaaa";
 const VERSION_TWO = "2222bbbb";
 /** The Celld this node booted with; what every other node's is compared against. */
 const CELLD_VERSION = "0.5.0";
 
-describe("environment-owned reconciliation", () => {
+describe("application-owned reconciliation", () => {
   it("starts one process and routes it as soon as the supervisor reports it running", async () => {
     const world = await seededWorld();
     expect(await world.reconciler.runOnce()).toEqual([
       {
         type: "start",
-        project: PROJECT,
-        env: ENV,
+        application: APP,
         ports: { public: 42_000, internal: 42_001 },
       },
     ]);
     expect(world.supervisor.started).toHaveLength(1);
-    expect(world.events).toEqual(["spec", "start", "ingress:2"]);
-    expect(world.reconciler.status().processes[0]).toMatchObject({
-      processId: "shop--production",
-    });
+    expect(world.events).toEqual(["spec", "start", "ingress:1"]);
+    expect(world.reconciler.status().processes[0]).toMatchObject({ application: APP });
   });
 
   it("forgets a process that ended on its own once a pass has read its exit", async () => {
     const world = await seededWorld();
-    /* Left behind by an environment this node no longer serves, so nothing in
+    /* Left behind by an application this node no longer serves, so nothing in
        the plan would name it: the pass reads it, and that is the whole of it. */
-    world.supervisor.exited("shop--retired");
+    world.supervisor.exited("shop-retired");
 
     await world.reconciler.runOnce();
 
-    expect(world.supervisor.list().map((status) => status.id)).toEqual(["shop--production"]);
-    expect(world.reconciler.status().processes.map((process) => process.processId)).toEqual([
-      "shop--production",
+    expect(world.supervisor.list().map((status) => status.id)).toEqual([APP]);
+    expect(world.reconciler.status().processes.map((process) => process.application)).toEqual([
+      APP,
     ]);
   });
 
@@ -61,11 +56,11 @@ describe("environment-owned reconciliation", () => {
     const world = await seededWorld();
     await world.reconciler.runOnce();
     world.events.length = 0;
-    await createDeployment(world.daemon.registry, PROJECT, { version: VERSION_TWO });
-    await recordRevision(world.daemon.registry, PROJECT, ENV, VERSION_TWO);
+    await createDeployment(world.daemon.registry, APP, { version: VERSION_TWO });
+    await recordRevision(world.daemon.registry, APP, VERSION_TWO);
 
     expect(await world.reconciler.runOnce()).toEqual([]);
-    expect(world.events).toEqual(["ingress:2"]);
+    expect(world.events).toEqual(["ingress:1"]);
     expect(world.supervisor.started).toHaveLength(1);
   });
 
@@ -84,7 +79,7 @@ describe("environment-owned reconciliation", () => {
     release();
     await Promise.all([pass, shutdown]);
 
-    expect(world.supervisor.stopped).toEqual(["shop--production"]);
+    expect(world.supervisor.stopped).toEqual([APP]);
     expect(world.supervisor.list()).toEqual([]);
   });
 
@@ -93,15 +88,15 @@ describe("environment-owned reconciliation", () => {
     await world.reconciler.runOnce();
     const lease = await acquireLease(world.daemon.registry, "coordinator");
     if (lease === null) throw new Error("lease unavailable");
-    await writePlacement(world.daemon.registry, PROJECT, ENV, ["node-b"], lease);
+    await writePlacement(world.daemon.registry, APP, ["node-b"], lease);
     world.supervisor.stopFailures = 1;
 
     await world.reconciler.runOnce();
     expect(world.reconciler.status().processes[0]).toMatchObject({ teardownPending: true });
 
     /* Placed here again while the stop is still owed: the teardown is retried
-       before anything else, and only then may the environment be served. */
-    await writePlacement(world.daemon.registry, PROJECT, ENV, ["node-a"], lease);
+       before anything else, and only then may the application be served. */
+    await writePlacement(world.daemon.registry, APP, ["node-a"], lease);
     expect((await world.reconciler.runOnce())[0]).toMatchObject({
       type: "stop",
       reason: "runtime teardown is pending",
@@ -114,10 +109,10 @@ describe("environment-owned reconciliation", () => {
     await world.reconciler.runOnce();
     const lease = await acquireLease(world.daemon.registry, "coordinator");
     if (lease === null) throw new Error("lease unavailable");
-    await writePlacement(world.daemon.registry, PROJECT, ENV, ["node-b"], lease);
+    await writePlacement(world.daemon.registry, APP, ["node-b"], lease);
 
     await world.reconciler.runOnce();
-    expect(world.supervisor.stopped).toEqual(["shop--production"]);
+    expect(world.supervisor.stopped).toEqual([APP]);
     expect(world.reconciler.status().processes).toEqual([]);
   });
 });
@@ -142,12 +137,12 @@ describe("what a node tells the fleet it serves", () => {
     /* The pass beat the heartbeat out of turn; let that beat land. */
     await heartbeat.beat();
     expect((await getNode(world.daemon.registry, "node-a")).serving).toEqual({
-      "shop/production": { port: 42_000 },
+      [APP]: { port: 42_000 },
     });
 
     const lease = await acquireLease(world.daemon.registry, "coordinator");
     if (lease === null) throw new Error("lease unavailable");
-    await writePlacement(world.daemon.registry, PROJECT, ENV, ["node-b"], lease);
+    await writePlacement(world.daemon.registry, APP, ["node-b"], lease);
     await world.reconciler.runOnce();
     await heartbeat.beat();
     expect((await getNode(world.daemon.registry, "node-a")).serving).toEqual({});
@@ -193,7 +188,7 @@ describe("what a node tells the fleet it serves", () => {
   });
 });
 
-describe("an environment another node serves on a different Celld", () => {
+describe("an application another node serves on a different Celld", () => {
   it("is not started here, and says which node holds it on what", async () => {
     const world = await seededWorld();
     await registerNode(world.daemon.registry, otherNode("node-b", "0.4.1"));
@@ -206,7 +201,7 @@ describe("an environment another node serves on a different Celld", () => {
     const [failure] = world.reconciler.status().failures;
     expect(failure).toMatchObject({
       action: "start",
-      subject: "shop--production",
+      subject: APP,
       code: "version-skew",
     });
     expect(failure?.detail).toContain("node-b");
@@ -215,7 +210,7 @@ describe("an environment another node serves on a different Celld", () => {
 
   it("leaves nothing behind for the fleet to route to", async () => {
     /* A start that did not happen must not reach the heartbeat: a node that
-       announced this environment would take traffic it cannot answer. */
+       announced this application would take traffic it cannot answer. */
     const world = await seededWorld();
     const heartbeat = await attachHeartbeat(world);
     await registerNode(world.daemon.registry, otherNode("node-b", "0.4.1"));
@@ -238,14 +233,14 @@ describe("an environment another node serves on a different Celld", () => {
       await world.reconciler.runOnce();
       await world.reconciler.runOnce();
       expect(lines).toHaveLength(1);
-      expect(lines[0]).toContain("scafo: reconcile start shop--production failed [version-skew]");
+      expect(lines[0]).toContain(`scafo: reconcile start ${APP} failed [version-skew]`);
       expect(lines[0]).toContain("node-b");
 
       await world.daemon.registry.store.del(nodeKey("node-b"));
       await world.reconciler.runOnce();
       await world.reconciler.runOnce();
       expect(lines).toHaveLength(2);
-      expect(lines[1]).toBe("scafo: reconcile start shop--production no longer fails");
+      expect(lines[1]).toBe(`scafo: reconcile start ${APP} no longer fails`);
     } finally {
       spy.mockRestore();
     }
@@ -285,7 +280,7 @@ describe("the fleet routing a pass leaves behind", () => {
       addresses: { internal: "10.0.0.2", apiPort: 7400 },
       heartbeatAt: new Date().toISOString(),
       versions: { scafo: "test", celld: CELLD_VERSION },
-      serving: { "shop/production": { port: 42_010 } },
+      serving: { [APP]: { port: 42_010 } },
     });
     /* Not the empty document: that one says the fleet answers on nothing, which
        is something this node has not read yet and an ingress would act on. */
@@ -296,15 +291,13 @@ describe("the fleet routing a pass leaves behind", () => {
        through its record, so it shows up one pass after it started. */
     expect(world.reconciler.fleetRouting()?.routes.map((route) => route.upstreams)).toEqual([
       [{ node: "node-b", address: "10.0.0.2:42010" }],
-      [{ node: "node-b", address: "10.0.0.2:42010" }],
     ]);
 
     await heartbeat.beat();
     await world.reconciler.runOnce();
     expect(world.reconciler.fleetRouting()?.routes[0]).toEqual({
-      host: "shop--production.apps.test",
-      project: PROJECT,
-      env: ENV,
+      host: `${APP}.apps.test`,
+      application: APP,
       upstreams: [
         { node: "node-a", address: "127.0.0.1:42000" },
         { node: "node-b", address: "10.0.0.2:42010" },
@@ -313,7 +306,7 @@ describe("the fleet routing a pass leaves behind", () => {
   });
 });
 
-/** Another machine, answering now and telling the fleet it serves this environment. */
+/** Another machine, answering now and telling the fleet it serves this application. */
 function otherNode(id: string, celld: string): NodeRecord {
   return {
     v: 1,
@@ -322,7 +315,7 @@ function otherNode(id: string, celld: string): NodeRecord {
     addresses: { internal: "10.0.0.2", apiPort: 7400 },
     heartbeatAt: new Date().toISOString(),
     versions: { scafo: "test", celld },
-    serving: { [`${PROJECT}/${ENV}`]: { port: 42_010 } },
+    serving: { [APP]: { port: 42_010 } },
   };
 }
 
@@ -340,13 +333,12 @@ async function attachHeartbeat(world: Awaited<ReturnType<typeof seededWorld>>) {
 
 async function seededWorld() {
   const registry = ctxWith(new MemoryCasStore());
-  await createProject(registry.ctx, { slug: PROJECT });
-  await createEnvironment(registry.ctx, PROJECT, { name: ENV });
-  await createDeployment(registry.ctx, PROJECT, { version: VERSION_ONE });
-  await recordRevision(registry.ctx, PROJECT, ENV, VERSION_ONE);
+  await createApplication(registry.ctx, { name: APP });
+  await createDeployment(registry.ctx, APP, { version: VERSION_ONE });
+  await recordRevision(registry.ctx, APP, VERSION_ONE);
   const lease = await acquireLease(registry.ctx, "coordinator");
   if (lease === null) throw new Error("lease unavailable");
-  await writePlacement(registry.ctx, PROJECT, ENV, ["node-a"], lease);
+  await writePlacement(registry.ctx, APP, ["node-a"], lease);
 
   const events: string[] = [];
   const supervisor = fakeSupervisor(events);
@@ -446,7 +438,7 @@ function fakeDriver(events: string[]): FakeDriver {
     processSpec(input) {
       events.push("spec");
       this.inputs.push(input);
-      return { id: `${input.project}--${input.env.name}`, command: "celld", args: [], env: {} };
+      return { id: input.application.name, command: "celld", args: [], env: {} };
     },
   };
 }

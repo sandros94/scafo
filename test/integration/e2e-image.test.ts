@@ -94,8 +94,8 @@ const BUCKET: BucketSettings = {
 };
 
 const PLATFORM_DOMAIN = "scafo.test";
-const PROJECT = "app";
-const ENVIRONMENT = "production";
+/** The application this suite deploys, and the name its `wrangler.jsonc` carries. */
+const APPLICATION = "app";
 const NODE_ID = "node-e2e-image";
 
 /**
@@ -296,10 +296,8 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
           await stageApp("v1", tmpDirs),
           "--node",
           `http://127.0.0.1:${String(apiPort)}`,
-          "--project",
-          PROJECT,
-          "--env",
-          ENVIRONMENT,
+          "--name",
+          APPLICATION,
           "--key",
           keyPath,
         ],
@@ -310,9 +308,9 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
       expectCleanExit(deploy);
       expect(deploy.output, nodeLogTail()).toContain("deployed");
       deploymentVersion = deploymentOf(deploy.output);
-      expect(await listDeployments(registry, PROJECT)).toContain(deploymentVersion);
+      expect(await listDeployments(registry, APPLICATION)).toContain(deploymentVersion);
 
-      const host = `${PROJECT}--${ENVIRONMENT}.${PLATFORM_DOMAIN}`;
+      const host = `${APPLICATION}.${PLATFORM_DOMAIN}`;
       const answer = await until(`${host} to serve "v1"`, DEADLINE_MS, async () => {
         const served = await httpGet(caddyHttpPort, "/", { host });
         return served.status === 200 && served.body.includes(`"v1"`) ? served : null;

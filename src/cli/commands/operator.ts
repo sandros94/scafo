@@ -43,7 +43,7 @@ import {
   enrollPath,
   formatRemoteKeys,
   listRemoteKeys,
-  operatorProjects,
+  operatorApplications,
   operatorRole,
   revokeRemoteKey,
   showOperator,
@@ -76,7 +76,8 @@ const keygenArgs: ArgsDef = {
     type: "string",
     description:
       `Tier to register at: admin (the first key is always one, and this path admits no other ` +
-      `— an operator-tier key needs a project scope, which only the wire path can give it)`,
+      `— an operator-tier key needs an application scope, which only the wire path can give ` +
+      `it)`,
   },
 };
 
@@ -95,11 +96,11 @@ const enrollArgs: ArgsDef = {
   },
   remote: { type: "string", description: "Remote whose node admits the key, admin-authed" },
   role: { type: "string", description: "Tier to admit it at: admin|operator" },
-  projects: {
+  apps: {
     type: "string",
     description:
-      `Projects the key may name, comma-separated, or "*" for every project; ` +
-      `required for an operator-tier key (wire path only)`,
+      `Applications the key may name, comma-separated, "shop-*" for a prefix, or "*" for ` +
+      `every application; required for an operator-tier key (wire path only)`,
   },
   node: { type: "string", description: "Node to reach, instead of the remote's first endpoint" },
 };
@@ -270,7 +271,7 @@ async function runEnroll(flags: Record<string, unknown>): Promise<void> {
      costs no request and no bucket credential to refuse. */
   const pub = await loadPublicOperator(required(flags, "pubkey"));
   const role = operatorRole(flags.role);
-  const scope = operatorProjects(flags.projects);
+  const scope = operatorApplications(flags.apps);
   const named = text(flags.remote);
 
   const chosen = enrollPath({
@@ -279,7 +280,7 @@ async function runEnroll(flags: Record<string, unknown>): Promise<void> {
   });
   /* The ceremony seeds and recovers ADMINS: never scoped, and never at the
      operator tier, which would be a key that can reach nothing. */
-  assertScopedEnrollment(chosen, scope.projects, role.role);
+  assertScopedEnrollment(chosen, scope.applications, role.role);
 
   const enrolled =
     chosen === "wire"
@@ -330,7 +331,7 @@ async function runList(flags: Record<string, unknown>): Promise<void> {
 /**
  * Which remote this invocation administers, down the one chain every other
  * operator-facing command uses: `--remote`, then the environment, then the
- * project's pin, then the only remote there is.
+ * project directory's pin, then the only remote there is.
  *
  * A home holding none is refused HERE rather than inside the chain, which
  * answers null for it: every command in this file acts on a remote, and there is

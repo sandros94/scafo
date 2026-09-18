@@ -249,7 +249,7 @@ export const DRAIN_ATTEMPTS: number = 3;
  * that crashed, and a crash is only noticed once the node's heartbeat has aged
  * past the liveness window — ninety seconds during which the coordinator still
  * counts it among the nodes it hands work to, and its single-replica
- * environments are placed on a process that is already gone. A node that writes
+ * applications are placed on a process that is already gone. A node that writes
  * this down is counted out on the coordinator's very next assignment pass.
  *
  * BEST EFFORT, and NEVER throws: the node is leaving either way, and a bucket

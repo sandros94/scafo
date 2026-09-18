@@ -404,7 +404,7 @@ describe("the tier a bucket-side registration files a key at", () => {
     const second = await generateOperatorKey();
 
     /*
-     * The ceremony admits a key with no projects named, and an operator-tier
+     * The ceremony admits a key with no applications named, and an operator-tier
      * key that names none reaches nothing — so what it would produce here is a
      * key that authenticates and can do nothing, filed by the one path with no
      * node in it to say so. It bypasses the TIER rules on purpose, because
@@ -413,7 +413,7 @@ describe("the tier a bucket-side registration files a key at", () => {
      */
     const error = await rejectsWith(() => registerOperatorKey(clock.ctx, second), "invalid-input");
 
-    expect(error.detail).toContain("projects");
+    expect(error.detail).toContain("applications");
     await expect(getOperator(clock.ctx, second.id)).resolves.toBeNull();
   });
 

@@ -1,21 +1,25 @@
 /*
- * Internal: the only place a project's runtime config is edited, and it is here
- * rather than on a node.
+ * Internal: the only place the runtime config of a project directory is read or
+ * edited, and it is here rather than on a node.
  *
  * The artifact a node receives is byte-for-byte what the runtime is handed, so
  * an edit has to happen before the directory is packed. It happens in memory and
  * goes straight into the archive: the file in the project directory is read and
  * never written, whatever flags were given.
+ *
+ * `--name` and `--env` are NOT edits. They choose the application a deploy
+ * lands in, and the config's own `name` reaches the runtime exactly as written.
  */
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ScafoError } from "../core/error.ts";
 import { assertEnvName } from "../core/utils/env.ts";
+import { isSlug } from "../core/utils/slug.ts";
 import { parseJsoncDocument } from "../daemon/_jsonc.ts";
 import type { FileSubstitution } from "../drivers/archive/tar-zst.ts";
 
-/** Config files a project may carry, in the order they are looked for. */
+/** Config files a project directory may carry, in the order they are looked for. */
 export const CONFIG_NAMES: readonly string[] = ["wrangler.jsonc", "wrangler.json"];
 
 /** What the deploy flags ask the config to say that it does not say already. */
@@ -68,8 +72,8 @@ export function parseVarFlags(pairs: readonly string[], flag: string): Record<st
 }
 
 /**
- * The project's runtime config with `edit` applied, ready to be packed in place
- * of the file on disk.
+ * The runtime config with `edit` applied, ready to be packed in place of the
+ * file on disk.
  *
  * The config's own `vars` are the defaults: an entry the caller named replaces
  * whatever the config holds for that name, of whatever JSON type, and every
@@ -121,7 +125,57 @@ async function readConfig(dir: string): Promise<{ name: string; text: string }> 
     } catch {}
   }
 
-  throw new ScafoError("invalid-input", "Project carries no runtime config", {
-    detail: `"${dir}" holds none of ${CONFIG_NAMES.join(", ")}, so there is nothing to edit`,
+  throw new ScafoError("invalid-input", "Directory carries no runtime config", {
+    detail: `"${dir}" holds none of ${CONFIG_NAMES.join(", ")}`,
+  });
+}
+
+/**
+ * The `name` the project directory's runtime config declares, which is what
+ * `scafo deploy` addresses when no `--name` was given.
+ *
+ * Read only: nothing here writes the config, and the name it carries reaches
+ * Celld exactly as it stands. A directory with no config, or one whose `name` is
+ * missing, blank, not text or no application name at all, is refused with
+ * `invalid-input` telling the caller to pass `--name` — guessing a name would
+ * deploy into an application nobody asked for.
+ */
+export async function readConfiguredName(dir: string): Promise<string> {
+  let found: { name: string; text: string };
+  try {
+    found = await readConfig(dir);
+  } catch (error) {
+    throw missingName(dir, "it holds no runtime config", error);
+  }
+
+  const parsed = parseJsoncDocument(found.text);
+  if ("error" in parsed) throw missingName(dir, `"${found.name}" could not be parsed`);
+
+  const document = parsed.value;
+  if (typeof document !== "object" || document === null || Array.isArray(document)) {
+    throw missingName(dir, `"${found.name}" does not hold an object`);
+  }
+
+  const name = (document as Record<string, unknown>).name;
+  if (typeof name !== "string" || name.trim() === "") {
+    throw missingName(dir, `"${found.name}" declares no "name"`);
+  }
+
+  /* A config may say anything; what is read out of one as an APPLICATION has to
+     be a name. Refused here, with the flag that settles it, rather than left to
+     surface further down as a slug complaint about text the caller never typed. */
+  const trimmed = name.trim();
+  if (!isSlug(trimmed)) {
+    throw missingName(dir, `"${found.name}" declares "${trimmed}", which is no application name`);
+  }
+  return trimmed;
+}
+
+function missingName(dir: string, why: string, cause?: unknown): ScafoError {
+  return new ScafoError("invalid-input", "No application to deploy to", {
+    detail:
+      `"${dir}" does not say which application this is — ${why}; pass --name <application>, ` +
+      `optionally with --env <name>`,
+    cause,
   });
 }

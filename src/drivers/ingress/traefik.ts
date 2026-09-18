@@ -24,7 +24,7 @@ export const NOOP_SERVICE: string = "noop@internal";
 /** The one middleware every router carries: retry the next upstream on a dial failure. */
 export const RETRY_MIDDLEWARE: string = `${TRAEFIK_KEY_PREFIX}retry`;
 
-/** Where an environment process says whether it is up. */
+/** Where an application process says whether it is up. */
 export const APP_HEALTH_PATH: string = "/.well-known/celld/health";
 
 /** Where a node's daemon says whether it is up. */

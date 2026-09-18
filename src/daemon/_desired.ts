@@ -1,24 +1,15 @@
 /* Internal: what the registry says THIS node should be serving. */
 
-import type { DesiredEnvironment } from "../core/placement/reconcile.ts";
 import { deploymentRevision } from "../core/registry/_revision.ts";
-import { readJson } from "../core/registry/cas.ts";
+import { findApplication, listApplications } from "../core/registry/applications.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
-import { listEnvironments } from "../core/registry/environments.ts";
-import { environmentKey } from "../core/registry/paths.ts";
 import { listPlacements } from "../core/registry/placement.ts";
-import { isProjectBlocked, listProjects } from "../core/registry/projects.ts";
-import {
-  type ConcurrencyGate,
-  createConcurrencyGate,
-  mapConcurrent,
-} from "../core/utils/concurrency.ts";
-import type { EnvironmentRecord, NodeSelector, PlacementRecord } from "../core/types/registry.ts";
+import { createConcurrencyGate, mapConcurrent } from "../core/utils/concurrency.ts";
+import type { ApplicationRecord, NodeSelector, PlacementRecord } from "../core/types/registry.ts";
 
-/** One environment's placement as this node reads it. */
+/** One application's placement as this node reads it. */
 export interface PlacementView {
-  project: string;
-  env: string;
+  application: string;
   /** Nodes the coordinator gave it. */
   nodes: string[];
   /** True when this node is one of them. */
@@ -29,118 +20,84 @@ export interface PlacementView {
 
 /** What one read of the registry told this node. */
 export interface DesiredState {
-  /** Deployed environments this node should serve. */
-  environments: DesiredEnvironment[];
+  /** Deployed applications this node should serve. */
+  applications: ApplicationRecord[];
   /**
-   * Every deployed environment the fleet serves somewhere, this node's included:
+   * Every deployed application the fleet serves somewhere, this node's included:
    * what the fleet's routing is rendered from. Read on the way past — the same
    * record answers whether this node serves it — so the fleet view costs the
    * pass nothing it was not already reading.
    */
-  fleet: Array<{ project: string; env: EnvironmentRecord }>;
-  /** Placement decisions read. An environment without one is pending, never implied. */
+  fleet: ApplicationRecord[];
+  /** Placement decisions read. An application without one is pending, never implied. */
   placements: PlacementView[];
 }
 
-/** Reads desired environments for one node. Nothing is served without an
- * explicit placement naming it. The record reads share one concurrency gate
- * across every project and retain listing order. */
+/** Reads desired applications for one node. Nothing is served without an
+ * explicit placement naming it. The record reads share one concurrency gate and
+ * retain listing order. */
 export async function readDesired(
   registry: RegistryContext,
   opts: { nodeId: string; concurrency?: number },
 ): Promise<DesiredState> {
-  const projects = await listProjects(registry);
   const gate = createConcurrencyGate(opts.concurrency);
-
-  /* The projects run ungated and take slots only for the reads inside them: a
-     project task holding a slot while it waits on the same gate would deadlock. */
-  const perProject = await Promise.all(
-    projects.map(async (project) => readProject(registry, project, opts.nodeId, gate)),
-  );
-  return {
-    environments: perProject.flatMap((entry) => entry.environments),
-    fleet: perProject.flatMap((entry) => entry.fleet),
-    placements: perProject.flatMap((entry) => entry.placements),
-  };
-}
-
-/** One project's environments, filtered to this node, and what placed them. */
-async function readProject(
-  registry: RegistryContext,
-  project: string,
-  nodeId: string,
-  gate: ConcurrencyGate,
-): Promise<DesiredState> {
-  /* A blocked project is served nowhere, so its listings are never read. */
-  if (await gate.run(() => isProjectBlocked(registry, project))) {
-    return { environments: [], fleet: [], placements: [] };
-  }
-
-  /* List environments and placements once per project. */
   const [names, placements] = await Promise.all([
-    listEnvironments(registry, project),
-    listPlacements(registry, project, { concurrency: gate }),
+    listApplications(registry),
+    listPlacements(registry, { concurrency: gate }),
   ]);
 
-  /* Resolve environments concurrently, preserving listed order in `parts`. */
+  /* The gate bounds these tasks from the outside, and each of them holds its
+     slot for the one read it makes: a task that took a slot and then awaited the
+     same gate from inside would deadlock as soon as every slot was taken. */
   const parts = await mapConcurrent(names, gate, async (name) =>
-    readEnvironment(registry, project, name, nodeId, placements.get(name)),
+    readApplication(registry, name, opts.nodeId, placements.get(name)),
   );
 
-  const state: DesiredState = { environments: [], fleet: [], placements: [] };
+  const state: DesiredState = { applications: [], fleet: [], placements: [] };
   for (const part of parts) {
-    state.environments.push(...part.environments);
+    state.applications.push(...part.applications);
     state.fleet.push(...part.fleet);
     state.placements.push(...part.placements);
   }
   return state;
 }
 
-/** What one environment contributes to its project's state, and nothing else's. */
-async function readEnvironment(
+/** What one application contributes to this node's state, and nothing else's. */
+async function readApplication(
   registry: RegistryContext,
-  project: string,
   name: string,
   nodeId: string,
   placement: PlacementRecord | undefined,
 ): Promise<DesiredState> {
-  const state: DesiredState = { environments: [], fleet: [], placements: [] };
+  const state: DesiredState = { applications: [], fleet: [], placements: [] };
   /* Unplaced is not a state this node may resolve on its own: only the
-     coordinator says where an environment runs. */
+     coordinator says where an application runs. */
   if (placement === undefined) return state;
 
-  /* One record answers placement view, selector, and deployment state. */
-  const found = await readJson<EnvironmentRecord>(registry, environmentKey(project, name));
+  /* One record answers placement view, selector, blocking and deployment state. */
+  const record = await findApplication(registry, name);
   /* A record deleted after listing is absent on the next pass. */
-  if (found === null) return state;
-  const environment = found.value;
+  if (record === null) return state;
 
   state.placements.push({
-    project,
-    env: name,
+    application: name,
     nodes: [...placement.nodes],
     self: placement.nodes.includes(nodeId),
-    ...(environment.nodeSelector === undefined
-      ? {}
-      : { selector: { ...environment.nodeSelector } }),
+    ...(record.nodeSelector === undefined ? {} : { selector: { ...record.nodeSelector } }),
   });
 
-  const wanted = resolveEnvironmentDeployment(project, environment);
-  if (wanted === null) return state;
-  state.fleet.push({ project, env: environment });
-  if (placement.nodes.includes(nodeId)) state.environments.push(wanted);
+  /* A blocked application is served nowhere; its placement stays for unblocking. */
+  if (record.blocked === true) return state;
+  if (!isServable(record)) return state;
+
+  state.fleet.push(record);
+  if (placement.nodes.includes(nodeId)) state.applications.push(record);
   return state;
 }
 
-/** Resolves a deployable, non-retired environment from its deployment notice. */
-export function resolveEnvironmentDeployment(
-  project: string,
-  env: EnvironmentRecord,
-): DesiredEnvironment | null {
+/** Whether an application is deployed and not retired, so something may serve it. */
+export function isServable(application: ApplicationRecord): boolean {
   /* Retirement outranks the placement that still names this node. */
-  if (env.retiredAt !== undefined) return null;
-  const revision = deploymentRevision(env);
-  if (revision === null) return null;
-
-  return { project, env };
+  if (application.retiredAt !== undefined) return false;
+  return deploymentRevision(application) !== null;
 }

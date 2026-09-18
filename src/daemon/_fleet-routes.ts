@@ -1,5 +1,5 @@
 /* Operator-authenticated fleet routes: the statements an admin makes about the
-   installation itself rather than about one project. */
+   installation itself rather than about one application. */
 
 import type { H3, H3Event, Middleware } from "h3";
 import { ScafoError } from "../core/error.ts";
@@ -86,10 +86,10 @@ function requireAdmin(event: H3Event): TrustedOperator {
 
   throw new ScafoError("auth-scope", "Only an admin freezes this fleet's deploys", {
     detail:
-      `"${caller.id}" is an ${caller.role}-tier key: it may deploy to the projects it reaches ` +
-      `and run their environments, and it may not stop every deploy of this installation — ` +
-      `that is a decision this fleet makes about itself rather than one taken inside a ` +
-      `project; ask an admin of this fleet`,
+      `"${caller.id}" is an ${caller.role}-tier key: it may deploy the applications it ` +
+      `reaches and run them, and it may not stop every deploy of this installation — ` +
+      `that is a decision this fleet makes about itself rather than one taken inside ` +
+      `an application; ask an admin of this fleet`,
   });
 }
 

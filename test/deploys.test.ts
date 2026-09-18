@@ -27,21 +27,22 @@ import {
 } from "../src/daemon/_intake.ts";
 import type { Reconciler } from "../src/daemon/reconcile.ts";
 import { OIDC_AUDIENCE, signNodeToken } from "../src/core/auth/index.ts";
-import { deploysPrefix, environmentKey, projectKey } from "../src/core/registry/paths.ts";
+import { applicationKey, deploysPrefix } from "../src/core/registry/paths.ts";
 import { ScafoError, type ProblemDetails } from "../src/core/error.ts";
 import { NODE_LIVENESS_WINDOW_MS } from "../src/core/registry/nodes.ts";
 import {
-  blockProject,
-  createEnvironment,
-  createProject,
+  blockApplication,
+  createApplication,
+  findApplication,
   freezeDeploys,
+  getApplication,
   getDeployment,
   getDeployRecord,
-  getEnvironment,
   registerNode,
+  setApplicationLabels,
   setTrustPolicy,
   trustOperator,
-  unblockProject,
+  unblockApplication,
   unfreezeDeploys,
 } from "../src/core/registry/index.ts";
 import type {
@@ -60,11 +61,10 @@ import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, type ManualClock, rejectsWith } from "./_helpers.ts";
 
 const OPERATOR = "op-1234abcd";
-/** A trusted key scoped to another project than the one being deployed. */
+/** A trusted key scoped to another application than the one being deployed. */
 const SCOPED = "op-scoped11";
-const PROJECT = "shop";
+const APPLICATION = "shop";
 const RIVAL = "rival";
-const ENVIRONMENT = "production";
 const VERSION_ID = "abc123def456";
 /** Another node of this installation, and where it says it is reached. */
 const PEER = "node-b";
@@ -139,13 +139,13 @@ beforeEach(async () => {
     id: SCOPED,
     publicKey: { kty: "OKP", crv: "Ed25519", x: scopedKeys.publicKey.x },
     role: "operator",
-    projects: [RIVAL],
+    applications: [RIVAL],
   });
 
-  for (const project of [PROJECT, RIVAL]) await createProject(clock.ctx, { slug: project });
-  /* Only one project trusts the issuer; the other is what a cross-project
+  for (const name of [APPLICATION, RIVAL]) await createApplication(clock.ctx, { name });
+  /* Only one application trusts the issuer; the other is what a cross-application
      attempt is aimed at. */
-  await setTrustPolicy(clock.ctx, PROJECT, {
+  await setTrustPolicy(clock.ctx, APPLICATION, {
     v: 1,
     issuers: [{ iss: ISS, aud: OIDC_AUDIENCE, subjects: ["repo:acme/*"] }],
   });
@@ -179,8 +179,8 @@ describe("who may deploy", () => {
     let reads = 0;
     const response = await streamedUpload(
       await signNodeToken(stranger.privateKey, OPERATOR),
-      PROJECT,
-      meta(),
+      APPLICATION,
+      {},
       unreadBody(() => reads++),
     );
 
@@ -195,8 +195,8 @@ describe("who may deploy", () => {
     let reads = 0;
     const response = await streamedUpload(
       forged,
-      PROJECT,
-      meta(),
+      APPLICATION,
+      {},
       unreadBody(() => reads++),
     );
 
@@ -208,7 +208,7 @@ describe("who may deploy", () => {
     let reads = 0;
     const response = await streamedUpload(
       await workloadToken({ sub: "repo:evil/app" }),
-      PROJECT,
+      APPLICATION,
       {},
       unreadBody(() => reads++),
     );
@@ -224,7 +224,7 @@ describe("who may deploy", () => {
 
     expect(response.status).toBe(202);
     expect(response.headers.get("location")).toBe(`/v1/deploys/${status.id}`);
-    expect(status).toMatchObject({ project: PROJECT, state: "accepted" });
+    expect(status).toMatchObject({ application: APPLICATION, state: "accepted" });
   });
 
   it("answers 202 without awaiting builder completion", async () => {
@@ -246,11 +246,11 @@ describe("who may deploy", () => {
       scheduler: {
         artifactBytes: 100,
         activeTasks: 1,
-        projectActiveTasks: 1,
+        applicationActiveTasks: 1,
         queuedTasks: 0,
-        projectQueuedTasks: 0,
+        applicationQueuedTasks: 0,
         stagedBytes: 100,
-        projectStagedBytes: 100,
+        applicationStagedBytes: 100,
         receiveTimeoutMs: 600_000,
         queueTimeoutMs: 600_000,
         taskTimeoutMs: 300_000,
@@ -260,7 +260,7 @@ describe("who may deploy", () => {
 
     const response = await streamedUpload(
       await operatorToken(),
-      PROJECT,
+      APPLICATION,
       {},
       unreadBody(() => reads++),
     );
@@ -278,11 +278,11 @@ describe("who may deploy", () => {
       scheduler: {
         artifactBytes: 100,
         activeTasks: 1,
-        projectActiveTasks: 1,
+        applicationActiveTasks: 1,
         queuedTasks: 1,
-        projectQueuedTasks: 1,
+        applicationQueuedTasks: 1,
         stagedBytes: 100,
-        projectStagedBytes: 100,
+        applicationStagedBytes: 100,
         receiveTimeoutMs: 10,
         queueTimeoutMs: 600_000,
         taskTimeoutMs: 300_000,
@@ -295,7 +295,7 @@ describe("who may deploy", () => {
       pull: () => new Promise<void>(() => {}),
     });
 
-    const response = await streamedUpload(await operatorToken(), PROJECT, {}, body);
+    const response = await streamedUpload(await operatorToken(), APPLICATION, {}, body);
 
     expect(response.status).toBe(408);
     expect(response.headers.get("location")).toBeNull();
@@ -310,11 +310,11 @@ describe("who may deploy", () => {
       scheduler: {
         artifactBytes: cap,
         activeTasks: 1,
-        projectActiveTasks: 1,
+        applicationActiveTasks: 1,
         queuedTasks: 1,
-        projectQueuedTasks: 1,
+        applicationQueuedTasks: 1,
         stagedBytes: cap,
-        projectStagedBytes: cap,
+        applicationStagedBytes: cap,
         receiveTimeoutMs: 600_000,
         queueTimeoutMs: 600_000,
         taskTimeoutMs: 300_000,
@@ -359,11 +359,11 @@ describe("who may deploy", () => {
       scheduler: {
         artifactBytes: 100,
         activeTasks: 1,
-        projectActiveTasks: 1,
+        applicationActiveTasks: 1,
         queuedTasks: 1,
-        projectQueuedTasks: 1,
+        applicationQueuedTasks: 1,
         stagedBytes: 100,
-        projectStagedBytes: 100,
+        applicationStagedBytes: 100,
         receiveTimeoutMs: 600_000,
         queueTimeoutMs: 600_000,
         taskTimeoutMs: 300_000,
@@ -414,7 +414,7 @@ describe("who may deploy", () => {
     expect(stopped).toBe(true);
   });
 
-  it("accepts a workload token the project's trust policy admits", async () => {
+  it("accepts a workload token the application's trust policy admits", async () => {
     const response = await upload(await workloadToken());
 
     expect(response.status).toBe(202);
@@ -447,17 +447,18 @@ describe("who may deploy", () => {
     }
   });
 
-  it("refuses a workload token trusted for one project the run of another", async () => {
-    /* The token is genuine and its own project would admit it. Deploying into a
-       project that does not name its issuer is authorization, and is said so. */
-    const response = await upload(await workloadToken(), { ...meta(), project: RIVAL });
+  it("refuses a workload token trusted for one application the run of another", async () => {
+    /* The token is genuine and its own application would admit it. Deploying into
+       an application that does not name its issuer is authorization, and is said
+       so. */
+    const response = await upload(await workloadToken(), {}, RIVAL);
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual(AUTH_INVALID_PROBLEM);
     expect(runs).toEqual([]);
   });
 
-  it("refuses a subject its own project's policy does not name", async () => {
+  it("refuses a subject its own application's policy does not name", async () => {
     const response = await upload(await workloadToken({ sub: "repo:evil/app" }));
 
     expect(response.status).toBe(403);
@@ -468,7 +469,7 @@ describe("who may deploy", () => {
   it("keeps pre-verification failures byte-identical and never fetches an untrusted issuer", async () => {
     const valid = await workloadToken();
     const [, payload, signature] = valid.split(".");
-    const noPolicy = await upload(valid, { ...meta(), project: RIVAL });
+    const noPolicy = await upload(valid, {}, RIVAL);
     const wrongIssuer = await upload(await workloadToken({ iss: "https://untrusted.test" }));
     const badSignature = await upload(`${valid.split(".")[0]}.${payload}.${signature}x`);
 
@@ -480,7 +481,6 @@ describe("who may deploy", () => {
 
   it("persists only the verified workload actor beside self-asserted source metadata", async () => {
     const response = await upload(await workloadToken(), {
-      ...meta(),
       source: {
         provider: "forge",
         repo: "acme/shop",
@@ -490,7 +490,7 @@ describe("who may deploy", () => {
     });
 
     const status = await settled((await responseId(response)) as string);
-    const deployment = await getDeployment(clock.ctx, PROJECT, status.deployment as string);
+    const deployment = await getDeployment(clock.ctx, APPLICATION, status.deployment as string);
     expect(deployment.source).toEqual({
       provider: "forge",
       repo: "acme/shop",
@@ -502,14 +502,12 @@ describe("who may deploy", () => {
 
   it("rejects caller-supplied OIDC provenance and leaves node deploys without it", async () => {
     const rejected = await upload(await operatorToken(), {
-      ...meta(),
       oidc: { issuer: "https://spoofed.test", subject: "spoof" },
     });
     expect(rejected.status).toBe(400);
     await expect(rejected.json()).resolves.toMatchObject({ type: "urn:scafo:invalid-input" });
 
     const legacy = await upload(await operatorToken(), {
-      ...meta(),
       source: {
         provider: "forge",
         repo: "acme/shop",
@@ -524,36 +522,47 @@ describe("who may deploy", () => {
     const accepted = await upload(await operatorToken());
     const status = await settled((await responseId(accepted)) as string);
     expect(
-      (await getDeployment(clock.ctx, PROJECT, status.deployment as string)).oidc,
+      (await getDeployment(clock.ctx, APPLICATION, status.deployment as string)).oidc,
     ).toBeUndefined();
   });
 });
 
-describe("a project an admin has blocked", () => {
+describe("an application an admin has blocked", () => {
   it("refuses the deploy before a byte is published, and names the block", async () => {
-    await blockProject(clock.ctx, PROJECT);
+    await blockApplication(clock.ctx, APPLICATION);
 
     const response = await upload(await operatorToken());
 
     /*
-     * named plainly, because the caller reaches this project: a scoped operator
-     * whose own project has been stopped is owed the reason, or their only
-     * signal is a deploy that fails for no stated cause. What is never named is
-     * a block on a project the caller does not reach — that refusal is the
-     * ordinary out-of-scope one and says nothing about the project at all.
+     * named plainly, because the caller reaches this application: a scoped
+     * operator whose own application has been stopped is owed the reason, or
+     * their only signal is a deploy that fails for no stated cause. What is
+     * never named is a block on an application the caller does not reach — that
+     * refusal is the ordinary out-of-scope one and says nothing about the
+     * application at all.
      */
     expect(response.status).toBe(409);
     const problem = await problemOf(response);
-    expect(problem.type).toBe("urn:scafo:project-blocked");
-    expect(problem.detail).toContain(PROJECT);
+    expect(problem.type).toBe("urn:scafo:application-blocked");
+    expect(problem.detail).toContain(APPLICATION);
 
     /* Refused at intake rather than inside the status a caller has to poll for,
        so nothing was bundled, uploaded or pointed at. */
     expect(runs).toEqual([]);
   });
 
+  it("leaves the block itself standing, a deploy owning no part of the record", async () => {
+    await blockApplication(clock.ctx, APPLICATION);
+
+    await upload(await operatorToken(), { replicas: 3 });
+
+    await expect(getApplication(clock.ctx, APPLICATION)).resolves.toMatchObject({ blocked: true });
+    /* And not even the placement the refused upload asked for was written. */
+    expect((await getApplication(clock.ctx, APPLICATION)).replicas).toBeUndefined();
+  });
+
   it("refuses a workload's deploy for it too", async () => {
-    await blockProject(clock.ctx, PROJECT);
+    await blockApplication(clock.ctx, APPLICATION);
 
     const response = await upload(await workloadToken());
 
@@ -562,16 +571,16 @@ describe("a project an admin has blocked", () => {
   });
 
   it("accepts one again once the block is lifted", async () => {
-    await blockProject(clock.ctx, PROJECT);
-    await unblockProject(clock.ctx, PROJECT);
+    await blockApplication(clock.ctx, APPLICATION);
+    await unblockApplication(clock.ctx, APPLICATION);
 
     const response = await upload(await operatorToken());
 
     expect(response.status).toBe(202);
   });
 
-  it("leaves an unblocked project alone", async () => {
-    await blockProject(clock.ctx, RIVAL);
+  it("leaves an unblocked application alone", async () => {
+    await blockApplication(clock.ctx, RIVAL);
 
     const response = await upload(await operatorToken());
 
@@ -580,16 +589,17 @@ describe("a project an admin has blocked", () => {
 });
 
 describe("a fleet whose deploys an admin has frozen", () => {
-  /* A project this registry has never held, so "nothing was created" is a thing
-     the bucket can be asked about rather than a thing the fixture already did. */
-  const FRESH = "not-yet-a-project";
+  /* An application this registry has never held, so "nothing was created" is a
+     thing the bucket can be asked about rather than a thing the fixture already
+     did. */
+  const FRESH = "not-yet-an-app";
   const ADMIN = "op-admin1111";
   const REASON = "celld 0.5.0 upgrade";
 
   it("refuses the deploy before ANYTHING is created, and says what it is waiting on", async () => {
     const { freeze } = await freezeDeploys(clock.ctx, { by: ADMIN, reason: REASON });
 
-    const response = await upload(await operatorToken(), { ...meta(), project: FRESH });
+    const response = await upload(await operatorToken(), {}, FRESH);
 
     expect(response.status).toBe(409);
     const problem = await problemOf(response);
@@ -604,22 +614,21 @@ describe("a fleet whose deploys an admin has frozen", () => {
     expect(problem.detail).toContain(REASON);
     expect(problem.detail).toContain("scafo fleet unfreeze");
 
-    /* Refused ahead of every write: intake creates a project and an environment
-       on the way in, and either would have outlived the refusal. */
-    await expect(clock.ctx.store.get(projectKey(FRESH))).resolves.toBeNull();
-    await expect(clock.ctx.store.get(environmentKey(FRESH, ENVIRONMENT))).resolves.toBeNull();
+    /* Refused ahead of every write: a first deploy creates the application on
+       the way in, and it would have outlived the refusal. */
+    await expect(clock.ctx.store.get(applicationKey(FRESH))).resolves.toBeNull();
     await expect(clock.ctx.store.list(deploysPrefix(FRESH))).resolves.toEqual([]);
     expect(runs).toEqual([]);
   });
 
-  it("refuses a project that is already there too, and records no deploy of it", async () => {
+  it("refuses an application that is already there too, and records no deploy of it", async () => {
     await freezeDeploys(clock.ctx, { by: ADMIN, reason: REASON });
 
     const response = await upload(await operatorToken());
 
     expect(response.status).toBe(409);
     expect((await problemOf(response)).type).toBe("urn:scafo:deploys-frozen");
-    await expect(clock.ctx.store.list(deploysPrefix(PROJECT))).resolves.toEqual([]);
+    await expect(clock.ctx.store.list(deploysPrefix(APPLICATION))).resolves.toEqual([]);
     expect(runs).toEqual([]);
   });
 
@@ -633,7 +642,7 @@ describe("a fleet whose deploys an admin has frozen", () => {
   });
 });
 
-describe("an environment another node serves on a different Celld", () => {
+describe("an application another node serves on a different Celld", () => {
   it("refuses the deploy before a byte is received, and names who holds it", async () => {
     await servedElsewhere("0.4.1");
 
@@ -646,7 +655,7 @@ describe("an environment another node serves on a different Celld", () => {
     expect(problem.type).toBe("urn:scafo:version-skew");
     expect(problem.detail).toContain("node-b");
     expect(problem.detail).toContain("0.4.1");
-    expect(problem.detail).toContain(`${PROJECT}/${ENVIRONMENT}`);
+    expect(problem.detail).toContain(APPLICATION);
 
     expect(runs).toEqual([]);
   });
@@ -673,14 +682,30 @@ describe("an environment another node serves on a different Celld", () => {
     expect((await upload(await operatorToken())).status).toBe(202);
   });
 
-  it("leaves a deploy for another environment alone", async () => {
-    await servedElsewhere("0.4.1", `${PROJECT}/staging`);
+  it("leaves a deploy of another application alone", async () => {
+    await servedElsewhere("0.4.1", RIVAL);
 
     expect((await upload(await operatorToken())).status).toBe(202);
   });
 });
 
 describe("what an upload must carry", () => {
+  it("takes the artifact at the application's own deploy path", async () => {
+    const response = await app.request(`/v1/applications/${APPLICATION}/deploys`, {
+      method: "POST",
+      headers: {
+        "authorization": `Bearer ${await operatorToken()}`,
+        "content-type": "application/octet-stream",
+        [DEPLOY_METADATA_HEADER]: encodeDeployMetadata({}),
+      },
+      body: artifact.open(),
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({ application: APPLICATION });
+  });
+
   it("does not retain the legacy body-selected deploy route", async () => {
     const response = await app.request("/v1/deploys", {
       method: "POST",
@@ -724,7 +749,7 @@ describe("what an upload must carry", () => {
       let reads = 0;
       const response = await streamedUpload(
         await operatorToken(),
-        PROJECT,
+        APPLICATION,
         header,
         unreadBody(() => reads++),
       );
@@ -734,12 +759,15 @@ describe("what an upload must carry", () => {
     },
   );
 
-  it("refuses a project duplicated in metadata before reading the body", async () => {
+  it("refuses an application named in the metadata before reading the body", async () => {
+    /* The path says which application is being deployed into, and it is what the
+       caller was authenticated against. A second answer in the header could
+       disagree with it, so there is no second answer. */
     let reads = 0;
     const response = await streamedUpload(
       await operatorToken(),
-      PROJECT,
-      { project: PROJECT },
+      APPLICATION,
+      { application: APPLICATION },
       unreadBody(() => reads++),
     );
 
@@ -754,7 +782,7 @@ describe("what an upload must carry", () => {
     let reads = 0;
     const response = await streamedUpload(
       await operatorToken(),
-      PROJECT,
+      APPLICATION,
       "A".repeat(DEPLOY_METADATA_MAX_BYTES + 1),
       unreadBody(() => reads++),
     );
@@ -764,7 +792,7 @@ describe("what an upload must carry", () => {
   });
 
   it("refuses a raw body without metadata", async () => {
-    const response = await app.request(`/v1/projects/${PROJECT}/deploys`, {
+    const response = await app.request(`/v1/applications/${APPLICATION}/deploys`, {
       method: "POST",
       headers: { "authorization": `Bearer ${await operatorToken()}`, "content-type": "text/plain" },
       body: "just some bytes",
@@ -777,7 +805,7 @@ describe("what an upload must carry", () => {
   });
 
   it("refuses an upload without an artifact body", async () => {
-    const response = await app.request(`/v1/projects/${PROJECT}/deploys`, {
+    const response = await app.request(`/v1/applications/${APPLICATION}/deploys`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${await operatorToken()}`,
@@ -790,10 +818,15 @@ describe("what an upload must carry", () => {
     expect(problem.detail).toContain("artifact body");
   });
 
-  it("refuses names the registry could not address", async () => {
+  it("refuses a path naming something the registry could not address", async () => {
+    const response = await upload(await operatorToken(), {}, "UPPER");
+
+    expect(response.status).toBe(400);
+    expect(runs).toEqual([]);
+  });
+
+  it("refuses placement the registry could not hold", async () => {
     const bad = [
-      { project: "Not A Slug" },
-      { environment: "UPPER" },
       { replicas: 0 },
       { replicas: "every" },
       { nodeSelector: "tier=fast" },
@@ -802,7 +835,7 @@ describe("what an upload must carry", () => {
     ];
 
     for (const patch of bad) {
-      const response = await upload(await operatorToken(), { ...meta(), ...patch });
+      const response = await upload(await operatorToken(), patch);
 
       expect(response.status, `for ${JSON.stringify(patch)}`).toBe(400);
     }
@@ -817,7 +850,6 @@ describe("what happens to an accepted deploy", () => {
        knows and says nothing about the rest. */
     const id = (await responseId(
       await upload(await operatorToken(), {
-        ...meta(),
         script: "worker",
         noBundle: true,
       } as never),
@@ -838,108 +870,86 @@ describe("what happens to an accepted deploy", () => {
     });
     expect(runs).toHaveLength(1);
     expect(runs[0]).toMatchObject({
-      project: PROJECT,
-      environment: ENVIRONMENT,
-      target: { prefix: `${PREFIX}/fleets/${PROJECT}/${ENVIRONMENT}`, bucket: "registry" },
+      application: APPLICATION,
+      target: { prefix: `${PREFIX}/fleets/${APPLICATION}`, bucket: "registry" },
     });
     /* The bytes the client packed arrive intact through the raw body. */
     expect(receivedArtifacts[0]).toEqual(artifactBytes);
 
-    const deployment = await getDeployment(clock.ctx, PROJECT, VERSION_ID);
+    const deployment = await getDeployment(clock.ctx, APPLICATION, VERSION_ID);
     expect(deployment).toMatchObject({ version: VERSION_ID });
 
-    const environment = await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
-    expect(environment.deployment?.revision).toBe(1);
+    const application = await getApplication(clock.ctx, APPLICATION);
+    expect(application.deployment?.revision).toBe(1);
   });
 
-  it("deploys into an environment somebody else created", async () => {
+  it("deploys into an application somebody else created", async () => {
     /*
-     * A deploy only needs the environment to exist — it expresses no opinion
+     * A deploy only needs the application to exist — it expresses no opinion
      * about how it was set up — so it must not be refused for disagreeing with
      * settings it never named.
      */
-    await createEnvironment(clock.ctx, PROJECT, { name: "preview" });
+    await createApplication(clock.ctx, { name: "preview" });
 
-    const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), environment: "preview" }),
-    )) as string;
+    const id = (await responseId(await upload(await operatorToken(), {}, "preview"))) as string;
 
     await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
-    /* And it is still the environment it was: the deploy created nothing. */
-    await expect(getEnvironment(clock.ctx, PROJECT, "preview")).resolves.toMatchObject({});
+    /* And it is still the application it was: the deploy created nothing. */
+    await expect(getApplication(clock.ctx, "preview")).resolves.toMatchObject({ name: "preview" });
   });
 
-  it("creates the environment with the replica count the upload asked for", async () => {
+  it("creates the application with the replica count the upload asked for", async () => {
     const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), environment: "fresh", replicas: 1 }),
+      await upload(await operatorToken(), { replicas: 1 }, "fresh"),
     )) as string;
 
     await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
-    await expect(getEnvironment(clock.ctx, PROJECT, "fresh")).resolves.toMatchObject({
-      replicas: 1,
-    });
+    await expect(getApplication(clock.ctx, "fresh")).resolves.toMatchObject({ replicas: 1 });
   });
 
-  it("restates the replica count of an environment that already exists", async () => {
-    await createEnvironment(clock.ctx, PROJECT, { name: "scaled", replicas: 3 });
+  it("restates the replica count of an application that already exists", async () => {
+    await createApplication(clock.ctx, { name: "scaled", replicas: 3 });
 
     const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), environment: "scaled", replicas: "all" }),
+      await upload(await operatorToken(), { replicas: "all" }, "scaled"),
     )) as string;
 
     await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
-    await expect(getEnvironment(clock.ctx, PROJECT, "scaled")).resolves.toMatchObject({
-      replicas: "all",
-    });
+    await expect(getApplication(clock.ctx, "scaled")).resolves.toMatchObject({ replicas: "all" });
   });
 
   it("leaves the replica count alone when the upload names none", async () => {
-    /* How many nodes serve an environment is an operational decision. A deploy
+    /* How many nodes serve an application is an operational decision. A deploy
        that silently rewrote it would move an application off nodes because
        somebody re-ran a pipeline that never mentioned placement. */
-    await createEnvironment(clock.ctx, PROJECT, { name: "scaled", replicas: 2 });
+    await createApplication(clock.ctx, { name: "scaled", replicas: 2 });
 
-    const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), environment: "scaled" }),
-    )) as string;
+    const id = (await responseId(await upload(await operatorToken(), {}, "scaled"))) as string;
 
     await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
-    await expect(getEnvironment(clock.ctx, PROJECT, "scaled")).resolves.toMatchObject({
-      replicas: 2,
-    });
+    await expect(getApplication(clock.ctx, "scaled")).resolves.toMatchObject({ replicas: 2 });
   });
 
-  it("creates the environment with the node selector the upload asked for", async () => {
+  it("creates the application with the node selector the upload asked for", async () => {
     const id = (await responseId(
-      await upload(await operatorToken(), {
-        ...meta(),
-        environment: "targeted",
-        nodeSelector: { tier: "fast" },
-      }),
+      await upload(await operatorToken(), { nodeSelector: { tier: "fast" } }, "targeted"),
     )) as string;
 
     await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
-    await expect(getEnvironment(clock.ctx, PROJECT, "targeted")).resolves.toMatchObject({
+    await expect(getApplication(clock.ctx, "targeted")).resolves.toMatchObject({
       nodeSelector: { tier: "fast" },
     });
   });
 
-  it("restates the node selector of an environment that already exists", async () => {
-    await createEnvironment(clock.ctx, PROJECT, {
-      name: "targeted",
-      nodeSelector: { tier: "slow" },
-    });
+  it("restates the node selector of an application that already exists", async () => {
+    await createApplication(clock.ctx, { name: "targeted", nodeSelector: { tier: "slow" } });
 
     const id = (await responseId(
-      await upload(await operatorToken(), {
-        ...meta(),
-        environment: "targeted",
-        nodeSelector: { tier: "fast" },
-      }),
+      await upload(await operatorToken(), { nodeSelector: { tier: "fast" } }, "targeted"),
     )) as string;
 
     await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
-    await expect(getEnvironment(clock.ctx, PROJECT, "targeted")).resolves.toMatchObject({
+    await expect(getApplication(clock.ctx, "targeted")).resolves.toMatchObject({
       nodeSelector: { tier: "fast" },
     });
   });
@@ -948,18 +958,13 @@ describe("what happens to an accepted deploy", () => {
     /* Where an application runs is an operational decision. A deploy that
        silently lifted a constraint would spread it across a fleet because
        somebody re-ran a pipeline that never mentioned placement — and lifting
-       one is `scafo env selector --clear`, which says so out loud. */
-    await createEnvironment(clock.ctx, PROJECT, {
-      name: "targeted",
-      nodeSelector: { tier: "fast" },
-    });
+       one is `scafo app selector --clear`, which says so out loud. */
+    await createApplication(clock.ctx, { name: "targeted", nodeSelector: { tier: "fast" } });
 
-    const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), environment: "targeted" }),
-    )) as string;
+    const id = (await responseId(await upload(await operatorToken(), {}, "targeted"))) as string;
 
     await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
-    await expect(getEnvironment(clock.ctx, PROJECT, "targeted")).resolves.toMatchObject({
+    await expect(getApplication(clock.ctx, "targeted")).resolves.toMatchObject({
       nodeSelector: { tier: "fast" },
     });
   });
@@ -969,11 +974,11 @@ describe("what happens to an accepted deploy", () => {
        assign: an upload that names one must not be able to file a deployment
        under an id of its own choosing. */
     const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), deployment: "0f0f0f0f" }),
+      await upload(await operatorToken(), { deployment: "0f0f0f0f" }),
     )) as string;
 
     await expect(settled(id)).resolves.toMatchObject({ deployment: VERSION_ID });
-    await rejectsWith(() => getDeployment(clock.ctx, PROJECT, "0f0f0f0f"), "not-found");
+    await rejectsWith(() => getDeployment(clock.ctx, APPLICATION, "0f0f0f0f"), "not-found");
   });
 
   it("reports a publish that threw as failed, and says why", async () => {
@@ -989,7 +994,7 @@ describe("what happens to an accepted deploy", () => {
        own unexpected failure and is recorded as one: a poll that had to guess
        would guess at the caller. */
     expect(status.code).toBe("internal");
-    await expect(getDeployRecord(clock.ctx, PROJECT, id)).resolves.toMatchObject({
+    await expect(getDeployRecord(clock.ctx, APPLICATION, id)).resolves.toMatchObject({
       code: "internal",
     });
   });
@@ -1005,7 +1010,7 @@ describe("what happens to an accepted deploy", () => {
     expect(status.state).toBe("failed");
     expect(status.code).toBe("invalid-slug");
     expect(status.detail).toContain('celld published version "not a version"');
-    await expect(getDeployRecord(clock.ctx, PROJECT, id)).resolves.toMatchObject({
+    await expect(getDeployRecord(clock.ctx, APPLICATION, id)).resolves.toMatchObject({
       code: "invalid-slug",
     });
   });
@@ -1043,16 +1048,16 @@ describe("what happens to an accepted deploy", () => {
   it("keeps a deploy the cancellation only caught after its commit point", async () => {
     /*
      * Writing the deployment revision is the commit point: past it the
-     * environment IS serving the deployment, and no abort undoes that. The task
+     * application IS serving the deployment, and no abort undoes that. The task
      * deadline elapses here while the revision's own write is in flight, so the
      * write lands and the signal is aborted by the time it returns — which used
      * to be reported to the operator as a deploy that failed.
      */
-    const envKey = environmentKey(PROJECT, ENVIRONMENT);
+    const recordKey = applicationKey(APPLICATION);
     const faulted = new FaultStore(clock.ctx.store);
     let committing = false;
     faulted.onBeforePut = async (key): Promise<void> => {
-      if (key === envKey && committing) await new Promise((wake) => setTimeout(wake, 300));
+      if (key === recordKey && committing) await new Promise((wake) => setTimeout(wake, 300));
     };
     publish = (): Promise<DeployRunResult> => {
       committing = true;
@@ -1064,11 +1069,11 @@ describe("what happens to an accepted deploy", () => {
       scheduler: {
         artifactBytes: 10_000_000,
         activeTasks: 1,
-        projectActiveTasks: 1,
+        applicationActiveTasks: 1,
         queuedTasks: 4,
-        projectQueuedTasks: 2,
+        applicationQueuedTasks: 2,
         stagedBytes: 10_000_000,
-        projectStagedBytes: 10_000_000,
+        applicationStagedBytes: 10_000_000,
         receiveTimeoutMs: 600_000,
         queueTimeoutMs: 600_000,
         taskTimeoutMs: 50,
@@ -1084,28 +1089,82 @@ describe("what happens to an accepted deploy", () => {
     /* And the abort the scheduler reports afterwards does not rewrite it. */
     await new Promise((wake) => setTimeout(wake, 50));
     expect(daemon.deploys?.get(id)).toMatchObject({ state: "deployed" });
-    const environment = await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
-    expect(environment.deployment?.revision).toBe(1);
+    const application = await getApplication(clock.ctx, APPLICATION);
+    expect(application.deployment?.revision).toBe(1);
   });
 
   it("disposes the staged artifact after background publishing is cancelled", async () => {
     publish = () => Promise.reject(new DOMException("publish cancelled", "AbortError"));
     const dispose = vi.fn(() => Promise.resolve());
-    const admission = await daemon.deploys?.admit({
-      project: PROJECT,
-      environment: ENVIRONMENT,
-    });
+    const admission = await daemon.deploys?.admit({ application: APPLICATION });
     const status = await admission?.start(
       {
         byteLength: artifactBytes.byteLength,
         open: () => new Blob([artifactBytes as BlobPart]).stream(),
         dispose,
       },
-      daemon.deploys!.reserve(PROJECT),
+      daemon.deploys!.reserve(APPLICATION),
     );
 
     await settled(status?.id as string);
     expect(dispose).toHaveBeenCalledOnce();
+  });
+});
+
+describe("the application a deploy addresses", () => {
+  const FIRST = "brand-new";
+
+  it("is created by the first deploy, there being no create route at all", async () => {
+    await expect(findApplication(clock.ctx, FIRST)).resolves.toBeNull();
+    const created = await app.request("/v1/applications", {
+      method: "POST",
+      headers: {
+        "authorization": `Bearer ${await operatorToken()}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name: FIRST }),
+    });
+    expect(created.status).toBe(404);
+
+    const id = (await responseId(await upload(await operatorToken(), {}, FIRST))) as string;
+
+    await expect(settled(id)).resolves.toMatchObject({ state: "deployed" });
+    await expect(getApplication(clock.ctx, FIRST)).resolves.toMatchObject({
+      v: 1,
+      name: FIRST,
+      deployment: { revision: 1 },
+    });
+  });
+
+  it("keeps the deploy inside the application its path named", async () => {
+    const id = (await responseId(await upload(await operatorToken(), {}, FIRST))) as string;
+    await settled(id);
+
+    expect(id.startsWith(`${FIRST}.`)).toBe(true);
+    await expect(getDeployRecord(clock.ctx, FIRST, id)).resolves.toMatchObject({
+      application: FIRST,
+    });
+    /* And nothing of it landed in the application the fixture deploys to. */
+    await expect(clock.ctx.store.list(deploysPrefix(APPLICATION))).resolves.toEqual([]);
+  });
+
+  it("never drops the labels an admin put on it", async () => {
+    /* Labels are the fleet's own, and a deploy owns the deployment revision and
+       the placement it named. A write that replaced the record wholesale would
+       take an admin's labels off because a pipeline ran. */
+    await setApplicationLabels(clock.ctx, APPLICATION, { tier: "gold", team: "payments" });
+
+    const id = (await responseId(
+      await upload(await operatorToken(), { replicas: 2, nodeSelector: { tier: "fast" } }),
+    )) as string;
+    await settled(id);
+
+    await expect(getApplication(clock.ctx, APPLICATION)).resolves.toMatchObject({
+      labels: { tier: "gold", team: "payments" },
+      replicas: 2,
+      nodeSelector: { tier: "fast" },
+      deployment: { revision: 1 },
+    });
   });
 });
 
@@ -1138,22 +1197,25 @@ describe("polling a deploy", () => {
 });
 
 describe("what a deploy id names", () => {
-  it("carries the project it belongs to, so any node can authenticate a poll", async () => {
+  it("carries the application it belongs to, so any node can authenticate a poll", async () => {
     const id = (await responseId(await upload(await operatorToken()))) as string;
 
-    expect(id).toMatch(new RegExp(`^${PROJECT}\\.[a-f\\d]{16}$`));
-    expect(parseDeployId(id)).toEqual({ project: PROJECT, token: id.slice(PROJECT.length + 1) });
+    expect(id).toMatch(new RegExp(`^${APPLICATION}\\.[a-f\\d]{16}$`));
+    expect(parseDeployId(id)).toEqual({
+      application: APPLICATION,
+      token: id.slice(APPLICATION.length + 1),
+    });
   });
 
-  it("parses back to the project that minted it, whatever the slug looks like", () => {
-    for (const project of ["a", PROJECT, "acme-shop-2", "s".repeat(63)]) {
-      const id = deployId(project);
-      expect(parseDeployId(id)).toEqual({ project, token: id.slice(project.length + 1) });
+  it("parses back to the application that minted it, whatever the slug looks like", () => {
+    for (const application of ["a", APPLICATION, "acme-shop-2", "s".repeat(63)]) {
+      const id = deployId(application);
+      expect(parseDeployId(id)).toEqual({ application, token: id.slice(application.length + 1) });
     }
   });
 
   it("mints an unguessable token for every deploy", () => {
-    const minted = new Set(Array.from({ length: 64 }, () => deployId(PROJECT)));
+    const minted = new Set(Array.from({ length: 64 }, () => deployId(APPLICATION)));
 
     expect(minted.size).toBe(64);
     for (const id of minted) expect(id.split(".")[1]).toMatch(/^[a-f\d]{16}$/);
@@ -1161,14 +1223,14 @@ describe("what a deploy id names", () => {
 
   it.each([
     ["empty", ""],
-    ["a project with no token", PROJECT],
-    ["a token with no project", "a1b2c3d4e5f60718"],
-    ["a short token", `${PROJECT}.a1b2c3d4e5f607`],
-    ["a long token", `${PROJECT}.a1b2c3d4e5f607189`],
-    ["an uppercase token", `${PROJECT}.A1B2C3D4E5F60718`],
-    ["a project outside the slug charset", "not_a_slug.a1b2c3d4e5f60718"],
-    ["a project the registry could not hold", `${"s".repeat(64)}.a1b2c3d4e5f60718`],
-    ["a path in place of a project", "../trust.a1b2c3d4e5f60718"],
+    ["an application with no token", APPLICATION],
+    ["a token with no application", "a1b2c3d4e5f60718"],
+    ["a short token", `${APPLICATION}.a1b2c3d4e5f607`],
+    ["a long token", `${APPLICATION}.a1b2c3d4e5f607189`],
+    ["an uppercase token", `${APPLICATION}.A1B2C3D4E5F60718`],
+    ["an application outside the slug charset", "not_a_slug.a1b2c3d4e5f60718"],
+    ["an application the registry could not hold", `${"s".repeat(64)}.a1b2c3d4e5f60718`],
+    ["a path in place of an application", "../trust.a1b2c3d4e5f60718"],
   ])("refuses %s", (_what, id) => {
     expect(parseDeployId(id)).toBeNull();
   });
@@ -1187,17 +1249,16 @@ describe("the record a deploy leaves in the registry", () => {
 
   it("records the deploy as accepted, then uploading, then deployed", async () => {
     const id = (await responseId(
-      await upload(await operatorToken(), { ...meta(), source: SOURCE }),
+      await upload(await operatorToken(), { source: SOURCE }),
     )) as string;
     await settled(id);
 
     expect(states).toEqual(["accepted", "uploading", "deployed"]);
-    const record = await getDeployRecord(clock.ctx, PROJECT, id);
+    const record = await getDeployRecord(clock.ctx, APPLICATION, id);
     expect(record).toMatchObject({
       v: 1,
       id,
-      project: PROJECT,
-      environment: ENVIRONMENT,
+      application: APPLICATION,
       node: OPERATOR,
       state: "deployed",
       deployment: VERSION_ID,
@@ -1211,7 +1272,7 @@ describe("the record a deploy leaves in the registry", () => {
     const id = (await responseId(await upload(await workloadToken()))) as string;
     await settled(id);
 
-    await expect(getDeployRecord(clock.ctx, PROJECT, id)).resolves.toMatchObject({
+    await expect(getDeployRecord(clock.ctx, APPLICATION, id)).resolves.toMatchObject({
       state: "deployed",
       oidc: { issuer: ISS, subject: SUBJECT },
     });
@@ -1224,7 +1285,7 @@ describe("the record a deploy leaves in the registry", () => {
     await settled(id);
 
     expect(states).toEqual(["accepted", "uploading", "failed"]);
-    const record = await getDeployRecord(clock.ctx, PROJECT, id);
+    const record = await getDeployRecord(clock.ctx, APPLICATION, id);
     expect(record.state).toBe("failed");
     expect(record.detail).toContain("celld exited with code 1");
     expect(record.deployment).toBeUndefined();
@@ -1235,7 +1296,7 @@ describe("the record a deploy leaves in the registry", () => {
        recorded under is one no node could ever answer for. */
     const faulted = new FaultStore(clock.ctx.store);
     faulted.onBeforePut = (key): void => {
-      if (!key.startsWith(deploysPrefix(PROJECT))) return;
+      if (!key.startsWith(deploysPrefix(APPLICATION))) return;
       throw new ScafoError("draining", "Injected fault", { detail: "no record could be written" });
     };
     daemon.registry = { ...clock.ctx, store: faulted };
@@ -1274,7 +1335,7 @@ describe("polling a deploy on another node of the fleet", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
       id,
-      project: PROJECT,
+      application: APPLICATION,
       state: "deployed",
       deployment: VERSION_ID,
     });
@@ -1294,8 +1355,8 @@ describe("polling a deploy on another node of the fleet", () => {
 
   it("answers the workload token that started the deploy, which is the CI case", async () => {
     /* The poll behind a shared apex lands wherever the ingress sends it, and the
-       project in the id is what lets this node verify the token against that
-       project's trust policy. */
+       application in the id is what lets this node verify the token against that
+       application's trust policy. */
     const id = (await responseId(await upload(await workloadToken()))) as string;
     await settled(id);
 
@@ -1321,22 +1382,22 @@ describe("polling a deploy on another node of the fleet", () => {
 
   it("refuses a scoped-out operator before it reads anything", async () => {
     /* No deploy exists under this id at all: a 404 would mean the scope was
-       applied to what the read found, rather than to the project asked for. */
-    const response = await poll(other, `${PROJECT}.a1b2c3d4e5f60718`, await scopedToken());
+       applied to what the read found, rather than to the application asked for. */
+    const response = await poll(other, `${APPLICATION}.a1b2c3d4e5f60718`, await scopedToken());
 
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
   });
 
-  it("answers an id of a project that never deployed as a miss", async () => {
-    const response = await poll(other, `${PROJECT}.a1b2c3d4e5f60718`, await operatorToken());
+  it("answers an id of an application that never deployed as a miss", async () => {
+    const response = await poll(other, `${APPLICATION}.a1b2c3d4e5f60718`, await operatorToken());
 
     const problem = await problemOf(response);
     expect(problem.status).toBe(404);
-    expect(problem.detail).toContain(PROJECT);
+    expect(problem.detail).toContain(APPLICATION);
   });
 
-  it("answers an id that is no id of ours as a miss, without naming a project", async () => {
+  it("answers an id that is no id of ours as a miss, without naming an application", async () => {
     const response = await poll(other, "0000000000000000", await operatorToken());
 
     const problem = await problemOf(response);
@@ -1344,18 +1405,17 @@ describe("polling a deploy on another node of the fleet", () => {
     expect(problem.detail).toContain("0000000000000000");
   });
 
-  it("answers a record filed under a project its id does not claim as a miss", async () => {
+  it("answers a record filed under an application its id does not claim as a miss", async () => {
     /* A document written by hand, or by a build that filed it elsewhere: the id
        is what the caller was authenticated against, and a record that disagrees
        with it is not the one the caller asked for. */
-    const id = `${PROJECT}.a1b2c3d4e5f60718`;
+    const id = `${APPLICATION}.a1b2c3d4e5f60718`;
     await clock.ctx.store.put(
-      `${deploysPrefix(PROJECT)}${id}.json`,
+      `${deploysPrefix(APPLICATION)}${id}.json`,
       JSON.stringify({
         v: 1,
         id,
-        project: RIVAL,
-        environment: ENVIRONMENT,
+        application: RIVAL,
         state: "deployed",
         node: PEER,
         acceptedAt: "2026-01-01T00:00:00.000Z",
@@ -1381,8 +1441,8 @@ describe("polling a deploy on another node of the fleet", () => {
 
 describe("retired deployment-selection endpoints", () => {
   it.each([
-    ["alias", `/v1/projects/${PROJECT}/environments/${ENVIRONMENT}/alias`],
-    ["split", `/v1/environments/${PROJECT}/${ENVIRONMENT}/split`],
+    ["alias", `/v1/applications/${APPLICATION}/alias`],
+    ["split", `/v1/applications/${APPLICATION}/split`],
   ])("keeps the removed %s mutation unavailable", async (_name, path) => {
     const response = await post(path, await operatorToken(), { deployment: VERSION_ID });
     expect(response.status).toBe(404);
@@ -1444,10 +1504,10 @@ function fakeReconciler(processes: () => RuntimeProcess[] = () => running): Reco
   };
 }
 
-/** Another live machine telling the fleet it already serves `env` on `celld`. */
+/** Another live machine telling the fleet it already serves `application` on `celld`. */
 async function servedElsewhere(
   celld: string | undefined,
-  env: string = `${PROJECT}/${ENVIRONMENT}`,
+  application: string = APPLICATION,
 ): Promise<void> {
   await registerNode(clock.ctx, {
     v: 1,
@@ -1456,7 +1516,7 @@ async function servedElsewhere(
     addresses: PEER_ADDRESS,
     heartbeatAt: new Date(clock.nowMs()).toISOString(),
     ...(celld === undefined ? {} : { versions: { scafo: "0.0.0-test", celld } }),
-    serving: { [env]: { port: 42_000 } },
+    serving: { [application]: { port: 42_000 } },
   });
 }
 
@@ -1472,17 +1532,13 @@ function fakeRunner(): DeployRunner {
   };
 }
 
-function meta(): Record<string, unknown> {
-  return { project: PROJECT, environment: ENVIRONMENT };
-}
-
-/** Uploads the artifact with `sent` as the whole of its meta part. */
+/** Uploads the artifact to `target`, with `metadata` as the whole of its meta part. */
 async function upload(
   token: string | undefined,
-  sent: Record<string, unknown> = meta(),
+  metadata: Record<string, unknown> = {},
+  target: string = APPLICATION,
 ): Promise<Response> {
-  const { project: target = PROJECT, ...metadata } = sent;
-  return await app.request(`/v1/projects/${String(target)}/deploys`, {
+  return await app.request(`/v1/applications/${target}/deploys`, {
     method: "POST",
     headers: {
       ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
@@ -1496,13 +1552,13 @@ async function upload(
 
 async function streamedUpload(
   token: string | undefined,
-  project: string,
+  application: string,
   metadata: Record<string, unknown> | string,
   body: ReadableStream<Uint8Array>,
 ): Promise<Response> {
   const encoded =
     typeof metadata === "string" ? metadata : encodeDeployMetadata(metadata as DeployMetadata);
-  return await app.request(`/v1/projects/${project}/deploys`, {
+  return await app.request(`/v1/applications/${application}/deploys`, {
     method: "POST",
     headers: {
       ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
@@ -1566,7 +1622,7 @@ function watchingDeployRecords(inner: CasStore, states: string[]): CasStore {
     get: (key) => inner.get(key),
     getBytes: (key, opts) => inner.getBytes(key, opts),
     put: (key, body, cas) => {
-      if (key.startsWith(deploysPrefix(PROJECT)) && typeof body === "string") {
+      if (key.startsWith(deploysPrefix(APPLICATION)) && typeof body === "string") {
         states.push((JSON.parse(body) as DeployRecord).state);
       }
       return inner.put(key, body, cas);
@@ -1605,7 +1661,7 @@ function operatorToken(): Promise<string> {
   return signNodeToken(operatorKeys.privateKey, OPERATOR);
 }
 
-/** A token of the trusted key that reaches every project but this one. */
+/** A token of the trusted key that reaches every application but this one. */
 function scopedToken(): Promise<string> {
   return signNodeToken(scopedKeys.privateKey, SCOPED);
 }

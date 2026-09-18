@@ -1,6 +1,6 @@
 /*
  * Labels and the selectors that match them: the charset both ends share, the `k=v,k2=v2` text a
- * flag carries them in, and the and-matching that decides which nodes an environment may run on
+ * flag carries them in, and the and-matching that decides which nodes an application may run on
  * at all.
  */
 

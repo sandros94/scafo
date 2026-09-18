@@ -59,7 +59,10 @@ const NAMESPACE = "scafo-e2e";
 const PLATFORM_DOMAIN = "scafo.k3s.test";
 /** What the cluster's Traefik presents to the fleet; both Secrets carry it. */
 const INGRESS_TOKEN = "e2e-k3s-ingress-token";
-const PROJECT = "app";
+/** The application the fixture's `wrangler.jsonc` names, deployed on every node. */
+const APPLICATION = "app";
+/** A second application, scaled to one node, whose name shares a prefix with it. */
+const SOLO = "app-single";
 const BUCKET: BucketSettings = {
   bucket: "scafo-k3s-e2e",
   prefix: "e2e",
@@ -346,10 +349,8 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
           await stageApp("v1", tmpDirs),
           "--node",
           `http://127.0.0.1:${String(apiPort)}`,
-          "--project",
-          PROJECT,
-          "--env",
-          "production",
+          "--name",
+          APPLICATION,
           "--replicas",
           "all",
           "--key",
@@ -360,16 +361,13 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
       expect(deploy.code, deploy.output).toBe(0);
       expect(deploy.output).toContain("deployed");
       expect(deploymentOf(deploy.output)).toMatch(/^[\da-f]+$/);
-      await serves(`${PROJECT}.${PLATFORM_DOMAIN}`, "v1");
+      await serves(hostOf(APPLICATION), "v1");
 
-      const production = await until(
+      const spread = await until(
         "the all-replica placement and one process on each node",
         DEADLINE_MS,
         async () => {
-          const placement = await readJson<PlacementRecord>(
-            registry,
-            placementKey(PROJECT, "production"),
-          );
+          const placement = await readJson<PlacementRecord>(registry, placementKey(APPLICATION));
           if (placement?.value.nodes.length !== 2) return null;
           const states = await Promise.all((await nodes()).map(stateOf));
           const nodeIds: string[] = [];
@@ -380,27 +378,25 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
           if (
             new Set(nodeIds).size !== 2 ||
             !placement.value.nodes.every((id) => nodeIds.includes(id)) ||
-            !states.every((state) => state.processes.filter(runsProduction).length === 1)
+            !states.every((state) => state.processes.filter(runsEverywhere).length === 1)
           )
             return null;
           return { placement: placement.value, nodeIds, states };
         },
       );
-      expect(
-        [...production.placement.nodes].sort((left, right) => left.localeCompare(right)),
-      ).toEqual([...production.nodeIds].sort((left, right) => left.localeCompare(right)));
-      for (const state of production.states) {
-        expect(state.processes.filter(runsProduction)).toHaveLength(1);
+      expect([...spread.placement.nodes].sort((left, right) => left.localeCompare(right))).toEqual(
+        [...spread.nodeIds].sort((left, right) => left.localeCompare(right)),
+      );
+      for (const state of spread.states) {
+        expect(state.processes.filter(runsEverywhere)).toHaveLength(1);
       }
 
       const retired = await runK3sCli(
         [
-          "env",
+          "app",
           "retire",
-          "--project",
-          PROJECT,
-          "--env",
-          "production",
+          "--name",
+          APPLICATION,
           "--node",
           `http://127.0.0.1:${String(apiPort)}`,
           "--key",
@@ -411,7 +407,7 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
       expect(retired.code, retired.output).toBe(0);
       await until("the all-replica proof to release both runtimes", DEADLINE_MS, async () => {
         const states = await Promise.all((await nodes()).map(stateOf));
-        return states.every((state) => !state.processes.some(runsProduction)) ? states : null;
+        return states.every((state) => !state.processes.some(runsEverywhere)) ? states : null;
       });
 
       const single = await runK3sCli(
@@ -420,10 +416,8 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
           await stageApp("v1", tmpDirs),
           "--node",
           `http://127.0.0.1:${String(apiPort)}`,
-          "--project",
-          PROJECT,
-          "--env",
-          "single",
+          "--name",
+          SOLO,
           "--replicas",
           "1",
           "--key",
@@ -434,11 +428,11 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
       expect(single.code, single.output).toBe(0);
       expect(single.output).toContain("deployed");
 
-      const placed = await settledSinglePlacement("single");
+      const placed = await settledSinglePlacement(SOLO);
       expect(placed.placement.nodes).toHaveLength(1);
       /* One node holds this host and the edge, which is colocated with neither,
          reaches it there: the routing it polls names the pod that runs it. */
-      await assignedServes("single", "v1");
+      await assignedServes(SOLO, "v1");
       const leaving = placed.owner.pod;
       const leavingState = await stateOf(leaving);
       const leavingId = leavingState.node?.id;
@@ -469,8 +463,8 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
         },
       );
       expect(restored.id).toBe(leavingId);
-      await assignedServes("single", "v1");
-      const victim = (await settledSinglePlacement("single")).owner.pod;
+      await assignedServes(SOLO, "v1");
+      const victim = (await settledSinglePlacement(SOLO)).owner.pod;
       const name = victim.metadata?.name as string;
       const before =
         victim.status?.containerStatuses?.find((status) => status.name === "node")?.restartCount ??
@@ -498,7 +492,7 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
           ? pod
           : null;
       });
-      await assignedServes("single", "v1");
+      await assignedServes(SOLO, "v1");
     },
     SCENARIO_TIMEOUT_MS,
   );
@@ -673,13 +667,18 @@ async function containerLogs(names: string[]): Promise<string> {
   return logs.join("\n");
 }
 
-/** The placement settles on one node, and the shared edge answers wherever that is. */
-async function assignedServes(env: string, version: string): Promise<void> {
-  await settledSinglePlacement(env);
-  await serves(`${PROJECT}--${env}.${PLATFORM_DOMAIN}`, version);
+/** The host one application is served at under the platform domain. */
+function hostOf(application: string): string {
+  return `${application}.${PLATFORM_DOMAIN}`;
 }
 
-async function settledSinglePlacement(env: string): Promise<{
+/** The placement settles on one node, and the shared edge answers wherever that is. */
+async function assignedServes(application: string, version: string): Promise<void> {
+  await settledSinglePlacement(application);
+  await serves(hostOf(application), version);
+}
+
+async function settledSinglePlacement(application: string): Promise<{
   placement: { nodes: string[] };
   owner: { pod: k8s.V1Pod; state: DaemonState };
   nonOwner: { pod: k8s.V1Pod; state: DaemonState };
@@ -687,7 +686,7 @@ async function settledSinglePlacement(env: string): Promise<{
   /* What each node last claimed, so a timeout says which side never settled. */
   let seen = "nothing observed yet";
   return until(
-    `a settled one-node placement for ${env}`,
+    `a settled one-node placement for ${application}`,
     DEADLINE_MS,
     async () => {
       const states = await Promise.all(
@@ -695,9 +694,7 @@ async function settledSinglePlacement(env: string): Promise<{
       );
       seen = states
         .map(({ pod, state }) => {
-          const placement = state.placements.find(
-            (view) => view.project === PROJECT && view.env === env,
-          );
+          const placement = state.placements.find((view) => view.application === application);
           const processes = state.processes
             .map((process) => `${process.id}:${process.state}`)
             .join(",");
@@ -705,7 +702,7 @@ async function settledSinglePlacement(env: string): Promise<{
         })
         .join("\n");
       const placements = states.map(({ state }) =>
-        state.placements.find((view) => view.project === PROJECT && view.env === env),
+        state.placements.find((view) => view.application === application),
       );
       const assignedNodeIds = placements[0]?.nodes;
       if (
@@ -722,13 +719,13 @@ async function settledSinglePlacement(env: string): Promise<{
       const nonOwner = states.find(({ state }) => state.node?.id !== assignedNodeIds[0]);
       /* Only a RUNNING process counts as serving. A node lists a process it
          stopped as exited for as long as it runs, so a node that held the
-         environment while its owner was away keeps an exited entry after the
+         application while its owner was away keeps an exited entry after the
          owner returns — bookkeeping, not a second runtime. */
       if (
         owner === undefined ||
         nonOwner === undefined ||
-        !owner.state.processes.some((process) => runs(process, env)) ||
-        nonOwner.state.processes.some((process) => runs(process, env))
+        !owner.state.processes.some((process) => runs(process, application)) ||
+        nonOwner.state.processes.some((process) => runs(process, application))
       )
         return null;
       return { placement: { nodes: assignedNodeIds }, owner, nonOwner };
@@ -765,13 +762,14 @@ function runK3sCli(args: string[], extraEnv: Record<string, string>): Promise<Co
   return runCli(args, extraEnv, { timeoutMs: CLI_TIMEOUT_MS });
 }
 
-function runsProduction(process: ProcessStatus): boolean {
-  return runs(process, "production");
+/** Whether `process` is the running runtime of the application every node serves. */
+function runsEverywhere(process: ProcessStatus): boolean {
+  return runs(process, APPLICATION);
 }
 
-/** Whether `process` is the running runtime of the project's `env`. */
-function runs(process: ProcessStatus, env: string): boolean {
-  return process.state === "running" && process.id === `${PROJECT}--${env}`;
+/** Whether `process` is the running runtime of `application`. */
+function runs(process: ProcessStatus, application: string): boolean {
+  return process.state === "running" && process.id === application;
 }
 
 async function crictlId(args: string[], description: string): Promise<string> {

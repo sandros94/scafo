@@ -51,7 +51,7 @@ export const OBSERVE_PARQUET_READER_CODECS: Partial<Record<CodecName, ReaderCode
  * ORDER IS THE FILE'S COLUMN ORDER, and it is grouped by record kind so a
  * `DESCRIBE` reads like the record union does: what everything carries, then the
  * flush header's, then an event's, then a counter snapshot's. The two shared
- * names sit with the kind that reaches them first — `project` and `env` are an
+ * name sits with the kind that reaches it first — `application` is an
  * operational event's and a counters record's alike.
  */
 const FIXED_COLUMNS = {
@@ -72,8 +72,7 @@ const FIXED_COLUMNS = {
 
   /* ObserveEventRecord: the flattened ObservedEvent union. */
   type: { type: "string", optional: true },
-  project: { type: "string", optional: true },
-  env: { type: "string", optional: true },
+  application: { type: "string", optional: true },
   storeOps: { type: "i64", optional: true },
   listOps: { type: "i64", optional: true },
   reason: { type: "string", optional: true },
@@ -81,7 +80,6 @@ const FIXED_COLUMNS = {
   actions: { type: "i64", optional: true },
   failures: { type: "i64", optional: true },
   durationMs: { type: "i64", optional: true },
-  processId: { type: "string", optional: true },
   /* The operator audit pair: who acted, on whom, at what tier. */
   actor: { type: "string", optional: true },
   subject: { type: "string", optional: true },
@@ -158,8 +156,7 @@ const COLUMN_OF: Record<ObserveField, ObserveParquetColumn | typeof SPREAD> = {
 
   /* ObserveEventRecord. */
   type: "type",
-  project: "project",
-  env: "env",
+  application: "application",
   storeOps: "storeOps",
   listOps: "listOps",
   reason: "reason",
@@ -167,7 +164,6 @@ const COLUMN_OF: Record<ObserveField, ObserveParquetColumn | typeof SPREAD> = {
   actions: "actions",
   failures: "failures",
   durationMs: "durationMs",
-  processId: "processId",
   actor: "actor",
   subject: "subject",
   role: "role",

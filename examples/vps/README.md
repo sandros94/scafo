@@ -8,7 +8,7 @@ With `SCAFO_TRANSPORT=wireguard` the node's API, its advertised address and the 
 
 Each host's Caddy reads its certificates through its own node's `/v1/storage` and the fleet's routing from `/v1/ingress/routes` with `prefer self`, holding one ingress token and never a bucket credential. Both Caddys therefore share one certificate store in the bucket, and either can serve any host: with apex and wildcard DNS pointing at both machines, the one a request lands on serves it locally when it can and proxies to the holder over the tunnel when it cannot.
 
-The platform domain and everything under it come from one DNS-01 wildcard, which is what the `-dns` image flavour is for. Custom domains a project claims are issued per name through on-demand TLS, gated by the node's `/v1/ingress/ask` endpoint — the fleet issues only for hosts it has been told about.
+The platform domain and everything under it come from one DNS-01 wildcard, which is what the `-dns` image flavour is for. Custom domains an application claims are issued per name through on-demand TLS, gated by the node's `/v1/ingress/ask` endpoint — the fleet issues only for hosts it has been told about.
 
 This is the multi-host recipe. For one machine use [`../compose.yaml`](../compose.yaml), or [`scripts/install.sh`](../../scripts/install.sh) for a systemd host without Docker.
 
@@ -80,7 +80,7 @@ To deploy, reach a node's API through the tunnel from your own machine:
 ```sh
 ssh -L 7400:10.83.0.1:7400 ubuntu@203.0.113.10
 scafo remote add prod --endpoint http://127.0.0.1:7400 --register
-scafo deploy ./app --project hello --env production --replicas all
+scafo deploy ./app --name hello --replicas all
 curl -sS https://hello.apps.example.com/
 ```
 
@@ -94,7 +94,7 @@ Add its entry to `HOSTS` — a free tunnel address in the same `/24` — point i
 ./roll.sh vps-c
 ```
 
-Named hosts are the only ones rolled, but the peer refresh at the end runs everywhere, which is what tells the existing hosts about the new one. Placement moves environments onto it by rendezvous hashing as it joins; `--replicas all` environments start there on the next reconcile.
+Named hosts are the only ones rolled, but the peer refresh at the end runs everywhere, which is what tells the existing hosts about the new one. Placement moves applications onto it by rendezvous hashing as it joins; `--replicas all` applications start there on the next reconcile.
 
 ## Caveats
 

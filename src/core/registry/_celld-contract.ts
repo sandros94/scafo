@@ -46,7 +46,7 @@
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L800-L848 (v0.5.0)
  *
  * `DeployPointer`, the two `current.json` objects prune reads to know what an
- * environment serves; `script_name` is optional, and older named pointers omit it.
+ * application serves; `script_name` is optional, and older named pointers omit it.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L450-L460 (v0.5.0)
  */
 

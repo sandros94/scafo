@@ -27,8 +27,11 @@ describe("identity reservations", () => {
     const store = new MemoryCasStore();
     const { ctx } = ctxWith(store);
     const admin = operator("admin-a", "admin");
-    const peer = operator("peer-a", "operator", { projects: ["acme"] });
-    const caller = operator("caller-a", "operator", { projects: ["acme"], supersedes: "admin-a" });
+    const peer = operator("peer-a", "operator", { applications: ["acme"] });
+    const caller = operator("caller-a", "operator", {
+      applications: ["acme"],
+      supersedes: "admin-a",
+    });
 
     for (const record of [admin, peer, caller]) await trustOperator(ctx, record);
     const before = new Map<string, Uint8Array>();
@@ -39,7 +42,7 @@ describe("identity reservations", () => {
     await expect(trustOperator(ctx, admin)).resolves.toEqual(admin);
     for (const changed of [
       { ...admin, publicKey: key("changed-admin") },
-      { ...peer, projects: ["globex"] },
+      { ...peer, applications: ["globex"] },
       { ...caller, supersedes: "peer-a" },
     ]) {
       await rejectsWith(() => trustOperator(ctx, changed), "reference-held");

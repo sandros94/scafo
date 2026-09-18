@@ -511,14 +511,13 @@ async function deployedConfig(
 
 function input(artifact: StagedArtifact): DeployRunInput {
   return {
-    project: "shop",
-    environment: "prod",
+    application: "shop",
     artifact,
     target: {
       endpoint: "http://store.test:9000",
       region: "us-east-1",
       bucket: "registry",
-      prefix: "shop/prod",
+      prefix: "fleets/shop",
       accessKey: "key",
       secretKey: "secret",
     },

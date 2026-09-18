@@ -4,7 +4,7 @@
 import { ScafoError } from "../core/error.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
 import type { OperatorRole, TrustedOperator } from "../core/registry/operators.ts";
-import { WILDCARD_PROJECT } from "../core/registry/operators.ts";
+import { WILDCARD_APPLICATION } from "../core/registry/operators.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
 import { assertSlug } from "../core/utils/slug.ts";
 import {
@@ -40,7 +40,7 @@ export interface OperatorGrant {
   /** Key this one replaces; a node accepts only the CALLER's own id here. */
   supersedes?: string;
   /** Requested scope; the node applies inheritance and grant policy. */
-  projects?: string[];
+  applications?: string[];
 }
 
 /** What every command about a remote's trusted keys needs beyond the remote itself. */
@@ -118,7 +118,7 @@ export function operatorApi(opts: NodeOptions): OperatorApi {
           publicKey: key.publicKey,
           ...(key.role === undefined ? {} : { role: key.role }),
           ...(key.supersedes === undefined ? {} : { supersedes: key.supersedes }),
-          ...(key.projects === undefined ? {} : { projects: key.projects }),
+          ...(key.applications === undefined ? {} : { applications: key.applications }),
         }),
       });
       return (answer as { operator: TrustedOperator }).operator;
@@ -220,7 +220,7 @@ export function describeRevocation(revoked: RevokedKey): string {
 
 /**
  * The keys a fleet trusts, as an operator reads them: the id, the TIER, the
- * PROJECTS each may reach, and — where a rotation left one — the key it
+ * APPLICATIONS each may reach, and — where a rotation left one — the key it
  * replaced.
  *
  * The tier is a column of its own because it is what decides who may administer
@@ -270,14 +270,14 @@ export function formatRemoteKeys(keys: RemoteKeys): string {
  * What a key's scope reads as in a listing.
  *
  * IT DEPENDS ON THE TIER, because an absent scope does. An ADMIN reaches every
- * project and never carries a list, so it reads `all`. An operator-tier key
+ * application and never carries a list, so it reads `all`. An operator-tier key
  * reaches what it names — `*` for the whole fleet, said out loud — and one
  * carrying no list at all reaches NOTHING, which reads `none` rather than
  * blank: a column that went empty there would look like missing information
  * instead of like the answer.
  */
-export function formatScope(key: Pick<TrustedOperator, "role" | "projects">): string {
-  if (key.projects !== undefined) return key.projects.join(",");
+export function formatScope(key: Pick<TrustedOperator, "role" | "applications">): string {
+  if (key.applications !== undefined) return key.applications.join(",");
   return key.role === "admin" ? "all" : "none";
 }
 
@@ -372,11 +372,11 @@ export interface EnrolledOperator {
   role: OperatorRole;
   path: EnrollPath;
   /**
-   * Projects the key may reach, as the FLEET filed them — `["*"]` for every
+   * Applications the key may reach, as the FLEET filed them — `["*"]` for every
    * one. Absent means the key is an ADMIN, which carries no scope and reaches
    * everything; an operator-tier key never comes back without one.
    */
-  projects?: string[];
+  applications?: string[];
   /** How it was done, as the command's own output names it. */
   via: string;
 }
@@ -388,7 +388,7 @@ export interface EnrolledOperator {
  * locked every operator out — both produce an ADMIN. So a scope asked for there
  * is a contradiction, an admin being never scoped; and an operator TIER asked
  * for there is the same contradiction from the other end, because that path
- * names no projects and an operator-tier key that names none reaches nothing.
+ * names no applications and an operator-tier key that names none reaches nothing.
  * The ceremony admits admins, and every other key goes over the wire.
  *
  * Said here rather than after the bucket has been reached: the credential that
@@ -401,59 +401,61 @@ export interface EnrolledOperator {
  */
 export function assertScopedEnrollment(
   path: EnrollPath,
-  projects?: string[],
+  applications?: string[],
   role?: OperatorRole,
 ): void {
   if (path !== "bucket") return;
 
-  if (projects !== undefined) {
+  if (applications !== undefined) {
     throw new ScafoError("invalid-input", "The ceremony cannot scope a key", {
       detail:
         `the bucket path is how an installation is seeded and how one that has locked every ` +
         `operator out is recovered, and both of those produce an ADMIN — which administers ` +
-        `every key this fleet trusts and is therefore never scoped to projects; enrol the key ` +
-        `over the wire with --remote <name> to scope it`,
+        `every key this fleet trusts and is therefore never scoped to applications; enrol the ` +
+        `key over the wire with --remote <name> to scope it`,
     });
   }
   if (role === "operator") {
     throw new ScafoError("invalid-input", "The ceremony admits admins", {
       detail:
-        `the bucket path names no projects, and an operator-tier key that names none may reach ` +
-        `nothing at all — so this would file a key that authenticates and can do nothing; ` +
-        `enrol it over the wire with --remote <name> --projects <a,b>, which is where an ` +
+        `the bucket path names no applications, and an operator-tier key that names none may ` +
+        `reach nothing at all — so this would file a key that authenticates and can do nothing; ` +
+        `enrol it over the wire with --remote <name> --apps <a,b>, which is where an ` +
         `operator-tier key gets the scope it needs`,
     });
   }
 }
 
 /**
- * The projects `--projects` names, as a comma-separated list — the same shape
+ * The applications `--apps` names, as a comma-separated list — the same shape
  * `--endpoint` and `--node-labels` take, since citty has no array argument.
  *
- * Slugs are refused here rather than at the node, for the reason
- * {@link operatorRole} is: a mistyped one would otherwise be filed as a project
- * that will never exist, and the operator finds out from a refusal months later.
+ * An entry is an application name, a prefix glob such as `shop-*`, or the
+ * wildcard. Names are checked here rather than at the node, for the reason
+ * {@link operatorRole} is: a mistyped one would otherwise be filed as an
+ * application that will never exist, and the operator finds out from a refusal
+ * months later.
  *
- * {@link WILDCARD_PROJECT} passes through UNCHECKED, and whether it is allowed
- * where it was used is the node's to say. It is not a slug, so validating it
- * here would mean either teaching this function the rule that it must stand
- * alone — policy, duplicated, in the one place it cannot be enforced — or
- * refusing `--projects "*"` outright with a message about lowercase letters.
- * Absent stays absent, and the node refuses that for an operator-tier key.
+ * A GLOB AND THE WILDCARD PASS THROUGH UNCHECKED, and whether either is allowed
+ * where it was used is the node's to say. Neither is a name, so validating them
+ * here would mean either teaching this function the rule that the wildcard must
+ * stand alone — policy, duplicated, in the one place it cannot be enforced — or
+ * refusing `--apps "*"` outright with a message about lowercase letters. Absent
+ * stays absent, and the node refuses that for an operator-tier key.
  */
-export function operatorProjects(value: unknown): { projects?: string[] } {
+export function operatorApplications(value: unknown): { applications?: string[] } {
   const given = typeof value === "string" ? value.trim() : "";
   if (given === "") return {};
 
-  const projects = given
+  const applications = given
     .split(",")
     .map((entry) => entry.trim())
     .filter((entry) => entry !== "");
-  for (const project of projects) {
-    if (project !== WILDCARD_PROJECT) assertSlug(project);
+  for (const entry of applications) {
+    if (entry !== WILDCARD_APPLICATION && !entry.endsWith("*")) assertSlug(entry);
   }
 
-  return projects.length === 0 ? {} : { projects };
+  return applications.length === 0 ? {} : { applications };
 }
 
 /**
@@ -468,7 +470,7 @@ export async function enrollOnWire(
   home: string,
   remote: string,
   pub: PublicOperator,
-  opts: RemoteKeyOptions & { role?: OperatorRole; projects?: string[] } = {},
+  opts: RemoteKeyOptions & { role?: OperatorRole; applications?: string[] } = {},
 ): Promise<EnrolledOperator> {
   const api = await reachRemote(home, remote, opts);
   const trusted = await api.trust({
@@ -477,7 +479,7 @@ export async function enrollOnWire(
        document is: the two fields named here are the only ones that may go. */
     publicKey: { kty: "OKP", crv: "Ed25519", x: pub.publicKey.x },
     ...(opts.role === undefined ? {} : { role: opts.role }),
-    ...(opts.projects === undefined ? {} : { projects: opts.projects }),
+    ...(opts.applications === undefined ? {} : { applications: opts.applications }),
   });
 
   /* The SCOPE is read back off the answer for the same reason the tier is: a
@@ -488,7 +490,7 @@ export async function enrollOnWire(
     id: trusted.id,
     role: trusted.role,
     path: "wire",
-    ...(trusted.projects === undefined ? {} : { projects: trusted.projects }),
+    ...(trusted.applications === undefined ? {} : { applications: trusted.applications }),
     via: api.via,
   };
 }
@@ -522,17 +524,17 @@ export function describeEnrollment(enrolled: EnrolledOperator): string {
       `tokens it signs are now accepted by every node`,
   ];
 
-  if (enrolled.projects !== undefined) {
+  if (enrolled.applications !== undefined) {
     /* Said out loud, because the whole point of a scoped key is that it does
        LESS than the reader may expect a trusted key to do — and the wildcard is
        said out loud for the opposite reason. */
     lines.push(
-      enrolled.projects.includes(WILDCARD_PROJECT)
-        ? `scafo: it may name EVERY project of this fleet, including ones nobody has created ` +
-            `yet. That binds the KEY on the wire and nothing else: whoever holds the bucket's ` +
+      enrolled.applications.includes(WILDCARD_APPLICATION)
+        ? `scafo: it may name EVERY application of this fleet, including ones nobody has ` +
+            `created yet. That binds the KEY on the wire and nothing else: whoever holds the bucket's ` +
             `credentials still holds the whole fleet`
-        : `scafo: it may only name ${enrolled.projects.join(", ")} — every other project of ` +
-            `this fleet answers it with a refusal. That binds the KEY on the wire and nothing ` +
+        : `scafo: it may only name ${enrolled.applications.join(", ")} — every other ` +
+            `application of this fleet answers it with a refusal. That binds the KEY on the wire and nothing ` +
             `else: whoever holds the bucket's credentials still holds the whole fleet`,
     );
   }

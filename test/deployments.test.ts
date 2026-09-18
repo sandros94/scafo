@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import * as deploymentsModule from "../src/core/registry/deployments.ts";
 import {
   createDeployment,
-  createProject,
+  createApplication,
   getDeployment,
   listDeployments,
 } from "../src/core/registry/index.ts";
@@ -13,7 +13,7 @@ import type { DeploymentInput } from "../src/core/types/registry.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
 
-const PROJECT = "app";
+const APPLICATION = "app";
 const DEPLOYMENT: DeploymentInput = {
   version: "0123abcd",
   source: {
@@ -46,7 +46,7 @@ const DIFFERENT_IN: Array<{ field: string; patch: Partial<DeploymentInput> }> = 
 async function seeded(): Promise<{ store: MemoryCasStore; clock: ManualClock }> {
   const store = new MemoryCasStore();
   const clock = ctxWith(store);
-  await createProject(clock.ctx, { slug: PROJECT });
+  await createApplication(clock.ctx, { name: APPLICATION });
   return { store, clock };
 }
 
@@ -54,21 +54,23 @@ describe("createDeployment", () => {
   it("stamps the immutable deployment history record", async () => {
     const { clock } = await seeded();
 
-    const record = await createDeployment(clock.ctx, PROJECT, DEPLOYMENT);
+    const record = await createDeployment(clock.ctx, APPLICATION, DEPLOYMENT);
     expect(record).toMatchObject({
       v: 1,
       version: DEPLOYMENT.version,
     });
     expect(Date.parse(record.createdAt)).toBe(clock.nowMs());
-    await expect(getDeployment(clock.ctx, PROJECT, DEPLOYMENT.version)).resolves.toEqual(record);
+    await expect(getDeployment(clock.ctx, APPLICATION, DEPLOYMENT.version)).resolves.toEqual(
+      record,
+    );
   });
 
   it("is idempotent and keeps the original createdAt", async () => {
     const { clock } = await seeded();
-    const first = await createDeployment(clock.ctx, PROJECT, DEPLOYMENT);
+    const first = await createDeployment(clock.ctx, APPLICATION, DEPLOYMENT);
 
     clock.tick(60_000);
-    const second = await createDeployment(clock.ctx, PROJECT, DEPLOYMENT);
+    const second = await createDeployment(clock.ctx, APPLICATION, DEPLOYMENT);
 
     expect(second).toEqual(first);
     expect(second.createdAt).toBe(first.createdAt);
@@ -78,23 +80,23 @@ describe("createDeployment", () => {
   it.each(DIFFERENT_IN)("still refuses a second record differing in $field", async ({ patch }) => {
     const { store, clock } = await seeded();
     const seedInput = { ...DEPLOYMENT };
-    await createDeployment(clock.ctx, PROJECT, seedInput);
-    const before = await store.get(deploymentKey(PROJECT, DEPLOYMENT.version));
+    await createDeployment(clock.ctx, APPLICATION, seedInput);
+    const before = await store.get(deploymentKey(APPLICATION, DEPLOYMENT.version));
 
     const error = await rejectsWith(
-      () => createDeployment(clock.ctx, PROJECT, { ...seedInput, ...patch }),
+      () => createDeployment(clock.ctx, APPLICATION, { ...seedInput, ...patch }),
       "immutable",
     );
 
     expect(error.status).toBe(409);
-    expect(await store.get(deploymentKey(PROJECT, DEPLOYMENT.version))).toEqual(before);
+    expect(await store.get(deploymentKey(APPLICATION, DEPLOYMENT.version))).toEqual(before);
   });
 
   it("rejects a version that is not a content digest", async () => {
     const { clock } = await seeded();
 
     const error = await rejectsWith(
-      () => createDeployment(clock.ctx, PROJECT, { ...DEPLOYMENT, version: "b1" }),
+      () => createDeployment(clock.ctx, APPLICATION, { ...DEPLOYMENT, version: "b1" }),
       "invalid-slug",
     );
     expect(error.status).toBe(400);
@@ -106,23 +108,23 @@ describe("getDeployment / listDeployments", () => {
     const { clock } = await seeded();
 
     const error = await rejectsWith(
-      () => getDeployment(clock.ctx, PROJECT, "deadbeef"),
+      () => getDeployment(clock.ctx, APPLICATION, "deadbeef"),
       "not-found",
     );
-    expect(error.detail).toContain(deploymentKey(PROJECT, "deadbeef"));
+    expect(error.detail).toContain(deploymentKey(APPLICATION, "deadbeef"));
   });
 
   it("lists versions lexicographically, ignoring anything nested", async () => {
     const { store, clock } = await seeded();
     for (const version of ["cccccccc", "aaaaaaaa", "bbbbbbbb"]) {
-      await createDeployment(clock.ctx, PROJECT, { ...DEPLOYMENT, version });
+      await createDeployment(clock.ctx, APPLICATION, { ...DEPLOYMENT, version });
     }
     await store.put(
-      `${deploymentKey(PROJECT, "aaaaaaaa").slice(0, -".json".length)}/nested.json`,
+      `${deploymentKey(APPLICATION, "aaaaaaaa").slice(0, -".json".length)}/nested.json`,
       "{}",
     );
 
-    await expect(listDeployments(clock.ctx, PROJECT)).resolves.toEqual([
+    await expect(listDeployments(clock.ctx, APPLICATION)).resolves.toEqual([
       "aaaaaaaa",
       "bbbbbbbb",
       "cccccccc",

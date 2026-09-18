@@ -1,6 +1,6 @@
 /*
- * What the ingress served, counted per environment: which host is read as whose, what a status
- * and a latency land in, and what a snapshot promises.
+ * What the ingress served, counted per application: which host is read as whose,
+ * what a status and a latency land in, and what a snapshot promises.
  */
 
 import { describe, expect, it } from "vitest";
@@ -15,78 +15,77 @@ import { recordRouting } from "../src/daemon/_ingress.ts";
 import type { DaemonContext } from "../src/daemon/app.ts";
 import { API_DENIED_PREFIXES } from "../src/core/placement/routes.ts";
 import type { IngressRoute } from "../src/core/types/ingress.ts";
-import type { EnvironmentRecord } from "../src/core/types/registry.ts";
+import type { ApplicationRecord } from "../src/core/types/registry.ts";
 import type { RuntimeProcess } from "../src/core/types/runtime.ts";
 import { CLOCK_START_MS } from "./_helpers.ts";
 
 const DOMAINS = ["apps.test", "preview.test"];
 
 describe("what a host is counted as", () => {
-  it("reads an environment's label and its project's apex off the host grammar alone", () => {
+  it("reads an application's name off the host grammar alone", () => {
     /* Nothing has to be routed for this: host grammar alone is enough to
-       attribute an environment's traffic. */
+       attribute an application's traffic. */
     const counters = counting();
-    counters.ingest(line({ host: "shop--preview.apps.test" }));
+    counters.ingest(line({ host: "shop-preview.apps.test" }));
     counters.ingest(line({ host: "shop.apps.test" }));
-    counters.ingest(line({ host: "shop--preview.preview.test" }));
+    counters.ingest(line({ host: "shop-preview.preview.test" }));
 
     expect(named(counters)).toEqual([
-      { project: "shop", env: "preview", requests: 2 },
-      /* An apex host names the one environment that answers on it. */
-      { project: "shop", env: "production", requests: 1 },
+      { application: "shop", requests: 1 },
+      { application: "shop-preview", requests: 2 },
     ]);
   });
 
   it("takes a custom domain from the routing, which is the only thing that knows", () => {
     const counters = counting();
     counters.observeRouting({
-      routes: [route("shop.example.com", "shop", "production")],
-      claims: [{ host: "shop.example.com", project: "shop", environment: "production" }],
+      routes: [route("shop.example.com", "shop")],
+      claims: [{ host: "shop.example.com", application: "shop" }],
     });
 
     counters.ingest(line({ host: "shop.example.com" }));
 
-    expect(named(counters)).toEqual([{ project: "shop", env: "production", requests: 1 }]);
+    expect(named(counters)).toEqual([{ application: "shop", requests: 1 }]);
     expect(counters.snapshot().unattributed).toBe(0);
   });
 
-  it("keeps an inactive environment's custom domain attributable, because the claim outlives the route", () => {
+  it("keeps an inactive application's custom domain attributable, because the claim outlives the route", () => {
     /* Nothing is ready, so the routing carries no route for it at all; the claim
-       is what an environment's record says regardless. */
+       is what an application's record says regardless. */
     const counters = counting();
     counters.observeRouting({
       routes: [],
-      claims: [{ host: "shop.example.com", project: "shop", environment: "production" }],
+      claims: [{ host: "shop.example.com", application: "shop" }],
     });
 
     counters.ingest(line({ host: "shop.example.com" }));
 
-    expect(named(counters)).toEqual([{ project: "shop", env: "production", requests: 1 }]);
+    expect(named(counters)).toEqual([{ application: "shop", requests: 1 }]);
   });
 
   it("lets the routing win over the platform-host grammar", () => {
     const counters = counting();
     counters.observeRouting({
-      routes: [route("shop.apps.test", "shop", "staging")],
+      routes: [route("shop.apps.test", "shop-preview")],
       claims: [],
     });
 
     counters.ingest(line({ host: "shop.apps.test" }));
 
-    /* Read off the grammar alone this is production; the published routing is
-       the authority for what the request actually reached. */
-    expect(named(counters)).toEqual([{ project: "shop", env: "staging", requests: 1 }]);
+    /* Read off the grammar alone this is "shop"; the published routing is the
+       authority for what the request actually reached. */
+    expect(named(counters)).toEqual([{ application: "shop-preview", requests: 1 }]);
   });
 
   it("stops attributing a host the routing has stopped naming", () => {
     const counters = counting();
     counters.observeRouting({
       routes: [],
-      claims: [{ host: "shop.example.com", project: "shop", environment: "production" }],
+      claims: [{ host: "shop.example.com", application: "shop" }],
     });
     counters.ingest(line({ host: "shop.example.com" }));
 
-    /* The environment was deleted, or its domain released: the next pass states
+    /* The application was deleted, or its domain released: the next pass states
        the routing whole, and a stale entry would go on crediting it. */
     counters.observeRouting({ routes: [], claims: [] });
     counters.ingest(line({ host: "shop.example.com" }));
@@ -94,8 +93,8 @@ describe("what a host is counted as", () => {
     const snapshot = counters.snapshot();
     expect(snapshot.unattributed).toBe(1);
     expect(named(counters)).toEqual([
-      { project: UNATTRIBUTED, env: UNATTRIBUTED, requests: 1 },
-      { project: "shop", env: "production", requests: 1 },
+      { application: UNATTRIBUTED, requests: 1 },
+      { application: "shop", requests: 1 },
     ]);
   });
 
@@ -111,21 +110,20 @@ describe("what a host is counted as", () => {
     expect(snapshot.unattributed).toBe(3);
     expect(snapshot.buckets).toHaveLength(1);
     expect(snapshot.buckets[0]).toMatchObject({
-      project: UNATTRIBUTED,
-      env: UNATTRIBUTED,
+      application: UNATTRIBUTED,
       requests: 3,
       bytes: 42,
     });
   });
 
-  it("never lets the unattributed bucket collide with a real environment", () => {
-    /* The sentinel is not a slug, so no project or environment can ever be
-       named it and no real traffic can ever be added into it. */
+  it("never lets the unattributed bucket collide with a real application", () => {
+    /* The sentinel is not a slug, so no application can ever be named it and no
+       real traffic can ever be added into it. */
     const counters = counting();
     counters.ingest(line({ host: `${UNATTRIBUTED}.apps.test` }));
 
     expect(counters.snapshot().unattributed).toBe(1);
-    expect(named(counters)).toEqual([{ project: UNATTRIBUTED, env: UNATTRIBUTED, requests: 1 }]);
+    expect(named(counters)).toEqual([{ application: UNATTRIBUTED, requests: 1 }]);
   });
 });
 
@@ -244,50 +242,49 @@ describe("the snapshot", () => {
     expect(again.buckets[0].status["2xx"]).toBe(1);
   });
 
-  it("sorts by project and environment, so two snapshots line up", () => {
+  it("sorts by application name, so two snapshots line up", () => {
     const counters = counting();
     for (const host of [
       "zeta.apps.test",
-      "shop--staging.apps.test",
-      "alpha--preview.apps.test",
-      "shop--preview.apps.test",
+      "shop-staging.apps.test",
+      "alpha-preview.apps.test",
+      "shop-preview.apps.test",
     ]) {
       counters.ingest(line({ host }));
     }
 
-    expect(counters.snapshot().buckets.map((bucket) => `${bucket.project}/${bucket.env}`)).toEqual([
-      "alpha/preview",
-      "shop/preview",
-      "shop/staging",
-      "zeta/production",
+    expect(counters.snapshot().buckets.map((bucket) => bucket.application)).toEqual([
+      "alpha-preview",
+      "shop-preview",
+      "shop-staging",
+      "zeta",
     ]);
   });
 });
 
 describe("what the reconcile pass hands over", () => {
   it("attributes off the same routing the node renders for itself", () => {
-    /* The attribution is not a second reading of what serves an environment —
+    /* The attribution is not a second reading of what serves an application —
        it is the routing itself, read where it is rendered. A second reading
        would drift from what traffic actually reaches. */
     const counters = counting();
     const daemon = daemonWith(counters, true);
 
-    const env = environment("production", ["shop.example.com"]);
     const routing = recordRouting(daemon, {
-      desired: [{ project: "shop", env }],
-      processes: [process_("shop", "production", "aaaa1111", 9101)],
+      desired: [application("shop", ["shop.example.com"])],
+      processes: [process_("shop", 9101)],
     });
 
-    /* Exactly the hosts the pass rendered, each read as the environment the
+    /* Exactly the hosts the pass rendered, each read as the application the
        ingress reading them will send them to. */
     expect(routing.routes.map((entry) => entry.host)).toContain("shop.example.com");
 
-    for (const host of ["shop.apps.test", "shop--production.apps.test", "shop.example.com"]) {
+    for (const host of ["shop.apps.test", "shop.preview.test", "shop.example.com"]) {
       counters.ingest(line({ host }));
     }
 
     expect(counters.snapshot().unattributed).toBe(0);
-    expect(named(counters)).toEqual([{ project: "shop", env: "production", requests: 3 }]);
+    expect(named(counters)).toEqual([{ application: "shop", requests: 3 }]);
   });
 
   it("publishes the platform apexes as the fleet's API, or not at all", () => {
@@ -341,16 +338,15 @@ function line(over: { host: string; status?: number; size?: number; durationMs?:
   });
 }
 
-function route(host: string, project: string, env: string): IngressRoute {
-  return { host, backend: { project, env, port: 9101 } };
+function route(host: string, application: string): IngressRoute {
+  return { host, backend: { application, port: 9101 } };
 }
 
-/** An environment record carrying only what the routing is rendered from. */
-function environment(name: string, domains: string[]): EnvironmentRecord {
+/** An application record carrying only what the routing is rendered from. */
+function application(name: string, domains: string[]): ApplicationRecord {
   return {
     v: 1,
     name,
-    prefix: `fleets/shop/${name}`,
     deployment: { revision: 1, deployedAt: new Date(CLOCK_START_MS).toISOString() },
     domains,
     createdAt: new Date(CLOCK_START_MS).toISOString(),
@@ -358,25 +354,18 @@ function environment(name: string, domains: string[]): EnvironmentRecord {
 }
 
 /** A supervised process, which is the only kind the routing ever names. */
-function process_(project: string, env: string, _version: string, port: number): RuntimeProcess {
-  return {
-    processId: `${project}--${env}`,
-    project,
-    env,
-    port,
-    internalPort: port + 1,
-  };
+function process_(application: string, port: number): RuntimeProcess {
+  return { application, port, internalPort: port + 1 };
 }
 
-/** Each bucket as the pair it names and what it counted, for a case that only wants that. */
+/** Each bucket as the application it names and what it counted, for a case that only wants that. */
 function named(counters: IngressCounters): Array<
-  Pick<IngressBucket, "project" | "env"> & {
+  Pick<IngressBucket, "application"> & {
     requests: number;
   }
 > {
   return counters.snapshot().buckets.map((bucket) => ({
-    project: bucket.project,
-    env: bucket.env,
+    application: bucket.application,
     requests: bucket.requests,
   }));
 }

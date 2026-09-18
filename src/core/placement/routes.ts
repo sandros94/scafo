@@ -1,36 +1,27 @@
-/* Pure ingress routing from running environment processes and claims. */
+/* Pure ingress routing from running application processes and claims. */
 
 import { isScafoError } from "../error.ts";
 import type { ApiRouting, IngressBackend, IngressDesired } from "../types/ingress.ts";
-import type { EnvironmentRecord } from "../types/registry.ts";
+import type { ApplicationRecord } from "../types/registry.ts";
 import type { RuntimeProcess } from "../types/runtime.ts";
-import { formatHostLabel } from "../utils/slug.ts";
-
-/**
- * The one environment name that also answers on its project's apex host. Every
- * other environment is only reachable under its own label.
- */
-export const APEX_ENVIRONMENT: string = "production";
+import { assertSlug } from "../utils/slug.ts";
 
 /** API paths denied at platform apexes: TLS storage, and the fleet's routing in
     every format, which all live under the one prefix — both name where every
     process listens. Drivers match path-segment boundaries. */
 export const API_DENIED_PREFIXES: string[] = ["/v1/storage", "/v1/ingress/routes"];
 
-/** A custom domain and the environment that claimed it. */
+/** A custom domain and the application that claimed it. */
 export interface RouteClaim {
   host: string;
-  project: string;
-  environment: string;
+  application: string;
 }
 
 export interface RenderRoutesInput {
   /** Apex domains the platform serves wildcard subdomains under. */
   platformDomains: string[];
-  /**
-   * Every deployed environment the node serves.
-   */
-  environments: Array<{ project: string; env: EnvironmentRecord }>;
+  /** Every deployed application the node serves. */
+  applications: ApplicationRecord[];
   /** Processes the supervisor reports running on this node right now. */
   processes: RuntimeProcess[];
   claims: RouteClaim[];
@@ -38,7 +29,7 @@ export interface RenderRoutesInput {
   api?: { port: number };
 }
 
-/** Renders deterministic routes: environment hosts then claims, with API apexes
+/** Renders deterministic routes: application hosts then claims, with API apexes
     only where no application route wins. */
 export function renderRoutes(input: RenderRoutesInput): IngressDesired {
   const running = runningProcesses(input.processes);
@@ -51,29 +42,26 @@ export function renderRoutes(input: RenderRoutesInput): IngressDesired {
     routes.set(host, backend);
   };
 
-  const environments = [...input.environments].sort((a, b) =>
-    compare(`${a.project}/${a.env.name}`, `${b.project}/${b.env.name}`),
-  );
+  const applications = [...input.applications].sort((a, b) => compare(a.name, b.name));
 
-  /* One backend shared by all hosts for an environment. */
+  /* One backend shared by all hosts of an application. */
   const served = new Map<string, IngressBackend>();
-  for (const { project, env } of environments) {
-    const backend = currentBackend(project, env, running);
-    if (backend !== undefined) served.set(placement(project, env.name), backend);
+  for (const application of applications) {
+    const backend = currentBackend(application, running);
+    if (backend !== undefined) served.set(application.name, backend);
   }
 
-  for (const { project, env } of environments) {
-    const backend = served.get(placement(project, env.name));
+  for (const application of applications) {
+    const backend = served.get(application.name);
     if (backend === undefined) continue;
 
     for (const domain of input.platformDomains) {
-      add(hostUnder(domain, project, env.name), backend);
-      if (env.name === APEX_ENVIRONMENT) add(hostUnder(domain, project), backend);
+      add(hostUnder(domain, application.name), backend);
     }
   }
 
   for (const claim of [...input.claims].sort((a, b) => compare(a.host, b.host))) {
-    add(claim.host, served.get(placement(claim.project, claim.environment)));
+    add(claim.host, served.get(claim.application));
   }
 
   const api =
@@ -87,13 +75,12 @@ export function renderRoutes(input: RenderRoutesInput): IngressDesired {
   };
 }
 
-/** Backend an environment's hosts use, or undefined without a running process. */
+/** Backend an application's hosts use, or undefined without a running process. */
 export function servingBackend(
-  project: string,
-  env: EnvironmentRecord,
+  application: ApplicationRecord,
   processes: RuntimeProcess[],
 ): IngressBackend | undefined {
-  return currentBackend(project, env, runningProcesses(processes));
+  return currentBackend(application, runningProcesses(processes));
 }
 
 /** API apexes not already claimed by an application route. */
@@ -109,25 +96,26 @@ function apiRouting(
 
 /** Resolves a backend from sorted, running processes. */
 function currentBackend(
-  project: string,
-  env: EnvironmentRecord,
+  application: ApplicationRecord,
   running: RuntimeProcess[],
 ): IngressBackend | undefined {
-  if (env.deployment === null) return undefined;
+  if (application.deployment === null) return undefined;
   const process = running.find(
     (candidate) =>
-      candidate.project === project &&
-      candidate.env === env.name &&
+      candidate.application === application.name &&
       candidate.teardownPending !== true &&
       candidate.port > 0,
   );
-  return process === undefined ? undefined : backendOf(process);
+  return process === undefined
+    ? undefined
+    : { application: process.application, port: process.port };
 }
 
-/** Builds a platform host, skipping labels too long for DNS rather than failing all routes. */
-export function hostUnder(domain: string, project: string, ref?: string): string | null {
+/** Builds a platform host, skipping names too long for DNS rather than failing all routes. */
+export function hostUnder(domain: string, application: string): string | null {
   try {
-    return `${formatHostLabel(project, ref)}.${domain}`;
+    assertSlug(application);
+    return `${application}.${domain}`;
   } catch (error) {
     if (isScafoError(error) && error.code === "invalid-slug") return null;
     throw error;
@@ -136,19 +124,7 @@ export function hostUnder(domain: string, project: string, ref?: string): string
 
 /** Stable process order makes duplicate starts resolve deterministically. */
 function runningProcesses(processes: RuntimeProcess[]): RuntimeProcess[] {
-  return [...processes].sort((a, b) => compare(a.processId, b.processId));
-}
-
-function backendOf(process: RuntimeProcess): IngressBackend {
-  return {
-    project: process.project,
-    env: process.env,
-    port: process.port,
-  };
-}
-
-function placement(project: string, env: string): string {
-  return `${project}/${env}`;
+  return [...processes].sort((a, b) => compare(a.application, b.application));
 }
 
 /* Code-unit ordering, so the routing does not depend on the node's locale. */

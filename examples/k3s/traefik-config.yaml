@@ -42,7 +42,7 @@ spec:
           tls:
             enabled: true
             certResolver: letsencrypt
-    # For domains an environment claimed: their DNS points at this cluster, so
+    # For domains an application claimed: their DNS points at this cluster, so
     # HTTP-01 on the `web` entryPoint resolves without a DNS-provider plugin.
     # The platform apex and its wildcard are not issued here — cert-manager holds
     # them, and ACME skips a host the certificate store already covers.

@@ -1,34 +1,37 @@
 /* Runtime reconcile contract. */
 
 import { describe, expect, it } from "vitest";
-import { formatProcessId, parseProcessId } from "../src/core/placement/ids.ts";
 import {
-  type DesiredEnvironment,
   planReconcile,
   type PortView,
   type ReconcileAction,
 } from "../src/core/placement/reconcile.ts";
+import type { ApplicationRecord } from "../src/core/types/registry.ts";
 import type { RuntimeProcess } from "../src/core/types/runtime.ts";
 
 const PORT_START = 42_000;
 const RUNNING_PORT = 43_000;
 const CREATED_AT = "2026-01-01T00:00:00.000Z";
 
-describe("an environment with nothing running", () => {
-  it("starts one environment-owned process", () => {
+describe("an application with nothing running", () => {
+  it("starts one application-owned process", () => {
     const ports = countingPorts();
-    expect(planReconcile({ desired: [desired("shop", "prod", 1)], actual: [], ports })).toEqual([
+    expect(planReconcile({ desired: [desired("shop", 1)], actual: [], ports })).toEqual([
       {
         type: "start",
-        project: "shop",
-        env: "prod",
+        application: "shop",
         ports: { public: PORT_START, internal: PORT_START + 1 },
       },
     ]);
     expect(ports.calls).toBe(1);
-    expect(formatProcessId({ project: "shop", env: "prod" })).toBe("shop--prod");
-    expect(parseProcessId("shop--prod")).toEqual({ project: "shop", env: "prod" });
-    expect(parseProcessId("shop--prod--aaaaaaaa")).toBeNull();
+  });
+
+  it("starts nothing for an application that has never been deployed", () => {
+    const never: ApplicationRecord = { ...desired("shop", 1), deployment: null };
+    const ports = countingPorts();
+
+    expect(planReconcile({ desired: [never], actual: [], ports })).toEqual([]);
+    expect(ports.calls).toBe(0);
   });
 });
 
@@ -36,25 +39,25 @@ describe("runtime-owned deployment lifecycle", () => {
   it("does nothing when only the deployment revision changes", () => {
     expect(
       planReconcile({
-        desired: [desired("shop", "prod", 2)],
-        actual: [runtimeProcess("shop", "prod")],
+        desired: [desired("shop", 2)],
+        actual: [runtimeProcess("shop")],
         ports: countingPorts(),
       }),
     ).toEqual([]);
   });
 
   it("retries a pending teardown before anything else", () => {
-    const running = { ...runtimeProcess("shop", "prod"), teardownPending: true as const };
+    const running = { ...runtimeProcess("shop"), teardownPending: true as const };
     expect(
       planReconcile({
-        desired: [desired("shop", "prod", 2)],
+        desired: [desired("shop", 2)],
         actual: [running],
         ports: countingPorts(),
       }),
     ).toEqual([
       {
         type: "stop",
-        processId: running.processId,
+        application: "shop",
         reason: "runtime teardown is pending",
       },
     ]);
@@ -62,36 +65,48 @@ describe("runtime-owned deployment lifecycle", () => {
 });
 
 describe("placement removal", () => {
-  it("stops an environment no longer assigned to this node", () => {
-    const running = runtimeProcess("shop", "prod");
-    expect(planReconcile({ desired: [], actual: [running], ports: countingPorts() })).toEqual([
+  it("stops an application no longer assigned to this node", () => {
+    expect(
+      planReconcile({
+        desired: [],
+        actual: [runtimeProcess("shop")],
+        ports: countingPorts(),
+      }),
+    ).toEqual([
       {
         type: "stop",
-        processId: running.processId,
-        reason: "environment is no longer served by this node",
+        application: "shop",
+        reason: "application is no longer served by this node",
       },
     ]);
   });
 
   it("plans starts before unrelated stops", () => {
-    const removed = runtimeProcess("archive", "old");
     const plan = planReconcile({
-      desired: [desired("shop", "prod", 1)],
-      actual: [removed],
+      desired: [desired("shop", 1)],
+      actual: [runtimeProcess("archive")],
       ports: countingPorts(),
     });
     expect(plan.map((action) => action.type)).toEqual(["start", "stop"]);
   });
 
-  it("orders environments and leftover stops independently of input order", () => {
-    const z = runtimeProcess("zulu", "prod");
-    const a = runtimeProcess("alpha", "prod");
+  it("orders applications and leftover stops independently of input order", () => {
     const plan = planReconcile({
-      desired: [desired("zulu", "new", 1), desired("alpha", "new", 1)],
-      actual: [z, a],
+      desired: [desired("zulu-new", 1), desired("alpha-new", 1)],
+      actual: [runtimeProcess("zulu"), runtimeProcess("alpha")],
       ports: countingPorts(),
     });
-    expect(plan.map(subject)).toEqual(["alpha/new", "zulu/new", a.processId, z.processId]);
+    expect(plan.map(subject)).toEqual(["alpha-new", "zulu-new", "alpha", "zulu"]);
+  });
+
+  it("leaves an application whose name merely shares a prefix running", () => {
+    const plan = planReconcile({
+      desired: [desired("shop", 1), desired("shop-preview", 1), desired("shop2", 1)],
+      actual: [runtimeProcess("shop"), runtimeProcess("shop-preview"), runtimeProcess("shop2")],
+      ports: countingPorts(),
+    });
+
+    expect(plan).toEqual([]);
   });
 });
 
@@ -113,30 +128,20 @@ function countingPorts(): CountingPorts {
   return ports;
 }
 
-function desired(project: string, env: string, revision: number): DesiredEnvironment {
+function desired(name: string, revision: number): ApplicationRecord {
   return {
-    project,
-    env: {
-      v: 1,
-      name: env,
-      prefix: `fleets/${project}/${env}`,
-      deployment: { revision, deployedAt: CREATED_AT },
-      domains: [],
-      createdAt: CREATED_AT,
-    },
+    v: 1,
+    name,
+    deployment: { revision, deployedAt: CREATED_AT },
+    domains: [],
+    createdAt: CREATED_AT,
   };
 }
 
-function runtimeProcess(project: string, env: string): RuntimeProcess {
-  return {
-    processId: formatProcessId({ project, env }),
-    project,
-    env,
-    port: RUNNING_PORT,
-    internalPort: RUNNING_PORT + 1,
-  };
+function runtimeProcess(application: string): RuntimeProcess {
+  return { application, port: RUNNING_PORT, internalPort: RUNNING_PORT + 1 };
 }
 
 function subject(action: ReconcileAction): string {
-  return action.type === "start" ? `${action.project}/${action.env}` : action.processId;
+  return action.application;
 }

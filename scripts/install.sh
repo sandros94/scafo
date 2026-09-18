@@ -372,8 +372,7 @@ SCAFO_S3_REGION=us-east-1
 # Optional: keeps this installation inside one prefix of a shared bucket.
 #SCAFO_S3_PREFIX=
 
-# The names applications are served under: <project>.<domain> and
-# <project>--<env>.<domain>. Comma-separated.
+# The names applications are served under: <name>.<domain>. Comma-separated.
 SCAFO_PLATFORM_DOMAINS=
 
 # The node API. Loopback needs no further statement about the network; widening
@@ -386,7 +385,7 @@ SCAFO_LISTEN=127.0.0.1:7400
 # The ingress is not configured from here. It READS the fleet's routing off this
 # node's API, at /v1/ingress/routes behind the ingress token, and follows it.
 
-# What this machine IS, for environments that ask for a class of node.
+# What this machine IS, for applications that ask for a class of node.
 #SCAFO_NODE_LABELS=tier=fast,region=eu-west-1
 
 # Upstream Celld policy for every runtime process, comma-separated. Scafo adds
@@ -766,14 +765,14 @@ next_steps() {
     printf '   looks for it. Back it up: nothing can reissue it.\n\n'
     printf '4. Deploy something:\n\n'
     printf '     scafo deploy ./my-app --node http://127.0.0.1:7400 \\\n'
-    printf '       --project shop --env production\n\n'
+    printf '       --name shop\n\n'
   else
     printf '1. Run the node and the ingress as described above.\n'
     printf '2. Mint an operator key with the same bucket settings exported:\n\n'
     printf '     scafo operator keygen --register\n\n'
     printf '3. Deploy something:\n\n'
     printf '     scafo deploy ./my-app --node http://127.0.0.1:7400 \\\n'
-    printf '       --project shop --env production\n\n'
+    printf '       --name shop\n\n'
   fi
 
   printf 'WHERE THINGS ARE\n\n'

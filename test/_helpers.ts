@@ -3,19 +3,18 @@
 import { expect } from "vitest";
 import { ScafoError, type ScafoErrorCode } from "../src/core/error.ts";
 import {
+  applicationKey,
   coordinatorKey,
   domainKey,
   domainsPrefix,
-  environmentKey,
-  listEnvironments,
-  listProjects,
+  listApplications,
   readJson,
   type RegistryContext,
 } from "../src/core/registry/index.ts";
 import type {
   CoordinatorLease,
   DomainClaim,
-  EnvironmentRecord,
+  ApplicationRecord,
   NodeVersions,
 } from "../src/core/types/registry.ts";
 import { MIN_CELLD_VERSION } from "../src/drivers/runtime/celld.ts";
@@ -258,34 +257,28 @@ export class ObservingStore implements CasStore {
 
 export interface InvariantOptions {
   /**
-   * Tolerates a claim whose environment record is gone. `executeReap` deletes the
-   * environment before its claims, so a killed run leaves the claim behind.
+   * Tolerates a claim whose application record is gone: a deletion killed
+   * partway can leave one behind.
    */
   allowOrphanClaims?: boolean;
 }
 
 /**
  * Reads the whole registry and asserts it is referentially safe: pointers only
- * ever name records that exist. A claim without the environment listing it is
+ * ever name records that exist. A claim without the application listing it is
  * legal (claim-first crash state); a listing without a claim is not.
  */
 export async function invariants(store: CasStore, opts?: InvariantOptions): Promise<void> {
   const ctx: RegistryContext = { store };
 
-  for (const project of await listProjects(ctx)) {
-    for (const name of await listEnvironments(ctx, project)) {
-      const found = await readJson<EnvironmentRecord>(ctx, environmentKey(project, name));
-      if (found === null) continue;
-      const environment = found.value;
+  for (const name of await listApplications(ctx)) {
+    const found = await readJson<ApplicationRecord>(ctx, applicationKey(name));
+    if (found === null) continue;
 
-      for (const host of environment.domains) {
-        const claim = await readJson<DomainClaim>(ctx, domainKey(host));
-        expect(claim, `${project}/${name} lists "${host}" without a claim`).not.toBeNull();
-        expect({ project: claim?.value.project, environment: claim?.value.environment }).toEqual({
-          project,
-          environment: name,
-        });
-      }
+    for (const host of found.value.domains) {
+      const claim = await readJson<DomainClaim>(ctx, domainKey(host));
+      expect(claim, `"${name}" lists "${host}" without a claim`).not.toBeNull();
+      expect(claim?.value.application).toBe(name);
     }
   }
 
@@ -293,11 +286,11 @@ export async function invariants(store: CasStore, opts?: InvariantOptions): Prom
     const claim = await readJson<DomainClaim>(ctx, key);
     if (claim === null || opts?.allowOrphanClaims === true) continue;
 
-    const environment = await readJson<EnvironmentRecord>(
+    const application = await readJson<ApplicationRecord>(
       ctx,
-      environmentKey(claim.value.project, claim.value.environment),
+      applicationKey(claim.value.application),
     );
-    expect(environment, `claim "${key}" points at a missing environment`).not.toBeNull();
+    expect(application, `claim "${key}" points at a missing application`).not.toBeNull();
   }
 
   const lease = await readJson<CoordinatorLease>(ctx, coordinatorKey());

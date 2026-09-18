@@ -131,7 +131,7 @@ export async function heartbeatNode(
  * The first step of a graceful shutdown, and the whole reason one is worth
  * taking: a daemon that simply stopped would look exactly like a crash, and a
  * crash is only noticed once the liveness window has run out — a minute and a
- * half in which its environments are served by a process that is already gone.
+ * half in which its applications are served by a process that is already gone.
  * A node that says it is leaving is counted out on the coordinator's very next
  * assignment pass instead.
  *

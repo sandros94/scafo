@@ -148,12 +148,13 @@ export async function resolveRemote(
     detail:
       `this operator's home holds ${String(names.length)} remotes (${names.join(", ")}) and ` +
       `nothing said which one to act on: pass --remote <name>, set ${SCAFO_REMOTE_ENV}, or pin ` +
-      `one for this project with { "remote": "<name>" } in ./scafo.config.jsonc — that pin ` +
+      `one for this project directory with { "remote": "<name>" } in ./scafo.config.jsonc — ` +
+      `that pin ` +
       `holds no secret and belongs in the repository`,
   });
 }
 
-/** The remote a project pinned, read out of the config file beside it. */
+/** The remote a project directory pinned, read out of the config file beside it. */
 export async function readRemotePin(opts: ResolveOperatorOptions): Promise<string | undefined> {
   const read = opts.readFile ?? readTextFile;
   const explicit = text(opts.flags.config);

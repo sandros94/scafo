@@ -1,4 +1,4 @@
-/* `scafo deploy`: pack a built project, hand it to a node, and watch it land. */
+/* `scafo deploy`: pack a built project directory, hand it to a node, and watch it land. */
 
 import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import type { DeployStatus } from "../../daemon/deploys.ts";
@@ -12,7 +12,14 @@ import { isScafoError, ScafoError } from "../../core/error.ts";
 import { parseReplicas } from "../../core/placement/replicas.ts";
 import { parseLabels } from "../../core/utils/labels.ts";
 import { packDirectory } from "../../drivers/archive/tar-zst.ts";
-import { type ConfigEdit, editedConfig, isEmptyEdit, parseVarFlags } from "../_deploy-config.ts";
+import { resolveApplication } from "../_application.ts";
+import {
+  type ConfigEdit,
+  editedConfig,
+  isEmptyEdit,
+  parseVarFlags,
+  readConfiguredName,
+} from "../_deploy-config.ts";
 import { nodeBaseUrl, nodeRequest, type Authorize, operatorSigner } from "../_node.ts";
 import { resolveOperatorHome } from "../_home.ts";
 import { OPERATOR_KEY_FORMS, operatorFlags, resolveOperator } from "../_operator.ts";
@@ -29,15 +36,18 @@ const deployArgs: ArgsDef = {
     type: "positional",
     required: false,
     default: ".",
-    description: "Directory holding the built project",
+    description: "The built project directory to pack",
   },
   "node": {
     type: "string",
     description: "Base URL of the node daemon; without it the chosen remote says where",
   },
   "remote": { type: "string", description: "Remote to deploy to, out of this operator's home" },
-  "project": { type: "string", description: "Project slug to deploy into", required: true },
-  "env": { type: "string", description: "Environment to deploy into (production)" },
+  "name": {
+    type: "string",
+    description: "Application to deploy into; without it the config's own name is used",
+  },
+  "env": { type: "string", description: "Deploy into the application <name>-<env> instead" },
   "var": {
     type: "string",
     multiple: true,
@@ -56,11 +66,11 @@ const deployArgs: ArgsDef = {
   },
   "replicas": {
     type: "string",
-    description: "How many nodes serve this environment: a whole number, or all",
+    description: "How many nodes serve this application: a whole number, or all",
   },
   "node-selector": {
     type: "string",
-    description: "Labels a node must carry to serve this environment (region=eu-west-1,tier=fast)",
+    description: "Labels a node must carry to serve this application (region=eu-west-1,tier=fast)",
   },
   "key": { type: "string", description: `Operator key to sign with: ${OPERATOR_KEY_FORMS}` },
   "config": {
@@ -71,14 +81,14 @@ const deployArgs: ArgsDef = {
     type: "string",
     /* A node token is spent by the first request that presents it, so one passed
        in cannot also be used for the polling that follows; a workload token the
-       project trusts is not spent, and watches the deploy to its end. */
+       application trusts is not spent, and watches the deploy to its end. */
     description:
       "Bearer token to present instead of signing one; a single-use node token cannot watch",
   },
 };
 
 export const deploy: CommandDef = defineCommand({
-  meta: { name: "deploy", description: "Deploy a built project to a node" },
+  meta: { name: "deploy", description: "Deploy a built project directory to a node" },
   args: deployArgs,
   async run({ args }): Promise<void> {
     try {
@@ -91,8 +101,14 @@ export const deploy: CommandDef = defineCommand({
 
 async function runDeploy(flags: Record<string, unknown>): Promise<void> {
   const dir = text(flags.dir) ?? ".";
-  const project = text(flags.project) as string;
   const fixed = text(flags.token);
+
+  /* Without --name the config says which application this is. Read first, so a
+     directory that names none costs nothing but the refusal. */
+  const application = resolveApplication({
+    name: text(flags.name) ?? (await readConfiguredName(dir)),
+    env: text(flags.env),
+  });
 
   /*
    * A token stands in for the whole operator identity — it is what a CI job
@@ -116,7 +132,7 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
   const meta = deployMetadataFrom(flags);
   const edit = configEditFrom(flags);
   /* Only what was asked for is edited. With neither flag the archive carries the
-     project's config byte for byte, which is what the node publishes. */
+     directory's config byte for byte, which is what the node publishes. */
   const substitute = isEmptyEdit(edit) ? undefined : await editedConfig(dir, edit);
 
   console.log(`scafo: packing ${dir}`);
@@ -127,7 +143,7 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
     accepted = await uploadArtifact({
       nodeUrl,
       token: await authorize(),
-      project,
+      application,
       metadata: meta,
       artifact,
     });
@@ -144,7 +160,7 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
 }
 
 /**
- * What the flags ask the project's runtime config to say.
+ * What the flags ask the directory's runtime config to say.
  *
  * `--var` is declared `multiple`, so the parser hands over every occurrence as
  * an array and an absent flag as an empty one. The comma means nothing here: a
@@ -172,10 +188,9 @@ export function deployMetadataFrom(flags: Record<string, unknown>): DeployMetada
     wantedSelector === undefined ? undefined : parseLabels(wantedSelector, "--node-selector");
 
   return {
-    environment: text(flags.env) ?? "production",
     /* Only when they were asked for: a deploy that names no replica count and no
-       selector must leave whatever the environment already carries exactly as it
-       is. Neither flag can lift a constraint — that is `scafo env selector`. */
+       selector must leave whatever the application already carries exactly as it
+       is. Neither flag can lift a constraint — that is `scafo app selector`. */
     ...(replicas === undefined ? {} : { replicas }),
     ...(nodeSelector === undefined ? {} : { nodeSelector }),
   };
@@ -184,7 +199,7 @@ export function deployMetadataFrom(flags: Record<string, unknown>): DeployMetada
 export interface DeployUploadOptions {
   nodeUrl: string;
   token: string;
-  project: string;
+  application: string;
   metadata: DeployMetadata;
   artifact: StagedArtifact;
   fetchFn?: typeof fetch;
@@ -193,7 +208,7 @@ export interface DeployUploadOptions {
 /** Sends the file-backed artifact as the raw streaming deploy request body. */
 export function uploadArtifact(opts: DeployUploadOptions): Promise<Response> {
   return nodeRequest(
-    `${opts.nodeUrl}/v1/projects/${encodeURIComponent(opts.project)}/deploys`,
+    `${opts.nodeUrl}/v1/applications/${encodeURIComponent(opts.application)}/deploys`,
     opts.token,
     {
       method: "POST",
@@ -284,8 +299,8 @@ function unwatchable(error: unknown, last: DeployStatus, fixedToken: boolean): u
     detail:
       `deploy ${last.id} was accepted by the node and is running; the token given to --token ` +
       `was then refused, and a scafo node token is spent by the first request that presents ` +
-      `it. Sign with an operator key, or present a workload token the project's trust policy ` +
-      `admits, to watch a deploy through to its outcome`,
+      `it. Sign with an operator key, or present a workload token the application's trust ` +
+      `policy admits, to watch a deploy through to its outcome`,
     cause: error,
   });
 }

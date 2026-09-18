@@ -1,13 +1,12 @@
 /* Internal: carrying out one reconcile plan against this node. */
 
 import { describeError, isScafoError, ScafoError } from "../core/error.ts";
-import { formatProcessId, parseProcessId } from "../core/placement/ids.ts";
-import type { DesiredEnvironment, ReconcileAction } from "../core/placement/reconcile.ts";
-import { servingKey } from "../core/placement/serving.ts";
+import type { ReconcileAction } from "../core/placement/reconcile.ts";
 import { findVersionSkew, versionSkewError } from "../core/placement/version-skew.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { listNodeRecords } from "../core/registry/nodes.ts";
-import type { NodeRecord } from "../core/types/registry.ts";
+import { isSlug } from "../core/utils/slug.ts";
+import type { ApplicationRecord, NodeRecord } from "../core/types/registry.ts";
 import type { RuntimeDriver, RuntimeProcess, RuntimeSpecInput } from "../core/types/runtime.ts";
 import type { DaemonContext } from "./app.ts";
 import { advertisedAddress } from "./config.ts";
@@ -34,7 +33,7 @@ export interface ExecutorDeps {
 export interface Executor {
   execute(
     plan: ReconcileAction[],
-    desired: DesiredEnvironment[],
+    desired: ApplicationRecord[],
     pending: ReconcileFailure[],
     signal?: AbortSignal,
   ): Promise<void>;
@@ -48,26 +47,24 @@ export function createExecutor(deps: ExecutorDeps): Executor {
 
   async function runStart(
     action: Extract<ReconcileAction, { type: "start" }>,
-    wanted: Map<string, DesiredEnvironment>,
+    wanted: Map<string, ApplicationRecord>,
     pending: ReconcileFailure[],
     fleet: () => Promise<NodeRecord[]>,
     signal?: AbortSignal,
   ): Promise<void> {
     signal?.throwIfAborted();
-    const env = servingKey(action.project, action.env);
-    const entry = wanted.get(env);
-    if (entry === undefined || entry.env.deployment === null) return;
-
-    const processId = formatProcessId({ project: action.project, env: action.env });
+    const application = action.application;
+    const entry = wanted.get(application);
+    if (entry === undefined || entry.deployment === null) return;
 
     /*
-     * ASKED HERE, AS LATE AS THE ANSWER IS STILL USEFUL: the environment's Celld
+     * ASKED HERE, AS LATE AS THE ANSWER IS STILL USEFUL: the application's Celld
      * fleet takes one version, and the node that would break that is the one
      * about to start a second binary over it. Refused rather than raised, so the
      * rest of the plan still runs and the next pass tries again — the other node
      * stopping is all it takes.
      */
-    const about = { env, celld: daemon.versions.celld };
+    const about = { application, celld: daemon.versions.celld };
     const skew = findVersionSkew(await fleet(), {
       ...about,
       selfId: daemon.nodeId,
@@ -75,19 +72,17 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     });
     if (skew.length > 0) {
       pending.push(
-        failureOf(versionSkewError(skew, about), { action: "start", subject: processId }),
+        failureOf(versionSkewError(skew, about), { action: "start", subject: application }),
       );
       return;
     }
 
     const spec = driver.processSpec(runtimeInput(entry, action.ports));
-    if (spec.id !== processId) {
-      throw new ScafoError("invalid-input", "Runtime process id does not match environment");
+    if (spec.id !== application) {
+      throw new ScafoError("invalid-input", "Runtime process id does not match the application");
     }
     const started: RuntimeProcess = {
-      processId,
-      project: entry.project,
-      env: entry.env.name,
+      application,
       port: action.ports.public,
       internalPort: action.ports.internal,
     };
@@ -97,16 +92,16 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     const stopStarted = (): Promise<void> => {
       if (cleanup !== undefined) return cleanup;
       if (!processStarted) return Promise.resolve();
-      known.set(processId, started);
+      known.set(application, started);
       cleanup = (async (): Promise<void> => {
         try {
-          await daemon.supervisor.stop(processId, { graceMs: driver.stopGraceMs });
-          quarantined.delete(processId);
-          known.delete(processId);
+          await daemon.supervisor.stop(application, { graceMs: driver.stopGraceMs });
+          quarantined.delete(application);
+          known.delete(application);
         } catch (error) {
-          quarantined.add(processId);
-          known.set(processId, started);
-          pending.push(failureOf(error, { action: "stop", subject: processId }));
+          quarantined.add(application);
+          known.set(application, started);
+          pending.push(failureOf(error, { action: "stop", subject: application }));
         }
       })();
       return cleanup;
@@ -117,8 +112,8 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       await daemon.supervisor.start(spec);
       processStarted = true;
       signal?.throwIfAborted();
-      known.set(processId, started);
-      observe?.emit({ type: "runtime.started", processId });
+      known.set(application, started);
+      observe?.emit({ type: "runtime.started", application });
     } catch (error) {
       if (processStarted) await stopStarted();
       if (signal?.aborted !== true) throw error;
@@ -129,22 +124,21 @@ export function createExecutor(deps: ExecutorDeps): Executor {
 
   async function runStop(action: Extract<ReconcileAction, { type: "stop" }>): Promise<void> {
     try {
-      await daemon.supervisor.stop(action.processId, { graceMs: driver.stopGraceMs });
-      quarantined.delete(action.processId);
-      known.delete(action.processId);
+      await daemon.supervisor.stop(action.application, { graceMs: driver.stopGraceMs });
+      quarantined.delete(action.application);
+      known.delete(action.application);
     } catch (error) {
-      quarantined.add(action.processId);
+      quarantined.add(action.application);
       throw error;
     }
   }
 
   function runtimeInput(
-    entry: DesiredEnvironment,
+    entry: ApplicationRecord,
     ports: { public: number; internal: number },
   ): RuntimeSpecInput {
     return {
-      project: entry.project,
-      env: entry.env,
+      application: entry,
       ports,
       node: {
         endpoint: daemon.config.bucket.endpoint,
@@ -162,12 +156,10 @@ export function createExecutor(deps: ExecutorDeps): Executor {
 
   return {
     async execute(plan, desired, pending, signal): Promise<void> {
-      const wanted = new Map(
-        desired.map((entry) => [servingKey(entry.project, entry.env.name), entry]),
-      );
+      const wanted = new Map(desired.map((entry) => [entry.name, entry]));
       /* The fleet is read once per pass, and only by a pass that starts
          something: a steady state costs nothing, and a pass held back by
-         another node's version asks about it once, not once per environment. */
+         another node's version asks about it once, not once per application. */
       let fleet: Promise<NodeRecord[]> | undefined;
       const readFleet = (): Promise<NodeRecord[]> => (fleet ??= listNodeRecords(registry));
       for (const action of plan) {
@@ -176,7 +168,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
           if (action.type === "start") await runStart(action, wanted, pending, readFleet, signal);
           else await runStop(action);
         } catch (error) {
-          pending.push(failureOf(error, { action: action.type, subject: subjectOf(action) }));
+          pending.push(failureOf(error, { action: action.type, subject: action.application }));
         }
       }
     },
@@ -199,12 +191,10 @@ export function createExecutor(deps: ExecutorDeps): Executor {
           );
           continue;
         }
-        const identity = parseProcessId(status.id);
-        if (identity === null) continue;
+        /* A supervised id that is no application name is not one of ours. */
+        if (!isSlug(status.id)) continue;
         const adopted: RuntimeProcess = {
-          processId: status.id,
-          project: identity.project,
-          env: identity.env,
+          application: status.id,
           port: UNKNOWN_PORT,
           internalPort: UNKNOWN_PORT,
         };
@@ -229,10 +219,4 @@ export function failureOf(
     ...(isScafoError(error) ? { code: error.code } : {}),
     detail: describeError(error),
   };
-}
-
-function subjectOf(action: ReconcileAction): string {
-  return action.type === "start"
-    ? formatProcessId({ project: action.project, env: action.env })
-    : action.processId;
 }

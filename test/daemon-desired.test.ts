@@ -1,17 +1,19 @@
+/* What one read of the registry tells a node it should be serving. */
+
 import { beforeEach, describe, expect, it } from "vitest";
 import { recordRevision } from "../src/core/registry/_revision.ts";
 import { readDesired } from "../src/daemon/_desired.ts";
 import {
   acquireLease,
+  applicationKey,
+  blockApplication,
+  createApplication,
   createDeployment,
-  createEnvironment,
-  createProject,
   deletePlacement,
-  environmentKey,
   type LeaseHandle,
-  retireEnvironment,
+  retireApplication,
   setNodeSelector,
-  unretireEnvironment,
+  unretireApplication,
   writePlacement,
 } from "../src/core/registry/index.ts";
 import type { RegistryContext } from "../src/core/registry/context.ts";
@@ -19,12 +21,13 @@ import { DEFAULT_CONCURRENCY } from "../src/core/utils/concurrency.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock, ObservingStore } from "./_helpers.ts";
 
-const PROJECT = "shop";
-const OTHER_PROJECT = "blog";
+const APP = "shop";
+const OTHER = "blog";
+const STAGING = "shop-staging";
+const PREVIEW = "shop-preview";
 const VERSION = "b1b1b1b1";
 const SELF = "node-a";
 const PEER = "node-b";
-const PREVIEW = "preview";
 
 let clock: ManualClock;
 let registry: RegistryContext;
@@ -34,220 +37,219 @@ beforeEach(async () => {
   clock = ctxWith(new MemoryCasStore());
   registry = clock.ctx;
 
-  for (const project of [PROJECT, OTHER_PROJECT]) {
-    await createProject(registry, { slug: project });
-    await createDeployment(registry, project, { version: VERSION });
-  }
-  await deployed(PROJECT, "prod");
+  await deployed(APP);
 
   const acquired = await acquireLease(registry, SELF);
   if (acquired === null) throw new Error("the fixture could not take the lease");
   lease = acquired;
 });
 
-describe("an environment nobody has placed", () => {
+describe("an application nobody has placed", () => {
   it("is served nowhere, and reported nowhere either", async () => {
     for (const nodeId of [SELF, PEER, "node-c"]) {
       const state = await readDesired(registry, { nodeId });
 
-      expect(state.environments, nodeId).toEqual([]);
+      expect(state.applications, nodeId).toEqual([]);
       expect(state.fleet, nodeId).toEqual([]);
       expect(state.placements, nodeId).toEqual([]);
     }
   });
 });
 
-describe("an environment that has been placed", () => {
+describe("an application that has been placed", () => {
   it("is served here when the decision names this node", async () => {
-    await writePlacement(registry, PROJECT, "prod", [SELF, PEER], lease);
+    await writePlacement(registry, APP, [SELF, PEER], lease);
 
     const state = await readDesired(registry, { nodeId: SELF });
 
-    expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
-    expect(state.placements).toEqual([
-      { project: PROJECT, env: "prod", nodes: [SELF, PEER], self: true },
-    ]);
+    expect(state.applications.map((entry) => entry.name)).toEqual([APP]);
+    expect(state.placements).toEqual([{ application: APP, nodes: [SELF, PEER], self: true }]);
   });
 
   it("is NOT served here when the decision names other nodes", async () => {
-    await writePlacement(registry, PROJECT, "prod", [PEER], lease);
+    await writePlacement(registry, APP, [PEER], lease);
 
     const state = await readDesired(registry, { nodeId: SELF });
 
-    expect(state.environments).toEqual([]);
+    expect(state.applications).toEqual([]);
     /* Still part of the fleet view: this node routes to it, it just does not run it. */
-    expect(state.fleet.map((entry) => `${entry.project}/${entry.env.name}`)).toEqual([
-      `${PROJECT}/prod`,
-    ]);
-    expect(state.placements).toEqual([
-      { project: PROJECT, env: "prod", nodes: [PEER], self: false },
-    ]);
+    expect(state.fleet.map((entry) => entry.name)).toEqual([APP]);
+    expect(state.placements).toEqual([{ application: APP, nodes: [PEER], self: false }]);
   });
 
   it("reports what it is NOT serving, so an operator can see where it went", async () => {
-    await deployed(PROJECT, "staging");
-    await writePlacement(registry, PROJECT, "prod", [SELF], lease);
-    await writePlacement(registry, PROJECT, "staging", [PEER], lease);
+    await deployed(STAGING);
+    await writePlacement(registry, APP, [SELF], lease);
+    await writePlacement(registry, STAGING, [PEER], lease);
 
     const state = await readDesired(registry, { nodeId: SELF });
 
-    expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
+    expect(state.applications.map((entry) => entry.name)).toEqual([APP]);
     expect(state.placements).toEqual([
-      { project: PROJECT, env: "prod", nodes: [SELF], self: true },
-      { project: PROJECT, env: "staging", nodes: [PEER], self: false },
+      { application: APP, nodes: [SELF], self: true },
+      { application: STAGING, nodes: [PEER], self: false },
     ]);
   });
 
   it("is served nowhere when the decision names nobody", async () => {
-    await writePlacement(registry, PROJECT, "prod", [], lease);
+    await writePlacement(registry, APP, [], lease);
 
     const state = await readDesired(registry, { nodeId: SELF });
 
-    expect(state.environments).toEqual([]);
+    expect(state.applications).toEqual([]);
     expect(state.placements[0]).toMatchObject({ nodes: [], self: false });
   });
 
-  it("filters each project on its own", async () => {
-    await deployed(OTHER_PROJECT, "prod");
-    await writePlacement(registry, PROJECT, "prod", [PEER], lease);
-    await writePlacement(registry, OTHER_PROJECT, "prod", [SELF], lease);
+  it("filters each application on its own", async () => {
+    await deployed(OTHER);
+    await writePlacement(registry, APP, [PEER], lease);
+    await writePlacement(registry, OTHER, [SELF], lease);
 
     const state = await readDesired(registry, { nodeId: SELF });
 
-    expect(state.environments.map((entry) => entry.project)).toEqual([OTHER_PROJECT]);
-    expect(
-      state.placements.map((view) => `${view.project}/${view.env}:${String(view.self)}`),
-    ).toEqual([`${OTHER_PROJECT}/prod:true`, `${PROJECT}/prod:false`]);
+    expect(state.applications.map((entry) => entry.name)).toEqual([OTHER]);
+    expect(state.placements.map((view) => `${view.application}:${String(view.self)}`)).toEqual([
+      `${OTHER}:true`,
+      `${APP}:false`,
+    ]);
   });
 });
 
-describe("an environment that carries a node selector", () => {
+describe("an application that carries a node selector", () => {
   const FAST = { tier: "fast" };
 
   it("is NOT served anywhere while no coordinator has placed it", async () => {
-    await setNodeSelector(registry, PROJECT, "prod", FAST);
+    await setNodeSelector(registry, APP, FAST);
 
     for (const nodeId of [SELF, PEER, "node-c"]) {
       const state = await readDesired(registry, { nodeId });
-      expect(state.environments, nodeId).toEqual([]);
+      expect(state.applications, nodeId).toEqual([]);
       expect(state.fleet, nodeId).toEqual([]);
       expect(state.placements, nodeId).toEqual([]);
     }
   });
 
   it("is served the moment a decision names this node, selector and all", async () => {
-    await setNodeSelector(registry, PROJECT, "prod", FAST);
-    await writePlacement(registry, PROJECT, "prod", [SELF], lease);
+    await setNodeSelector(registry, APP, FAST);
+    await writePlacement(registry, APP, [SELF], lease);
 
     const state = await readDesired(registry, { nodeId: SELF });
 
-    expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
+    expect(state.applications.map((entry) => entry.name)).toEqual([APP]);
     expect(state.placements).toEqual([
-      { project: PROJECT, env: "prod", nodes: [SELF], self: true, selector: FAST },
+      { application: APP, nodes: [SELF], self: true, selector: FAST },
     ]);
   });
 
   it("is left out again when the decision names other nodes", async () => {
-    await setNodeSelector(registry, PROJECT, "prod", FAST);
-    await writePlacement(registry, PROJECT, "prod", [PEER], lease);
+    await setNodeSelector(registry, APP, FAST);
+    await writePlacement(registry, APP, [PEER], lease);
 
     const state = await readDesired(registry, { nodeId: SELF });
 
-    expect(state.environments).toEqual([]);
+    expect(state.applications).toEqual([]);
     expect(state.placements[0]).toMatchObject({ self: false, selector: FAST });
   });
 
   it("reports the constraint beside the decision, so both are read together", async () => {
-    await deployed(PROJECT, "staging");
-    await setNodeSelector(registry, PROJECT, "prod", FAST);
-    await writePlacement(registry, PROJECT, "prod", [SELF], lease);
-    await writePlacement(registry, PROJECT, "staging", [SELF, PEER], lease);
+    await deployed(STAGING);
+    await setNodeSelector(registry, APP, FAST);
+    await writePlacement(registry, APP, [SELF], lease);
+    await writePlacement(registry, STAGING, [SELF, PEER], lease);
 
     const state = await readDesired(registry, { nodeId: SELF });
 
     expect(state.placements).toEqual([
-      { project: PROJECT, env: "prod", nodes: [SELF], self: true, selector: FAST },
-      { project: PROJECT, env: "staging", nodes: [SELF, PEER], self: true },
+      { application: APP, nodes: [SELF], self: true, selector: FAST },
+      { application: STAGING, nodes: [SELF, PEER], self: true },
     ]);
   });
 
   it("keeps serving what the decision says once the selector is cleared", async () => {
-    await setNodeSelector(registry, PROJECT, "prod", FAST);
-    await writePlacement(registry, PROJECT, "prod", [SELF], lease);
+    await setNodeSelector(registry, APP, FAST);
+    await writePlacement(registry, APP, [SELF], lease);
 
-    await setNodeSelector(registry, PROJECT, "prod", null);
+    await setNodeSelector(registry, APP, null);
 
     const state = await readDesired(registry, { nodeId: SELF });
-    expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
-    expect(state.placements).toEqual([
-      { project: PROJECT, env: "prod", nodes: [SELF], self: true },
-    ]);
+    expect(state.applications.map((entry) => entry.name)).toEqual([APP]);
+    expect(state.placements).toEqual([{ application: APP, nodes: [SELF], self: true }]);
   });
 
-  it("leaves the environments beside it entirely alone", async () => {
-    await deployed(PROJECT, "staging");
-    await setNodeSelector(registry, PROJECT, "prod", FAST);
-    await writePlacement(registry, PROJECT, "staging", [SELF], lease);
+  it("leaves the applications beside it entirely alone", async () => {
+    await deployed(STAGING);
+    await setNodeSelector(registry, APP, FAST);
+    await writePlacement(registry, STAGING, [SELF], lease);
 
     const state = await readDesired(registry, { nodeId: SELF });
 
-    expect(state.environments.map((entry) => entry.env.name)).toEqual(["staging"]);
+    expect(state.applications.map((entry) => entry.name)).toEqual([STAGING]);
   });
 });
 
 describe("what is left out for reasons other than placement", () => {
-  it("leaves out an environment without a deployment notice, squarely placed as it is", async () => {
-    await createEnvironment(registry, PROJECT, { name: "fresh" });
-    await writePlacement(registry, PROJECT, "fresh", [SELF], lease);
-    await writePlacement(registry, PROJECT, "prod", [SELF], lease);
+  it("leaves out an application without a deployment notice, squarely placed as it is", async () => {
+    await createApplication(registry, { name: "fresh" });
+    await writePlacement(registry, "fresh", [SELF], lease);
+    await writePlacement(registry, APP, [SELF], lease);
 
     const state = await readDesired(registry, { nodeId: SELF });
 
-    expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
-    expect(state.placements.map((view) => view.env)).toEqual(["fresh", "prod"]);
+    expect(state.applications.map((entry) => entry.name)).toEqual([APP]);
+    expect(state.placements.map((view) => view.application)).toEqual(["fresh", APP]);
   });
 
-  it("leaves out a RETIRED environment, however squarely it is placed here", async () => {
-    await writePlacement(registry, PROJECT, "prod", [SELF], lease);
-    await retireEnvironment(registry, PROJECT, "prod");
+  it("leaves out a BLOCKED application, however squarely it is placed here", async () => {
+    await writePlacement(registry, APP, [SELF], lease);
+    await blockApplication(registry, APP);
 
     const state = await readDesired(registry, { nodeId: SELF });
 
-    expect(state.environments).toEqual([]);
-    expect(state.placements).toEqual([
-      { project: PROJECT, env: "prod", nodes: [SELF], self: true },
-    ]);
+    expect(state.applications).toEqual([]);
+    expect(state.fleet).toEqual([]);
+    /* The decision stays readable, because unblocking takes it straight back. */
+    expect(state.placements).toEqual([{ application: APP, nodes: [SELF], self: true }]);
+  });
+
+  it("leaves out a RETIRED application, however squarely it is placed here", async () => {
+    await writePlacement(registry, APP, [SELF], lease);
+    await retireApplication(registry, APP);
+
+    const state = await readDesired(registry, { nodeId: SELF });
+
+    expect(state.applications).toEqual([]);
+    expect(state.placements).toEqual([{ application: APP, nodes: [SELF], self: true }]);
   });
 
   it("takes it straight back the moment it is unretired", async () => {
-    await writePlacement(registry, PROJECT, "prod", [SELF], lease);
-    await retireEnvironment(registry, PROJECT, "prod");
-    expect((await readDesired(registry, { nodeId: SELF })).environments).toEqual([]);
+    await writePlacement(registry, APP, [SELF], lease);
+    await retireApplication(registry, APP);
+    expect((await readDesired(registry, { nodeId: SELF })).applications).toEqual([]);
 
-    await unretireEnvironment(registry, PROJECT, "prod");
+    await unretireApplication(registry, APP);
 
     const state = await readDesired(registry, { nodeId: SELF });
-    expect(state.environments.map((entry) => entry.env.name)).toEqual(["prod"]);
-    expect(state.environments[0].env.deployment?.revision).toBe(1);
+    expect(state.applications.map((entry) => entry.name)).toEqual([APP]);
+    expect(state.applications[0].deployment?.revision).toBe(1);
   });
 
-  it("leaves a retired environment out on every node, not just this one", async () => {
-    await writePlacement(registry, PROJECT, "prod", [SELF, PEER, "node-c"], lease);
-    await retireEnvironment(registry, PROJECT, "prod");
+  it("leaves a retired application out on every node, not just this one", async () => {
+    await writePlacement(registry, APP, [SELF, PEER, "node-c"], lease);
+    await retireApplication(registry, APP);
 
     for (const nodeId of [SELF, PEER, "node-c"]) {
-      expect((await readDesired(registry, { nodeId })).environments, nodeId).toEqual([]);
+      expect((await readDesired(registry, { nodeId })).applications, nodeId).toEqual([]);
     }
   });
 
   it("keeps it out once the coordinator has dropped its placement record too", async () => {
-    await writePlacement(registry, PROJECT, "prod", [SELF, PEER], lease);
-    await retireEnvironment(registry, PROJECT, "prod");
-    await deletePlacement(registry, PROJECT, "prod", lease);
+    await writePlacement(registry, APP, [SELF, PEER], lease);
+    await retireApplication(registry, APP);
+    await deletePlacement(registry, APP, lease);
 
     for (const nodeId of [SELF, PEER, "node-c"]) {
       const state = await readDesired(registry, { nodeId });
-      expect(state.environments, nodeId).toEqual([]);
+      expect(state.applications, nodeId).toEqual([]);
       expect(state.fleet, nodeId).toEqual([]);
       expect(state.placements, nodeId).toEqual([]);
     }
@@ -257,18 +259,17 @@ describe("what is left out for reasons other than placement", () => {
     const empty = ctxWith(new MemoryCasStore()).ctx;
 
     expect(await readDesired(empty, { nodeId: SELF })).toEqual({
-      environments: [],
+      applications: [],
       fleet: [],
       placements: [],
     });
   });
 });
 
-describe("an old environment", () => {
+describe("an old application", () => {
   it("remains desired indefinitely", async () => {
-    await createEnvironment(registry, PROJECT, { name: PREVIEW });
-    await recordRevision(registry, PROJECT, PREVIEW, VERSION);
-    await writePlacement(registry, PROJECT, PREVIEW, [SELF], lease);
+    await deployed(PREVIEW);
+    await writePlacement(registry, PREVIEW, [SELF], lease);
     clock.tick(365 * 24 * 60 * 60 * 1000);
 
     expect(await isDesired(PREVIEW)).toBe(true);
@@ -276,7 +277,7 @@ describe("an old environment", () => {
 });
 
 describe("how a pass reads all of that", () => {
-  it("overlaps the environments of a project, up to the bound and no further", async () => {
+  it("overlaps the applications of an installation, up to the bound and no further", async () => {
     const { ctx, observing } = await watchedInstallation();
     observing.reset();
 
@@ -286,7 +287,7 @@ describe("how a pass reads all of that", () => {
     expect(observing.peakReads).toBeLessThanOrEqual(DEFAULT_CONCURRENCY);
   });
 
-  it("takes exactly the bound it is given, however many environments there are", async () => {
+  it("takes exactly the bound it is given, however many applications there are", async () => {
     const { ctx, observing } = await watchedInstallation();
 
     for (const concurrency of [1, 3]) {
@@ -298,7 +299,7 @@ describe("how a pass reads all of that", () => {
 
   it("answers exactly what it answered one read at a time", async () => {
     const { ctx, observing, names } = await watchedInstallation();
-    observing.delays.set(environmentKey(PROJECT, names[0]), 20);
+    observing.delays.set(applicationKey(names[0]), 20);
 
     const overlapped = await readDesired(ctx, { nodeId: SELF });
     const sequential = await readDesired(ctx, {
@@ -307,36 +308,37 @@ describe("how a pass reads all of that", () => {
     });
 
     expect(overlapped).toEqual(sequential);
-    expect(overlapped.environments.map((entry) => entry.env.name)).toEqual(names);
-    expect(overlapped.placements.map((view) => view.env)).toEqual(names);
+    expect(overlapped.applications.map((entry) => entry.name)).toEqual(names);
+    expect(overlapped.placements.map((view) => view.application)).toEqual(names);
   });
 
-  it("surfaces the failure of the FIRST environment, not of the first read to fail", async () => {
+  it("surfaces the failure of the FIRST application, not of the first read to fail", async () => {
     const { ctx, observing, names } = await watchedInstallation();
-    observing.delays.set(environmentKey(PROJECT, names[1]), 20);
-    observing.faults.set(environmentKey(PROJECT, names[1]), new Error("the second"));
-    observing.faults.set(environmentKey(PROJECT, names[5]), new Error("the sixth"));
+    observing.delays.set(applicationKey(names[1]), 20);
+    observing.faults.set(applicationKey(names[1]), new Error("the second"));
+    observing.faults.set(applicationKey(names[5]), new Error("the sixth"));
 
     await expect(readDesired(ctx, { nodeId: SELF })).rejects.toThrow("the second");
     await expect(readDesired(ctx, { nodeId: SELF, concurrency: 1 })).rejects.toThrow("the second");
   });
 });
 
-/** An environment with a deployment notice, ready to be served. */
-async function deployed(project: string, name: string): Promise<void> {
-  await createEnvironment(registry, project, { name });
-  await recordRevision(registry, project, name, VERSION);
+/** An application with a deployment notice, ready to be served. */
+async function deployed(name: string): Promise<void> {
+  await createApplication(registry, { name });
+  await createDeployment(registry, name, { version: VERSION });
+  await recordRevision(registry, name, VERSION);
 }
 
 /** Whether this node would run `name`. */
 async function isDesired(name: string): Promise<boolean> {
   const state = await readDesired(registry, { nodeId: SELF });
-  return state.environments.some((entry) => entry.env.name === name);
+  return state.applications.some((entry) => entry.name === name);
 }
 
 /**
- * One project of a dozen deployed and decided environments, over a store that
- * watches how its reads run.
+ * A dozen deployed and decided applications, over a store that watches how its
+ * reads run.
  */
 async function watchedInstallation(): Promise<{
   ctx: RegistryContext;
@@ -345,17 +347,16 @@ async function watchedInstallation(): Promise<{
 }> {
   const observing = new ObservingStore(new MemoryCasStore());
   const { ctx } = ctxWith(observing);
-  await createProject(ctx, { slug: PROJECT });
-  await createDeployment(ctx, PROJECT, { version: VERSION });
 
   const taken = await acquireLease(ctx, SELF);
   if (taken === null) throw new Error("the fixture could not take the lease");
 
-  const names = Array.from({ length: 12 }, (_, index) => `env-${String(index).padStart(2, "0")}`);
+  const names = Array.from({ length: 12 }, (_, index) => `app-${String(index).padStart(2, "0")}`);
   for (const name of names) {
-    await createEnvironment(ctx, PROJECT, { name });
-    await recordRevision(ctx, PROJECT, name, VERSION);
-    await writePlacement(ctx, PROJECT, name, [SELF], taken);
+    await createApplication(ctx, { name });
+    await createDeployment(ctx, name, { version: VERSION });
+    await recordRevision(ctx, name, VERSION);
+    await writePlacement(ctx, name, [SELF], taken);
   }
   return { ctx, observing, names };
 }

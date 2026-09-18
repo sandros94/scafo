@@ -66,7 +66,7 @@ export const sailArgs: ArgsDef = {
   "state-dir": { type: "string", description: "Directory this node keeps its identity in" },
   "node-labels": {
     type: "string",
-    description: "What this node is, for environments to select on (region=eu-west-1,tier=fast)",
+    description: "What this node is, for applications to select on (region=eu-west-1,tier=fast)",
   },
   "listen": { type: "string", description: "host:port the node API binds to" },
   "advertise": { type: "string", description: "host:port other nodes reach this one at" },
@@ -88,7 +88,7 @@ export const sailArgs: ArgsDef = {
       "new,old admits both while a rotation is in flight, and the first is written to the " +
       "state directory's ingress-token file. Restart the daemon before reloading the ingress",
   },
-  "celld-bin": { type: "string", description: "Executable that runs an environment" },
+  "celld-bin": { type: "string", description: "Executable that runs an application" },
   "celld-env": {
     type: "string",
     description:
@@ -106,19 +106,19 @@ export const sailArgs: ArgsDef = {
     description: "Maximum entries per deploy archive",
   },
   "active-tasks": { type: "string", description: "Maximum active deploy tasks on this node" },
-  "project-active-tasks": {
+  "application-active-tasks": {
     type: "string",
-    description: "Maximum active deploy tasks for one project",
+    description: "Maximum active deploy tasks for one application",
   },
   "queued-tasks": { type: "string", description: "Maximum receiving and queued deploys" },
-  "project-queued-tasks": {
+  "application-queued-tasks": {
     type: "string",
-    description: "Maximum receiving and queued deploys for one project",
+    description: "Maximum receiving and queued deploys for one application",
   },
   "staged-bytes": { type: "string", description: "Maximum staged deploy bytes on this node" },
-  "project-staged-bytes": {
+  "application-staged-bytes": {
     type: "string",
-    description: "Maximum staged deploy bytes for one project",
+    description: "Maximum staged deploy bytes for one application",
   },
   "receive-timeout-ms": {
     type: "string",
@@ -137,7 +137,7 @@ export const sailArgs: ArgsDef = {
     type: "string",
     description:
       "File the ingress writes its JSON access log to; the node follows it and counts " +
-      "requests, bytes, statuses and latencies per environment. Needs --observability",
+      "requests, bytes, statuses and latencies per application. Needs --observability",
   },
   "api-public": {
     type: "boolean",
@@ -327,11 +327,11 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
           scheduler: {
             artifactBytes: config.deploy.artifactBytes,
             activeTasks: config.deploy.activeTasks,
-            projectActiveTasks: config.deploy.projectActiveTasks,
+            applicationActiveTasks: config.deploy.applicationActiveTasks,
             queuedTasks: config.deploy.queuedTasks,
-            projectQueuedTasks: config.deploy.projectQueuedTasks,
+            applicationQueuedTasks: config.deploy.applicationQueuedTasks,
             stagedBytes: config.deploy.stagedBytes,
-            projectStagedBytes: config.deploy.projectStagedBytes,
+            applicationStagedBytes: config.deploy.applicationStagedBytes,
             receiveTimeoutMs: config.deploy.receiveTimeoutMs,
             queueTimeoutMs: config.deploy.queueTimeoutMs,
             taskTimeoutMs: config.deploy.taskTimeoutMs,
@@ -355,7 +355,7 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   daemon.coordinator = coordinator;
 
   /* What tells the coordinator this node is still there. Without it the node is
-     counted out after three intervals and its environments go elsewhere. */
+     counted out after three intervals and its applications go elsewhere. */
   const heartbeat = createHeartbeat(daemon);
   daemon.heartbeat = heartbeat;
 
@@ -381,7 +381,7 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
     /*
      * Written FIRST, before anything is stopped: this is what tells placement
      * the node is leaving rather than dying, and every millisecond it is late is
-     * a millisecond an environment is still assigned to a node that is going
+     * a millisecond an application is still assigned to a node that is going
      * away. A heartbeat that lands between this write and the stop below cannot
      * undo it — a beat touches its own field and nothing else.
      *
@@ -458,7 +458,7 @@ function attachIngressCounters(
   daemon.ingressCounters = counters;
   console.log(
     `scafo: counting what the ingress serves from "${path}"; requests, bytes, statuses ` +
-      `and latencies are kept per environment, in memory, since this boot`,
+      `and latencies are kept per application, in memory, since this boot`,
   );
 
   return createAccessLogTailer({
@@ -500,7 +500,7 @@ function untilSignalled(shutdown: () => Promise<void>): Promise<void> {
  * A switch reaches the loader as the text that loader accepts for one. Only a
  * flag the operator actually WROTE gets here — an unpassed boolean is undefined
  * rather than false — so a `--flag` says on, a `--no-flag` says off, and a flag
- * nobody wrote leaves the environment and the config file to answer.
+ * nobody wrote leaves the process environment and the config file to answer.
  */
 function stringFlags(flags: Record<string, unknown>): Record<string, string | undefined> {
   const given: Record<string, string | undefined> = {};

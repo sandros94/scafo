@@ -6,14 +6,13 @@ import {
   acquireLease,
   checkDomain,
   claimDomain,
+  createApplication,
   createDeployment,
-  createEnvironment,
-  createProject,
   executeReap,
+  getApplication,
   getDeployment,
-  getEnvironment,
   planReap,
-  retireEnvironment,
+  retireApplication,
   type ReapOptions,
 } from "../src/core/registry/index.ts";
 import { fleetPrefix } from "../src/core/registry/paths.ts";
@@ -27,7 +26,7 @@ import {
   rejectsWith,
 } from "./_helpers.ts";
 
-const PROJECT = "app";
+const APPLICATION = "app";
 const VERSION = "0f0f0f0f";
 const HOST = "flow.example.com";
 const HOUR_MS = 3_600_000;
@@ -49,18 +48,17 @@ const FLOWS: Flow[] = [
   {
     name: "createDeployment then recordRevision",
     seed: async ({ ctx }) => {
-      await createProject(ctx, { slug: PROJECT });
-      await createEnvironment(ctx, PROJECT, { name: "prod" });
+      await createApplication(ctx, { name: APPLICATION });
     },
     run: async ({ ctx }) => {
-      await createDeployment(ctx, PROJECT, { version: VERSION });
-      await recordRevision(ctx, PROJECT, "prod", VERSION);
+      await createDeployment(ctx, APPLICATION, { version: VERSION });
+      await recordRevision(ctx, APPLICATION, VERSION);
     },
     settled: async ({ ctx }) => {
-      await expect(getDeployment(ctx, PROJECT, VERSION)).resolves.toMatchObject({
+      await expect(getDeployment(ctx, APPLICATION, VERSION)).resolves.toMatchObject({
         version: VERSION,
       });
-      await expect(getEnvironment(ctx, PROJECT, "prod")).resolves.toMatchObject({
+      await expect(getApplication(ctx, APPLICATION)).resolves.toMatchObject({
         deployment: { revision: 1 },
       });
     },
@@ -68,30 +66,24 @@ const FLOWS: Flow[] = [
   {
     name: "claimDomain",
     seed: async ({ ctx }) => {
-      await createProject(ctx, { slug: PROJECT });
-      await createEnvironment(ctx, PROJECT, { name: "prod" });
+      await createApplication(ctx, { name: APPLICATION });
     },
     run: async ({ ctx }) => {
-      await claimDomain(ctx, HOST, PROJECT, "prod");
+      await claimDomain(ctx, HOST, APPLICATION);
     },
     settled: async ({ ctx }) => {
-      await expect(checkDomain(ctx, HOST)).resolves.toMatchObject({ environment: "prod" });
-      await expect(getEnvironment(ctx, PROJECT, "prod")).resolves.toMatchObject({
-        domains: [HOST],
-      });
+      await expect(checkDomain(ctx, HOST)).resolves.toMatchObject({ application: APPLICATION });
+      await expect(getApplication(ctx, APPLICATION)).resolves.toMatchObject({ domains: [HOST] });
     },
   },
   {
-    name: "executeReap of an environment with a domain and fleet keys",
+    name: "executeReap of an application with a domain and fleet keys",
     seed: async (clock) => {
-      await createProject(clock.ctx, { slug: PROJECT });
-      await createEnvironment(clock.ctx, PROJECT, {
-        name: "preview",
-      });
-      await claimDomain(clock.ctx, HOST, PROJECT, "preview");
-      await retireEnvironment(clock.ctx, PROJECT, "preview");
+      await createApplication(clock.ctx, { name: APPLICATION });
+      await claimDomain(clock.ctx, HOST, APPLICATION);
+      await retireApplication(clock.ctx, APPLICATION);
       for (const suffix of ["node-a.json", "state/routes.json"]) {
-        await clock.ctx.store.put(`${fleetPrefix(PROJECT, "preview")}/${suffix}`, "{}");
+        await clock.ctx.store.put(`${fleetPrefix(APPLICATION)}/${suffix}`, "{}");
       }
       clock.tick(86_400_001);
     },
@@ -102,7 +94,7 @@ const FLOWS: Flow[] = [
       await executeReap(ctx, plan, lease, REAP_OPTIONS);
     },
     settled: async ({ ctx }) => {
-      await rejectsWith(() => getEnvironment(ctx, PROJECT, "preview"), "not-found");
+      await rejectsWith(() => getApplication(ctx, APPLICATION), "not-found");
     },
   },
 ];

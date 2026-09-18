@@ -516,14 +516,15 @@ report() {
   fi
 
   printf '\nTHE BUCKET WAS NOT TOUCHED\n\n'
-  printf '  This node'\''s record, its builds and every environment it served are\n'
+  printf '  This node'\''s record, its builds and every application it served are\n'
   printf '  where they were. That is not an omission: the registry is the FLEET'\''s,\n'
   printf '  deletion in it is gated on the coordinator lease this script does not\n'
-  printf '  hold, and another node may be serving those environments right now.\n'
+  printf '  hold, and another node may be serving those applications right now.\n'
   printf '  THIS NODE DROPS OFF THE FLEET ON ITS OWN — stopping the daemon marked it\n'
   printf '  draining, so placement counted it out on the coordinator'\''s next pass,\n'
   printf '  and a node that never got to say so is counted out once its liveness\n'
-  printf '  window runs out. Retiring what it served is "scafo env", from anywhere.\n'
+  printf '  window runs out. Retiring what it served is "scafo app retire", from\n'
+  printf '  anywhere.\n'
   if [ "$MANIFEST_CADDY_FLAVOR" = 'scafo' ]; then
     printf '  THE TLS MATERIAL IS IN THERE TOO. This host ran scafo-caddy, so the\n'
     printf '  certificates, their keys and the ACME account were in the bucket rather\n'

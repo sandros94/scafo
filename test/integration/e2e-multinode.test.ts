@@ -21,15 +21,14 @@ import type { DaemonState } from "../../src/daemon/app.ts";
 import type { OperatorKeyFile } from "../../src/cli/_operator-key.ts";
 import { signNodeToken } from "../../src/core/auth/node-token.ts";
 import {
+  applicationKey,
   claimDomain,
-  createEnvironment,
   domainKey,
   listNodes,
   NODE_LIVENESS_WINDOW_MS,
   placementKey,
   readJson,
   type RegistryContext,
-  environmentKey,
   nodeKey,
   setReplicas,
 } from "../../src/core/registry/index.ts";
@@ -63,22 +62,21 @@ const ACCESS_KEY = "scafo";
 const SECRET_KEY = "scafo-secret";
 const REGION = "us-east-1";
 const PLATFORM_DOMAIN = "scafo.test";
-const PROJECT = "app";
-const ENVIRONMENT = "production";
+/** The application every other name here shares a prefix with. */
+const APPLICATION = "app";
 /** Deployed, then deleted through the coordinator and reaped. */
-const PREVIEW = "preview";
+const PREVIEW = "app-preview";
 /**
  * Scaled down to a single node, then carried through the coordinator's death.
  *
- * The NAME is load-bearing, and only for how much this suite proves: rendezvous
- * hashing is deterministic, so `app/single` over these two node ids always lands
- * on node-a — which is the node that boots first, therefore usually wins the
- * coordinator lease, and is therefore the one the kill step kills. That makes
- * the interesting branch the usual one: the environment has to be MOVED to a
- * node that was not running it. Neither the name nor the boot order guarantees
- * it, so the assertion still handles the other outcome.
+ * Rendezvous hashing is deterministic, so this name alone decides which of the
+ * two nodes holds it. The node that boots first usually wins the coordinator
+ * lease and is therefore the one the kill step kills, which makes the
+ * interesting branch — the application has to be MOVED to a node that was not
+ * running it — the likely one. Nothing guarantees it, so the assertion handles
+ * either outcome.
  */
-const SOLO = "single";
+const SOLO = "app-single";
 /**
  * Deployed under a node selector only one node satisfies, then let loose again.
  *
@@ -87,16 +85,16 @@ const SOLO = "single";
  * label at all, so `--node-selector tier=fast --replicas all` has exactly one
  * eligible node however the digests fall.
  */
-const TARGETED = "targeted";
+const TARGETED = "app-targeted";
 
 /** The label node-b boots with, and the one {@link TARGETED} selects on. */
 const FAST_LABEL = "tier=fast";
 
 /** Deployed through a node excluded from its placement selector. */
-const AWAITED = "awaited";
+const AWAITED = "app-awaited";
 
 /** Deployed to both nodes, retired out of service, then force-deleted. */
-const SUNSET = "sunset";
+const SUNSET = "app-sunset";
 /** Claimed for {@link SUNSET}, so its deletion has a claim to release too. */
 const SUNSET_DOMAIN = "sunset.example.test";
 
@@ -165,9 +163,6 @@ const observed: Record<string, unknown> = {};
 
 describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   beforeAll(async () => {
-    const built = await run("pnpm", ["build"], REPO_ROOT, env as Record<string, string>);
-    if (built.code !== 0) throw new Error(`"pnpm build" failed:\n${built.output}`);
-
     store = await new GenericContainer(STORE_IMAGE)
       .withCommand(["server", "-s3"])
       .withExposedPorts(STORE_PORT)
@@ -256,7 +251,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
     "deploys through one node and is served by both",
     async () => {
       const started = Date.now();
-      const result = await runCli(deployArgs(await stageApp("v1"), ENVIRONMENT), {});
+      const result = await runCli(deployArgs(await stageApp("v1"), APPLICATION), {});
       observed.deployV1Ms = Date.now() - started;
       observed.deployV1Output = result.output;
 
@@ -268,7 +263,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       const servedAt: Record<string, number> = {};
       for (const node of nodes) {
         const at = Date.now();
-        await untilServes(node, envHost(), "v1");
+        await untilServes(node, hostOf(APPLICATION), "v1");
         servedAt[node.id] = Date.now() - at;
       }
       observed.servedAfterDeployMs = servedAt;
@@ -281,7 +276,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
     async () => {
       for (const node of nodes) {
         await until(`${node.id} to answer /count`, DEADLINE_MS, async () => {
-          const answer = await httpGet(node.httpPort, "/count", { host: envHost() });
+          const answer = await httpGet(node.httpPort, "/count", { host: hostOf(APPLICATION) });
           return answer.status === 200 && typeof countOf(answer.body) === "number" ? answer : null;
         });
       }
@@ -289,7 +284,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       const counts: Array<{ node: string; n: number }> = [];
       for (let round = 0; round < 3; round++) {
         for (const node of nodes) {
-          const answer = await httpGet(node.httpPort, "/count", { host: envHost() });
+          const answer = await httpGet(node.httpPort, "/count", { host: hostOf(APPLICATION) });
           expectStatus(answer, 200);
           counts.push({ node: node.id, n: countOf(answer.body) as number });
         }
@@ -334,23 +329,25 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   );
 
   it(
-    "deletes an environment outright when asked of the node that is NOT the coordinator",
+    "deletes an application outright when asked of the node that is NOT the coordinator",
     async () => {
-      await createEnvironment(registry, PROJECT, { name: PREVIEW });
       expectCleanExit(
         await runCli(deployArgs(await stageApp("v1"), PREVIEW, ["--replicas", "all"]), {}),
       );
 
       const coordinator = await coordinatorNode();
       const asked = nodes.find((node) => node.id !== coordinator.id) as Node;
-      await untilServes(asked, previewHost(), "v1");
+      expect(asked.id, "the deletion must be sent to a node holding no lease").not.toBe(
+        coordinator.id,
+      );
+      await untilServes(asked, hostOf(PREVIEW), "v1");
 
       const started = Date.now();
-      /* Forced: the environment was never retired, and this case is about which
+      /* Forced: the application was never retired, and this case is about which
          node carries the deletion out, not about the two steps that precede it. */
       const answer = await httpDelete(
         asked.apiPort,
-        `/v1/environments/${PROJECT}/${PREVIEW}?force=1`,
+        `/v1/applications/${PREVIEW}?force=1`,
         await operatorToken(),
       );
       observed.proxiedDelete = {
@@ -362,15 +359,15 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       };
 
       expectStatus(answer, 200);
-      expect(JSON.parse(answer.body).deleted).toContain(environmentKey(PROJECT, PREVIEW));
-      expect(await readJson(registry, environmentKey(PROJECT, PREVIEW))).toBeNull();
+      expect(JSON.parse(answer.body).deleted).toContain(applicationKey(PREVIEW));
+      expect(await readJson(registry, applicationKey(PREVIEW))).toBeNull();
 
       const reapedAt = Date.now();
       for (const node of nodes) {
         await until(`${node.id} to stop running ${PREVIEW}`, DEADLINE_MS, async () => {
           const state = await stateOf(node);
           const running = state.processes.filter(
-            (process) => process.state === "running" && process.id === `${PROJECT}--${PREVIEW}`,
+            (process) => process.state === "running" && process.id === PREVIEW,
           );
           return running.length === 0 ? state : null;
         });
@@ -381,7 +378,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   );
 
   it(
-    "runs a labelled environment only on the node carrying the label, then spreads it when the selector is lifted",
+    "runs a labelled application only on the node carrying the label, then spreads it when the selector is lifted",
     async () => {
       const labelled = nodes.find((node) => node.id === NODE_B) as Node;
       const plain = nodes.find((node) => node.id === NODE_A) as Node;
@@ -409,7 +406,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       );
       const placedMs = Date.now() - deployedAt;
 
-      const served = await untilServes(labelled, targetedHost(), "v1");
+      const served = await untilServes(labelled, hostOf(TARGETED), "v1");
       expect(JSON.parse(served.body).version).toBe("v1");
 
       await until(`${plain.id} to run nothing for ${TARGETED}`, DEADLINE_MS, async () => {
@@ -419,35 +416,35 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       /* The node the selector excluded runs nothing for the host, and still
        * answers for it: its Traefik reads the FLEET's routing from it, and that
        * document names the holder's upstream because nothing local can serve. */
-      const excludedAnswer = await untilServes(plain, targetedHost(), "v1");
+      const excludedAnswer = await untilServes(plain, hostOf(TARGETED), "v1");
       expect(JSON.parse(excludedAnswer.body).version).toBe("v1");
       expect((await stateOf(plain)).processes.some(runsTargeted)).toBe(false);
 
       const view = (await stateOf(plain)).placements.find(
-        (entry) => entry.project === PROJECT && entry.env === TARGETED,
+        (entry) => entry.application === TARGETED,
       );
       expect(view?.selector).toEqual({ tier: "fast" });
 
       const clearedAt = Date.now();
-      const cleared = await runCli(envArgs("selector", TARGETED, plain, ["--clear"]), {});
+      const cleared = await runCli(appArgs("selector", TARGETED, plain, ["--clear"]), {});
       expectCleanExit(cleared);
       expect(cleared.output).toContain("no nodes any more");
 
-      /* Serving is no longer what says the environment arrived: the excluded node
+      /* Serving is no longer what says the application arrived: the excluded node
        * already answered for it by forwarding. The process on it is. */
       await until(`${TARGETED} to spread to both nodes`, DEADLINE_MS, async () => {
         const states = await Promise.all(nodes.map(async (node) => stateOf(node)));
         if (!states.every((state) => placedNodes(state, TARGETED)?.length === 2)) return null;
         return states.every((state) => state.processes.some(runsTargeted)) ? states : null;
       });
-      const spread = await untilServes(plain, targetedHost(), "v1");
+      const spread = await untilServes(plain, hostOf(TARGETED), "v1");
       const spreadMs = Date.now() - clearedAt;
 
       expect(JSON.parse(spread.body).version).toBe("v1");
       expect(placedNodes(await stateOf(plain), TARGETED)).toEqual([NODE_A, NODE_B]);
 
       observed.nodeSelector = {
-        environment: TARGETED,
+        application: TARGETED,
         selector: FAST_LABEL,
         deployedThrough: labelled.id,
         placedOn: labelled.id,
@@ -492,7 +489,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expect((await stateOf(plain)).processes.some(runsAwaited)).toBe(false);
 
       observed.deployThroughOtherNode = {
-        environment: AWAITED,
+        application: AWAITED,
         deployedThrough: plain.id,
         placedOn: labelled.id,
         deployedMs,
@@ -503,13 +500,13 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   );
 
   it(
-    "runs an environment scaled to one replica on exactly one node, and takes it off the other",
+    "runs an application scaled to one replica on exactly one node, and takes it off the other",
     async () => {
       expectCleanExit(await runCli(deployArgs(await stageApp("v1"), SOLO), {}));
-      for (const node of nodes) await untilServes(node, soloHost(), "v1");
+      for (const node of nodes) await untilServes(node, hostOf(SOLO), "v1");
 
       const scaledAt = Date.now();
-      await setReplicas(registry, PROJECT, SOLO, 1);
+      await setReplicas(registry, SOLO, 1);
 
       const holder = await until(
         `exactly one node to be left running ${SOLO}`,
@@ -527,7 +524,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       );
       const unassigned = nodes.find((node) => node.id !== holder.id) as Node;
 
-      const served = await untilServes(holder, soloHost(), "v1");
+      const served = await untilServes(holder, hostOf(SOLO), "v1");
       expect(JSON.parse(served.body).version).toBe("v1");
 
       await until(`${unassigned.id} to run nothing for ${SOLO}`, DEADLINE_MS, async () => {
@@ -537,7 +534,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       /* Same contract as the selector case: the node scaling took the process off
        * keeps answering for the host, because the fleet document its own Traefik
        * polls names the one node left running it. */
-      const unassignedAnswer = await untilServes(unassigned, soloHost(), "v1");
+      const unassignedAnswer = await untilServes(unassigned, hostOf(SOLO), "v1");
       expect(JSON.parse(unassignedAnswer.body).version).toBe("v1");
       expect((await stateOf(unassigned)).processes.some(runsSolo)).toBe(false);
       expect(placedNodes(await stateOf(unassigned), SOLO)).toEqual([holder.id]);
@@ -559,7 +556,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   );
 
   it(
-    "moves a single-replica environment off a node that was asked to stop, FAST",
+    "moves a single-replica application off a node that was asked to stop, FAST",
     async () => {
       const leaving = soloHolder;
       const survivor = nodes.find((node) => node.id !== leaving.id) as Node;
@@ -583,7 +580,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
           if (placedNodes(state, SOLO)?.includes(survivor.id) !== true) return null;
           if (!state.processes.some(runsSolo)) return null;
 
-          const answer = await httpGet(survivor.httpPort, "/", { host: soloHost() });
+          const answer = await httpGet(survivor.httpPort, "/", { host: hostOf(SOLO) });
           return answer.status === 200 && answer.body.includes('"v1"') ? answer : null;
         },
       );
@@ -642,24 +639,24 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   );
 
   it(
-    "retires an environment out of service, then refuses to delete it until it is forced",
+    "retires an application out of service, then refuses to delete it until it is forced",
     async () => {
       expectCleanExit(await runCli(deployArgs(await stageApp("v1"), SUNSET), {}));
-      for (const node of nodes) await untilServes(node, sunsetHost(), "v1");
-      await claimDomain(registry, SUNSET_DOMAIN, PROJECT, SUNSET);
+      for (const node of nodes) await untilServes(node, hostOf(SUNSET), "v1");
+      await claimDomain(registry, SUNSET_DOMAIN, SUNSET);
 
       const retiredAt = Date.now();
-      const retired = await runCli(envArgs("retire", SUNSET, nodes[0]), {});
+      const retired = await runCli(appArgs("retire", SUNSET, nodes[0]), {});
       expectCleanExit(retired);
       expect(retired.output).toContain("retired");
 
-      /* A retired environment leaves the fleet document entirely, so neither node
+      /* A retired application leaves the fleet document entirely, so neither node
        * has an upstream to forward to and both fall through to Traefik's own 404. */
       for (const node of nodes) {
         await until(`${node.id} to stop serving ${SUNSET}`, DEADLINE_MS, async () => {
           const state = await stateOf(node);
           if (state.processes.some(runsSunset)) return null;
-          const answer = await httpGet(node.httpPort, "/", { host: sunsetHost() });
+          const answer = await httpGet(node.httpPort, "/", { host: hostOf(SUNSET) });
           return answer.status === 404 && answer.body.includes("404 page not found")
             ? answer
             : null;
@@ -668,28 +665,30 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       const stoppedMs = Date.now() - retiredAt;
 
       await until(`the placement of ${SUNSET} to be removed`, DEADLINE_MS, async () =>
-        (await readJson(registry, placementKey(PROJECT, SUNSET))) === null ? true : null,
+        (await readJson(registry, placementKey(SUNSET))) === null ? true : null,
       );
 
       const coordinator = await coordinatorNode();
       const asked = nodes.find((node) => node.id !== coordinator.id) as Node;
 
-      const refused = await runCli(envArgs("delete", SUNSET, asked), {});
+      const refused = await runCli(appArgs("delete", SUNSET, asked), {});
       expect(refused.code, refused.output).toBe(1);
       expect(refused.output).toContain("grace");
       expect(refused.output).toContain("force");
-      expect(await readJson(registry, environmentKey(PROJECT, SUNSET))).not.toBeNull();
+      expect(await readJson(registry, applicationKey(SUNSET))).not.toBeNull();
 
-      const forced = await runCli(envArgs("delete", SUNSET, asked, ["--force"]), {});
+      const forced = await runCli(appArgs("delete", SUNSET, asked, ["--force"]), {});
       expectCleanExit(forced);
-      expect(forced.output).toContain(environmentKey(PROJECT, SUNSET));
+      expect(forced.output).toContain(applicationKey(SUNSET));
 
-      expect(await readJson(registry, environmentKey(PROJECT, SUNSET))).toBeNull();
-      expect(await readJson(registry, placementKey(PROJECT, SUNSET))).toBeNull();
+      expect(await readJson(registry, applicationKey(SUNSET))).toBeNull();
+      expect(await readJson(registry, placementKey(SUNSET))).toBeNull();
       expect(await readJson(registry, domainKey(SUNSET_DOMAIN))).toBeNull();
+      /* The application whose name every one of these prefixes is untouched. */
+      expect(await readJson(registry, applicationKey(APPLICATION))).not.toBeNull();
 
       observed.retirement = {
-        environment: SUNSET,
+        application: SUNSET,
         retiredThrough: nodes[0].id,
         deletedThrough: asked.id,
         coordinator: coordinator.id,
@@ -741,14 +740,14 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expect(failoverMs).toBeGreaterThanOrEqual(LEASE_TTL_MS - LEASE_TTL_MS / 3);
       expect(failoverMs).toBeLessThanOrEqual(3 * LEASE_TTL_MS);
 
-      const answer = await untilServes(survivor, envHost(), "v1");
+      const answer = await untilServes(survivor, hostOf(APPLICATION), "v1");
       expect(JSON.parse(answer.body).version).toBe("v1");
     },
     STEP_TIMEOUT_MS,
   );
 
   it(
-    "carries the single-replica environment through the death of whichever node held it",
+    "carries the single-replica application through the death of whichever node held it",
     async () => {
       const survivor = nodes.find((node) => node.running) as Node;
       const killedHeldIt = soloHolder.id !== survivor.id;
@@ -762,7 +761,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
           if (placedNodes(state, SOLO)?.includes(survivor.id) !== true) return null;
           if (!state.processes.some(runsSolo)) return null;
 
-          const answer = await httpGet(survivor.httpPort, "/", { host: soloHost() });
+          const answer = await httpGet(survivor.httpPort, "/", { host: hostOf(SOLO) });
           if (answer.status !== 200 || !answer.body.includes('"v1"')) return null;
           return { state, answer };
         },
@@ -863,54 +862,42 @@ async function startNode(id: string, labels?: string): Promise<Node> {
   };
 }
 
-function envHost(): string {
-  return `${PROJECT}--${ENVIRONMENT}.${PLATFORM_DOMAIN}`;
-}
-
-function previewHost(): string {
-  return `${PROJECT}--${PREVIEW}.${PLATFORM_DOMAIN}`;
-}
-
-function soloHost(): string {
-  return `${PROJECT}--${SOLO}.${PLATFORM_DOMAIN}`;
-}
-
-function sunsetHost(): string {
-  return `${PROJECT}--${SUNSET}.${PLATFORM_DOMAIN}`;
-}
-
-function targetedHost(): string {
-  return `${PROJECT}--${TARGETED}.${PLATFORM_DOMAIN}`;
+/** The host one application is served at under the platform domain. */
+function hostOf(application: string): string {
+  return `${application}.${PLATFORM_DOMAIN}`;
 }
 
 /** Whether a process on a node is one serving {@link TARGETED}. */
 function runsTargeted(process: ProcessStatus): boolean {
-  return process.state === "running" && process.id === `${PROJECT}--${TARGETED}`;
+  return runs(process, TARGETED);
 }
 
 function runsAwaited(process: ProcessStatus): boolean {
-  return process.state === "running" && process.id === `${PROJECT}--${AWAITED}`;
+  return runs(process, AWAITED);
 }
 
 /** Whether a process on a node is one serving {@link SOLO}. */
 function runsSolo(process: ProcessStatus): boolean {
-  return process.state === "running" && process.id === `${PROJECT}--${SOLO}`;
+  return runs(process, SOLO);
 }
 
 /** Whether a process on a node is one serving {@link SUNSET}. */
 function runsSunset(process: ProcessStatus): boolean {
-  return process.state === "running" && process.id === `${PROJECT}--${SUNSET}`;
+  return runs(process, SUNSET);
 }
 
-/** One `scafo env <action>` run from the host against `node`'s node API. */
-function envArgs(action: string, environment: string, node: Node, extra: string[] = []): string[] {
+/** Whether `process` is the running runtime of `application`. */
+function runs(process: ProcessStatus, application: string): boolean {
+  return process.state === "running" && process.id === application;
+}
+
+/** One `scafo app <action>` run from the host against `node`'s node API. */
+function appArgs(action: string, application: string, node: Node, extra: string[] = []): string[] {
   return [
-    "env",
+    "app",
     action,
-    "--project",
-    PROJECT,
-    "--env",
-    environment,
+    "--name",
+    application,
     "--node",
     `http://127.0.0.1:${String(node.apiPort)}`,
     "--key",
@@ -919,9 +906,9 @@ function envArgs(action: string, environment: string, node: Node, extra: string[
   ];
 }
 
-/** The nodes a state says an environment was placed on, or null when it has no decision. */
-function placedNodes(state: DaemonState, env: string): string[] | null {
-  const placed = state.placements.find((view) => view.project === PROJECT && view.env === env);
+/** The nodes a state says an application was placed on, or null when it has no decision. */
+function placedNodes(state: DaemonState, application: string): string[] | null {
+  const placed = state.placements.find((view) => view.application === application);
   return placed?.nodes ?? null;
 }
 
@@ -962,7 +949,7 @@ function countOf(body: string): number | null {
 /** The flags one deploy of the fixture is run with, from the host through `via`. */
 function deployArgs(
   dir: string,
-  environment: string,
+  application: string,
   extra: string[] = [],
   via: Node = nodes[0],
 ): string[] {
@@ -971,10 +958,8 @@ function deployArgs(
     dir,
     "--node",
     `http://127.0.0.1:${String(via.apiPort)}`,
-    "--project",
-    PROJECT,
-    "--env",
-    environment,
+    "--name",
+    application,
     "--key",
     keyPath,
     ...extra,

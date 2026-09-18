@@ -9,7 +9,7 @@ export type ScafoErrorCode =
   | "cas-conflict"
   | "capability-missing"
   | "placement-unavailable"
-  | "project-blocked"
+  | "application-blocked"
   | "deploys-frozen"
   | "draining"
   | "deploy-overloaded"
@@ -50,13 +50,13 @@ const DEFAULT_STATUS: Record<ScafoErrorCode, number> = {
   "cas-conflict": 409,
   "capability-missing": 409,
   "placement-unavailable": 409,
-  /* An admin of the fleet has stopped the project. A CONFLICT rather than a
+  /* An admin of the fleet has stopped the application. A CONFLICT rather than a
      forbidden: nothing is wrong with the caller or with its key, and the same
      request works unchanged the moment the block is lifted. */
-  "project-blocked": 409,
+  "application-blocked": 409,
   /* An admin of the fleet has stopped deploy intake, for a maintenance or an
      upgrade. A CONFLICT rather than a forbidden, for the same reason a blocked
-     project is one: nothing is wrong with the caller or with its key, and the
+     application is one: nothing is wrong with the caller or with its key, and the
      same request works unchanged the moment the freeze is lifted. */
   "deploys-frozen": 409,
   "draining": 503,
@@ -70,7 +70,7 @@ const DEFAULT_STATUS: Record<ScafoErrorCode, number> = {
   "resource-limit": 413,
   "invalid-slug": 400,
   "invalid-input": 400,
-  /* Two Celld versions over one environment's fleet. A CONFLICT rather than a
+  /* Two Celld versions over one application's fleet. A CONFLICT rather than a
      capability that is missing: every binary involved is one scafo runs, and
      what is wrong is the fleet's state rather than the caller or its node. */
   "version-skew": 409,

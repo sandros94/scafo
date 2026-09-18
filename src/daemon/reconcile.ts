@@ -158,14 +158,14 @@ export function createReconciler(
         readDesired(registry, { nodeId: daemon.nodeId }),
         listNodeRecords(registry),
       ]);
-      const desired = state.environments;
+      const desired = state.applications;
       placements = state.placements;
       /* Rendered from what the pass read, before anything here changes: this
          node's own processes reach the fleet through its heartbeat, like every
          other node's, so every node's copy of the routing says the same. */
       fleetRouting = renderFleetRouting({
         platformDomains: daemon.config.platformDomains,
-        environments: state.fleet,
+        applications: state.fleet,
         nodes,
         now: nowDate(registry),
         api: daemon.config.api.public,
@@ -190,7 +190,7 @@ export function createReconciler(
         recordRouting(daemon, { desired, processes: executor.currentProcesses() });
       }
     } catch (error) {
-      /* A registry read failure must not be interpreted as every environment removed. */
+      /* A registry read failure must not be interpreted as every application removed. */
       pending.push(failureOf(error, {}));
     } finally {
       lastActions = plan;
@@ -295,7 +295,7 @@ export function createReconciler(
 }
 
 /**
- * The parts of an environment worth handing to a runtime process: enough to find
+ * The parts of the process environment worth handing to a runtime process: enough to find
  * and run the executable, and nothing that belongs to the daemon alone.
  */
 export function runtimeBaseEnv(env: Record<string, string | undefined>): Record<string, string> {

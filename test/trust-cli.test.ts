@@ -1,6 +1,7 @@
 /*
- * `scafo trust`: the operator's half of the workload-deploy path — which CI issuers a project
- * admits, which of their subjects, and what an edit does to the grants already in the policy.
+ * `scafo trust`: the operator's half of the workload-deploy path — which CI issuers an
+ * application admits, which of their subjects, and what an edit does to the grants already in
+ * the policy.
  */
 
 import { describe, expect, it } from "vitest";
@@ -18,7 +19,7 @@ import { matchTrust } from "../src/core/registry/trust.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, rejectsWith } from "./_helpers.ts";
 
-const PROJECT = "shop";
+const APPLICATION = "shop";
 const GITHUB = "https://token.actions.githubusercontent.com";
 const GITLAB = "https://gitlab.example.com";
 
@@ -27,11 +28,11 @@ const BRANCHES = "repo:acme/shop:ref:refs/heads/*";
 const TAGS = "repo:acme/shop:ref:refs/tags/*";
 
 describe("trusting an issuer", () => {
-  it("writes a policy a project had none of, defaulting the audience to ours", async () => {
+  it("writes a policy an application had none of, defaulting the audience to ours", async () => {
     const registry = emptyRegistry();
 
     const policy = await setTrustIssuer(registry, {
-      project: PROJECT,
+      application: APPLICATION,
       iss: GITHUB,
       aud: DEFAULT_TRUST_AUDIENCE,
       subjects: [BRANCHES],
@@ -41,13 +42,13 @@ describe("trusting an issuer", () => {
       v: 1,
       issuers: [{ iss: GITHUB, aud: OIDC_AUDIENCE, subjects: [BRANCHES] }],
     });
-    expect(await readTrustPolicy(registry, PROJECT)).toEqual(policy);
+    expect(await readTrustPolicy(registry, APPLICATION)).toEqual(policy);
   });
 
   it("admits exactly the subjects it was given, as the verifier reads them", async () => {
     const registry = emptyRegistry();
     const policy = await setTrustIssuer(registry, {
-      project: PROJECT,
+      application: APPLICATION,
       iss: GITHUB,
       aud: OIDC_AUDIENCE,
       subjects: [BRANCHES],
@@ -91,7 +92,7 @@ describe("trusting an issuer", () => {
     await trust(registry, GITHUB, [BRANCHES]);
 
     const policy = await setTrustIssuer(registry, {
-      project: PROJECT,
+      application: APPLICATION,
       iss: GITHUB,
       aud: "staging",
       subjects: [TAGS],
@@ -103,18 +104,20 @@ describe("trusting an issuer", () => {
     ]);
   });
 
-  it("keeps each project's policy to itself", async () => {
+  it("keeps each application's policy to itself", async () => {
     const registry = emptyRegistry();
     await trust(registry, GITHUB, [BRANCHES]);
 
     await setTrustIssuer(registry, {
-      project: "other",
+      application: "other",
       iss: GITLAB,
       aud: OIDC_AUDIENCE,
       subjects: [TAGS],
     });
 
-    expect((await readTrustPolicy(registry, PROJECT)).issuers.map((i) => i.iss)).toEqual([GITHUB]);
+    expect((await readTrustPolicy(registry, APPLICATION)).issuers.map((i) => i.iss)).toEqual([
+      GITHUB,
+    ]);
     expect((await readTrustPolicy(registry, "other")).issuers.map((i) => i.iss)).toEqual([GITLAB]);
   });
 
@@ -151,34 +154,34 @@ describe("no longer trusting an issuer", () => {
     const registry = emptyRegistry();
     await trust(registry, GITHUB, [BRANCHES]);
 
-    const policy = await removeTrustIssuer(registry, PROJECT, GITHUB);
+    const policy = await removeTrustIssuer(registry, APPLICATION, GITHUB);
 
     expect(policy).toEqual({ v: 1, issuers: [] });
-    expect(await readTrustPolicy(registry, PROJECT)).toEqual({ v: 1, issuers: [] });
+    expect(await readTrustPolicy(registry, APPLICATION)).toEqual({ v: 1, issuers: [] });
   });
 
   it("takes every audience that issuer was granted, and no other issuer", async () => {
     const registry = emptyRegistry();
     await trust(registry, GITHUB, [BRANCHES]);
     await setTrustIssuer(registry, {
-      project: PROJECT,
+      application: APPLICATION,
       iss: GITHUB,
       aud: "staging",
       subjects: [TAGS],
     });
     await trust(registry, GITLAB, [MAIN]);
 
-    const policy = await removeTrustIssuer(registry, PROJECT, GITHUB);
+    const policy = await removeTrustIssuer(registry, APPLICATION, GITHUB);
 
     expect(policy.issuers).toEqual([{ iss: GITLAB, aud: OIDC_AUDIENCE, subjects: [MAIN] }]);
   });
 
-  it("refuses an issuer the project never trusted, naming the ones it does", async () => {
+  it("refuses an issuer the application never trusted, naming the ones it does", async () => {
     const registry = emptyRegistry();
     await trust(registry, GITHUB, [BRANCHES]);
 
     const error = await rejectsWith(
-      () => removeTrustIssuer(registry, PROJECT, GITLAB),
+      () => removeTrustIssuer(registry, APPLICATION, GITLAB),
       "not-found",
     );
 
@@ -186,11 +189,11 @@ describe("no longer trusting an issuer", () => {
     expect(error.detail).toContain(GITHUB);
   });
 
-  it("refuses on a project with no policy at all, rather than writing an empty one", async () => {
+  it("refuses on an application with no policy at all, rather than writing an empty one", async () => {
     const registry = emptyRegistry();
 
     const error = await rejectsWith(
-      () => removeTrustIssuer(registry, PROJECT, GITHUB),
+      () => removeTrustIssuer(registry, APPLICATION, GITHUB),
       "not-found",
     );
 
@@ -203,7 +206,7 @@ describe("what `scafo trust show` puts on the terminal", () => {
     const registry = emptyRegistry();
     await trust(registry, GITHUB, [BRANCHES, TAGS]);
 
-    const printed = formatTrustPolicy(await readTrustPolicy(registry, PROJECT));
+    const printed = formatTrustPolicy(await readTrustPolicy(registry, APPLICATION));
 
     expect(printed).toBe(
       [`${GITHUB} (aud ${OIDC_AUDIENCE})`, `  ${BRANCHES}`, `  ${TAGS}`].join("\n"),
@@ -213,19 +216,21 @@ describe("what `scafo trust show` puts on the terminal", () => {
        another one is refused. */
     const staged = emptyRegistry();
     await setTrustIssuer(staged, {
-      project: PROJECT,
+      application: APPLICATION,
       iss: GITHUB,
       aud: "staging",
       subjects: [MAIN],
     });
 
-    expect(formatTrustPolicy(await readTrustPolicy(staged, PROJECT))).toContain("(aud staging)");
+    expect(formatTrustPolicy(await readTrustPolicy(staged, APPLICATION))).toContain(
+      "(aud staging)",
+    );
   });
 
-  it("says plainly that a project with no policy admits nothing", async () => {
+  it("says plainly that an application with no policy admits nothing", async () => {
     const registry = emptyRegistry();
 
-    const printed = formatTrustPolicy(await readTrustPolicy(registry, PROJECT));
+    const printed = formatTrustPolicy(await readTrustPolicy(registry, APPLICATION));
 
     expect(printed).toContain("no issuer is trusted");
     expect(printed).toContain("no workload token can deploy");
@@ -236,11 +241,11 @@ function emptyRegistry(): RegistryContext {
   return ctxWith(new MemoryCasStore()).ctx;
 }
 
-/** One `scafo trust set` on {@link PROJECT}, with the default audience. */
+/** One `scafo trust set` on {@link APPLICATION}, with the default audience. */
 function trust(
   registry: RegistryContext,
   iss: string,
   subjects: string[],
 ): ReturnType<typeof setTrustIssuer> {
-  return setTrustIssuer(registry, { project: PROJECT, iss, aud: OIDC_AUDIENCE, subjects });
+  return setTrustIssuer(registry, { application: APPLICATION, iss, aud: OIDC_AUDIENCE, subjects });
 }

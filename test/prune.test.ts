@@ -1,5 +1,5 @@
 /*
- * Pruning an environment's Celld publications: what the fleet's own selector
+ * Pruning an application's Celld publications: what the fleet's own selector
  * protects, what age and count select, and what is never touched.
  */
 
@@ -8,7 +8,7 @@ import {
   DEPLOYMENT_FEATURES,
   VERIFIED_CELLD_RELEASES,
 } from "../src/core/registry/_celld-contract.ts";
-import { createDeployment, createEnvironment, createProject } from "../src/core/registry/index.ts";
+import { createApplication, createDeployment } from "../src/core/registry/index.ts";
 import { NODE_LIVENESS_WINDOW_MS } from "../src/core/registry/nodes.ts";
 import {
   deploymentKey,
@@ -22,8 +22,7 @@ import { executePrune, planPrune, type PrunePlan } from "../src/core/registry/pr
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, type ManualClock, rejectsWith, TEST_VERSIONS } from "./_helpers.ts";
 
-const PROJECT = "shop";
-const ENV = "production";
+const APPLICATION = "shop";
 const SCRIPT = "app";
 /** The one node of the fixture installation; the release gate reads its record. */
 const NODE_ID = "node-a";
@@ -32,7 +31,7 @@ const VERIFIED = VERIFIED_CELLD_RELEASES[0];
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
 
-const FLEET = `${fleetPrefix(PROJECT, ENV)}/`;
+const FLEET = `${fleetPrefix(APPLICATION)}/`;
 const DEPLOY = `${FLEET}deploy/`;
 
 /** Asset digests, 64 lowercase hex as Celld writes them; each is one blob. */
@@ -60,8 +59,7 @@ beforeEach(async () => {
   store = new FaultStore(inner);
   clock = ctxWith(store);
 
-  await createProject(clock.ctx, { slug: PROJECT });
-  await createEnvironment(clock.ctx, PROJECT, { name: ENV });
+  await createApplication(clock.ctx, { name: APPLICATION });
   await putBlob(SHARED);
 });
 
@@ -72,12 +70,12 @@ describe("reading the fleet's own selector", () => {
   });
 
   it("refuses a fleet whose selector is not there at all", async () => {
-    await store.del(deployPointerKey(PROJECT, ENV));
+    await store.del(deployPointerKey(APPLICATION));
 
     const error = await rejectsWith(() => plan(), "store-nonconforming");
 
     expect(error.detail).toContain("deploy/current.json");
-    expect(error.detail).toContain(`${PROJECT}/${ENV}`);
+    expect(error.detail).toContain(APPLICATION);
   });
 
   it.each([
@@ -86,7 +84,7 @@ describe("reading the fleet's own selector", () => {
     ["a pointer with no version", JSON.stringify({ prefix: "deploy/app/x", script_name: "app" })],
     ["a pointer with no prefix", JSON.stringify({ version: "x", script_name: "app" })],
   ])("refuses %s in place of the fleet-wide pointer", async (_case, body) => {
-    await store.put(deployPointerKey(PROJECT, ENV), body);
+    await store.put(deployPointerKey(APPLICATION), body);
 
     const error = await rejectsWith(() => plan(), "store-nonconforming");
 
@@ -97,7 +95,7 @@ describe("reading the fleet's own selector", () => {
     /* `script_name` is an option upstream and nothing here reads it: a named
        pointer written before the field existed still says what is served. */
     await store.put(
-      deployPointerKey(PROJECT, ENV),
+      deployPointerKey(APPLICATION),
       JSON.stringify({ version: V4, prefix: `deploy/${SCRIPT}/${V4}` }),
     );
 
@@ -107,7 +105,7 @@ describe("reading the fleet's own selector", () => {
   });
 
   it("refuses a selector that is not JSON at all", async () => {
-    await store.put(deployPointerKey(PROJECT, ENV), "not json");
+    await store.put(deployPointerKey(APPLICATION), "not json");
 
     const error = await rejectsWith(() => plan(), "store-nonconforming");
 
@@ -182,12 +180,12 @@ describe("the Celld release the installation is answering on", () => {
     expect(names(made.delete)).toEqual([`${SCRIPT}/${V3}`, `${SCRIPT}/${V2}`, `${SCRIPT}/${V1}`]);
   });
 
-  it("refuses before it reads the environment, so a dry run is refused by the same gate", async () => {
+  it("refuses before it reads the application, so a dry run is refused by the same gate", async () => {
     /* A dry run plans and prints; the plan is the only bucket work it does, so
        a gate that refuses the plan is what refuses the dry run. Proved by
-       emptying the environment: the missing pointer would be its own refusal,
+       emptying the application: the missing pointer would be its own refusal,
        and this one comes first. */
-    await store.del(deployPointerKey(PROJECT, ENV));
+    await store.del(deployPointerKey(APPLICATION));
     await answeringNode({ celld: "0.4.1" });
 
     const error = await rejectsWith(() => rawPlan(), "capability-missing");
@@ -486,7 +484,7 @@ describe("what a plan selects", () => {
       `${DEPLOY}${SCRIPT}/${V1}/manifest.json`,
       `${DEPLOY}${SCRIPT}/${V1}/modules/index.js`,
     ]);
-    expect(oldest?.recordKey).toBe(deploymentKey(PROJECT, V1));
+    expect(oldest?.recordKey).toBe(deploymentKey(APPLICATION, V1));
     /* Nothing to delete beside the objects when scafo never recorded the deployment. */
     expect(
       made.delete.find((one) => one.version === "ffff6666ffff6666")?.recordKey,
@@ -500,7 +498,7 @@ describe("what a plan selects", () => {
     const made = await plan({ keep: 0 });
     const planned = [...made.keep, ...made.delete].flatMap((one) => one.keys);
 
-    expect(planned.filter((key) => key.startsWith(deployBlobsPrefix(PROJECT, ENV)))).toEqual([]);
+    expect(planned.filter((key) => key.startsWith(deployBlobsPrefix(APPLICATION)))).toEqual([]);
     expect(planned.filter((key) => key.endsWith("/current.json"))).toEqual([]);
   });
 });
@@ -618,7 +616,7 @@ describe("what the two gates select over a fleet's history", () => {
 });
 
 /*
- * The content-addressed blobs every deployment of an environment shares. They
+ * The content-addressed blobs every deployment of an application shares. They
  * are reference counted against what STAYS, and the age window is what keeps a
  * deploy in flight — blobs first, manifest and pointer after — from being
  * collected while it is happening.
@@ -701,7 +699,7 @@ describe("the shared asset blobs", () => {
   it("leaves an object under deploy-blobs/ it cannot read as a digest where it is", async () => {
     await publishAll();
     await pointAt(V4);
-    const stray = `${deployBlobsPrefix(PROJECT, ENV)}assets/sha256/ab/abcdef0123456789`;
+    const stray = `${deployBlobsPrefix(APPLICATION)}assets/sha256/ab/abcdef0123456789`;
     await store.put(stray, "not a blob this can reference-count");
 
     const made = await plan({ keep: 0, olderThanMs: 0 });
@@ -750,14 +748,14 @@ describe("executePrune", () => {
     expect(result.deleted.sort()).toEqual(
       [
         ...made.delete.flatMap((one) => one.keys),
-        deploymentKey(PROJECT, V1),
-        deploymentKey(PROJECT, V2),
-        deploymentKey(PROJECT, V3),
+        deploymentKey(APPLICATION, V1),
+        deploymentKey(APPLICATION, V2),
+        deploymentKey(APPLICATION, V3),
       ].sort(),
     );
     const left = await store.list("");
     expect(left).toContain(SHARED_BLOB);
-    expect(left).toContain(deployPointerKey(PROJECT, ENV));
+    expect(left).toContain(deployPointerKey(APPLICATION));
     expect(left).toContain(`${DEPLOY}${SCRIPT}/${V4}/manifest.json`);
     expect(left.filter((key) => key.startsWith(`${DEPLOY}${SCRIPT}/${V1}/`))).toEqual([]);
   });
@@ -771,7 +769,7 @@ describe("executePrune", () => {
     await expect(executePrune(clock.ctx, made)).rejects.toThrow("bucket went away");
 
     const left = await store.list("");
-    expect(left).not.toContain(deploymentKey(PROJECT, V1));
+    expect(left).not.toContain(deploymentKey(APPLICATION, V1));
     /* Still there, and a later run counts a publication with no record as the
          oldest one, so nothing is stranded. */
     expect(left).toContain(`${DEPLOY}${SCRIPT}/${V1}/manifest.json`);
@@ -789,7 +787,7 @@ describe("executePrune", () => {
 
     const left = await store.list("");
     expect(left).toContain(`${DEPLOY}${SCRIPT}/${V2}/manifest.json`);
-    expect(left).toContain(deploymentKey(PROJECT, V2));
+    expect(left).toContain(deploymentKey(APPLICATION, V2));
   });
 
   it("deletes the blobs after the deployments that were still referencing them", async () => {
@@ -806,9 +804,9 @@ describe("executePrune", () => {
     /* Last of everything: the deployments that referenced it are gone by then,
        so a run that dies halfway never strands a blob a live deployment needs. */
     expect(result.deleted.at(-1)).toBe(blobKey(ORPHAN));
-    expect(result.deleted.filter((key) => key.startsWith(deployBlobsPrefix(PROJECT, ENV)))).toEqual(
-      [blobKey(ORPHAN)],
-    );
+    expect(result.deleted.filter((key) => key.startsWith(deployBlobsPrefix(APPLICATION)))).toEqual([
+      blobKey(ORPHAN),
+    ]);
 
     const left = await store.list("");
     expect(left).not.toContain(blobKey(ORPHAN));
@@ -845,8 +843,7 @@ async function plan(opts: { keep?: number; olderThanMs?: number } = {}): Promise
 /** The same plan, over whatever node records the test has written itself. */
 function rawPlan(opts: { keep?: number; olderThanMs?: number } = {}): Promise<PrunePlan> {
   return planPrune(clock.ctx, {
-    project: PROJECT,
-    env: ENV,
+    application: APPLICATION,
     keep: opts.keep ?? 3,
     /* A zero window is the age gate lifted, which is how a test about the count
        alone says so; the gate itself is the subject further down. */
@@ -895,7 +892,7 @@ async function publish(
     );
   }
   if (opts.record !== false) {
-    await createDeployment(clock.ctx, PROJECT, { version });
+    await createDeployment(clock.ctx, APPLICATION, { version });
   }
 }
 
@@ -920,7 +917,7 @@ async function putBlob(digest: string): Promise<void> {
 
 /** Where Celld keeps the blob of `digest`: `assets/sha256/<first two hex>/<digest>`. */
 function blobKey(digest: string): string {
-  return `${deployBlobsPrefix(PROJECT, ENV)}assets/sha256/${digest.slice(0, 2)}/${digest}`;
+  return `${deployBlobsPrefix(APPLICATION)}assets/sha256/${digest.slice(0, 2)}/${digest}`;
 }
 
 /** Celld's attachment for one fleet-global queue: the deployment allowed to consume it. */
@@ -941,7 +938,7 @@ async function attachQueue(queue: string, version: string): Promise<void> {
 
 /** Where Celld files that attachment: `deploy/queues/<queue>/consumer.json`. */
 function queueKey(queue: string): string {
-  return `${deployQueuesPrefix(PROJECT, ENV)}${queue}/consumer.json`;
+  return `${deployQueuesPrefix(APPLICATION)}${queue}/consumer.json`;
 }
 
 /**
@@ -980,7 +977,7 @@ async function pointAt(version: string, script: string = SCRIPT): Promise<void> 
     prefix: `deploy/${script}/${version}`,
     script_name: script,
   });
-  await store.put(deployPointerKey(PROJECT, ENV), body);
+  await store.put(deployPointerKey(APPLICATION), body);
   await store.put(`${DEPLOY}${script}/current.json`, body);
 }
 

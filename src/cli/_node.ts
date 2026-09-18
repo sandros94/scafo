@@ -49,7 +49,7 @@ export interface NodeOptions {
  *
  * The problem document's own code is kept rather than replaced. It is the stable
  * half of the contract, and a caller acts on it: `trust-mismatch` says the token
- * is fine and the project does not admit it — a policy to fix — while
+ * is fine and the application does not admit it — a policy to fix — while
  * `auth-invalid` says the token itself did not hold up. Flattening both into one
  * code here would hand the caller the one thing the API is careful to keep
  * distinguishable, already thrown away.

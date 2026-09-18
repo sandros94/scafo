@@ -7,13 +7,12 @@ import type { DaemonConfig } from "../src/daemon/config.ts";
 import { type Coordinator, createCoordinator } from "../src/daemon/coordinator.ts";
 import {
   acquireLease,
+  createApplication,
   createDeployment,
-  createEnvironment,
-  createProject,
   DEFAULT_RETIREMENT_GRACE_MS,
-  getEnvironment,
+  getApplication,
   readJson,
-  retireEnvironment,
+  retireApplication,
 } from "../src/core/registry/index.ts";
 import { deploymentKey, coordinatorKey } from "../src/core/registry/paths.ts";
 import type { CoordinatorLease } from "../src/core/types/registry.ts";
@@ -21,7 +20,7 @@ import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, type ManualClock, rejectsWith } from "./_helpers.ts";
 
-const PROJECT = "app";
+const APP = "preview";
 const VERSION = "b1b1b1b1";
 const TTL_MS = 15_000;
 const HOUR_MS = 3_600_000;
@@ -33,12 +32,7 @@ beforeEach(async () => {
   store = new FaultStore(new MemoryCasStore());
   clock = ctxWith(store);
 
-  await createProject(clock.ctx, { slug: PROJECT });
-  await createEnvironment(clock.ctx, PROJECT, {
-    name: "preview",
-  });
-  await createDeployment(clock.ctx, PROJECT, { version: VERSION });
-  await recordRevision(clock.ctx, PROJECT, "preview", VERSION);
+  await deployed(APP);
 });
 
 describe("createCoordinator", () => {
@@ -67,16 +61,14 @@ describe("createCoordinator", () => {
     expect(Date.parse(second.acquiredAt)).toBeGreaterThan(Date.parse(first.acquiredAt));
   });
 
-  it("does not reap an active environment merely because it is old", async () => {
+  it("does not reap an active application merely because it is old", async () => {
     const coordinator = coordinatorFor("node-a");
     await coordinator.runOnce();
 
     clock.tick(HOUR_MS);
     await coordinator.runOnce();
 
-    await expect(getEnvironment(clock.ctx, PROJECT, "preview")).resolves.toMatchObject({
-      name: "preview",
-    });
+    await expect(getApplication(clock.ctx, APP)).resolves.toMatchObject({ name: APP });
     expect(coordinator.status().lastReapFailure).toBeNull();
     expect(coordinator.status().lastReapAt).not.toBeNull();
   });
@@ -95,9 +87,7 @@ describe("createCoordinator", () => {
     expect(coordinator.status().holding).toBe(false);
     expect(coordinator.handle()).toBeNull();
     expect(store.dels).toBe(deletesBefore);
-    await expect(getEnvironment(clock.ctx, PROJECT, "preview")).resolves.toMatchObject({
-      name: "preview",
-    });
+    await expect(getApplication(clock.ctx, APP)).resolves.toMatchObject({ name: APP });
   });
 
   it("stays a candidate for as long as the node that took over keeps renewing", async () => {
@@ -120,7 +110,7 @@ describe("createCoordinator", () => {
   it("keeps the lease when a reap fails, and reaps again on the next tick", async () => {
     const coordinator = coordinatorFor("node-a");
     await coordinator.runOnce();
-    await retireEnvironment(clock.ctx, PROJECT, "preview");
+    await retireApplication(clock.ctx, APP);
     clock.tick(DEFAULT_RETIREMENT_GRACE_MS + 1);
 
     store.failAfter(1);
@@ -128,16 +118,14 @@ describe("createCoordinator", () => {
 
     expect(coordinator.status().holding).toBe(true);
     expect(coordinator.status().lastReapFailure).toContain("Injected fault");
-    await expect(getEnvironment(clock.ctx, PROJECT, "preview")).resolves.toMatchObject({
-      name: "preview",
-    });
+    await expect(getApplication(clock.ctx, APP)).resolves.toMatchObject({ name: APP });
 
     store.clearFaults();
     clock.tick(TTL_MS / 3);
     await coordinator.runOnce();
 
     expect(coordinator.status().lastReapFailure).toBeNull();
-    await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, "preview"), "not-found");
+    await rejectsWith(() => getApplication(clock.ctx, APP), "not-found");
   });
 
   it("gives the lease up when the bucket will not take the renewal", async () => {
@@ -151,9 +139,7 @@ describe("createCoordinator", () => {
 
     expect(coordinator.status().holding).toBe(false);
     expect(store.dels).toBe(deletesBefore);
-    await expect(getEnvironment(clock.ctx, PROJECT, "preview")).resolves.toMatchObject({
-      name: "preview",
-    });
+    await expect(getApplication(clock.ctx, APP)).resolves.toMatchObject({ name: APP });
 
     store.clearFaults();
     await coordinator.runOnce();
@@ -194,10 +180,7 @@ describe("createCoordinator", () => {
   });
 
   it("renews mid-pass, so a pass longer than the TTL does not lose the lease", async () => {
-    for (const name of ["one", "two", "three", "four"]) {
-      await createEnvironment(clock.ctx, PROJECT, { name });
-      await recordRevision(clock.ctx, PROJECT, name, VERSION);
-    }
+    for (const name of ["one", "two", "three", "four"]) await deployed(name);
     const coordinator = coordinatorFor("node-a");
     await coordinator.runOnce();
 
@@ -252,8 +235,8 @@ describe("createCoordinator", () => {
       joined = true;
     });
 
-    /* It waited: the old answer here was to return at once, telling a caller
-       that nobody coordinates while this very node was taking the lease. */
+    /* It waited: returning at once would tell a caller that nobody coordinates
+       while this very node is taking the lease. */
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(joined).toBe(false);
     expect(coordinator.status().holding).toBe(false);
@@ -267,27 +250,42 @@ describe("createCoordinator", () => {
     expect((await storedLease()).fence).toBe(1);
   });
 
-  it("reaps nothing at all when no deployment retention is configured", async () => {
-    const coordinator = coordinatorFor("node-a", { deploymentRetentionMs: undefined });
+  it("reaps no deployment at all while no deployment retention is configured", async () => {
+    const coordinator = coordinatorFor("node-a");
     await coordinator.runOnce();
-    await retireEnvironment(clock.ctx, PROJECT, "preview");
+
     clock.tick(DEFAULT_RETIREMENT_GRACE_MS + 1);
     await coordinator.runOnce();
 
-    await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, "preview"), "not-found");
-    await expect(store.get(deploymentKey(PROJECT, VERSION))).resolves.not.toBeNull();
+    /* Age alone makes a deployment no candidate: without a retention it is kept
+       however old it is, and so is the application still pointing at it. */
+    await expect(getApplication(clock.ctx, APP)).resolves.toMatchObject({ name: APP });
+    await expect(store.get(deploymentKey(APP, VERSION))).resolves.not.toBeNull();
+  });
+
+  it("reaps the deployments of an application it deletes, and the application with them", async () => {
+    const coordinator = coordinatorFor("node-a");
+    await coordinator.runOnce();
+    await retireApplication(clock.ctx, APP);
+    clock.tick(DEFAULT_RETIREMENT_GRACE_MS + 1);
+
+    await coordinator.runOnce();
+
+    await rejectsWith(() => getApplication(clock.ctx, APP), "not-found");
+    await expect(store.get(deploymentKey(APP, VERSION))).resolves.toBeNull();
   });
 });
 
 /** A coordinator for `nodeId`, reaping on every tick against the shared store. */
-function coordinatorFor(nodeId: string, opts?: { deploymentRetentionMs?: number }): Coordinator {
-  return createCoordinator(daemonFor(nodeId), {
-    ttlMs: TTL_MS,
-    reapIntervalMs: 0,
-    ...(opts?.deploymentRetentionMs === undefined
-      ? {}
-      : { deploymentRetentionMs: opts.deploymentRetentionMs }),
-  });
+function coordinatorFor(nodeId: string): Coordinator {
+  return createCoordinator(daemonFor(nodeId), { ttlMs: TTL_MS, reapIntervalMs: 0 });
+}
+
+/** An application with a deployment notice, as the first deploy leaves it. */
+async function deployed(name: string): Promise<void> {
+  await createApplication(clock.ctx, { name });
+  await createDeployment(clock.ctx, name, { version: VERSION });
+  await recordRevision(clock.ctx, name, VERSION);
 }
 
 function daemonFor(nodeId: string): DaemonContext {

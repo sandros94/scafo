@@ -10,7 +10,7 @@ import type { DaemonState } from "../../src/daemon/app.ts";
 import type { OperatorKeyFile } from "../../src/cli/_operator-key.ts";
 import { signNodeToken } from "../../src/core/auth/node-token.ts";
 import {
-  getEnvironment,
+  getApplication,
   listDeployments,
   nodeKey,
   operatorKey as operatorRecordKey,
@@ -61,8 +61,8 @@ const BUCKET: BucketSettings = {
 };
 
 const PLATFORM_DOMAIN = "scafo.test";
-const PROJECT = "app";
-const ENVIRONMENT = "production";
+/** The application this suite deploys, and the name its `wrangler.jsonc` carries. */
+const APPLICATION = "app";
 const NODE_ID = "node-e2e-traefik";
 /**
  * Supplied rather than minted: Traefik starts before the node and has to
@@ -292,30 +292,25 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       expect(result.output, daemonLogTail()).toContain("deployed");
 
       versionV1 = deploymentOf(result.output);
-      expect(await listDeployments(registry, PROJECT)).toContain(versionV1);
+      expect(await listDeployments(registry, APPLICATION)).toContain(versionV1);
       observed.versionV1 = versionV1;
     },
     STEP_TIMEOUT_MS,
   );
 
   it(
-    "serves the first deployment through Traefik on the environment host and apex",
+    "serves the first deployment through Traefik on the application's own host",
     async () => {
-      const expected = [
-        ...[envHost(), apexHost()].map((host) => `scafo_${host}`),
-        ...STANDING_ROUTERS,
-      ].sort();
-      await wait("Traefik to hold the two v1 routers", DEADLINE_MS, async () => {
+      const expected = [`scafo_${appHost()}`, ...STANDING_ROUTERS].sort();
+      await wait("Traefik to hold the v1 router", DEADLINE_MS, async () => {
         const routers = (await scafoRouters()).sort();
         return routers.join(",") === expected.map((name) => `${name}@http`).join(",")
           ? routers
           : null;
       });
 
-      for (const host of [envHost(), apexHost()]) {
-        const answer = await untilServes(host, "v1");
-        expect(JSON.parse(answer.body).url, `the url ${host} saw`).toContain(host);
-      }
+      const answer = await untilServes(appHost(), "v1");
+      expect(JSON.parse(answer.body).url, `the url ${appHost()} saw`).toContain(appHost());
 
       const snapshot = await snapshotNow();
       expect(Object.keys(snapshot.http?.routers ?? {}).sort()).toEqual(expected);
@@ -372,20 +367,18 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       observed.deployV2Output = result.output;
 
       const publishedAt = Date.now();
-      await wait(`the router for ${envHost()} to be published`, DEADLINE_MS, async () => {
+      await wait(`the router for ${appHost()} to be published`, DEADLINE_MS, async () => {
         const routers = (await snapshotNow()).http?.routers ?? {};
-        return `scafo_${envHost()}` in routers ? routers : null;
+        return `scafo_${appHost()}` in routers ? routers : null;
       });
-      await untilServes(envHost(), "v2");
+      await untilServes(appHost(), "v2");
       observed.deployPublishedToServedMs = Date.now() - publishedAt;
-
-      await untilServes(apexHost(), "v2");
     },
     STEP_TIMEOUT_MS,
   );
 
   it(
-    "settles on exactly one environment-owned runtime process",
+    "settles on exactly one application-owned runtime process",
     async () => {
       const state = await wait(
         "the node to report a single running process",
@@ -403,7 +396,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       );
 
       const running = state.processes.filter((process) => process.state === "running");
-      expect(running[0].id).toBe(`${PROJECT}--${ENVIRONMENT}`);
+      expect(running[0].id).toBe(APPLICATION);
       expect(state.reconcile?.failures ?? []).toEqual([]);
       observed.finalProcesses = state.processes;
       observed.finalReconcile = state.reconcile;
@@ -412,17 +405,15 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   );
 
   it(
-    "retires the environment, and Traefik stops answering for it entirely",
+    "retires the application, and Traefik stops answering for it entirely",
     async () => {
       const retiredAt = Date.now();
       const retired = await runCli(
         [
-          "env",
+          "app",
           "retire",
-          "--project",
-          PROJECT,
-          "--env",
-          ENVIRONMENT,
+          "--name",
+          APPLICATION,
           "--node",
           `http://127.0.0.1:${String(apiPort)}`,
           "--key",
@@ -441,24 +432,18 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
           return routers.every((name) => STANDING_ROUTERS.includes(name)) ? Date.now() : null;
         },
       );
-      const gone = await wait(`${envHost()} to stop being served`, DEADLINE_MS, async () => {
-        const answer = await httpGet(httpPort, "/", { host: envHost() });
+      const gone = await wait(`${appHost()} to stop being served`, DEADLINE_MS, async () => {
+        const answer = await httpGet(httpPort, "/", { host: appHost() });
         return answer.status === 404 ? answer : null;
       });
       observed.retireToStandingSnapshotMs = settledAt - retiredAt;
       observed.retireToUnroutedMs = Date.now() - retiredAt;
       expect(gone.body).toContain("404 page not found");
 
-      for (const host of [apexHost()]) {
-        const answer = await httpGet(httpPort, "/", { host });
-        expect(answer.status, host).toBe(404);
-        expect(answer.body, host).toContain("404 page not found");
-      }
-
       const remaining = await scafoRouters();
       expect(remaining.sort()).toEqual([...STANDING_ROUTERS].map((name) => `${name}@http`).sort());
 
-      const record = await getEnvironment(registry, PROJECT, ENVIRONMENT);
+      const record = await getApplication(registry, APPLICATION);
       expect(record.retiredAt).toBeDefined();
       observed.retiredAt = record.retiredAt;
       observed.retiredSnapshot = await snapshotNow();
@@ -467,12 +452,9 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   );
 });
 
-function envHost(): string {
-  return `${PROJECT}--${ENVIRONMENT}.${PLATFORM_DOMAIN}`;
-}
-
-function apexHost(): string {
-  return `${PROJECT}.${PLATFORM_DOMAIN}`;
+/** The one host the application is served at under the platform domain. */
+function appHost(): string {
+  return `${APPLICATION}.${PLATFORM_DOMAIN}`;
 }
 
 /** The flags one deploy of the fixture is run with, from the host. */
@@ -482,10 +464,8 @@ function deployArgs(dir: string): string[] {
     dir,
     "--node",
     `http://127.0.0.1:${String(apiPort)}`,
-    "--project",
-    PROJECT,
-    "--env",
-    ENVIRONMENT,
+    "--name",
+    APPLICATION,
     "--key",
     keyPath,
   ];

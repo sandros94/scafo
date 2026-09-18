@@ -46,11 +46,11 @@ function argsOf(command: CommandDef, name: string): ArgsDef {
 }
 
 describe("the surface `scafo deployment` presents", () => {
-  it("prunes an environment's deployments, and takes the bucket the way every other command does", () => {
+  it("prunes an application's deployments, and takes the bucket the way every other command does", () => {
     expect(Object.keys(deployment.subCommands as Record<string, CommandDef>)).toEqual(["prune"]);
 
     const args = Object.keys(argsOf(deployment, "prune"));
-    for (const flag of ["project", "env", "keep", "older-than", "dry-run", "yes"]) {
+    for (const flag of ["name", "env", "keep", "older-than", "dry-run", "yes"]) {
       expect(args, flag).toContain(flag);
     }
     for (const flag of ["endpoint", "region", "bucket", "prefix", "access-key", "secret-key"]) {
@@ -163,12 +163,11 @@ describe("reading a duration", () => {
 });
 
 describe("reading the flags", () => {
-  const target = { project: "shop", env: "production" };
+  const target = { name: "shop", env: "production" };
 
   it("keeps ten deployments, deletes nothing younger than a day, and asks first by default", () => {
     expect(readPruneFlags({ ...target })).toEqual({
-      project: "shop",
-      env: "production",
+      application: "shop-production",
       keep: 10,
       olderThan: { text: "24h", ms: DAY_MS },
       dryRun: false,
@@ -178,16 +177,14 @@ describe("reading the flags", () => {
 
   it("takes either spelling of a hyphenated flag, because the parser hands over both", () => {
     expect(readPruneFlags({ ...target, "older-than": "30d", "dry-run": true })).toEqual({
-      project: "shop",
-      env: "production",
+      application: "shop-production",
       keep: 10,
       olderThan: { text: "30d", ms: 30 * DAY_MS },
       dryRun: true,
       yes: false,
     });
     expect(readPruneFlags({ ...target, olderThan: "12h", dryRun: true })).toEqual({
-      project: "shop",
-      env: "production",
+      application: "shop-production",
       keep: 10,
       olderThan: { text: "12h", ms: 12 * HOUR_MS },
       dryRun: true,
@@ -222,12 +219,17 @@ describe("reading the flags", () => {
     expect(error.message).toContain("--keep");
   });
 
-  it.each(["project", "env"])("refuses to run without --%s", async (missing) => {
+  it("refuses to run without --name, which is the only thing it cannot guess", async () => {
     const flags: Record<string, unknown> = { ...target };
-    delete flags[missing];
+    delete flags.name;
 
     const error = await rejectsWith(() => Promise.resolve(readPruneFlags(flags)), "invalid-input");
-    expect(error.detail).toContain(`--${missing}`);
+    expect(error.detail).toContain("--name");
+  });
+
+  it("addresses the application --name and --env name together", () => {
+    expect(readPruneFlags({ name: "shop" }).application).toBe("shop");
+    expect(readPruneFlags({ name: "shop", env: "preview" }).application).toBe("shop-preview");
   });
 });
 
@@ -241,7 +243,7 @@ describe("what the command prints", () => {
       `delete worker/ffff6666: 1 object and no deployment record`,
       `delete 4 asset blobs no kept deployment references`,
       `scafo: pruned 2 deployments (3 objects, 1 deployment record, 4 asset blobs) of ` +
-        `"shop/production", kept 3; ${BLOBS_SENTENCE}`,
+        `"shop-production", kept 3; ${BLOBS_SENTENCE}`,
     ]);
 
     /* A dry run says what WOULD go, and only that. */
@@ -254,7 +256,7 @@ describe("what the command prints", () => {
     ]);
     expect(dry.at(-1)).toBe(
       `scafo: would prune 2 deployments (3 objects, 1 deployment record, 4 asset blobs) of ` +
-        `"shop/production", kept 3; ${BLOBS_SENTENCE}`,
+        `"shop-production", kept 3; ${BLOBS_SENTENCE}`,
     );
 
     const nothing = describePrune({
@@ -265,11 +267,11 @@ describe("what the command prints", () => {
 
     expect(nothing.slice(-2)).toEqual([
       `keep 12 asset blobs, referenced or younger than 12h`,
-      `scafo: nothing to prune in "shop/production", kept 3; ${BLOBS_SENTENCE}`,
+      `scafo: nothing to prune in "shop-production", kept 3; ${BLOBS_SENTENCE}`,
     ]);
   });
 
-  it("says nothing of the blobs in an environment that has none", () => {
+  it("says nothing of the blobs in an application that has none", () => {
     const lines = describePrune({
       plan: { ...PLAN, delete: [], blobs: { keep: 0, delete: [] } },
       keep: 3,
@@ -290,7 +292,7 @@ describe("what the command prints", () => {
     expect(lines.at(-2)).toBe(`delete 4 asset blobs no kept deployment references`);
     expect(lines.at(-1)).toBe(
       `scafo: pruned 0 deployments (0 objects, 0 deployment records, 4 asset blobs) of ` +
-        `"shop/production", kept 3; ${BLOBS_SENTENCE}`,
+        `"shop-production", kept 3; ${BLOBS_SENTENCE}`,
     );
   });
 });
@@ -302,7 +304,7 @@ describe("asking before anything is deleted", () => {
     await run.go();
 
     expect(run.asked).toEqual([
-      `Delete 2 deployments (3 objects) and 4 asset blobs of "shop/production"? [y/N] `,
+      `Delete 2 deployments (3 objects) and 4 asset blobs of "shop-production"? [y/N] `,
     ]);
     /* Every line but the summary was already on the terminal when the question
        was put: an operator answers having read what would go. */
@@ -391,7 +393,7 @@ describe("asking before anything is deleted", () => {
 
     await run.go();
 
-    expect(run.asked).toEqual([`Delete 4 asset blobs of "shop/production"? [y/N] `]);
+    expect(run.asked).toEqual([`Delete 4 asset blobs of "shop-production"? [y/N] `]);
     expect(run.pruned()).toBe(1);
   });
 });
@@ -461,13 +463,12 @@ function session(
 
 /** Four blobs no deployment that stays references, as Celld keys them. */
 const BLOB_KEYS = ["0a", "1b", "2c", "3d"].map(
-  (fanout) => `fleets/shop/production/deploy-blobs/assets/sha256/${fanout}/${fanout.repeat(32)}`,
+  (fanout) => `fleets/shop-production/deploy-blobs/assets/sha256/${fanout}/${fanout.repeat(32)}`,
 );
 
 /** One plan of each kept reason and of both kinds of doomed deployment. */
 const PLAN: PrunePlan = {
-  project: "shop",
-  env: "production",
+  application: "shop-production",
   current: ["dddd4444"],
   keep: [
     { ...storedDeployment("app", "dddd4444", { record: true }), reason: "current" },
@@ -491,7 +492,7 @@ function storedDeployment(
   version: string,
   opts: { record?: boolean; objects?: number },
 ): StoredDeployment {
-  const prefix = `fleets/shop/production/deploy/${script}/${version}/`;
+  const prefix = `fleets/shop-production/deploy/${script}/${version}/`;
   return {
     script,
     version,
@@ -501,7 +502,7 @@ function storedDeployment(
       (_unused, index) => `${prefix}file-${String(index)}.js`,
     ),
     ...(opts.record === true
-      ? { recordKey: `_scafo/projects/shop/deployments/${version}.json` }
+      ? { recordKey: `_scafo/deployments/shop-production/${version}.json` }
       : {}),
   };
 }

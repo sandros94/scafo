@@ -1,8 +1,8 @@
-/* Monotonic in-memory per-environment ingress access-log counters. Built only
+/* Monotonic in-memory per-application ingress access-log counters. Built only
    with an ingress log; observation flushing persists snapshots. */
 
-import { parsePlatformHost } from "../core/placement/hosts.ts";
-import { APEX_ENVIRONMENT, type RouteClaim } from "../core/placement/routes.ts";
+import { platformApplication } from "../core/placement/hosts.ts";
+import type { RouteClaim } from "../core/placement/routes.ts";
 import type { IngressRoute } from "../core/types/ingress.ts";
 import { parseAccessLogLine } from "../core/utils/access-log.ts";
 
@@ -21,12 +21,10 @@ export interface StatusClassCounts {
   "other": number;
 }
 
-/** What one environment was served, since counting started. */
+/** What one application was served, since counting started. */
 export interface IngressBucket {
   /** {@link UNATTRIBUTED} when the Host resolved to nothing. */
-  project: string;
-  /** {@link UNATTRIBUTED} when the Host resolved to nothing. */
-  env: string;
+  application: string;
   requests: number;
   /** Response body bytes, as the ingress reported them. */
   bytes: number;
@@ -45,7 +43,7 @@ export interface IngressCountersSnapshot {
   malformed: number;
   /** Requests whose Host resolved to nothing, counted in the {@link UNATTRIBUTED} bucket. */
   unattributed: number;
-  /** One entry per project and environment counted, sorted by project then environment. */
+  /** One entry per application counted, sorted by name. */
   buckets: IngressBucket[];
 }
 
@@ -55,7 +53,7 @@ export interface RoutingAttribution {
   claims: RouteClaim[];
 }
 
-/** Where an ingress's access log is turned into what each environment was served. */
+/** Where an ingress's access log is turned into what each application was served. */
 export interface IngressCounters {
   /** Counts one line; malformed input increments `malformed` and does not throw. */
   ingest(line: string): void;
@@ -79,18 +77,14 @@ export function createIngressCounters(opts: IngressCountersOptions): IngressCoun
   const since = now().toISOString();
   const domains = [...opts.platformDomains];
 
-  let routing = new Map<string, Attributed>();
+  let routing = new Map<string, string>();
   const buckets = new Map<string, IngressBucket>();
   let lines = 0;
   let malformed = 0;
   let unattributed = 0;
 
-  const attribute = (host: string): Attributed | null => {
-    const routed = routing.get(host);
-    if (routed !== undefined) return routed;
-
-    const named = parsePlatformHost(host, domains);
-    return named === null ? null : { project: named.project, env: named.ref ?? APEX_ENVIRONMENT };
+  const attribute = (host: string): string | null => {
+    return routing.get(host) ?? platformApplication(host, domains);
   };
 
   return {
@@ -106,7 +100,7 @@ export function createIngressCounters(opts: IngressCountersOptions): IngressCoun
       const target = attribute(request.host);
       if (target === null) unattributed++;
 
-      const bucket = bucketFor(buckets, target ?? { project: UNATTRIBUTED, env: UNATTRIBUTED });
+      const bucket = bucketFor(buckets, target ?? UNATTRIBUTED);
       bucket.requests++;
       bucket.bytes += request.bytes;
       bucket.status[statusClass(request.status)]++;
@@ -114,14 +108,10 @@ export function createIngressCounters(opts: IngressCountersOptions): IngressCoun
     },
 
     observeRouting(input: RoutingAttribution): void {
-      const next = new Map<string, Attributed>();
+      const next = new Map<string, string>();
       /* Routes override claims because they represent the request target. */
-      for (const claim of input.claims) {
-        next.set(claim.host, { project: claim.project, env: claim.environment });
-      }
-      for (const route of input.routes) {
-        next.set(route.host, { project: route.backend.project, env: route.backend.env });
-      }
+      for (const claim of input.claims) next.set(claim.host, claim.application);
+      for (const route of input.routes) next.set(route.host, route.backend.application);
       routing = next;
     },
 
@@ -138,7 +128,7 @@ export function createIngressCounters(opts: IngressCountersOptions): IngressCoun
             status: { ...bucket.status },
             durations: [...bucket.durations],
           }))
-          .sort((a, b) => compare(`${a.project}/${a.env}`, `${b.project}/${b.env}`)),
+          .sort((a, b) => compare(a.application, b.application)),
       };
     },
   };
@@ -146,26 +136,18 @@ export function createIngressCounters(opts: IngressCountersOptions): IngressCoun
 
 /* ------------------------------------------------------------------ internal */
 
-/** What a host was resolved to. */
-interface Attributed {
-  project: string;
-  env: string;
-}
-
-function bucketFor(buckets: Map<string, IngressBucket>, target: Attributed): IngressBucket {
-  const key = `${target.project}/${target.env}`;
-  const found = buckets.get(key);
+function bucketFor(buckets: Map<string, IngressBucket>, application: string): IngressBucket {
+  const found = buckets.get(application);
   if (found !== undefined) return found;
 
   const created: IngressBucket = {
-    project: target.project,
-    env: target.env,
+    application,
     requests: 0,
     bytes: 0,
     status: { "2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0, "other": 0 },
     durations: Array.from({ length: DURATION_BANDS_MS.length + 1 }, () => 0),
   };
-  buckets.set(key, created);
+  buckets.set(application, created);
   return created;
 }
 

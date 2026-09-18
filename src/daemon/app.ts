@@ -1,20 +1,18 @@
 /* The daemon's HTTP API: what a node exposes to its peers and to operators. */
 
-import { H3, type H3Event } from "h3";
+import { H3 } from "h3";
 import { createNodeVerifier, type NodeSigningKey } from "../core/auth/node-token.ts";
 import { createOidcVerifier } from "../core/auth/oidc.ts";
 import { ScafoError } from "../core/error.ts";
-import { APEX_ENVIRONMENT } from "../core/placement/routes.ts";
+import { platformApplication, platformLabel } from "../core/placement/hosts.ts";
 import { deploymentRevision } from "../core/registry/_revision.ts";
+import { findApplication } from "../core/registry/applications.ts";
 import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import { checkDomain } from "../core/registry/domains.ts";
-import { isProjectBlocked } from "../core/registry/projects.ts";
 import { isLeaseExpired } from "../core/registry/lease.ts";
 import { getDeployRecord } from "../core/registry/deploys.ts";
-import { coordinatorKey, environmentKey, nodeKey, parseDeployId } from "../core/registry/paths.ts";
-import { setNodeSelector } from "../core/registry/placement.ts";
-import { retireEnvironment, unretireEnvironment } from "../core/registry/retirement.ts";
+import { coordinatorKey, nodeKey, parseDeployId } from "../core/registry/paths.ts";
 import type { IngressFormat } from "../core/types/ingress.ts";
 import {
   DEFAULT_ARTIFACT_BYTES,
@@ -22,23 +20,17 @@ import {
   type StagedArtifact,
 } from "../core/types/deploy.ts";
 import type {
+  ApplicationRecord,
   CoordinatorLease,
-  EnvironmentRecord,
   NodeRecord,
   NodeVersions,
 } from "../core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../core/types/supervisor.ts";
 import { isHost } from "../core/utils/host.ts";
-import { assertSlug, parseHostLabel } from "../core/utils/slug.ts";
+import { assertSlug } from "../core/utils/slug.ts";
 import type { AssignmentFailure } from "./_assign.ts";
-import { deleteEnvironmentRequest } from "./_environments.ts";
 import { registerIngressRoutes } from "./_ingress-routes.ts";
-import {
-  type DeployVerifiers,
-  readDeployMetadata,
-  readSelectorRequest,
-  verifyCaller,
-} from "./_intake.ts";
+import { type DeployVerifiers, readDeployMetadata, verifyCaller } from "./_intake.ts";
 import type { IngressCounters } from "./access-counters.ts";
 import type { DaemonConfig } from "./config.ts";
 import type { Coordinator } from "./coordinator.ts";
@@ -49,10 +41,10 @@ import {
   requireNodeToken,
   requireOperatorToken,
 } from "./middleware.ts";
-import { assertProjectScope, scopedState } from "./_scope.ts";
+import { scopedState } from "./_scope.ts";
 import { registerOperatorRoutes } from "./_operator-routes.ts";
 import { registerFleetRoutes } from "./_fleet-routes.ts";
-import { registerProjectRoutes } from "./_project-routes.ts";
+import { registerApplicationRoutes } from "./_application-routes.ts";
 import type { Heartbeat } from "./heartbeat.ts";
 import type { Observability } from "./observe.ts";
 import type { PlacementView, Reconciler, ReconcileStatus } from "./reconcile.ts";
@@ -70,7 +62,7 @@ export interface DaemonContext {
    * The binaries this daemon booted with, and what its node record reports. The
    * Scafo half is what `GET /.well-known/scafo/health` answers with, and the
    * Celld half is what every other node's is measured against before this one
-   * starts a process for an environment or takes a deploy into it.
+   * starts a process for an application or takes a deploy into it.
    */
   versions: NodeVersions;
   /** Node private key used for peer tokens; its public half is in the registry. */
@@ -106,6 +98,14 @@ export interface DaemonContext {
   storage?: StorageService;
 }
 
+/* The application routes' own bodies are part of the node's public surface, and
+   they are declared beside the routes that answer with them. */
+export type {
+  ApplicationDeleted,
+  ApplicationResult,
+  ApplicationsResult,
+} from "./_application-routes.ts";
+
 /** Body of `GET /.well-known/scafo/health`. */
 export interface DaemonHealth {
   ok: boolean;
@@ -121,7 +121,7 @@ export interface CoordinatorView {
   fence: number;
   /** True when the node answering is the one coordinating. */
   self: boolean;
-  /** Unplaced environments from this coordinator's last pass; absent otherwise. */
+  /** Unplaced applications from this coordinator's last pass; absent otherwise. */
   unplaced?: AssignmentFailure[];
 }
 
@@ -138,18 +138,8 @@ export interface DaemonState {
   placements: PlacementView[];
   /** Last pass of the reconcile loop; absent on a node that runs no loop. */
   reconcile?: ReconcileStatus;
-  /** `true` when operator scope filtered this document, even if scope grants all projects. */
+  /** `true` when operator scope filtered this document, even if scope grants all applications. */
   scoped?: true;
-}
-
-/** Body of `DELETE /v1/environments/:project/:env`: the store keys it removed. */
-export interface EnvironmentDeleted {
-  deleted: string[];
-}
-
-/** Body of an environment configuration route. */
-export interface EnvironmentResult {
-  environment: EnvironmentRecord;
 }
 
 /**
@@ -190,8 +180,8 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     });
   });
 
-  /* Operator tokens receive project-scoped state; peer and admin tokens receive
-     the whole document. */
+  /* Operator tokens receive application-scoped state; peer and admin tokens
+     receive the whole document. */
   app.get(
     "/v1/state",
     async (event): Promise<DaemonState> => {
@@ -217,64 +207,17 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     { middleware: [authenticated] },
   );
 
-  /* Retirement is one CAS update, so it does not require coordinator authority. */
-  app.post(
-    "/v1/environments/:project/:env/retire",
-    async (event): Promise<EnvironmentResult> => ({
-      environment: await retireEnvironment(daemon.registry, ...(await scopedTarget(daemon, event))),
-    }),
-    { middleware: [authenticated] },
-  );
-
-  /* Retirement remains reversible during its grace period. */
-  app.post(
-    "/v1/environments/:project/:env/unretire",
-    async (event): Promise<EnvironmentResult> => ({
-      environment: await unretireEnvironment(
-        daemon.registry,
-        ...(await scopedTarget(daemon, event)),
-      ),
-    }),
-    { middleware: [authenticated] },
-  );
-
-  /* Selectors are CAS-updated intent. Unsatisfied selectors remain valid and
-     are reported by assignment rather than rejected here. */
-  app.post(
-    "/v1/environments/:project/:env/selector",
-    async (event): Promise<EnvironmentResult> => {
-      const [project, name] = await scopedTarget(daemon, event);
-      const request = await readSelectorRequest(event, { maxBytes: daemon.config.api.jsonBytes });
-      return {
-        environment: await setNodeSelector(daemon.registry, project, name, request.selector),
-      };
-    },
-    { middleware: [authenticated] },
-  );
-
-  /* Deletion is coordinator-gated and transparently forwarded. `force=1` skips
-     the retirement-grace check. */
-  app.delete(
-    "/v1/environments/:project/:env",
-    async (event): Promise<Response | EnvironmentDeleted> => {
-      /* Check operator scope before forwarding under a node token. */
-      await scopedTarget(daemon, event);
-      return deleteEnvironmentRequest(daemon, event);
-    },
-    { middleware: [authenticated] },
-  );
-
-  app.post("/v1/projects/:project/deploys", async (event): Promise<Response> => {
-    const project = event.context.params?.project ?? "";
-    assertSlug(project);
-    /* Authenticate project access before reading deployment metadata or body. */
-    const caller = await verifyCaller(verifiers, event, project);
-    const meta = readDeployMetadata(event, project);
+  app.post("/v1/applications/:name/deploys", async (event): Promise<Response> => {
+    const application = event.context.params?.name ?? "";
+    assertSlug(application);
+    /* Authenticate application access before reading deployment metadata or body. */
+    const caller = await verifyCaller(verifiers, event, application);
+    const meta = readDeployMetadata(event, application);
     if (caller.kind === "workload") meta.oidc = caller.identity.actor;
 
     const service = deployService(daemon);
     const stager = artifactStager(daemon);
-    const reservation = service.reserve(project);
+    const reservation = service.reserve(application);
     let artifact: StagedArtifact | undefined;
     let status: DeployStatus;
     try {
@@ -309,12 +252,12 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     const id = event.context.params?.id ?? "";
     const parsed = parseDeployId(id);
 
-    /* The project in the id is what the caller is authenticated against, exactly
-       as the upload was: an operator's scope is applied to it and a workload
-       token is verified against its trust policy. An id that is no id of ours
-       names no project, so there is nothing to authenticate and nothing to
-       disclose. */
-    await verifyCaller(verifiers, event, parsed?.project ?? null);
+    /* The application in the id is what the caller is authenticated against,
+       exactly as the upload was: an operator's scope is applied to it and a
+       workload token is verified against its trust policy. An id that is no id
+       of ours names no application, so there is nothing to authenticate and
+       nothing to disclose. */
+    await verifyCaller(verifiers, event, parsed?.application ?? null);
     if (parsed === null) {
       throw new ScafoError("not-found", "No such deploy", {
         detail: `"${id}" is not a deploy id this installation mints`,
@@ -324,12 +267,12 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     const local = daemon.deploys?.get(id) ?? null;
     if (local !== null) return local;
 
-    const record = await getDeployRecord(daemon.registry, parsed.project, id);
+    const record = await getDeployRecord(daemon.registry, parsed.application, id);
     /* A record that disagrees with the id it is filed under is not the one the
        caller was authenticated for. */
-    if (record.project !== parsed.project) {
+    if (record.application !== parsed.application) {
       throw new ScafoError("not-found", "No such deploy", {
-        detail: `"${id}" is not a deploy of project "${parsed.project}"`,
+        detail: `"${id}" is not a deploy of application "${parsed.application}"`,
       });
     }
     return deployStatusOf(record);
@@ -339,8 +282,8 @@ export function createNodeApp(daemon: DaemonContext): H3 {
   const operatorGuard = requireOperatorToken(nodeVerifier, daemon.registry);
   registerOperatorRoutes(app, daemon, operatorGuard);
 
-  /* Project administration uses the same operator-only boundary. */
-  registerProjectRoutes(app, daemon, operatorGuard);
+  /* Application administration uses the same operator-only boundary. */
+  registerApplicationRoutes(app, daemon, { operator: operatorGuard, peer: authenticated });
 
   /* So does what an admin says about the installation itself. */
   registerFleetRoutes(app, daemon, operatorGuard);
@@ -386,8 +329,8 @@ function coordinatorView(
   };
 }
 
-/** Returns whether a host is currently certificate-eligible. Retired, missing,
- * and blocked project environments are refused. */
+/** Returns whether a host is currently certificate-eligible. Retired, missing
+ * and blocked applications are refused. */
 async function servesHost(daemon: DaemonContext, host: string): Promise<boolean> {
   if (!isHost(host)) return false;
 
@@ -395,59 +338,28 @@ async function servesHost(daemon: DaemonContext, host: string): Promise<boolean>
      only while explicitly public. */
   if (daemon.config.api.public && daemon.config.platformDomains.includes(host)) return true;
 
-  /* Require a deployed, unretired environment before certificate issuance. */
-  for (const domain of daemon.config.platformDomains) {
-    const suffix = `.${domain}`;
-    if (!host.endsWith(suffix)) continue;
-
-    const label = host.slice(0, -suffix.length);
-    const parsed = parseHostLabel(label);
-    if (parsed === null) return false;
-    if (await isProjectBlocked(daemon.registry, parsed.project)) return false;
-
-    const environment = await readJson<EnvironmentRecord>(
-      daemon.registry,
-      environmentKey(parsed.project, parsed.ref ?? APEX_ENVIRONMENT),
-    );
-    return servesEnvironment(environment?.value);
+  /* Require a deployed, unretired application before certificate issuance. A
+     host under a platform domain is only ever that application: a claim can
+     never be taken for one. */
+  const label = platformLabel(host, daemon.config.platformDomains);
+  if (label !== null) {
+    const named = platformApplication(host, daemon.config.platformDomains);
+    return named !== null && servesApplication(await findApplication(daemon.registry, named));
   }
 
   const claim = await checkDomain(daemon.registry, host);
   if (claim === null) return false;
-  if (await isProjectBlocked(daemon.registry, claim.project)) return false;
-
-  const environment = await readJson<EnvironmentRecord>(
-    daemon.registry,
-    environmentKey(claim.project, claim.environment),
-  );
-  return servesEnvironment(environment?.value);
+  return servesApplication(await findApplication(daemon.registry, claim.application));
 }
 
-/** Whether an environment owns a currently serviceable public host. */
-function servesEnvironment(environment?: EnvironmentRecord): boolean {
+/** Whether an application owns a currently serviceable public host. */
+function servesApplication(application: ApplicationRecord | null): boolean {
   return (
-    environment !== undefined &&
-    environment.retiredAt === undefined &&
-    deploymentRevision(environment) !== null
+    application !== null &&
+    application.blocked !== true &&
+    application.retiredAt === undefined &&
+    deploymentRevision(application) !== null
   );
-}
-
-/** The `:project` and `:env` a route was matched on, as a positional pair. */
-function target(event: H3Event): [project: string, env: string] {
-  return [event.context.params?.project ?? "", event.context.params?.env ?? ""];
-}
-
-/** Returns the target after applying operator project scope before I/O. */
-async function scopedTarget(
-  daemon: DaemonContext,
-  event: H3Event,
-): Promise<[project: string, env: string]> {
-  const pair = target(event);
-  const caller = nodeIdentity(event);
-  if (caller !== undefined) {
-    assertProjectScope(caller, pair[0]);
-  }
-  return pair;
 }
 
 function deployService(daemon: DaemonContext): DeployService {

@@ -1,4 +1,4 @@
-/* Which CI issuers may deploy a project, and which of their subjects. */
+/* Which CI issuers may deploy an application, and which of their subjects. */
 
 import type { TrustIssuer, TrustPolicy } from "../types/registry.ts";
 import { isCasConflict } from "./_shared.ts";
@@ -6,13 +6,18 @@ import { createJson, requireJson, updateJson } from "./cas.ts";
 import type { RegistryContext } from "./context.ts";
 import { trustKey } from "./paths.ts";
 
-/** Replaces the project's trust policy, creating it when absent. */
+/**
+ * Replaces the application's trust policy, creating it when absent.
+ *
+ * The policy may be written before the application exists: an admin pre-grants
+ * a name, and the first deploy under it creates the application.
+ */
 export async function setTrustPolicy(
   ctx: RegistryContext,
-  project: string,
+  application: string,
   policy: TrustPolicy,
 ): Promise<TrustPolicy> {
-  const key = trustKey(project);
+  const key = trustKey(application);
 
   try {
     await createJson(ctx, key, policy);
@@ -25,8 +30,11 @@ export async function setTrustPolicy(
   }
 }
 
-export async function getTrustPolicy(ctx: RegistryContext, project: string): Promise<TrustPolicy> {
-  const found = await requireJson<TrustPolicy>(ctx, trustKey(project));
+export async function getTrustPolicy(
+  ctx: RegistryContext,
+  application: string,
+): Promise<TrustPolicy> {
+  const found = await requireJson<TrustPolicy>(ctx, trustKey(application));
   return found.value;
 }
 

@@ -1,18 +1,19 @@
-/* Internal monotonic notice that celld moved an environment's current deployment. */
+/* Internal monotonic notice that celld moved an application's current deployment. */
 
-import type { DeploymentRecord, EnvironmentRecord } from "../types/registry.ts";
-import { requireJson, updateJson } from "./cas.ts";
+import type { ApplicationRecord, DeploymentRecord } from "../types/registry.ts";
+import { updateApplication } from "./applications.ts";
+import { requireJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
-import { deploymentKey, environmentKey } from "./paths.ts";
+import { deploymentKey } from "./paths.ts";
 import { ScafoError } from "../error.ts";
 
 export interface DeploymentUpdate {
-  environment: EnvironmentRecord;
+  application: ApplicationRecord;
   revision: number;
 }
 
 /**
- * Advances an environment's deployment revision after celld publishes.
+ * Advances an application's deployment revision after celld publishes.
  *
  * The record deliberately names no version. Concurrent writers retry against
  * the latest value, so each successful deployment increments the monotonic
@@ -20,20 +21,19 @@ export interface DeploymentUpdate {
  */
 export async function recordRevision(
   ctx: RegistryContext,
-  project: string,
-  env: string,
+  application: string,
   version: string,
   opts?: { signal?: AbortSignal },
 ): Promise<DeploymentUpdate> {
-  await requireJson<DeploymentRecord>(ctx, deploymentKey(project, version));
-  const updated = await updateJson<EnvironmentRecord>(
+  await requireJson<DeploymentRecord>(ctx, deploymentKey(application, version));
+  const updated = await updateApplication(
     ctx,
-    environmentKey(project, env),
+    application,
     (current) => {
       const previous = deploymentRevision(current) ?? 0;
       if (previous >= Number.MAX_SAFE_INTEGER) {
         throw new ScafoError("invalid-input", "Invalid deployment revision", {
-          detail: `environment "${env}" has a malformed or exhausted deployment revision`,
+          detail: `application "${application}" has a malformed or exhausted deployment revision`,
         });
       }
       return {
@@ -43,18 +43,15 @@ export async function recordRevision(
     },
     opts,
   );
-  const revision = deploymentRevision(updated.value);
+  const revision = deploymentRevision(updated);
   if (revision === null)
     throw new ScafoError("invalid-input", "Deployment revision was not stored");
-  return {
-    environment: updated.value,
-    revision,
-  };
+  return { application: updated, revision };
 }
 
 /** Validates and reads the non-selectable deployment notice from registry input. */
-export function deploymentRevision(environment: EnvironmentRecord): number | null {
-  const deployment = environment.deployment;
+export function deploymentRevision(application: ApplicationRecord): number | null {
+  const deployment = application.deployment;
   if (deployment === null) return null;
   /* The record is bucket input: a missing or non-object notice must surface as
      a typed error, never as a TypeError out of the field reads below. */
@@ -66,7 +63,7 @@ export function deploymentRevision(environment: EnvironmentRecord): number | nul
     !Number.isFinite(Date.parse(deployment.deployedAt))
   ) {
     throw new ScafoError("invalid-input", "Invalid deployment revision", {
-      detail: `environment "${environment.name}" has a malformed deployment revision`,
+      detail: `application "${application.name}" has a malformed deployment revision`,
     });
   }
   return deployment.revision;

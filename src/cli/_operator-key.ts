@@ -336,7 +336,7 @@ export async function loadPublicOperator(spec: string): Promise<PublicOperator> 
  * key after it is least privilege unless an admin is asked for.
  *
  * AND IT GRANTS NO SCOPE, which is why an operator-tier key cannot come out of
- * it at all: this path admits a key with no projects named, and an operator-tier
+ * it at all: this path admits a key with no applications named, and an operator-tier
  * key that names none reaches nothing. Refused rather than written, by the same
  * check the wire route meets — the ceremony bypasses the TIER rules on purpose,
  * because there may be no admin to ask, and it bypasses nothing about what a

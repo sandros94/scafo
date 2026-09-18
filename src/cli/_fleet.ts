@@ -2,7 +2,7 @@
  * Internal: the statements an admin makes about the installation itself — right
  * now, the deploy freeze — and how each of them prints.
  *
- * NODE-ONLY, like project administration and for the same reason: freezing is an
+ * NODE-ONLY, like application administration and for the same reason: freezing is an
  * admin-tier act, and a bucket fallback would be a way around the authorization
  * the node enforces. `scafo fleet nodes` reads the bucket directly because it is
  * the one question a node cannot be trusted to answer about itself; this is the

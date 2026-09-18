@@ -2,7 +2,6 @@
    and exposes bounded in-memory status history. */
 
 import { describeError, isScafoError, ScafoError, type ScafoErrorCode } from "../core/error.ts";
-import { servingKey } from "../core/placement/serving.ts";
 import { findVersionSkew, versionSkewError } from "../core/placement/version-skew.ts";
 import { createDeployment } from "../core/registry/deployments.ts";
 import { nowDate } from "../core/registry/context.ts";
@@ -14,10 +13,13 @@ import {
 import { assertDeploysUnfrozen, readFreeze } from "../core/registry/freeze.ts";
 import { listNodeRecords } from "../core/registry/nodes.ts";
 import { recordRevision } from "../core/registry/_revision.ts";
-import { createEnvironment, getEnvironment } from "../core/registry/environments.ts";
 import { fleetPrefix } from "../core/registry/paths.ts";
 import { setNodeSelector, setReplicas } from "../core/registry/placement.ts";
-import { assertProjectUnblocked, createProject } from "../core/registry/projects.ts";
+import {
+  assertApplicationUnblocked,
+  createApplication,
+  findApplication,
+} from "../core/registry/applications.ts";
 import {
   DEFAULT_ARTIFACT_BYTES,
   type DeployRunner,
@@ -36,9 +38,9 @@ import type { DaemonContext } from "./app.ts";
 import {
   createDeployScheduler,
   DEFAULT_ACTIVE_TASKS,
-  DEFAULT_PROJECT_ACTIVE_TASKS,
-  DEFAULT_PROJECT_QUEUED_TASKS,
-  DEFAULT_PROJECT_STAGED_BYTES,
+  DEFAULT_APPLICATION_ACTIVE_TASKS,
+  DEFAULT_APPLICATION_QUEUED_TASKS,
+  DEFAULT_APPLICATION_STAGED_BYTES,
   DEFAULT_QUEUED_TASKS,
   DEFAULT_QUEUE_TIMEOUT_MS,
   DEFAULT_RECEIVE_TIMEOUT_MS,
@@ -60,7 +62,7 @@ export type { DeployState } from "../core/types/registry.ts";
 /** What a caller polling a deploy is told. */
 export interface DeployStatus {
   id: string;
-  project: string;
+  application: string;
   /** Deployment the deploy produced, by version; absent until it has been recorded. */
   deployment?: string;
   state: DeployState;
@@ -72,11 +74,10 @@ export interface DeployStatus {
 
 /** Everything a deploy request carries besides the artifact itself. */
 export interface DeployMeta {
-  project: string;
-  environment: string;
-  /** Optional placement intent; existing environments keep it when omitted. */
+  application: string;
+  /** Optional placement intent; an existing application keeps it when omitted. */
   replicas?: ReplicaCount;
-  /** Optional placement intent; existing environments keep it when omitted. */
+  /** Optional placement intent; an existing application keeps it when omitted. */
   nodeSelector?: NodeSelector;
   source?: DeploymentSource;
   /** Verified workload identity, assigned only by the deploy-auth boundary. */
@@ -91,11 +92,11 @@ export interface DeployServiceOptions {
 
 export interface DeployService {
   /** Atomically reserves receive capacity before the request body is read. */
-  reserve(project: string): DeployReservation;
+  reserve(application: string): DeployReservation;
   /**
-   * Validates the project and environment before any artifact bytes are read.
-   * No status exists until the returned admission is started with a complete
-   * staged artifact.
+   * Validates the application before any artifact bytes are read. No status
+   * exists until the returned admission is started with a complete staged
+   * artifact.
    */
   admit(meta: DeployMeta): Promise<DeployAdmission>;
   /** The deploy's status, or null when this daemon has never heard of it. */
@@ -119,7 +120,7 @@ export interface DeployAdmission {
 export function deployStatusOf(record: DeployRecord): DeployStatus {
   return {
     id: record.id,
-    project: record.project,
+    application: record.application,
     state: record.state,
     ...(record.deployment === undefined ? {} : { deployment: record.deployment }),
     ...(record.code === undefined ? {} : { code: record.code }),
@@ -143,11 +144,11 @@ export function createDeployService(
   const scheduler = createDeployScheduler({
     artifactBytes: deploy?.artifactBytes ?? DEFAULT_ARTIFACT_BYTES,
     activeTasks: deploy?.activeTasks ?? DEFAULT_ACTIVE_TASKS,
-    projectActiveTasks: deploy?.projectActiveTasks ?? DEFAULT_PROJECT_ACTIVE_TASKS,
+    applicationActiveTasks: deploy?.applicationActiveTasks ?? DEFAULT_APPLICATION_ACTIVE_TASKS,
     queuedTasks: deploy?.queuedTasks ?? DEFAULT_QUEUED_TASKS,
-    projectQueuedTasks: deploy?.projectQueuedTasks ?? DEFAULT_PROJECT_QUEUED_TASKS,
+    applicationQueuedTasks: deploy?.applicationQueuedTasks ?? DEFAULT_APPLICATION_QUEUED_TASKS,
     stagedBytes: deploy?.stagedBytes ?? DEFAULT_STAGED_BYTES,
-    projectStagedBytes: deploy?.projectStagedBytes ?? DEFAULT_PROJECT_STAGED_BYTES,
+    applicationStagedBytes: deploy?.applicationStagedBytes ?? DEFAULT_APPLICATION_STAGED_BYTES,
     receiveTimeoutMs: deploy?.receiveTimeoutMs ?? DEFAULT_RECEIVE_TIMEOUT_MS,
     queueTimeoutMs: deploy?.queueTimeoutMs ?? DEFAULT_QUEUE_TIMEOUT_MS,
     taskTimeoutMs: deploy?.taskTimeoutMs ?? DEFAULT_TASK_TIMEOUT_MS,
@@ -161,7 +162,7 @@ export function createDeployService(
     const current = statuses.get(id);
     if (current === undefined) return null;
     /* Terminal means terminal. A deploy that reached `deployed` HAPPENED — its
-       revision is in the registry, and the environment is serving the deployment —
+       revision is in the registry, and the application is serving the deployment —
        so a cancellation that lands afterwards has nothing left to cancel and
        must not rewrite the outcome as a failure. The scheduler reports one
        whenever the task's signal was aborted, whatever the task returned. */
@@ -183,7 +184,7 @@ export function createDeployService(
        reported and the deploy goes on: the record is a state behind for as long
        as the publish takes, and the reaper measures a deploy's silence in
        liveness windows rather than seconds. */
-    await updateDeployRecord(daemon.registry, meta.project, id, { state: "uploading" }).catch(
+    await updateDeployRecord(daemon.registry, meta.application, id, { state: "uploading" }).catch(
       (error: unknown) => {
         console.error(
           `scafo: deploy "${id}" could not be recorded as uploading: ${describeError(error)}`,
@@ -195,14 +196,13 @@ export function createDeployService(
     try {
       const published = await runner.run(
         {
-          project: meta.project,
-          environment: meta.environment,
+          application: meta.application,
           artifact,
           target: {
             endpoint: bucket.endpoint,
             region: bucket.region,
             bucket: bucket.bucket,
-            prefix: joinPrefix(bucket.prefix, fleetPrefix(meta.project, meta.environment)),
+            prefix: joinPrefix(bucket.prefix, fleetPrefix(meta.application)),
             accessKey: bucket.accessKey,
             secretKey: bucket.secretKey,
           },
@@ -212,7 +212,7 @@ export function createDeployService(
       celldVersionId = published.celldVersionId;
 
       throwIfStopped(signal);
-      const deployment = await createDeployment(daemon.registry, meta.project, {
+      const deployment = await createDeployment(daemon.registry, meta.application, {
         version: published.celldVersionId,
         ...(meta.source === undefined ? {} : { source: meta.source }),
         ...(meta.oidc === undefined ? {} : { oidc: meta.oidc }),
@@ -222,10 +222,8 @@ export function createDeployService(
       /* The commit point. Past it the deployment revision is written and there
          is nothing left to abandon, so the signal is not consulted again: a
          cancellation that arrives now would only mislabel work that is done. */
-      await recordRevision(daemon.registry, meta.project, meta.environment, deployment.version, {
-        signal,
-      });
-      await updateDeployRecord(daemon.registry, meta.project, id, {
+      await recordRevision(daemon.registry, meta.application, deployment.version, { signal });
+      await updateDeployRecord(daemon.registry, meta.application, id, {
         state: "deployed",
         deployment: deployment.version,
       });
@@ -262,7 +260,7 @@ export function createDeployService(
    * failure and is recorded as `internal`, so that no reader has to guess — a
    * guess lands on the caller.
    */
-  async function recordFailure(id: string, project: string, error: unknown): Promise<void> {
+  async function recordFailure(id: string, application: string, error: unknown): Promise<void> {
     const failure = {
       state: "failed",
       code: isScafoError(error) ? error.code : "internal",
@@ -275,7 +273,7 @@ export function createDeployService(
     if (next !== null && next.state !== "failed") return;
 
     try {
-      await updateDeployRecord(daemon.registry, project, id, failure);
+      await updateDeployRecord(daemon.registry, application, id, failure);
     } catch (refused) {
       if (isScafoError(refused) && refused.code === "cas-conflict") return;
       console.error(
@@ -285,39 +283,38 @@ export function createDeployService(
   }
 
   return {
-    reserve(project): DeployReservation {
-      return scheduler.reserve(project);
+    reserve(application): DeployReservation {
+      return scheduler.reserve(application);
     },
 
     async admit(meta): Promise<DeployAdmission> {
       /* Before anything at all is created: an admin has stopped intake for the
-         whole fleet, and a project or an environment brought into being by a
-         deploy that is about to be refused would outlive the refusal. */
+         whole fleet, and an application brought into being by a deploy that is
+         about to be refused would outlive the refusal. */
       assertDeploysUnfrozen(await readFreeze(daemon.registry));
-      /* Reject invalid identity before acknowledging the deploy. */
-      const project = await createProject(daemon.registry, { slug: meta.project });
-      /* Reject blocked projects before artifact work begins. */
-      assertProjectUnblocked(project);
-      await ensureEnvironment(daemon, meta.project, meta.environment, {
+      await ensureApplication(daemon, meta.application, {
         ...(meta.replicas === undefined ? {} : { replicas: meta.replicas }),
         ...(meta.nodeSelector === undefined ? {} : { nodeSelector: meta.nodeSelector }),
       });
-      await assertOneCelldVersion(daemon, meta.project, meta.environment);
+      await assertOneCelldVersion(daemon, meta.application);
 
       return {
         async start(artifact, reserved): Promise<DeployStatus> {
-          if (reserved.project !== meta.project) {
-            throw new ScafoError("invalid-input", "Deploy reservation belongs to another project", {
-              detail: `the reservation is for "${reserved.project}", not "${meta.project}"`,
-            });
+          if (reserved.application !== meta.application) {
+            throw new ScafoError(
+              "invalid-input",
+              "Deploy reservation belongs to another application",
+              {
+                detail: `the reservation is for "${reserved.application}", not "${meta.application}"`,
+              },
+            );
           }
-          const id = deployId(meta.project);
+          const id = deployId(meta.application);
           /* Before anything is enqueued: a deploy whose record could not be
              written is one the caller is told about now, rather than one it
              holds an id for that no node will ever answer. */
-          await createDeployRecord(daemon.registry, meta.project, {
+          await createDeployRecord(daemon.registry, meta.application, {
             id,
-            environment: meta.environment,
             node: daemon.nodeId,
             ...(meta.source === undefined ? {} : { source: meta.source }),
             ...(meta.oidc === undefined ? {} : { oidc: meta.oidc }),
@@ -325,7 +322,7 @@ export function createDeployService(
 
           const accepted: DeployStatus = {
             id,
-            project: meta.project,
+            application: meta.application,
             state: "accepted",
           };
           /* Enqueue before exposing an id to avoid ghost statuses. */
@@ -337,7 +334,7 @@ export function createDeployService(
           const answer = snapshot(accepted);
           const continuation = scheduled.completion.then(
             () => undefined,
-            (error: unknown) => recordFailure(id, meta.project, error),
+            (error: unknown) => recordFailure(id, meta.application, error),
           );
           continuations.add(continuation);
           void continuation.finally(() => continuations.delete(continuation));
@@ -359,21 +356,17 @@ export function createDeployService(
 }
 
 /**
- * Refuses the deploy while another node still serves the environment on a
+ * Refuses the deploy while another node still serves the application on a
  * different Celld.
  *
  * ASKED AT INTAKE, before a byte of the artifact is read: publishing writes into
- * the environment's Celld fleet, whose bucket format belongs to whichever
+ * the application's Celld fleet, whose bucket format belongs to whichever
  * version is serving it, and the caller's answer is a 409 it can act on rather
  * than an upload that is thrown away. The publish path asks nothing more — the
  * refusal has already happened, and the node the deploy lands on is this one.
  */
-async function assertOneCelldVersion(
-  daemon: DaemonContext,
-  project: string,
-  environment: string,
-): Promise<void> {
-  const about = { env: servingKey(project, environment), celld: daemon.versions.celld };
+async function assertOneCelldVersion(daemon: DaemonContext, application: string): Promise<void> {
+  const about = { application, celld: daemon.versions.celld };
   const skew = findVersionSkew(await listNodeRecords(daemon.registry), {
     ...about,
     selfId: daemon.nodeId,
@@ -382,31 +375,30 @@ async function assertOneCelldVersion(
   if (skew.length > 0) throw versionSkewError(skew, about);
 }
 
-/** Ensures an environment exists. Existing placement changes only when requested;
-    creation remains idempotent under races. */
-async function ensureEnvironment(
+/**
+ * Ensures the application exists, which is the only way one is ever created.
+ *
+ * A blocked application is refused before any artifact work begins. Existing
+ * placement changes only when the deploy asked for it; creation remains
+ * idempotent under races.
+ */
+async function ensureApplication(
   daemon: DaemonContext,
-  project: string,
-  environment: string,
+  application: string,
   wanted: { replicas?: ReplicaCount; nodeSelector?: NodeSelector },
 ): Promise<void> {
-  let exists = true;
-  try {
-    await getEnvironment(daemon.registry, project, environment);
-  } catch (error) {
-    if (!isScafoError(error) || error.code !== "not-found") throw error;
-    exists = false;
-  }
-
-  if (!exists) {
-    await createEnvironment(daemon.registry, project, { name: environment, ...wanted });
+  const existing = await findApplication(daemon.registry, application);
+  if (existing === null) {
+    await createApplication(daemon.registry, { name: application, ...wanted });
     return;
   }
+
+  assertApplicationUnblocked(existing);
   if (wanted.replicas !== undefined) {
-    await setReplicas(daemon.registry, project, environment, wanted.replicas);
+    await setReplicas(daemon.registry, application, wanted.replicas);
   }
   if (wanted.nodeSelector !== undefined) {
-    await setNodeSelector(daemon.registry, project, environment, wanted.nodeSelector);
+    await setNodeSelector(daemon.registry, application, wanted.nodeSelector);
   }
 }
 
@@ -429,20 +421,20 @@ function joinPrefix(keyPrefix: string | undefined, fleet: string): string {
 }
 
 /**
- * Mints an id for one deploy of `project`.
+ * Mints an id for one deploy of `application`.
  *
- * It NAMES the project, because a poll may reach any node of the installation
- * and the project is what that node authenticates the caller against — an
- * operator's scope and a workload's trust policy are both answers about a
- * project. The second half stays unguessable, so knowing a whole id remains
- * evidence of having started the deploy.
+ * It NAMES the application, because a poll may reach any node of the
+ * installation and the application is what that node authenticates the caller
+ * against — an operator's scope and a workload's trust policy are both answers
+ * about an application. The second half stays unguessable, so knowing a whole id
+ * remains evidence of having started the deploy.
  */
-export function deployId(project: string): string {
+export function deployId(application: string): string {
   let hex = "";
   for (const byte of crypto.getRandomValues(new Uint8Array(8))) {
     hex += byte.toString(16).padStart(2, "0");
   }
-  return `${project}.${hex}`;
+  return `${application}.${hex}`;
 }
 
 /** The specifics a scafo failure carries are the useful half; keep both. */

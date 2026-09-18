@@ -200,8 +200,7 @@ export function createObserveFlusher(
       node: opts.nodeId,
       at: at.toISOString(),
       since: snapshot?.since ?? at.toISOString(),
-      project: bucket.project,
-      env: bucket.env,
+      application: bucket.application,
       requests: bucket.requests,
       bytes: bucket.bytes,
       status: { ...bucket.status },
@@ -338,8 +337,7 @@ export function createObserveFlusher(
 function countersShape(record: ObserveCountersRecord): unknown {
   return {
     since: record.since,
-    project: record.project,
-    env: record.env,
+    application: record.application,
     requests: record.requests,
     bytes: record.bytes,
     status: record.status,

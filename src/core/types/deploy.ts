@@ -15,7 +15,7 @@ export interface DeployTarget {
   region: string;
   bucket: string;
   /**
-   * Key prefix within the bucket the environment's fleet lives under, with the
+   * Key prefix within the bucket the application's fleet lives under, with the
    * installation's own key prefix already applied.
    */
   prefix: string;
@@ -36,8 +36,7 @@ export const DEFAULT_ARCHIVE_ENTRIES: number = 20_000;
  * application's own, and nothing on this side of the seam rewrites it.
  */
 export interface DeployRunInput {
-  project: string;
-  environment: string;
+  application: string;
   /** The uploaded archive, exactly as it arrived and staged outside memory. */
   artifact: StagedArtifact;
   target: DeployTarget;

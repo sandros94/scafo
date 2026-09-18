@@ -60,8 +60,7 @@ function counters(overrides: Partial<ObserveCountersRecord> = {}): ObserveCounte
     node: NODE,
     at: AT,
     since: SINCE,
-    project: "shop",
-    env: "production",
+    application: "shop",
     requests: 41,
     bytes: 90_210,
     status: { "2xx": 35, "3xx": 2, "4xx": 3, "5xx": 1, "other": 0 },
@@ -85,8 +84,7 @@ const EVERY_EVENT: ObserveEventRecord[] = [
   event({ type: "reconcile.pass.start", kicked: true }),
   event({
     type: "placement.pending",
-    project: "shop",
-    env: "production",
+    application: "shop",
     reason: "placement-unavailable",
   }),
   event({
@@ -97,7 +95,7 @@ const EVERY_EVENT: ObserveEventRecord[] = [
     listOps: 3,
     durationMs: 412,
   }),
-  event({ type: "runtime.started", processId: "shop--prod" }),
+  event({ type: "runtime.started", application: "shop-prod" }),
   event({
     type: "operator.trusted",
     actor: "op-aaaa1111",
@@ -110,8 +108,8 @@ const EVERY_EVENT: ObserveEventRecord[] = [
     subject: "op-bbbb2222",
     role: "operator",
   }),
-  event({ type: "project.blocked", actor: "op-aaaa1111", project: "shop" }),
-  event({ type: "project.unblocked", actor: "op-aaaa1111", project: "shop" }),
+  event({ type: "application.blocked", actor: "op-aaaa1111", application: "shop" }),
+  event({ type: "application.unblocked", actor: "op-aaaa1111", application: "shop" }),
 ];
 
 /** Rows written straight through the wide schema, bypassing the record mapping. */
@@ -157,8 +155,7 @@ describe("the wide schema a flush declares", () => {
       unattributed: "i64?",
 
       type: "string?",
-      project: "string?",
-      env: "string?",
+      application: "string?",
       storeOps: "i64?",
       listOps: "i64?",
       reason: "string?",
@@ -166,7 +163,6 @@ describe("the wide schema a flush declares", () => {
       actions: "i64?",
       failures: "i64?",
       durationMs: "i64?",
-      processId: "string?",
       actor: "string?",
       subject: "string?",
       role: "string?",
@@ -238,8 +234,7 @@ describe("what one record becomes", () => {
       node: NODE,
       at: CLOCK_START_MS,
       since: CLOCK_START_MS - 3_600_000,
-      project: "shop",
-      env: "production",
+      application: "shop",
       requests: 41,
       bytes: 90_210,
       status_2xx: 35,
@@ -265,7 +260,7 @@ describe("what one record becomes", () => {
   });
 
   it("leaves a column the record says nothing about ABSENT, which is a real null", () => {
-    const row = observeParquetRow(event({ type: "runtime.started", processId: "shop--prod" }));
+    const row = observeParquetRow(event({ type: "runtime.started", application: "shop-prod" }));
 
     expect(row).toEqual({
       v: OBSERVE_RECORD_VERSION,
@@ -273,7 +268,7 @@ describe("what one record becomes", () => {
       node: NODE,
       at: CLOCK_START_MS,
       type: "runtime.started",
-      processId: "shop--prod",
+      application: "shop-prod",
     });
     expect(Object.hasOwn(row, "requests")).toBe(false);
   });
@@ -290,13 +285,28 @@ describe("what one record becomes", () => {
         "runtime.started",
         "operator.trusted",
         "operator.revoked",
-        "project.blocked",
-        "project.unblocked",
+        "application.blocked",
+        "application.unblocked",
       ]),
     );
 
     expect(rows[0].kicked).toBe(true);
     expect(rows[2].storeOps).toBe(11);
+  });
+
+  it("files an event's subject and a counter snapshot's in the one application column", () => {
+    /* An operational event and a request total name the same thing, so they name
+       it in the same column and a query can group the two together. */
+    const blocked = observeParquetRow(
+      event({ type: "application.blocked", actor: "op-aaaa1111", application: "shop" }),
+    );
+
+    expect(blocked.application).toBe("shop");
+    expect(blocked.actor).toBe("op-aaaa1111");
+    expect(observeParquetRow(counters()).application).toBe("shop");
+    expect(
+      OBSERVE_PARQUET_SCHEMA.columns.filter((column) => column.name === "application"),
+    ).toEqual([{ name: "application", type: "string", optional: true }]);
   });
 
   it("refuses a record whose timestamp is not an instant rather than writing a guess", async () => {
@@ -366,11 +376,11 @@ describe("reading it back", () => {
   });
 
   it("keeps a null column absent rather than reading it back as a zero", () => {
-    const kicked = event({ type: "runtime.started", processId: "shop--prod" });
+    const started = event({ type: "runtime.started", application: "shop-prod" });
 
-    const [read] = PARQUET_CODEC.decode(PARQUET_CODEC.encode([kicked]).bytes).records;
+    const [read] = PARQUET_CODEC.decode(PARQUET_CODEC.encode([started]).bytes).records;
 
-    expect(Object.keys(read).sort()).toEqual(["at", "node", "processId", "record", "type", "v"]);
+    expect(Object.keys(read).sort()).toEqual(["application", "at", "node", "record", "type", "v"]);
   });
 
   it("reads the flush header's optional totals back only when the node counted", () => {
@@ -385,7 +395,7 @@ describe("reading it back", () => {
 
   it("skips and counts a row that is not a record, keeping the file's good ones", () => {
     const bytes = writeRows([
-      observeParquetRow(event({ type: "runtime.started", processId: "shop--kept" })),
+      observeParquetRow(event({ type: "runtime.started", application: "shop-kept" })),
       { v: 1, record: "invented", node: NODE, at: CLOCK_START_MS },
       { v: 1, record: "event", node: "not a node id", at: CLOCK_START_MS },
     ]);
@@ -494,13 +504,11 @@ describe.skipIf(DUCKDB === undefined)("what DuckDB makes of a flush", () => {
     expect(
       query(
         file,
-        `SELECT "project", "env", "requests", "bytes", "status_2xx", "durations_le_10ms", ` +
+        `SELECT "application", "requests", "bytes", "status_2xx", "durations_le_10ms", ` +
           `"durations_gt_3000ms", epoch_ms("at"), epoch_ms("since") ` +
           `FROM read_parquet('$FILE') WHERE "record" = 'counters'`,
       ),
-    ).toBe(
-      ["shop", "production", 41, 90_210, 35, 10, 1, CLOCK_START_MS, Date.parse(SINCE)].join(","),
-    );
+    ).toBe(["shop", 41, 90_210, 35, 10, 1, CLOCK_START_MS, Date.parse(SINCE)].join(","));
 
     expect(
       query(

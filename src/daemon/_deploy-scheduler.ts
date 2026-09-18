@@ -2,11 +2,11 @@ import { ScafoError } from "../core/error.ts";
 import type { StagedArtifact } from "../core/types/deploy.ts";
 
 export const DEFAULT_ACTIVE_TASKS: number = 1;
-export const DEFAULT_PROJECT_ACTIVE_TASKS: number = 1;
+export const DEFAULT_APPLICATION_ACTIVE_TASKS: number = 1;
 export const DEFAULT_QUEUED_TASKS: number = 4;
-export const DEFAULT_PROJECT_QUEUED_TASKS: number = 2;
+export const DEFAULT_APPLICATION_QUEUED_TASKS: number = 2;
 export const DEFAULT_STAGED_BYTES: number = 5 * 1024 ** 3;
-export const DEFAULT_PROJECT_STAGED_BYTES: number = 3 * 1024 ** 3;
+export const DEFAULT_APPLICATION_STAGED_BYTES: number = 3 * 1024 ** 3;
 export const DEFAULT_RECEIVE_TIMEOUT_MS: number = 600_000;
 export const DEFAULT_QUEUE_TIMEOUT_MS: number = 600_000;
 export const DEFAULT_TASK_TIMEOUT_MS: number = 300_000;
@@ -15,11 +15,11 @@ export const DEFAULT_OUTPUT_BYTES: number = 65_536;
 export interface DeploySchedulerOptions {
   artifactBytes: number;
   activeTasks: number;
-  projectActiveTasks: number;
+  applicationActiveTasks: number;
   queuedTasks: number;
-  projectQueuedTasks: number;
+  applicationQueuedTasks: number;
   stagedBytes: number;
-  projectStagedBytes: number;
+  applicationStagedBytes: number;
   receiveTimeoutMs: number;
   queueTimeoutMs: number;
   taskTimeoutMs: number;
@@ -30,7 +30,7 @@ export interface ScheduledDeploy<T> {
 }
 
 export interface DeployReservation {
-  readonly project: string;
+  readonly application: string;
   signal: AbortSignal;
   cancel(reason?: unknown): void;
   /** Disposes a completed artifact rejected before enqueue, then releases its slot and bytes. */
@@ -45,23 +45,23 @@ export interface DeploySchedulerUsage {
   activeTasks: number;
   queuedTasks: number;
   stagedBytes: number;
-  projects: Record<string, ProjectUsage>;
+  applications: Record<string, ApplicationUsage>;
 }
 
-export interface ProjectUsage {
+export interface ApplicationUsage {
   activeTasks: number;
   queuedTasks: number;
   stagedBytes: number;
 }
 
 export interface DeployScheduler {
-  reserve(project: string): DeployReservation;
+  reserve(application: string): DeployReservation;
   usage(): DeploySchedulerUsage;
   stop(reason: unknown): Promise<void>;
 }
 
 interface Job {
-  project: string;
+  application: string;
   artifact: StagedArtifact;
   byteLength: number;
   task: (signal: AbortSignal) => Promise<unknown>;
@@ -72,7 +72,7 @@ interface Job {
   phase: "queued" | "active" | "cleanup";
 }
 
-interface ProjectState extends ProjectUsage {
+interface ApplicationState extends ApplicationUsage {
   queue: Job[];
   ready: boolean;
 }
@@ -85,7 +85,7 @@ interface ProjectState extends ProjectUsage {
  * retried on every dispatch and once more at stop.
  */
 interface Orphan {
-  project: string;
+  application: string;
   artifact: StagedArtifact;
   bytes: number;
 }
@@ -98,7 +98,7 @@ interface Receiving {
 /** One node-wide deploy scheduler and all accounting it owns. */
 export function createDeployScheduler(options: DeploySchedulerOptions): DeployScheduler {
   validateOptions(options);
-  const projects = new Map<string, ProjectState>();
+  const applications = new Map<string, ApplicationState>();
   const ready: string[] = [];
   const receiving = new Set<Receiving>();
   const active = new Set<Job>();
@@ -114,65 +114,65 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
   let dispatchRequested = false;
   let sweeping: Promise<void> | undefined;
 
-  const stateOf = (project: string): ProjectState => {
-    let state = projects.get(project);
+  const stateOf = (application: string): ApplicationState => {
+    let state = applications.get(application);
     if (state === undefined) {
       state = { activeTasks: 0, queuedTasks: 0, stagedBytes: 0, queue: [], ready: false };
-      projects.set(project, state);
+      applications.set(application, state);
     }
     return state;
   };
 
-  const removeEmpty = (project: string, state: ProjectState): void => {
+  const removeEmpty = (application: string, state: ApplicationState): void => {
     if (state.activeTasks === 0 && state.queuedTasks === 0 && state.stagedBytes === 0) {
-      projects.delete(project);
+      applications.delete(application);
     }
   };
 
-  const releaseBytes = (project: string, bytes: number): void => {
-    const state = projects.get(project);
+  const releaseBytes = (application: string, bytes: number): void => {
+    const state = applications.get(application);
     if (state === undefined || state.stagedBytes < bytes) {
       throw new Error("deploy scheduler staged-byte accounting underflow");
     }
     stagedBytes -= bytes;
     state.stagedBytes -= bytes;
-    removeEmpty(project, state);
+    removeEmpty(application, state);
   };
 
-  const releaseQueuedSlot = (project: string): void => {
-    const state = projects.get(project);
+  const releaseQueuedSlot = (application: string): void => {
+    const state = applications.get(application);
     if (state === undefined || state.queuedTasks <= 0) {
       throw new Error("deploy scheduler queued accounting underflow");
     }
     queuedTasks -= 1;
     state.queuedTasks -= 1;
-    removeEmpty(project, state);
+    removeEmpty(application, state);
   };
 
   const releaseActiveSlot = (job: Job): void => {
-    const state = projects.get(job.project);
+    const state = applications.get(job.application);
     if (state === undefined || state.activeTasks <= 0) {
       throw new Error("deploy scheduler active accounting underflow");
     }
     activeTasks -= 1;
     state.activeTasks -= 1;
     active.delete(job);
-    removeEmpty(job.project, state);
+    removeEmpty(job.application, state);
   };
 
   /** Disposes an artifact and frees its bytes, or keeps them charged as an orphan. */
   const disposeCharged = async (
-    project: string,
+    application: string,
     artifact: StagedArtifact,
     bytes: number,
   ): Promise<void> => {
     try {
       await artifact.dispose();
     } catch (error) {
-      orphans.add({ project, artifact, bytes });
+      orphans.add({ application, artifact, bytes });
       throw error;
     }
-    releaseBytes(project, bytes);
+    releaseBytes(application, bytes);
   };
 
   /** Retries every orphaned disposal, one sweep at a time; whatever still fails stays charged. */
@@ -188,7 +188,7 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
               continue;
             }
             orphans.delete(orphan);
-            releaseBytes(orphan.project, orphan.bytes);
+            releaseBytes(orphan.application, orphan.bytes);
           }
         } finally {
           sweeping = undefined;
@@ -198,16 +198,16 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
     return sweeping;
   };
 
-  const markReady = (project: string, state: ProjectState): void => {
+  const markReady = (application: string, state: ApplicationState): void => {
     if (
       state.ready ||
       state.queue.length === 0 ||
-      state.activeTasks >= options.projectActiveTasks
+      state.activeTasks >= options.applicationActiveTasks
     ) {
       return;
     }
     state.ready = true;
-    ready.push(project);
+    ready.push(application);
   };
 
   const trackCleanup = (cleanup: Promise<void>): Promise<void> => {
@@ -222,17 +222,17 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
   const rejectAfterDispose = async (job: Job, reason: unknown): Promise<void> => {
     job.phase = "cleanup";
     try {
-      await disposeCharged(job.project, job.artifact, job.byteLength);
+      await disposeCharged(job.application, job.artifact, job.byteLength);
     } catch {
       /* Orphaned: the bytes stay charged, the reason the job was refused stands. */
     }
-    releaseQueuedSlot(job.project);
+    releaseQueuedSlot(job.application);
     job.settled.reject(reason);
   };
 
   const expireQueued = (): void => {
     const now = performance.now();
-    for (const [project, state] of projects) {
+    for (const [application, state] of applications) {
       const keep: Job[] = [];
       for (const job of state.queue) {
         if (job.queuedAt + options.queueTimeoutMs <= now) {
@@ -243,14 +243,14 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
       }
       state.queue = keep;
       if (keep.length === 0) state.ready = false;
-      else markReady(project, state);
+      else markReady(application, state);
     }
   };
 
   const scheduleQueueTimer = (): void => {
     if (queueTimer !== undefined) clearTimeout(queueTimer);
     let earliest = Number.POSITIVE_INFINITY;
-    for (const state of projects.values()) {
+    for (const state of applications.values()) {
       for (const job of state.queue) earliest = Math.min(earliest, job.queuedAt);
     }
     if (!Number.isFinite(earliest)) {
@@ -284,7 +284,7 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
        went: what the task did is what the caller hears, and an artifact left
        behind is the node's problem to keep retrying, not the deploy's. */
     try {
-      await disposeCharged(job.project, job.artifact, job.byteLength);
+      await disposeCharged(job.application, job.artifact, job.byteLength);
     } catch {
       /* Orphaned. */
     }
@@ -292,8 +292,8 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
 
     if (outcome.ok) job.settled.resolve(outcome.value);
     else job.settled.reject(outcome.error);
-    const state = projects.get(job.project);
-    if (state !== undefined) markReady(job.project, state);
+    const state = applications.get(job.application);
+    if (state !== undefined) markReady(job.application, state);
     dispatch();
   };
 
@@ -309,11 +309,11 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
         if (orphans.size > 0) void sweepOrphans();
         expireQueued();
         while (!closed && activeTasks < options.activeTasks && ready.length > 0) {
-          const project = ready.shift() as string;
-          const state = projects.get(project);
+          const application = ready.shift() as string;
+          const state = applications.get(application);
           if (state === undefined) continue;
           state.ready = false;
-          if (state.activeTasks >= options.projectActiveTasks) continue;
+          if (state.activeTasks >= options.applicationActiveTasks) continue;
           const job = state.queue[0];
           if (job === undefined || job.phase !== "queued") continue;
 
@@ -329,7 +329,7 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
             options.taskTimeoutMs,
           );
           active.add(job);
-          markReady(project, state);
+          markReady(application, state);
           queueMicrotask(() => void execute(job));
         }
       } while (dispatchRequested && !closed);
@@ -340,16 +340,16 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
   }
 
   const scheduler: DeployScheduler = {
-    reserve(project): DeployReservation {
+    reserve(application): DeployReservation {
       if (closed) throw overloaded("deploy admission is closed while this node stops");
-      const state = stateOf(project);
+      const state = stateOf(application);
       if (
         queuedTasks + 1 > options.queuedTasks ||
-        state.queuedTasks + 1 > options.projectQueuedTasks ||
+        state.queuedTasks + 1 > options.applicationQueuedTasks ||
         stagedBytes + options.artifactBytes > options.stagedBytes ||
-        state.stagedBytes + options.artifactBytes > options.projectStagedBytes
+        state.stagedBytes + options.artifactBytes > options.applicationStagedBytes
       ) {
-        removeEmpty(project, state);
+        removeEmpty(application, state);
         throw overloaded("this node has no queued deploy or staged-byte capacity");
       }
 
@@ -375,7 +375,7 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
       };
 
       const reservation: DeployReservation = {
-        project,
+        application,
         signal: controller.signal,
         cancel(reason = new Error("deploy receive cancelled")): void {
           if (phase !== "receiving" && phase !== "aborting") {
@@ -384,8 +384,8 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
           phase = "cancelled";
           clearTimeout(receiveTimer);
           controller.abort(reason);
-          releaseQueuedSlot(project);
-          releaseBytes(project, options.artifactBytes);
+          releaseQueuedSlot(application);
+          releaseBytes(application, options.artifactBytes);
           finishReceiving();
         },
         discard(
@@ -401,10 +401,10 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
           return trackCleanup(
             (async (): Promise<void> => {
               try {
-                await disposeCharged(project, artifact, options.artifactBytes);
+                await disposeCharged(application, artifact, options.artifactBytes);
                 phase = "cancelled";
               } finally {
-                releaseQueuedSlot(project);
+                releaseQueuedSlot(application);
                 finishReceiving();
               }
             })(),
@@ -426,7 +426,7 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
           const settled = Promise.withResolvers<unknown>();
           settled.promise.catch(() => {});
           const job: Job = {
-            project,
+            application,
             artifact,
             byteLength: artifact.byteLength,
             task,
@@ -436,7 +436,7 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
           };
           state.queue.push(job);
           finishReceiving();
-          markReady(project, state);
+          markReady(application, state);
           dispatch();
           return { completion: settled.promise as Promise<T> };
         },
@@ -451,9 +451,9 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
     },
 
     usage(): DeploySchedulerUsage {
-      const usage: Record<string, ProjectUsage> = {};
-      for (const [project, state] of projects) {
-        Object.defineProperty(usage, project, {
+      const usage: Record<string, ApplicationUsage> = {};
+      for (const [application, state] of applications) {
+        Object.defineProperty(usage, application, {
           value: {
             activeTasks: state.activeTasks,
             queuedTasks: state.queuedTasks,
@@ -466,7 +466,7 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
         activeTasks,
         queuedTasks,
         stagedBytes,
-        projects: usage,
+        applications: usage,
       };
     },
 
@@ -481,7 +481,7 @@ export function createDeployScheduler(options: DeploySchedulerOptions): DeploySc
           receivingCleanup.push(entry.settled);
         }
         const queuedCleanup: Promise<void>[] = [];
-        for (const state of projects.values()) {
+        for (const state of applications.values()) {
           if (state.queue.length === 0) continue;
           const jobs = state.queue.splice(0);
           state.ready = false;
@@ -509,37 +509,37 @@ function validateOptions(options: DeploySchedulerOptions): void {
   for (const name of [
     "artifactBytes",
     "activeTasks",
-    "projectActiveTasks",
+    "applicationActiveTasks",
     "queuedTasks",
-    "projectQueuedTasks",
+    "applicationQueuedTasks",
     "stagedBytes",
-    "projectStagedBytes",
+    "applicationStagedBytes",
     "receiveTimeoutMs",
     "queueTimeoutMs",
     "taskTimeoutMs",
   ] as const) {
     const value = options[name];
-    const queueCount = name === "queuedTasks" || name === "projectQueuedTasks";
+    const queueCount = name === "queuedTasks" || name === "applicationQueuedTasks";
     if (!Number.isSafeInteger(value) || value < (queueCount ? 0 : 1)) {
       throw new ScafoError("invalid-input", "Invalid deploy scheduler limit", {
         detail: `${name} must be a ${queueCount ? "non-negative" : "positive"} safe integer`,
       });
     }
   }
-  for (const [project, global] of [
-    ["projectActiveTasks", "activeTasks"],
-    ["projectQueuedTasks", "queuedTasks"],
-    ["projectStagedBytes", "stagedBytes"],
+  for (const [application, global] of [
+    ["applicationActiveTasks", "activeTasks"],
+    ["applicationQueuedTasks", "queuedTasks"],
+    ["applicationStagedBytes", "stagedBytes"],
   ] as const) {
-    if (options[project] > options[global]) {
+    if (options[application] > options[global]) {
       throw new ScafoError("invalid-input", "Invalid deploy scheduler limits", {
-        detail: `${project} must not exceed ${global}`,
+        detail: `${application} must not exceed ${global}`,
       });
     }
   }
   if (
     options.stagedBytes < options.artifactBytes ||
-    options.projectStagedBytes < options.artifactBytes
+    options.applicationStagedBytes < options.artifactBytes
   ) {
     throw new ScafoError("invalid-input", "Invalid deploy scheduler byte limits", {
       detail: "staged byte limits must each hold one complete artifact",

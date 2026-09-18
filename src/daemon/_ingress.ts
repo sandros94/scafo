@@ -3,7 +3,7 @@
  * the one reader left that needs it node-locally — the access counters.
  */
 
-import type { DesiredEnvironment } from "../core/placement/reconcile.ts";
+import type { ApplicationRecord } from "../core/types/registry.ts";
 import { renderRoutes, type RouteClaim } from "../core/placement/routes.ts";
 import type { IngressDesired } from "../core/types/ingress.ts";
 import type { RuntimeProcess } from "../core/types/runtime.ts";
@@ -12,8 +12,8 @@ import { parseHostPort } from "./config.ts";
 
 /** What one pass ended with, as this node's own routing is rendered from it. */
 export interface IngressInput {
-  /** Environments this node serves, with the records this pass resolved for them. */
-  desired: DesiredEnvironment[];
+  /** Applications this node serves, as the records this pass resolved for them. */
+  desired: ApplicationRecord[];
   /** Processes this node is running and routes. */
   processes: RuntimeProcess[];
 }
@@ -34,21 +34,19 @@ export interface IngressInput {
 export function recordRouting(daemon: DaemonContext, input: IngressInput): IngressDesired {
   const { desired, processes } = input;
 
-  /* An environment record mirrors every domain claimed for it, so the custom
+  /* An application record mirrors every domain claimed for it, so the custom
      domains come along with the desired state and cost no extra registry reads.
-     A claim the environment does not list yet is one whose claim call has not
+     A claim the application does not list yet is one whose claim call has not
      finished, and which nothing should be routed to. */
   const claims: RouteClaim[] = [];
   for (const entry of desired) {
-    for (const host of entry.env.domains) {
-      claims.push({ host, project: entry.project, environment: entry.env.name });
-    }
+    for (const host of entry.domains) claims.push({ host, application: entry.name });
   }
 
   const port = parseHostPort(daemon.config.node.listen, "node.listen").port;
   const routing = renderRoutes({
     platformDomains: daemon.config.platformDomains,
-    environments: desired.map((entry) => ({ project: entry.project, env: entry.env })),
+    applications: desired,
     processes,
     claims,
     /* The same daemon, at the same port, reached under a different contract: the
@@ -61,7 +59,7 @@ export function recordRouting(daemon: DaemonContext, input: IngressInput): Ingre
 
   /* THIS IS ALSO WHAT SAYS WHOSE HOST IS WHOSE. The counters read the ingress's
      access log, and only this knows that a custom domain belongs to an
-     environment — a second reading of that would be a second routing. */
+     application — a second reading of that would be a second routing. */
   daemon.ingressCounters?.observeRouting({ routes: routing.routes, claims });
 
   return routing;

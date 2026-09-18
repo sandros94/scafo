@@ -20,11 +20,11 @@ import {
   PARQUET_CODEC,
 } from "../src/daemon/observe-parquet.ts";
 import {
+  applicationsCounted,
   bandAt,
   formatMetrics,
   type MetricsNaming,
   noCounters,
-  projectsCounted,
   summarizeMetrics,
   UNMATCHED,
 } from "../src/cli/_metrics.ts";
@@ -38,7 +38,7 @@ import {
 import { formatTraces, selectTraces } from "../src/cli/_traces.ts";
 import { readMetricsNaming } from "../src/cli/_metrics-names.ts";
 import { traces } from "../src/cli/commands/traces.ts";
-import { createEnvironment, createProject } from "../src/core/registry/index.ts";
+import { createApplication } from "../src/core/registry/index.ts";
 import type { RegistryContext } from "../src/core/registry/context.ts";
 import { observeKey } from "../src/core/registry/paths.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
@@ -70,8 +70,7 @@ function counters(
   node: string,
   atMs: number,
   opts: {
-    project: string;
-    env: string;
+    application: string;
     sinceMs?: number;
     requests: number;
     bytes: number;
@@ -85,8 +84,7 @@ function counters(
     node,
     at: new Date(atMs).toISOString(),
     since: new Date(opts.sinceMs ?? CLOCK_START_MS - 5 * HOUR_MS).toISOString(),
-    project: opts.project,
-    env: opts.env,
+    application: opts.application,
     requests: opts.requests,
     bytes: opts.bytes,
     status: { "2xx": opts.requests, "3xx": 0, "4xx": 0, "5xx": 0, "other": 0, ...opts.status },
@@ -109,22 +107,22 @@ describe("what a window reads", () => {
     await seed("node-a", CLOCK_START_MS - 2 * HOUR_MS, [
       event("node-a", CLOCK_START_MS - 2 * HOUR_MS, {
         type: "runtime.started",
-        processId: "shop--old",
+        application: "shop-old",
       }),
     ]);
     await seed("node-a", CLOCK_START_MS - 10 * MINUTE_MS, [
       event("node-a", CLOCK_START_MS - 10 * MINUTE_MS, {
         type: "runtime.started",
-        processId: "shop--inside",
+        application: "shop-inside",
       }),
     ]);
 
     const window = { sinceMs: CLOCK_START_MS - HOUR_MS, untilMs: CLOCK_START_MS };
     const found = await readObservations(registry, { window });
 
-    expect(found.records.map((record) => ("processId" in record ? record.processId : ""))).toEqual([
-      "shop--inside",
-    ]);
+    expect(
+      found.records.map((record) => ("application" in record ? record.application : "")),
+    ).toEqual(["shop-inside"]);
     /* The nodes are reported whatever the window said, so an empty answer can
        tell "nobody ever wrote" from "nobody wrote lately". */
     expect(found.nodes).toEqual(["node-a"]);
@@ -136,7 +134,7 @@ describe("what a window reads", () => {
     await seed("node-a", CLOCK_START_MS + 30 * MINUTE_MS, [
       event("node-a", CLOCK_START_MS - 10 * MINUTE_MS, {
         type: "runtime.started",
-        processId: "shop--late-flush",
+        application: "shop-late-flush",
       }),
     ]);
 
@@ -150,7 +148,7 @@ describe("what a window reads", () => {
     const stale = await seed("node-a", CLOCK_START_MS - 2 * OBSERVE_READ_SLACK_MS - HOUR_MS, [
       event("node-a", CLOCK_START_MS - 30 * MINUTE_MS, {
         type: "runtime.started",
-        processId: "shop--impossible",
+        application: "shop-impossible",
       }),
     ]);
     expect(stale).toContain("_scafo/observe/node-a/");
@@ -167,13 +165,13 @@ describe("what a window reads", () => {
     await seed("node-b", CLOCK_START_MS, [
       event("node-b", CLOCK_START_MS - 5 * MINUTE_MS, {
         type: "runtime.started",
-        processId: "shop--b-second",
+        application: "shop-b-second",
       }),
     ]);
     await seed("node-a", CLOCK_START_MS, [
       event("node-a", CLOCK_START_MS - 9 * MINUTE_MS, {
         type: "runtime.started",
-        processId: "shop--a-first",
+        application: "shop-a-first",
       }),
     ]);
 
@@ -187,7 +185,7 @@ describe("what a window reads", () => {
   it("skips and counts the rows that are not records, keeping the file's good ones", async () => {
     const good = event("node-a", CLOCK_START_MS - MINUTE_MS, {
       type: "runtime.started",
-      processId: "shop--kept",
+      application: "shop-kept",
     });
     const writer = createWriter(OBSERVE_PARQUET_SCHEMA, {
       codec: OBSERVE_PARQUET_WRITER_CODEC,
@@ -226,7 +224,7 @@ describe("what a window reads", () => {
     await seed("node-a", CLOCK_START_MS, [
       event("node-a", CLOCK_START_MS - MINUTE_MS, {
         type: "runtime.started",
-        processId: "shop--kept",
+        application: "shop-kept",
       }),
     ]);
     await store.put(
@@ -280,14 +278,12 @@ describe("what the metrics come to", () => {
   it("differences the first and last snapshot of the window", () => {
     const records: ObserveRecord[] = [
       counters("node-a", CLOCK_START_MS - 50 * MINUTE_MS, {
-        project: "shop",
-        env: "production",
+        application: "shop-production",
         requests: 100,
         bytes: 1000,
       }),
       counters("node-a", CLOCK_START_MS - 5 * MINUTE_MS, {
-        project: "shop",
-        env: "production",
+        application: "shop-production",
         requests: 460,
         bytes: 9000,
       }),
@@ -305,26 +301,22 @@ describe("what the metrics come to", () => {
   it("adds up the nodes rather than differencing across them", () => {
     const records: ObserveRecord[] = [
       counters("node-a", CLOCK_START_MS - 50 * MINUTE_MS, {
-        project: "shop",
-        env: "production",
+        application: "shop-production",
         requests: 100,
         bytes: 10,
       }),
       counters("node-b", CLOCK_START_MS - 50 * MINUTE_MS, {
-        project: "shop",
-        env: "production",
+        application: "shop-production",
         requests: 7000,
         bytes: 10,
       }),
       counters("node-a", CLOCK_START_MS - 5 * MINUTE_MS, {
-        project: "shop",
-        env: "production",
+        application: "shop-production",
         requests: 150,
         bytes: 20,
       }),
       counters("node-b", CLOCK_START_MS - 5 * MINUTE_MS, {
-        project: "shop",
-        env: "production",
+        application: "shop-production",
         requests: 7020,
         bytes: 20,
       }),
@@ -339,8 +331,7 @@ describe("what the metrics come to", () => {
   it("takes a node that restarted mid-window whole rather than going negative", () => {
     const records: ObserveRecord[] = [
       counters("node-a", CLOCK_START_MS - 50 * MINUTE_MS, {
-        project: "shop",
-        env: "production",
+        application: "shop-production",
         sinceMs: CLOCK_START_MS - 5 * HOUR_MS,
         requests: 9000,
         bytes: 90,
@@ -348,15 +339,13 @@ describe("what the metrics come to", () => {
       /* Restarted: the totals went back to zero, and a subtraction against the
          old run's 9000 would report a negative number of requests. */
       counters("node-a", CLOCK_START_MS - 20 * MINUTE_MS, {
-        project: "shop",
-        env: "production",
+        application: "shop-production",
         sinceMs: CLOCK_START_MS - 30 * MINUTE_MS,
         requests: 12,
         bytes: 12,
       }),
       counters("node-a", CLOCK_START_MS - 5 * MINUTE_MS, {
-        project: "shop",
-        env: "production",
+        application: "shop-production",
         sinceMs: CLOCK_START_MS - 30 * MINUTE_MS,
         requests: 40,
         bytes: 40,
@@ -370,29 +359,25 @@ describe("what the metrics come to", () => {
     expect(summary.rows[0].requests).toBe(40);
   });
 
-  it("keeps the environments apart and totals them together", () => {
+  it("keeps the applications apart and totals them together", () => {
     const records: ObserveRecord[] = [
       counters("node-a", CLOCK_START_MS - 50 * MINUTE_MS, {
-        project: "shop",
-        env: "production",
+        application: "shop-production",
         requests: 0,
         bytes: 0,
       }),
       counters("node-a", CLOCK_START_MS - 50 * MINUTE_MS, {
-        project: "shop",
-        env: "preview",
+        application: "shop-preview",
         requests: 0,
         bytes: 0,
       }),
       counters("node-a", CLOCK_START_MS - 5 * MINUTE_MS, {
-        project: "shop",
-        env: "production",
+        application: "shop-production",
         requests: 300,
         bytes: 3000,
       }),
       counters("node-a", CLOCK_START_MS - 5 * MINUTE_MS, {
-        project: "shop",
-        env: "preview",
+        application: "shop-preview",
         requests: 12,
         bytes: 120,
       }),
@@ -400,42 +385,38 @@ describe("what the metrics come to", () => {
 
     const summary = summarizeMetrics(records, window);
 
-    expect(summary.rows.map((row) => `${row.project}/${row.env}=${String(row.requests)}`)).toEqual([
-      "shop/preview=12",
-      "shop/production=300",
+    expect(summary.rows.map((row) => `${row.application}=${String(row.requests)}`)).toEqual([
+      "shop-preview=12",
+      "shop-production=300",
     ]);
     expect(summary.totals.requests).toBe(312);
   });
 
-  it("narrows to one project and environment when asked", () => {
+  it("narrows to one application when asked", () => {
     const records: ObserveRecord[] = [
       counters("node-a", CLOCK_START_MS - 50 * MINUTE_MS, {
-        project: "shop",
-        env: "production",
+        application: "shop-production",
         requests: 0,
         bytes: 0,
       }),
       counters("node-a", CLOCK_START_MS - 50 * MINUTE_MS, {
-        project: "blog",
-        env: "production",
+        application: "blog-production",
         requests: 0,
         bytes: 0,
       }),
       counters("node-a", CLOCK_START_MS - 5 * MINUTE_MS, {
-        project: "shop",
-        env: "production",
+        application: "shop-production",
         requests: 5,
         bytes: 5,
       }),
       counters("node-a", CLOCK_START_MS - 5 * MINUTE_MS, {
-        project: "blog",
-        env: "production",
+        application: "blog-production",
         requests: 900,
         bytes: 900,
       }),
     ];
 
-    const summary = summarizeMetrics(records, window, { project: "shop", env: "production" });
+    const summary = summarizeMetrics(records, window, { application: "shop-production" });
 
     expect(summary.rows).toHaveLength(1);
     expect(summary.totals.requests).toBe(5);
@@ -453,15 +434,13 @@ describe("what the metrics come to", () => {
   it("prints a table with a totals line under it", () => {
     const records: ObserveRecord[] = [
       counters("node-a", CLOCK_START_MS - 50 * MINUTE_MS, {
-        project: "shop",
-        env: "production",
+        application: "shop-production",
         requests: 0,
         bytes: 0,
         durations: [0, 0, 0, 0, 0, 0, 0],
       }),
       counters("node-a", CLOCK_START_MS - 5 * MINUTE_MS, {
-        project: "shop",
-        env: "production",
+        application: "shop-production",
         requests: 12_480,
         bytes: 4_200_000,
         status: { "2xx": 12_310, "4xx": 160, "5xx": 10 },
@@ -473,8 +452,7 @@ describe("what the metrics come to", () => {
     const lines = table.split("\n");
 
     expect(lines[0].split(/\s+/)).toEqual([
-      "PROJECT",
-      "ENV",
+      "APPLICATION",
       "REQUESTS",
       "BYTES",
       "2XX",
@@ -488,7 +466,7 @@ describe("what the metrics come to", () => {
     expect(lines[1]).toContain("12480");
     expect(lines[1]).toContain("4.20 MB");
     expect(lines.at(-1)).toContain("TOTAL");
-    /* A rule between the rows and the total, so a fleet with one environment
+    /* A rule between the rows and the total, so a fleet with one application
        cannot be misread as counting it twice. */
     expect(lines.at(-2)).toMatch(/^-+$/);
   });
@@ -499,93 +477,84 @@ describe("whose traffic a counted host actually was", () => {
 
   /** What the registry holds, for the cases below to be read against. */
   const naming: MetricsNaming = {
-    projects: new Set(["shop"]),
-    environments: new Map([["shop", new Set(["production", "preview-7"])]]),
+    applications: new Set(["shop", "shop-preview-7"]),
   };
 
-  it("keeps an environment the registry really holds exactly as it was counted", () => {
-    const summary = summarizeMetrics(run("shop", "preview-7", 5, 25), window, { naming });
+  it("keeps an application the registry really holds exactly as it was counted", () => {
+    const summary = summarizeMetrics(run("shop-preview-7", 5, 25), window, { naming });
 
-    expect(summary.rows).toMatchObject([{ project: "shop", env: "preview-7", requests: 20 }]);
+    expect(summary.rows).toMatchObject([{ application: "shop-preview-7", requests: 20 }]);
   });
 
-  it("never invents a project out of a host nothing serves, nor an env no project holds", () => {
-    /* `wat.apps.test` parses as a project label perfectly well, and a scanner
-       walking the platform domain produces a thousand of them. */
-    const invented = summarizeMetrics(run("wat", "production", 0, 9), window, { naming });
+  it("never invents an application out of a host nothing serves", () => {
+    /* `wat.apps.test` parses as an application label perfectly well, and a
+       scanner walking the platform domain produces a thousand of them. */
+    const invented = summarizeMetrics(run("wat", 0, 9), window, { naming });
 
-    expect(invented.rows).toMatchObject([{ project: UNMATCHED, env: UNMATCHED, requests: 9 }]);
+    expect(invented.rows).toMatchObject([{ application: UNMATCHED, requests: 9 }]);
 
-    /* A real project's unknown ref goes under the same unmatched row. */
-    const unknownRef = summarizeMetrics(run("shop", "typo", 0, 3), window, { naming });
+    /* A name close to a real one goes under the same unmatched row. */
+    const nearMiss = summarizeMetrics(run("shop-typo", 0, 3), window, { naming });
 
-    expect(unknownRef.rows).toMatchObject([{ project: UNMATCHED, env: UNMATCHED, requests: 3 }]);
+    expect(nearMiss.rows).toMatchObject([{ application: UNMATCHED, requests: 3 }]);
   });
 
   it("gathers what the node could not attribute at all into that one row", () => {
-    const records = [...run("-", "-", 0, 11), ...run("wat", "production", 0, 4)];
+    const records = [...run("-", 0, 11), ...run("wat", 0, 4)];
 
     const summary = summarizeMetrics(records, window, { naming });
 
     /* One row, whichever way a host failed to name something: an address, a
-       domain this installation never minted, a label no project answers to. */
-    expect(summary.rows).toMatchObject([{ project: UNMATCHED, env: UNMATCHED, requests: 15 }]);
+       domain this installation never minted, a label no application answers to. */
+    expect(summary.rows).toMatchObject([{ application: UNMATCHED, requests: 15 }]);
   });
 
   it("filters on what a row turned out to be, not on what the counter wrote", () => {
-    const records = [...run("shop", "typo", 0, 60), ...run("wat", "production", 0, 4)];
+    const records = [...run("shop-typo", 0, 60), ...run("wat", 0, 4)];
 
-    const summary = summarizeMetrics(records, window, { naming, project: UNMATCHED });
+    const summary = summarizeMetrics(records, window, { naming, application: UNMATCHED });
 
-    expect(summary.rows).toMatchObject([{ project: UNMATCHED, requests: 64 }]);
+    expect(summary.rows).toMatchObject([{ application: UNMATCHED, requests: 64 }]);
   });
 
   it("leaves every name alone when nothing was read back about them", () => {
     /* Without a registry to check against there is nothing to correct, and
        guessing would be exactly the failure this fixes. */
-    const summary = summarizeMetrics(run("shop", "typo", 0, 8), window);
+    const summary = summarizeMetrics(run("shop-typo", 0, 8), window);
 
-    expect(summary.rows).toMatchObject([{ project: "shop", env: "typo", requests: 8 }]);
+    expect(summary.rows).toMatchObject([{ application: "shop-typo", requests: 8 }]);
   });
 
-  it("reads back what the registry holds, for those projects and no others", async () => {
-    await createProject(registry, { slug: "shop" });
-    await createEnvironment(registry, "shop", { name: "production" });
-    await createProject(registry, { slug: "untouched" });
+  it("reads back what the registry holds, for those applications and no others", async () => {
+    await createApplication(registry, { name: "shop" });
+    await createApplication(registry, { name: "untouched" });
 
     const read = await readMetricsNaming(registry, ["shop", "wat"]);
 
-    expect(read.projects.has("shop")).toBe(true);
-    /* A label under a platform domain that no project answers to. */
-    expect(read.projects.has("wat")).toBe(false);
-    expect([...(read.environments.get("shop") ?? [])]).toEqual(["production"]);
-    /* A project this window never counted costs no listing at all. */
-    expect(read.environments.has("untouched")).toBe(false);
+    expect(read.applications.has("shop")).toBe(true);
+    /* A label under a platform domain that no application answers to. */
+    expect(read.applications.has("wat")).toBe(false);
+    /* An application this window never counted costs no listing at all. */
+    expect(read.applications.has("untouched")).toBe(false);
   });
 
-  it("names the projects a window counted, so only those have to be read back", () => {
-    const records = [
-      ...run("shop", "typo", 0, 1),
-      ...run("-", "-", 0, 1),
-      ...run("blog", "production", 0, 1),
-    ];
+  it("names the applications a window counted, so only those have to be read back", () => {
+    const records = [...run("shop", 0, 1), ...run("-", 0, 1), ...run("blog", 0, 1)];
 
-    /* The unattributed bucket is not a project and is never looked up. */
-    expect(projectsCounted(records)).toEqual(["blog", "shop"]);
+    /* The unattributed bucket is not an application and is never looked up. */
+    expect(applicationsCounted(records)).toEqual(["blog", "shop"]);
   });
 
-  /** One node's run of one `{project, env}`: a baseline in the window, and its end. */
-  function run(project: string, env: string, from: number, to: number): ObserveRecord[] {
+  /** One node's run of one application: a baseline in the window, and its end. */
+  function run(application: string, from: number, to: number): ObserveRecord[] {
     return [
       counters("node-a", CLOCK_START_MS - 50 * MINUTE_MS, {
-        project,
-        env,
+        application,
         requests: from,
         bytes: from * 10,
       }),
       counters("node-a", CLOCK_START_MS - 5 * MINUTE_MS, {
-        project,
-        env,
+        application,
         requests: to,
         bytes: to * 10,
       }),
@@ -615,7 +584,7 @@ describe("what the traces come to", () => {
     return Array.from({ length: count }, (_unused, index) =>
       event("node-a", startMs + index, {
         type: "runtime.started",
-        processId: `shop--env-${String(index)}`,
+        application: `shop-${String(index)}`,
       }),
     );
   }
@@ -624,35 +593,35 @@ describe("what the traces come to", () => {
     const events = Array.from({ length: 10 }, (_unused, index) =>
       event("node-a", CLOCK_START_MS - (10 - index) * MINUTE_MS, {
         type: "runtime.started",
-        processId: `shop--env-${String(index)}`,
+        application: `shop-${String(index)}`,
       }),
     );
 
     const selection = selectTraces(events, { limit: 3 });
 
     expect(
-      selection.events.map((record) => ("processId" in record ? record.processId : "")),
-    ).toEqual(["shop--env-7", "shop--env-8", "shop--env-9"]);
+      selection.events.map((record) => ("application" in record ? record.application : "")),
+    ).toEqual(["shop-7", "shop-8", "shop-9"]);
     expect({ matched: selection.matched, omitted: selection.omitted }).toEqual({
       matched: 10,
       omitted: 7,
     });
   });
 
-  it("finds a project directly and through a runtime process id", () => {
+  it("finds every event that names the application, and nothing that names none", () => {
     const records: ObserveRecord[] = [
       event("node-a", CLOCK_START_MS - 10 * MINUTE_MS, {
-        type: "project.blocked",
+        type: "application.blocked",
         actor: "op-aaaa1111",
-        project: "shop",
+        application: "shop",
       }),
       event("node-a", CLOCK_START_MS - 9 * MINUTE_MS, {
         type: "runtime.started",
-        processId: "shop--production",
+        application: "shop",
       }),
       event("node-a", CLOCK_START_MS - 8 * MINUTE_MS, {
         type: "runtime.started",
-        processId: "blog--production",
+        application: "blog",
       }),
       event("node-a", CLOCK_START_MS - 7 * MINUTE_MS, {
         type: "reconcile.pass.start",
@@ -660,27 +629,25 @@ describe("what the traces come to", () => {
       }),
     ];
 
-    const selection = selectTraces(records, { project: "shop" });
+    const selection = selectTraces(records, { application: "shop" });
 
     expect(selection.events).toHaveLength(2);
     expect(selection.events.every((record) => record.type !== "reconcile.pass.start")).toBe(true);
   });
 
-  it("keeps only the selected project's placement pending events", () => {
+  it("keeps only the selected application's placement pending events", () => {
     const own = event("node-a", CLOCK_START_MS - 2 * MINUTE_MS, {
       type: "placement.pending",
-      project: "shop",
-      env: "production",
-      reason: "profile-unavailable",
+      application: "shop-production",
+      reason: "placement-unavailable",
     });
     const other = event("node-a", CLOCK_START_MS - MINUTE_MS, {
       type: "placement.pending",
-      project: "blog",
-      env: "production",
+      application: "blog-production",
       reason: "placement-unavailable",
     });
 
-    expect(selectTraces([own, other], { project: "shop" }).events).toEqual([own]);
+    expect(selectTraces([own, other], { application: "shop-production" }).events).toEqual([own]);
   });
 
   it("leaves the reconcile loop's own passes out of a listing nobody narrowed", () => {
@@ -785,10 +752,10 @@ describe("what the traces come to", () => {
     await seed("node-a", CLOCK_START_MS, runtimeEvents(5, CLOCK_START_MS - 3 * MINUTE_MS));
 
     const found = await readObservations(registry, { window });
-    const selection = selectTraces(found.records, { project: "shop" });
+    const selection = selectTraces(found.records, { application: "shop-4" });
 
-    expect(selection.events).toHaveLength(5);
-    expect(formatTraces(selection)).toContain("shop--env-4");
+    expect(selection.events).toHaveLength(1);
+    expect(formatTraces(selection)).toContain("shop-4");
   });
 });
 
@@ -807,7 +774,7 @@ describe("nothing to show", () => {
     await seed("node-a", CLOCK_START_MS - 10 * HOUR_MS, [
       event("node-a", CLOCK_START_MS - 10 * HOUR_MS, {
         type: "runtime.started",
-        processId: "shop--old",
+        application: "shop-old",
       }),
     ]);
     const found = await readObservations(registry, { window });
@@ -822,7 +789,7 @@ describe("nothing to show", () => {
     const records = [
       event("node-a", CLOCK_START_MS, {
         type: "runtime.started",
-        processId: "shop--one",
+        application: "shop-one",
       }),
     ];
 

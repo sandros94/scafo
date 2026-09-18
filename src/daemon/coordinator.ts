@@ -41,7 +41,7 @@ export interface Coordinator {
   /** Stops and best-effort releases the lease; TTL handles a failed release. */
   stop(): Promise<void>;
   /**
-   * Runs one iteration: take or renew the lease, assign every environment to
+   * Runs one iteration: take or renew the lease, assign every application to
    * the nodes that should serve it, then reap when a reap is due.
    *
    * Resolves once an iteration has finished. A caller arriving while one is
@@ -176,12 +176,9 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
       const fingerprint = JSON.stringify({ reason: failure.reason, detail: failure.detail });
       next.set(failure.target, fingerprint);
       if (rememberedPending.get(failure.target) === fingerprint) continue;
-      const [project, env] = failure.target.split("/");
-      if (project === undefined || env === undefined) continue;
       observe.emit({
         type: "placement.pending",
-        project,
-        env,
+        application: failure.target,
         reason: failure.reason,
       });
     }

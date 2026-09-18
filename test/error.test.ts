@@ -14,6 +14,7 @@ const CODES: ScafoErrorCode[] = [
   "auth-invalid",
   "trust-mismatch",
   "cas-conflict",
+  "application-blocked",
   "deploys-frozen",
   "not-found",
   "invalid-input",
@@ -41,7 +42,7 @@ describe("a failure that crossed a process boundary", () => {
   it("keeps a trust denial apart from an authentication failure", () => {
     /*
      * The distinction a CI job acts on: `trust-mismatch` says the token held up
-     * and the project does not admit it, which is a policy to fix, while
+     * and the trust policy does not admit it, which is a policy to fix, while
      * `auth-invalid` says the token itself did not. Collapsing them is how a
      * caller ends up debugging the wrong half.
      */
@@ -69,6 +70,21 @@ describe("a failure that crossed a process boundary", () => {
     expect(frozen.code).toBe("deploys-frozen");
     expect(frozen.status).toBe(409);
     expect(frozen.toProblem().type).toBe(`${PROBLEM_TYPE_PREFIX}deploys-frozen`);
+  });
+
+  it("reads a blocked application back as the conflict it is, not as a denial of the key", () => {
+    /* Nothing is wrong with the caller or with its key, and the same request
+       works unchanged the moment an admin lifts the block — which is what 409
+       says and what 403 would not. */
+    const blocked = fromProblem(
+      new ScafoError("application-blocked", "Application is blocked", {
+        detail: `"shop" is blocked`,
+      }).toProblem(),
+    );
+
+    expect(blocked.code).toBe("application-blocked");
+    expect(blocked.status).toBe(409);
+    expect(blocked.toProblem().type).toBe(`${PROBLEM_TYPE_PREFIX}application-blocked`);
   });
 
   it("keeps the status the answer actually carried, over the one the code maps to", () => {

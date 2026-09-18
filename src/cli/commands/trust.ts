@@ -1,5 +1,5 @@
 /*
- * `scafo trust`: which CI issuers may deploy a project, and which of their
+ * `scafo trust`: which CI issuers may deploy an application, and which of their
  * subjects.
  *
  * This is the operator's half of the workload-deploy path: a CI job holds
@@ -13,6 +13,7 @@ import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import { loadDaemonConfig } from "../../daemon/config.ts";
 import { ScafoError } from "../../core/error.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
+import { resolveApplication } from "../_application.ts";
 import { createRegistry } from "../_bootstrap.ts";
 import { flagList } from "../_flags.ts";
 import {
@@ -35,13 +36,14 @@ const bucketArgs: ArgsDef = {
   "secret-key": { type: "string", description: "Bucket secret access key" },
 };
 
-const projectArgs: ArgsDef = {
+const applicationArgs: ArgsDef = {
   ...bucketArgs,
-  project: { type: "string", description: "Project the policy belongs to", required: true },
+  name: { type: "string", description: "Application the policy belongs to", required: true },
+  env: { type: "string", description: "Address the application <name>-<env> instead" },
 };
 
 const setArgs: ArgsDef = {
-  ...projectArgs,
+  ...applicationArgs,
   issuer: {
     type: "string",
     description: "Issuer URL, as its tokens carry it in iss",
@@ -60,12 +62,12 @@ const setArgs: ArgsDef = {
 };
 
 const removeArgs: ArgsDef = {
-  ...projectArgs,
+  ...applicationArgs,
   issuer: { type: "string", description: "Issuer URL to stop trusting", required: true },
 };
 
 const set: CommandDef = defineCommand({
-  meta: { name: "set", description: "Trust an issuer's subjects to deploy a project" },
+  meta: { name: "set", description: "Trust an issuer's subjects to deploy an application" },
   args: setArgs,
   async run({ args }): Promise<void> {
     try {
@@ -77,8 +79,8 @@ const set: CommandDef = defineCommand({
 });
 
 const show: CommandDef = defineCommand({
-  meta: { name: "show", description: "Print the issuers a project trusts" },
-  args: projectArgs,
+  meta: { name: "show", description: "Print the issuers an application trusts" },
+  args: applicationArgs,
   async run({ args }): Promise<void> {
     try {
       await runShow(args as Record<string, unknown>);
@@ -101,17 +103,17 @@ const remove: CommandDef = defineCommand({
 });
 
 export const trust: CommandDef = defineCommand({
-  meta: { name: "trust", description: "Manage which CI issuers may deploy a project" },
+  meta: { name: "trust", description: "Manage which CI issuers may deploy an application" },
   subCommands: { set, show, remove },
 });
 
 async function runSet(flags: Record<string, unknown>): Promise<void> {
-  const project = required(flags, "project");
+  const application = target(flags);
   const iss = required(flags, "issuer");
   const subjects = flagList(flags.subject);
 
   const policy = await setTrustIssuer(await registryFor(flags), {
-    project,
+    application,
     iss,
     aud: text(flags.audience) ?? DEFAULT_TRUST_AUDIENCE,
     subjects,
@@ -119,28 +121,33 @@ async function runSet(flags: Record<string, unknown>): Promise<void> {
 
   const count = subjects.length;
   console.log(
-    `scafo: "${project}" now trusts ${iss} for ${String(count)} ` +
+    `scafo: "${application}" now trusts ${iss} for ${String(count)} ` +
       `subject${count === 1 ? "" : "s"}`,
   );
   console.log(formatTrustPolicy(policy));
 }
 
 async function runShow(flags: Record<string, unknown>): Promise<void> {
-  const project = required(flags, "project");
-  const policy = await readTrustPolicy(await registryFor(flags), project);
+  const application = target(flags);
+  const policy = await readTrustPolicy(await registryFor(flags), application);
 
   const count = policy.issuers.length;
-  console.log(`scafo: "${project}" trusts ${String(count)} issuer${count === 1 ? "" : "s"}`);
+  console.log(`scafo: "${application}" trusts ${String(count)} issuer${count === 1 ? "" : "s"}`);
   console.log(formatTrustPolicy(policy));
 }
 
 async function runRemove(flags: Record<string, unknown>): Promise<void> {
-  const project = required(flags, "project");
+  const application = target(flags);
   const iss = required(flags, "issuer");
-  const policy = await removeTrustIssuer(await registryFor(flags), project, iss);
+  const policy = await removeTrustIssuer(await registryFor(flags), application, iss);
 
-  console.log(`scafo: "${project}" no longer trusts ${iss}`);
+  console.log(`scafo: "${application}" no longer trusts ${iss}`);
   console.log(formatTrustPolicy(policy));
+}
+
+/** The application this invocation addresses, `--env` resolved. */
+function target(flags: Record<string, unknown>): string {
+  return resolveApplication({ name: text(flags.name), env: text(flags.env) });
 }
 
 async function registryFor(flags: Record<string, unknown>): Promise<RegistryContext> {

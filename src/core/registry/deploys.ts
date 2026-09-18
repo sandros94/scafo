@@ -15,7 +15,7 @@ import { deployKey, deploysPrefix, parseDeployId } from "./paths.ts";
  *
  * A week: long enough that an operator coming back to a pipeline run from last
  * Friday still finds out what happened to it, and short enough that a busy
- * project's deploy history does not grow without bound. Nothing reads these
+ * application's deploy history does not grow without bound. Nothing reads these
  * records after the fact — a deployment record is what a deploy that succeeded
  * leaves behind — so this is a support window, not history.
  */
@@ -31,9 +31,8 @@ export function isDeployTerminal(state: DeployState): boolean {
 
 /** What a node knows about a deploy the moment it accepts it. */
 export interface DeployRecordInput {
-  /** `<project>.<16 hex>`, minted by the accepting node. */
+  /** `<application>.<16 hex>`, minted by the accepting node. */
   id: string;
-  environment: string;
   /** Node accepting the deploy; the reaper measures its liveness against this. */
   node: string;
   source?: DeploymentSource;
@@ -62,15 +61,14 @@ export interface DeployRecordPatch {
  */
 export async function createDeployRecord(
   ctx: RegistryContext,
-  project: string,
+  application: string,
   input: DeployRecordInput,
 ): Promise<DeployRecord> {
   const at = nowIso(ctx);
   const record: DeployRecord = {
     v: 1,
     id: input.id,
-    project,
-    environment: input.environment,
+    application,
     state: "accepted",
     node: input.node,
     acceptedAt: at,
@@ -80,13 +78,13 @@ export async function createDeployRecord(
   };
 
   try {
-    await createJson(ctx, deployKey(project, input.id), record);
+    await createJson(ctx, deployKey(application, input.id), record);
     return record;
   } catch (error) {
     if (!isCasConflict(error)) throw error;
 
     throw new ScafoError("immutable", "Deploy already exists", {
-      detail: `"${input.id}" is already recorded in project "${project}"`,
+      detail: `"${input.id}" is already recorded in application "${application}"`,
       cause: error,
     });
   }
@@ -97,13 +95,13 @@ export async function createDeployRecord(
  *
  * Throws `ScafoError("cas-conflict")` for a deploy that has already finished.
  * Terminal means terminal: a deploy that reached `deployed` HAPPENED — its
- * revision is in the registry and the environment is serving the deployment —
+ * revision is in the registry and the application is serving the deployment —
  * and a late refusal from the accepting node, or a reaper that decided the node
  * was gone, must not rewrite the outcome.
  */
 export async function updateDeployRecord(
   ctx: RegistryContext,
-  project: string,
+  application: string,
   id: string,
   patch: DeployRecordPatch,
 ): Promise<DeployRecord> {
@@ -114,12 +112,13 @@ export async function updateDeployRecord(
   let refusal: ScafoError | undefined;
   const updated = await updateJson<DeployRecord>(
     ctx,
-    deployKey(project, id),
+    deployKey(application, id),
     (current) => {
       if (isDeployTerminal(current.state) && current.state !== patch.state) {
         refusal = new ScafoError("cas-conflict", "Deploy has already finished", {
           detail:
-            `"${id}" of project "${project}" is ${current.state}, and a deploy that has ` +
+            `"${id}" of application "${application}" is ${current.state}, and a deploy that ` +
+            `has ` +
             `finished never moves again`,
         });
         throw refusal;
@@ -134,26 +133,27 @@ export async function updateDeployRecord(
 /** One deploy record. Throws `ScafoError("not-found")` when there is none. */
 export async function getDeployRecord(
   ctx: RegistryContext,
-  project: string,
+  application: string,
   id: string,
 ): Promise<DeployRecord> {
-  const found = await readJson<DeployRecord>(ctx, deployKey(project, id));
+  const found = await readJson<DeployRecord>(ctx, deployKey(application, id));
   if (found === null) {
     throw new ScafoError("not-found", "No such deploy", {
       detail:
-        `no deploy "${id}" is recorded in project "${project}"; a deploy's record is kept ` +
+        `no deploy "${id}" is recorded in application "${application}"; a deploy's record is ` +
+        `kept ` +
         `for ${formatDuration(DEPLOY_RECORD_RETENTION_MS)} after it finishes and then deleted`,
     });
   }
   return found.value;
 }
 
-/** Deploy records of `project` in id order; ones deleted while listing are omitted. */
+/** Deploy records of `application` in id order; ones deleted while listing are omitted. */
 export async function listDeployRecords(
   ctx: RegistryContext,
-  project: string,
+  application: string,
 ): Promise<DeployRecord[]> {
-  const prefix = deploysPrefix(project);
+  const prefix = deploysPrefix(application);
   const records: DeployRecord[] = [];
 
   for (const id of namesFromKeys(await ctx.store.list(prefix), prefix).sort()) {
@@ -161,7 +161,7 @@ export async function listDeployRecords(
        be reading whatever else was once written under this prefix. */
     if (parseDeployId(id) === null) continue;
 
-    const found = await readJson<DeployRecord>(ctx, deployKey(project, id));
+    const found = await readJson<DeployRecord>(ctx, deployKey(application, id));
     if (found !== null) records.push(found.value);
   }
   return records;

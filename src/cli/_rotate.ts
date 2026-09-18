@@ -50,12 +50,12 @@ export interface RotatedKey {
   /** Tier both keys are at: a rotation replaces a key, it never re-tiers one. */
   role: OperatorRole;
   /**
-   * Projects both keys reach — `["*"]` for every one, and absent for an ADMIN,
+   * Applications both keys reach — `["*"]` for every one, and absent for an ADMIN,
    * which carries no scope. Read back off the fleet for the same reason the
    * tier is: a rotation replaces a key, and it never widens or narrows what
    * that key could name.
    */
-  projects?: string[];
+  applications?: string[];
   /** Whether the new key was taken over from an interrupted run rather than minted. */
   resumed: boolean;
   /** Whether the old key was deregistered from the fleet. */
@@ -140,7 +140,7 @@ export async function rotateRemoteKey(
      is here is what the node inherited from the old key — which is the whole
      guarantee: a rotation cannot widen a scope, because the widening would have
      to be asked for and this never asks. */
-  const projects = registered?.projects;
+  const applications = registered?.applications;
 
   /* 4. FLIP. Everything above is repeatable; this is what stops being repeated. */
   await updateEntry(home, name, (current) => {
@@ -171,7 +171,7 @@ export async function rotateRemoteKey(
     newKeyId: newKey.id,
     newKeyPath,
     role,
-    ...(projects === undefined ? {} : { projects }),
+    ...(applications === undefined ? {} : { applications }),
     resumed: pending !== null,
     contracted,
     purged,
@@ -195,7 +195,7 @@ export function describeRotation(rotated: RotatedKey): string {
        who half-expected it to be a way up or down — or a way wider — should read
        that it was not. */
     `scafo: it is ${rotated.role}-tier` +
-      `${rotated.projects === undefined ? "" : `, scoped to ${rotated.projects.join(", ")}`}, ` +
+      `${rotated.applications === undefined ? "" : `, scoped to ${rotated.applications.join(", ")}`}, ` +
       `exactly as "${rotated.oldKeyId}" was`,
   ];
 

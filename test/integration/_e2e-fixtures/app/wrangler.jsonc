@@ -6,7 +6,7 @@
      `KEPT` is what such a deploy must leave exactly as it is written here.
 
      The counter is what makes a multi-node run meaningful: one cell owns it
-     however many nodes serve the environment, so a count that keeps rising
+     however many nodes serve the application, so a count that keeps rising
      across both of them is the fleet agreeing on a single owner. SQLite-backed
      classes are the only kind this runtime migrates. */
   "name": "app",

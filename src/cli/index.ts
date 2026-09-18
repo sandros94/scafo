@@ -5,12 +5,11 @@ import { defineCommand, runMain } from "citty";
 import { readPackageVersion } from "./_utils.ts";
 import { deploy } from "./commands/deploy.ts";
 import { deployment } from "./commands/deployment.ts";
-import { env } from "./commands/env.ts";
 import { fleet } from "./commands/fleet.ts";
 import { health } from "./commands/health.ts";
 import { metrics } from "./commands/metrics.ts";
 import { keygenAlias, operator } from "./commands/operator.ts";
-import { project } from "./commands/project.ts";
+import { app } from "./commands/app.ts";
 import { remote } from "./commands/remote.ts";
 import { sail, up } from "./commands/sail.ts";
 import { traces } from "./commands/traces.ts";
@@ -26,8 +25,8 @@ const main = defineCommand({
   /*
    * FIVE NOUNS AND THEN THE WORK. `sail` is what a machine does; `remote` is
    * where an operator can reach and who they are there; `operator` is the
-   * people; `fleet` is the machines of one installation; `project` is the things
-   * it hosts. Everything after them acts on what is deployed.
+   * people; `fleet` is the machines of one installation; `app` is the things it
+   * hosts. Everything after them acts on what is deployed.
    *
    * `health` comes straight after `sail` because it is the other half of it:
    * what a machine does, and whether it is doing it. It is what the image's
@@ -42,9 +41,8 @@ const main = defineCommand({
     remote,
     operator,
     fleet,
-    project,
+    app,
     deploy,
-    env,
     deployment,
     trust,
     metrics,

@@ -45,7 +45,7 @@ curl -sk --resolve apps.example.com:443:127.0.0.1 \
 
 `prefer=self` is right here because Traefik and the node share a machine: this node's upstreams are used while they are healthy, and the fleet's other nodes only when they are not. On a single-node fleet it changes nothing and stays correct as the fleet grows.
 
-A deployed environment answers at its own host the same way. Until then only the platform apex is routed: Scafo publishes no wildcard application fallback, and an unclaimed host is a 404 at the proxy.
+A deployed application answers at its own host the same way. Until then only the platform apex is routed: Scafo publishes no wildcard application fallback, and an unclaimed host is a 404 at the proxy.
 
 ## First deploy
 
@@ -83,14 +83,14 @@ The node holds no operator key, and the container is not where one is minted: th
 5. Deploy:
 
    ```sh
-   scafo deploy ./my-app --project shop --env production
+   scafo deploy ./my-app --name shop
    ```
 
 See [First deploy](https://scafo.dev/deploy/dokploy#first-deploy) for what each step does, and for the `scafo trust set` policy a CI job deploys through.
 
 ## Certificates
 
-Dokploy's `letsencrypt` resolver is HTTP-01 on the `web` entryPoint, storing to `/etc/dokploy/traefik/dynamic/acme.json`. The platform domain therefore gets an ordinary certificate per host, issued on the first request for that host — there is no wildcard certificate, and none is needed. A custom domain an environment claimed is issued the same way once its DNS points at this server. DNS-01, for a real wildcard, would need a second resolver and its provider credentials in the same static file.
+Dokploy's `letsencrypt` resolver is HTTP-01 on the `web` entryPoint, storing to `/etc/dokploy/traefik/dynamic/acme.json`. The platform domain therefore gets an ordinary certificate per host, issued on the first request for that host — there is no wildcard certificate, and none is needed. A custom domain an application claimed is issued the same way once its DNS points at this server. DNS-01, for a real wildcard, would need a second resolver and its provider credentials in the same static file.
 
 ## Caveats
 

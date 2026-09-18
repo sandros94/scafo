@@ -7,7 +7,7 @@
 import type { ScafoErrorCode } from "../error.ts";
 
 /**
- * How many nodes serve one environment: a whole number of at least 1, or `"all"`
+ * How many nodes serve one application: a whole number of at least 1, or `"all"`
  * for every node that is live at the moment the decision is made.
  */
 export type ReplicaCount = number | "all";
@@ -96,9 +96,11 @@ export interface OperatorRecord {
    * it supersedes, whatever tier either of them is.
    */
   supersedes?: string;
-  /** Project scope. Missing means no projects for an operator, all for an admin;
-   * `*` grants all projects. */
-  projects?: string[];
+  /**
+   * Application scope: `*`, an exact name, or a prefix glob such as `shop-*`.
+   * Missing means no applications for an operator, all for an admin.
+   */
+  applications?: string[];
 }
 
 /** A registered node running the daemon. Key: `_scafo/nodes/<id>.json`. */
@@ -131,15 +133,15 @@ export interface NodeRecord {
   versions?: NodeVersions;
   /**
    * What this node is serving right now, refreshed with the heartbeat: every
-   * environment `project/env` it runs a process for, and the port that process
-   * takes public traffic on at `addresses.internal`. This is what the fleet's
-   * routing is rendered from. Absent means nothing — a node that has not said
-   * what it serves is not routed to.
+   * application it runs a process for, and the port that process takes public
+   * traffic on at `addresses.internal`. This is what the fleet's routing is
+   * rendered from. Absent means nothing — a node that has not said what it
+   * serves is not routed to.
    */
   serving?: NodeServing;
 }
 
-/** Environments a node serves, by `project/env`, and where each one listens. */
+/** Applications a node serves, by name, and where each one listens. */
 export type NodeServing = Record<string, { port: number }>;
 
 /** What a node is running: this build's own version, and the Celld it started. */
@@ -148,17 +150,31 @@ export interface NodeVersions {
   celld: string;
 }
 
-/** A project namespace. Key: `_scafo/projects/<slug>/project.json`. */
-export interface ProjectRecord {
+/**
+ * One application: the unit scafo deploys, places, serves, blocks, retires and
+ * deletes. Key: `_scafo/applications/<name>.json`.
+ *
+ * `v` and `name` are its identity and never change. Everything else is mutable
+ * state that a functional CAS update preserves when it does not own it, so a
+ * deploy can never drop {@link ApplicationRecord.blocked} or its labels.
+ */
+export interface ApplicationRecord {
   v: 1;
-  slug: string;
-  /** Creation timestamp. Omitted legacy records are never backfilled. */
-  createdAt?: string;
-  /** `true` stops deploys, runtime, routing, and certificates without deleting
-   * project records. Absence is unblocked. */
+  name: string;
+  createdAt: string;
+  /** `true` stops deploys, runtime, routing and certificates, deleting nothing. */
   blocked?: true;
-  /** Caller-owned metadata, replaced wholesale and never interpreted by core. */
+  /** Fleet-owned metadata, replaced wholesale and stripped from a non-admin's view. */
   labels?: Record<string, string>;
+  /** Deployment notice; `null` until the first successful deploy. Never names a version. */
+  deployment: DeploymentRevision | null;
+  domains: string[];
+  /** Replica count; omitted resolves to every live node that may serve it. */
+  replicas?: ReplicaCount;
+  /** Eligible-node selector; `"all"` replicas means all matching live nodes. */
+  nodeSelector?: NodeSelector;
+  /** Retirement marker stops serving and becomes deletable after its grace period. */
+  retiredAt?: string;
 }
 
 /** Self-asserted source metadata stated by the caller that uploaded a deployment. */
@@ -177,7 +193,7 @@ export interface OidcActor {
 
 /**
  * An immutable deployment-history record, one per thing Celld serves.
- * Key: `_scafo/projects/<project>/deployments/<version>.json`.
+ * Key: `_scafo/deployments/<name>/<version>.json`.
  */
 export interface DeploymentRecord {
   v: 1;
@@ -208,31 +224,10 @@ export interface DeploymentRevision {
   deployedAt: string;
 }
 
-/**
- * A deployable environment of a project.
- * Key: `_scafo/projects/<project>/environments/<name>.json`.
- */
-export interface EnvironmentRecord {
-  v: 1;
-  name: string;
-  /** Bucket prefix the environment's fleet state lives under (`fleets/<project>/<name>`). */
-  prefix: string;
-  /** Deployment notice; `null` until the first successful deploy. Never names a version. */
-  deployment: DeploymentRevision | null;
-  domains: string[];
-  /** Replica count; omitted resolves to every live node that may serve it. */
-  replicas?: ReplicaCount;
-  /** Eligible-node selector; `"all"` replicas means all matching live nodes. */
-  nodeSelector?: NodeSelector;
-  /** Retirement marker stops serving and becomes deletable after its grace period. */
-  retiredAt?: string;
-  createdAt: string;
-}
-
 /** Last coordinator placement decision. Absence means no process may start. */
 export interface PlacementRecord {
   v: 1;
-  /** Ids of the nodes that should run this environment, lexicographically sorted. */
+  /** Ids of the nodes that should run this application, lexicographically sorted. */
   nodes: string[];
   decidedAt: string;
   /** Lease fence; stale coordinators cannot overwrite a newer decision. */
@@ -246,7 +241,13 @@ export interface TrustIssuer {
   subjects: string[];
 }
 
-/** Deploy-time trust configuration. Key: `_scafo/projects/<project>/trust.json`. */
+/**
+ * Deploy-time trust configuration, per application and exact.
+ * Key: `_scafo/trust/<name>.json`.
+ *
+ * It may exist BEFORE the application does: an admin pre-grants a name, and the
+ * first deploy creates the application under it.
+ */
 export interface TrustPolicy {
   v: 1;
   issuers: TrustIssuer[];
@@ -255,8 +256,7 @@ export interface TrustPolicy {
 /** Ownership of a custom domain. Key: `_scafo/domains/<domain>.json`. */
 export interface DomainClaim {
   v: 1;
-  project: string;
-  environment: string;
+  application: string;
   claimedAt: string;
 }
 
@@ -268,7 +268,7 @@ export type DeployState = "accepted" | "uploading" | "deployed" | "failed";
 
 /**
  * One deploy, from the moment a node accepted it to the moment it stopped
- * moving. Key: `_scafo/projects/<project>/deploys/<id>.json`.
+ * moving. Key: `_scafo/deploys/<name>/<id>.json`.
  *
  * The state lives HERE rather than in the accepting node's memory, so that any
  * node of the installation answers a poll — behind an apex that fronts several
@@ -278,10 +278,9 @@ export type DeployState = "accepted" | "uploading" | "deployed" | "failed";
  */
 export interface DeployRecord {
   v: 1;
-  /** `<project>.<16 hex>`; the project half is what authenticates a poll. */
+  /** `<application>.<16 hex>`; the application half is what authenticates a poll. */
   id: string;
-  project: string;
-  environment: string;
+  application: string;
   state: DeployState;
   /** Node that accepted the deploy and is carrying it out. */
   node: string;

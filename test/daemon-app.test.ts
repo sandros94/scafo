@@ -8,25 +8,24 @@ import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { recordRevision } from "../src/core/registry/_revision.ts";
-import { type DaemonState, createNodeApp, type EnvironmentResult } from "../src/daemon/app.ts";
+import { type DaemonState, createNodeApp, type ApplicationResult } from "../src/daemon/app.ts";
 import type { AssignmentFailure } from "../src/daemon/_assign.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
+import type { ReconcileStatus } from "../src/daemon/reconcile.ts";
 import { renderProblem } from "../src/daemon/middleware.ts";
 import { signNodeToken } from "../src/core/auth/index.ts";
 import type { ProblemDetails } from "../src/core/error.ts";
 import { ScafoError } from "../src/core/error.ts";
 import {
   acquireLease,
+  applicationKey,
   claimDomain,
+  createApplication,
   createDeployment,
-  createEnvironment,
-  createProject,
   deleteKey,
-  environmentKey,
-  getEnvironment,
+  getApplication,
   registerNode,
-  retireEnvironment,
-  unretireEnvironment,
+  retireApplication,
 } from "../src/core/registry/index.ts";
 import type { NodeRecord } from "../src/core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
@@ -34,17 +33,21 @@ import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock, TEST_VERSIONS } from "./_helpers.ts";
 
 const NODE_ID = "node-a";
-const PROJECT = "app";
-const ENVIRONMENT = "prod";
+const APPLICATION = "shop";
+/** A second application of the same fleet, for what must stay apart from the first. */
+const OTHER_APPLICATION = "blog";
 const CUSTOM_DOMAIN = "shop.example.com";
 /** The one platform domain this node serves; its bare apex is the fleet's API. */
 const PLATFORM_DOMAIN = "apps.test";
 const VERSION = "aaaa1111";
 
-/** What the stand-in supervisor reports; the state route must pass it through. */
+/**
+ * What the stand-in supervisor reports; the state route must pass it through.
+ * A process is named for the application it serves, which is the id it carries.
+ */
 const PROCESSES: ProcessStatus[] = [
-  { id: "cell-alpha", state: "running", pid: 4321, startedAt: "2026-01-01T00:00:00.000Z" },
-  { id: "cell-beta", state: "exited", exitCode: 0, startedAt: "2026-01-01T00:00:00.000Z" },
+  { id: APPLICATION, state: "running", pid: 4321, startedAt: "2026-01-01T00:00:00.000Z" },
+  { id: OTHER_APPLICATION, state: "exited", exitCode: 0, startedAt: "2026-01-01T00:00:00.000Z" },
 ];
 
 /** Every problem body a rejected caller may see, whatever was wrong with the token. */
@@ -186,37 +189,87 @@ describe("GET /v1/state", () => {
   });
 });
 
-describe("POST /v1/environments/:project/:env/retire", () => {
-  it("retires the environment and answers with it, without any lease at all", async () => {
+describe("GET /v1/state, which names applications throughout", () => {
+  /** What the loop reports; every entry of it is about one application. */
+  const STATUS: ReconcileStatus = {
+    lastRunAt: "2026-01-01T00:00:05.000Z",
+    running: false,
+    lastActions: [
+      { type: "start", application: APPLICATION, ports: { public: 42_000, internal: 42_001 } },
+      { type: "stop", application: OTHER_APPLICATION, reason: "no longer placed here" },
+    ],
+    failures: [
+      {
+        at: "2026-01-01T00:00:05.000Z",
+        action: "stop",
+        subject: OTHER_APPLICATION,
+        detail: "the supervisor would not stop it",
+      },
+    ],
+    processes: [{ application: APPLICATION, port: 42_000, internalPort: 42_001 }],
+    placements: [
+      { application: APPLICATION, nodes: [NODE_ID], self: true },
+      { application: OTHER_APPLICATION, nodes: ["node-b"], self: false },
+    ],
+  };
+
+  it("names a process, a placement, an action and a failure by its application", async () => {
+    const reconciling = appReconciling(STATUS);
+
+    const state = (await (
+      await reconciling.request("/v1/state", { headers: await bearer() })
+    ).json()) as DaemonState;
+
+    /* A process id IS the application it serves: the supervisor and the state
+       route agree on one name for it, with nothing to parse out of either. */
+    expect(state.processes.map((process) => process.id)).toEqual([APPLICATION, OTHER_APPLICATION]);
+    expect(state.placements).toEqual(STATUS.placements);
+    expect(state.reconcile).toEqual(STATUS);
+  });
+
+  it("reports the loop's placements rather than an empty list of its own", async () => {
+    const reconciling = appReconciling({ ...STATUS, placements: [] });
+
+    const state = (await (
+      await reconciling.request("/v1/state", { headers: await bearer() })
+    ).json()) as DaemonState;
+
+    expect(state.placements).toEqual([]);
+    expect(state.reconcile?.lastActions).toEqual(STATUS.lastActions);
+  });
+});
+
+describe("POST /v1/applications/:name/retire", () => {
+  it("retires the application and answers with it, without any lease at all", async () => {
     await deployable();
 
-    const response = await app.request(`/v1/environments/${PROJECT}/${ENVIRONMENT}/retire`, {
+    const response = await app.request(`/v1/applications/${APPLICATION}/retire`, {
       method: "POST",
       headers: await bearer(),
     });
-    const body = (await response.json()) as EnvironmentResult;
+    const body = (await response.json()) as ApplicationResult;
 
     expect(response.status).toBe(200);
-    expect(body.environment.retiredAt).toBe(new Date(clock.nowMs()).toISOString());
-    expect(await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).toEqual(body.environment);
+    expect(body.application.retiredAt).toBe(new Date(clock.nowMs()).toISOString());
+    expect(await getApplication(clock.ctx, APPLICATION)).toEqual(body.application);
   });
 
   it("takes it back through the matching route", async () => {
     await deployable();
-    await retireEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
+    await retireApplication(clock.ctx, APPLICATION);
 
-    const response = await app.request(`/v1/environments/${PROJECT}/${ENVIRONMENT}/unretire`, {
+    const response = await app.request(`/v1/applications/${APPLICATION}/unretire`, {
       method: "POST",
       headers: await bearer(),
     });
-    const body = (await response.json()) as EnvironmentResult;
+    const body = (await response.json()) as ApplicationResult;
 
     expect(response.status).toBe(200);
-    expect(body.environment.retiredAt).toBeUndefined();
+    expect(body.application.retiredAt).toBeUndefined();
   });
 
-  it("answers a missing environment as a miss rather than as a retirement", async () => {
-    const response = await app.request(`/v1/environments/${PROJECT}/ghost/retire`, {
+  it("answers a missing application as a miss rather than as a retirement", async () => {
+    const response = await app.request("/v1/applications/ghost/retire", {
       method: "POST",
       headers: await bearer(),
     });
@@ -229,25 +282,25 @@ describe("POST /v1/environments/:project/:env/retire", () => {
     await deployable();
 
     for (const suffix of ["retire", "unretire"]) {
-      const response = await app.request(`/v1/environments/${PROJECT}/${ENVIRONMENT}/${suffix}`, {
+      const response = await app.request(`/v1/applications/${APPLICATION}/${suffix}`, {
         method: "POST",
       });
 
       expect(response.status, suffix).toBe(401);
       await expect(response.json(), suffix).resolves.toEqual(AUTH_INVALID_PROBLEM);
     }
-    expect((await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).retiredAt).toBeUndefined();
+    expect((await getApplication(clock.ctx, APPLICATION)).retiredAt).toBeUndefined();
   });
 });
 
-describe("POST /v1/environments/:project/:env/selector", () => {
+describe("POST /v1/applications/:name/selector", () => {
   it("chooses which nodes may serve it, without any lease at all", async () => {
     await deployable();
 
     const body = await selectorBody({ selector: { tier: "fast" } });
 
-    expect(body.environment.nodeSelector).toEqual({ tier: "fast" });
-    expect(await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).toEqual(body.environment);
+    expect(body.application.nodeSelector).toEqual({ tier: "fast" });
+    expect(await getApplication(clock.ctx, APPLICATION)).toEqual(body.application);
   });
 
   it("lifts the constraint when the body says null", async () => {
@@ -256,7 +309,7 @@ describe("POST /v1/environments/:project/:env/selector", () => {
 
     const body = await selectorBody({ selector: null });
 
-    expect("nodeSelector" in body.environment).toBe(false);
+    expect("nodeSelector" in body.application).toBe(false);
   });
 
   it("accepts a selector no node satisfies, because that is the coordinator's to report", async () => {
@@ -264,7 +317,7 @@ describe("POST /v1/environments/:project/:env/selector", () => {
 
     const body = await selectorBody({ selector: { gpu: "a100" } });
 
-    expect(body.environment.nodeSelector).toEqual({ gpu: "a100" });
+    expect(body.application.nodeSelector).toEqual({ gpu: "a100" });
   });
 
   it("refuses a body that says nothing about the selector", async () => {
@@ -284,14 +337,14 @@ describe("POST /v1/environments/:project/:env/selector", () => {
       const response = await selectorRequest(sent);
 
       expect(response.status).toBe(400);
-      expect((await getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).nodeSelector).toBeUndefined();
+      expect((await getApplication(clock.ctx, APPLICATION)).nodeSelector).toBeUndefined();
     },
   );
 
-  it("answers a missing environment as a miss rather than as a selector", async () => {
+  it("answers a missing application as a miss rather than as a selector", async () => {
     await deployable();
 
-    const response = await app.request(`/v1/environments/${PROJECT}/ghost/selector`, {
+    const response = await app.request("/v1/applications/ghost/selector", {
       method: "POST",
       headers: { ...(await bearer()), "content-type": "application/json" },
       body: JSON.stringify({ selector: { tier: "fast" } }),
@@ -303,7 +356,7 @@ describe("POST /v1/environments/:project/:env/selector", () => {
 
 describe("GET /v1/state, on the node that is coordinating", () => {
   const UNPLACED = {
-    target: `${PROJECT}/${ENVIRONMENT}`,
+    target: APPLICATION,
     reason: "placement-unavailable" as const,
     detail: `no live node carries every label of "gpu=a100"`,
   };
@@ -375,36 +428,38 @@ describe("GET /v1/state, on the node that is coordinating", () => {
 
 describe("GET /v1/ingress/ask", () => {
   it("answers for a platform label only when something real is behind it", async () => {
-    await deployable();
-    await createDeployment(clock.ctx, PROJECT, { version: VERSION });
-    await recordRevision(clock.ctx, PROJECT, ENVIRONMENT, VERSION);
-    const real = await app.request(`/v1/ingress/ask?domain=${PROJECT}--${ENVIRONMENT}.apps.test`);
+    await deployedApplication();
+    const real = await app.request(`/v1/ingress/ask?domain=${APPLICATION}.${PLATFORM_DOMAIN}`);
     expect(real.status).toBe(200);
 
-    const direct = await app.request(`/v1/ingress/ask?domain=${PROJECT}--${VERSION}.apps.test`);
+    /* A label is an application name and nothing else: a deployment version
+       under the same domain names no application, so it is served by none. */
+    const direct = await app.request(`/v1/ingress/ask?domain=${VERSION}.${PLATFORM_DOMAIN}`);
     expect(direct.status).toBe(404);
 
-    await createEnvironment(clock.ctx, PROJECT, { name: "undeployed" });
-    const undeployed = await app.request(`/v1/ingress/ask?domain=${PROJECT}--undeployed.apps.test`);
+    await createApplication(clock.ctx, { name: OTHER_APPLICATION });
+    const undeployed = await app.request(
+      `/v1/ingress/ask?domain=${OTHER_APPLICATION}.${PLATFORM_DOMAIN}`,
+    );
     expect(undeployed.status).toBe(404);
 
-    const junk = await app.request(`/v1/ingress/ask?domain=${PROJECT}--nothing.apps.test`);
+    const junk = await app.request(`/v1/ingress/ask?domain=nothing.${PLATFORM_DOMAIN}`);
     expect(junk.status).toBe(404);
   });
 
-  it("answers for a custom domain an environment has claimed", async () => {
-    await deployedEnvironment();
-    await claimDomain(clock.ctx, CUSTOM_DOMAIN, PROJECT, ENVIRONMENT);
+  it("answers for a custom domain an application has claimed", async () => {
+    await deployedApplication();
+    await claimDomain(clock.ctx, CUSTOM_DOMAIN, APPLICATION);
 
     const response = await app.request(`/v1/ingress/ask?domain=${CUSTOM_DOMAIN}`);
 
     expect(response.status).toBe(200);
   });
 
-  it("REFUSES a claim whose environment has been retired", async () => {
-    await deployedEnvironment();
-    await claimDomain(clock.ctx, CUSTOM_DOMAIN, PROJECT, ENVIRONMENT);
-    await retireEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
+  it("REFUSES a claim whose application has been retired", async () => {
+    await deployedApplication();
+    await claimDomain(clock.ctx, CUSTOM_DOMAIN, APPLICATION);
+    await retireApplication(clock.ctx, APPLICATION);
 
     const response = await app.request(`/v1/ingress/ask?domain=${CUSTOM_DOMAIN}`);
 
@@ -413,20 +468,29 @@ describe("GET /v1/ingress/ask", () => {
   });
 
   it("answers for it again once it is taken back", async () => {
-    await deployedEnvironment();
-    await claimDomain(clock.ctx, CUSTOM_DOMAIN, PROJECT, ENVIRONMENT);
-    await retireEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
-    await unretireEnvironment(clock.ctx, PROJECT, ENVIRONMENT);
+    await deployedApplication();
+    await claimDomain(clock.ctx, CUSTOM_DOMAIN, APPLICATION);
+
+    const retired = await app.request(`/v1/applications/${APPLICATION}/retire`, {
+      method: "POST",
+      headers: await bearer(),
+    });
+    expect(retired.status).toBe(200);
+    const taken = await app.request(`/v1/applications/${APPLICATION}/unretire`, {
+      method: "POST",
+      headers: await bearer(),
+    });
+    expect(taken.status).toBe(200);
 
     const response = await app.request(`/v1/ingress/ask?domain=${CUSTOM_DOMAIN}`);
 
     expect(response.status).toBe(200);
   });
 
-  it("refuses a claim left behind by an environment that is gone", async () => {
-    await deployedEnvironment();
-    await claimDomain(clock.ctx, CUSTOM_DOMAIN, PROJECT, ENVIRONMENT);
-    await deleteKey(clock.ctx, environmentKey(PROJECT, ENVIRONMENT));
+  it("refuses a claim left behind by an application that is gone", async () => {
+    await deployedApplication();
+    await claimDomain(clock.ctx, CUSTOM_DOMAIN, APPLICATION);
+    await deleteKey(clock.ctx, applicationKey(APPLICATION));
 
     const response = await app.request(`/v1/ingress/ask?domain=${CUSTOM_DOMAIN}`);
 
@@ -616,6 +680,26 @@ function appWith(overrides: Partial<DaemonConfig>): H3 {
   });
 }
 
+/** The same app again, reporting `status` as the last pass of its reconcile loop. */
+function appReconciling(status: ReconcileStatus): H3 {
+  return createNodeApp({
+    config: daemonConfig(),
+    nodeId: NODE_ID,
+    registry: clock.ctx,
+    supervisor: fakeSupervisor(),
+    versions: TEST_VERSIONS,
+    reconciler: {
+      runOnce: () => Promise.resolve([]),
+      kick: () => {},
+      start: () => {},
+      shutdown: () => Promise.resolve(),
+      stop: () => {},
+      status: () => status,
+      fleetRouting: () => undefined,
+    },
+  });
+}
+
 /** Reports a fixed inventory; nothing it is asked to run would run. */
 function fakeSupervisor(): Supervisor {
   return {
@@ -637,21 +721,21 @@ async function bearer(): Promise<Record<string, string>> {
   return { authorization: `Bearer ${await mint()}` };
 }
 
-/** A project with one environment in it, for the routes that need something to act on. */
+/** An application the routes that need something to act on can act on. */
 async function deployable(): Promise<void> {
-  await createProject(clock.ctx, { slug: PROJECT });
-  await createEnvironment(clock.ctx, PROJECT, { name: ENVIRONMENT });
+  await createApplication(clock.ctx, { name: APPLICATION });
 }
 
-async function deployedEnvironment(): Promise<void> {
+/** The same application, with a deployment behind it, so it is publicly served. */
+async function deployedApplication(): Promise<void> {
   await deployable();
-  await createDeployment(clock.ctx, PROJECT, { version: VERSION });
-  await recordRevision(clock.ctx, PROJECT, ENVIRONMENT, VERSION);
+  await createDeployment(clock.ctx, APPLICATION, { version: VERSION });
+  await recordRevision(clock.ctx, APPLICATION, VERSION);
 }
 
 /** One call to the selector route with `sent` as the whole body. */
 async function selectorRequest(sent: Record<string, unknown>): Promise<Response> {
-  return app.request(`/v1/environments/${PROJECT}/${ENVIRONMENT}/selector`, {
+  return app.request(`/v1/applications/${APPLICATION}/selector`, {
     method: "POST",
     headers: { ...(await bearer()), "content-type": "application/json" },
     body: JSON.stringify(sent),
@@ -659,10 +743,10 @@ async function selectorRequest(sent: Record<string, unknown>): Promise<Response>
 }
 
 /** The same call, asserted to have succeeded, with its body read back. */
-async function selectorBody(sent: Record<string, unknown>): Promise<EnvironmentResult> {
+async function selectorBody(sent: Record<string, unknown>): Promise<ApplicationResult> {
   const response = await selectorRequest(sent);
   expect(response.status, await response.clone().text()).toBe(200);
-  return (await response.json()) as EnvironmentResult;
+  return (await response.json()) as ApplicationResult;
 }
 
 /**

@@ -7,12 +7,11 @@ import {
   acquireLease,
   checkDomain,
   claimDomain,
+  createApplication,
   createDeployment,
-  createEnvironment,
-  createProject,
   initRegistry,
   type LeaseHandle,
-  listProjects,
+  listApplications,
   probeStore,
   readMeta,
   type RegistryContext,
@@ -223,29 +222,25 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
     it(
       "bootstraps, deploys, configures and releases",
       async () => {
-        const project = `smoke${randomHex(3)}`;
+        const application = `smoke${randomHex(3)}`;
         const version = randomHex(8);
-        const host = `${project}.example.test`;
+        const host = `${application}.example.test`;
 
         const meta = await initRegistry(ctx, { platformDomains: ["apps.example.test"] });
         expect(meta.platformDomains).toEqual(["apps.example.test"]);
         await expect(readMeta(ctx)).resolves.toMatchObject({ v: 1 });
 
-        await createProject(ctx, { slug: project });
-        await expect(listProjects(ctx)).resolves.toContain(project);
+        await createApplication(ctx, { name: application });
+        await expect(listApplications(ctx)).resolves.toContain(application);
 
-        const deployment = await createDeployment(ctx, project, { version });
+        const deployment = await createDeployment(ctx, application, { version });
         expect(deployment.version).toBe(version);
 
-        await createEnvironment(ctx, project, { name: "prod" });
-        const flipped = await recordRevision(ctx, project, "prod", version);
-        expect(flipped.environment.deployment).toMatchObject({ revision: 1 });
+        const flipped = await recordRevision(ctx, application, version);
+        expect(flipped.application.deployment).toMatchObject({ revision: 1 });
 
-        await claimDomain(ctx, host, project, "prod");
-        await expect(checkDomain(ctx, host)).resolves.toMatchObject({
-          project,
-          environment: "prod",
-        });
+        await claimDomain(ctx, host, application);
+        await expect(checkDomain(ctx, host)).resolves.toMatchObject({ application });
 
         await releaseDomain(ctx, host);
         await expect(checkDomain(ctx, host)).resolves.toBeNull();

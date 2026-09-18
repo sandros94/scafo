@@ -93,15 +93,14 @@ export function identityKey(id: string): string {
   return `${identitiesPrefix()}${id}.json`;
 }
 
-/** Prefix for one project's placement decisions. */
-export function placementPrefix(project: string): string {
-  assertSlug(project);
-  return `${ROOT}/placement/${project}/`;
+/** Prefix every placement decision of the installation lives under. */
+export function placementPrefix(): string {
+  return `${ROOT}/placement/`;
 }
 
-export function placementKey(project: string, env: string): string {
-  assertSlug(env);
-  return `${placementPrefix(project)}${env}.json`;
+export function placementKey(application: string): string {
+  assertSlug(application);
+  return `${placementPrefix()}${application}.json`;
 }
 
 /** Prefix for node-scoped observation records, partitioned by UTC hour. */
@@ -186,29 +185,42 @@ export function domainKey(host: string): string {
   return `${domainsPrefix()}${host}.json`;
 }
 
-export function projectsPrefix(): string {
-  return `${ROOT}/projects/`;
+/*
+ * The layout below is FLAT AND KIND-PREFIXED: every kind of record has a prefix
+ * of its own, so listing one kind never reads another kind's keys. That is what
+ * keeps `_scafo/applications/` at exactly one key per application, and it is the
+ * listing every node runs on every reconcile pass — a layout that filed an
+ * application's history beneath its own name would make each of those passes
+ * read every deployment and every deploy of the whole installation to learn the
+ * names.
+ *
+ * Every per-application prefix carries its trailing separator, so listing under
+ * `shop` never reaches `shop-preview` or `shop2`.
+ */
+
+export function applicationsPrefix(): string {
+  return `${ROOT}/applications/`;
 }
 
-export function projectKey(project: string): string {
-  assertSlug(project);
-  return `${projectsPrefix()}${project}/project.json`;
+export function applicationKey(application: string): string {
+  assertSlug(application);
+  return `${applicationsPrefix()}${application}.json`;
 }
 
-export function trustKey(project: string): string {
-  assertSlug(project);
-  return `${projectsPrefix()}${project}/trust.json`;
+export function trustKey(application: string): string {
+  assertSlug(application);
+  return `${ROOT}/trust/${application}.json`;
 }
 
-/** Prefix one project's deployment records live under, keyed by Celld version. */
-export function deploymentsPrefix(project: string): string {
-  assertSlug(project);
-  return `${projectsPrefix()}${project}/deployments/`;
+/** Prefix one application's deployment records live under, keyed by Celld version. */
+export function deploymentsPrefix(application: string): string {
+  assertSlug(application);
+  return `${ROOT}/deployments/${application}/`;
 }
 
-export function deploymentKey(project: string, version: string): string {
+export function deploymentKey(application: string, version: string): string {
   assertId(version);
-  return `${deploymentsPrefix(project)}${version}.json`;
+  return `${deploymentsPrefix(application)}${version}.json`;
 }
 
 /** The unguessable half of a deploy id, as it is written and as it is read. */
@@ -216,29 +228,29 @@ const DEPLOY_TOKEN_RE = /^[a-f\d]{16}$/;
 
 /** The two halves a deploy id is made of. */
 export interface DeployIdParts {
-  /** Project the deploy belongs to, and the only thing a poll can be authenticated against. */
-  project: string;
+  /** Application the deploy belongs to, and the only thing a poll can be authenticated against. */
+  application: string;
   /** The unguessable half; knowing it is evidence of having started the deploy. */
   token: string;
 }
 
 /**
- * The project and token `id` names, or null when it is not a deploy id at all.
+ * The application and token `id` names, or null when it is not a deploy id at all.
  *
  * The grammar lives here because this is where the key built from it is built:
  * a caller that split an id by hand would be the thing that put a read one
- * segment away from another project's records.
+ * segment away from another application's records.
  */
 export function parseDeployId(id: string): DeployIdParts | null {
   const dot = id.indexOf(".");
   if (dot < 0) return null;
 
-  const project = id.slice(0, dot);
+  const application = id.slice(0, dot);
   const token = id.slice(dot + 1);
   /* A slug carries no dot, so the first one is the separator and anything
      before it that is not a slug makes the whole id no id of ours. */
-  if (!isSlug(project) || !DEPLOY_TOKEN_RE.test(token)) return null;
-  return { project, token };
+  if (!isSlug(application) || !DEPLOY_TOKEN_RE.test(token)) return null;
+  return { application, token };
 }
 
 /** Throws `ScafoError("invalid-slug")` when `id` is not a deploy id. */
@@ -246,46 +258,35 @@ export function assertDeployId(id: string): void {
   if (parseDeployId(id) !== null) return;
 
   throw new ScafoError("invalid-slug", "Invalid deploy id", {
-    detail: `"${id}" must be a project slug, a dot, and 16 lowercase hexadecimal characters`,
+    detail: `"${id}" must be an application name, a dot, and 16 lowercase hexadecimal characters`,
   });
 }
 
-/** Prefix one project's deploy records live under. */
-export function deploysPrefix(project: string): string {
-  assertSlug(project);
-  return `${projectsPrefix()}${project}/deploys/`;
+/** Prefix one application's deploy records live under. */
+export function deploysPrefix(application: string): string {
+  assertSlug(application);
+  return `${ROOT}/deploys/${application}/`;
 }
 
-export function deployKey(project: string, id: string): string {
+export function deployKey(application: string, id: string): string {
   assertDeployId(id);
-  return `${deploysPrefix(project)}${id}.json`;
-}
-
-export function environmentsPrefix(project: string): string {
-  assertSlug(project);
-  return `${projectsPrefix()}${project}/environments/`;
-}
-
-export function environmentKey(project: string, env: string): string {
-  assertSlug(env);
-  return `${environmentsPrefix(project)}${env}.json`;
+  return `${deploysPrefix(application)}${id}.json`;
 }
 
 /**
- * Prefix an environment's fleet state lives under. It carries no trailing
+ * Prefix an application's fleet state lives under. It carries no trailing
  * separator, so listing under it must append one to avoid matching siblings
- * (`fleets/p/prod` would otherwise match `fleets/p/prod2/...`).
+ * (`fleets/shop` would otherwise match `fleets/shop2/...`).
  */
-export function fleetPrefix(project: string, env: string): string {
-  assertSlug(project);
-  assertSlug(env);
-  return `fleets/${project}/${env}`;
+export function fleetPrefix(application: string): string {
+  assertSlug(application);
+  return `fleets/${application}`;
 }
 
 /*
  * The three keyspaces below are CELLD's, not the registry's. Scafo reads them —
- * to tell what an environment is serving, and what it has published before —
- * and writes none of them: Celld owns everything under an environment's fleet
+ * to tell what an application is serving, and what it has published before —
+ * and writes none of them: Celld owns everything under an application's fleet
  * prefix. They are named here all the same, because this file is where a key is
  * built and a caller that assembled one by hand would be the thing that put a
  * deletion one segment away from the wrong prefix.
@@ -295,23 +296,23 @@ export function fleetPrefix(project: string, env: string): string {
  */
 
 /**
- * Prefix Celld publishes an environment's deployments under; one deployment is
+ * Prefix Celld publishes an application's deployments under; one deployment is
  * `<script>/<version>/` beneath it.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L575 (v0.5.0)
  */
-export function deployPrefix(project: string, env: string): string {
-  return `${fleetPrefix(project, env)}/deploy/`;
+export function deployPrefix(application: string): string {
+  return `${fleetPrefix(application)}/deploy/`;
 }
 
 /**
- * The fleet-wide pointer: the SOLE selector of what an environment serves, and
+ * The fleet-wide pointer: the SOLE selector of what an application serves, and
  * the one object that says which publication must survive anything scafo
  * deletes underneath it.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L450-L460 (v0.5.0)
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L842-L848 (v0.5.0)
  */
-export function deployPointerKey(project: string, env: string): string {
-  return `${deployPrefix(project, env)}current.json`;
+export function deployPointerKey(application: string): string {
+  return `${deployPrefix(application)}current.json`;
 }
 
 /**
@@ -326,8 +327,8 @@ export function deployPointerKey(project: string, env: string): string {
  * a blob every deployment that stays has stopped naming, once it is older than
  * the window that covers a deploy in flight.
  */
-export function deployBlobsPrefix(project: string, env: string): string {
-  return `${fleetPrefix(project, env)}/deploy-blobs/`;
+export function deployBlobsPrefix(application: string): string {
+  return `${fleetPrefix(application)}/deploy-blobs/`;
 }
 
 /**
@@ -338,8 +339,8 @@ export function deployBlobsPrefix(project: string, env: string): string {
  * `scafo deployment prune` never weighs what is under it as one.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/container.rs#L67-L73 (v0.5.0)
  */
-export function deployImagesPrefix(project: string, env: string): string {
-  return `${deployPrefix(project, env)}images/`;
+export function deployImagesPrefix(application: string): string {
+  return `${deployPrefix(application)}images/`;
 }
 
 /**
@@ -353,8 +354,8 @@ export function deployImagesPrefix(project: string, env: string): string {
  * fleet that stops consuming a queue is Celld's to decide, not scafo's.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L119-L141 (v0.5.0)
  */
-export function deployQueuesPrefix(project: string, env: string): string {
-  return `${deployPrefix(project, env)}queues/`;
+export function deployQueuesPrefix(application: string): string {
+  return `${deployPrefix(application)}queues/`;
 }
 
 /**

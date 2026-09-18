@@ -13,10 +13,10 @@ import { deploymentKey, deploymentsPrefix } from "./paths.ts";
  */
 export async function createDeployment(
   ctx: RegistryContext,
-  project: string,
+  application: string,
   input: DeploymentInput,
 ): Promise<DeploymentRecord> {
-  const key = deploymentKey(project, input.version);
+  const key = deploymentKey(application, input.version);
   const record: DeploymentRecord = {
     v: 1,
     version: input.version,
@@ -34,7 +34,7 @@ export async function createDeployment(
     const existing = await requireJson<DeploymentRecord>(ctx, key);
     if (deepEqual(identity(existing.value), identity(record))) return existing.value;
     throw new ScafoError("immutable", "Deployment already exists", {
-      detail: `"${input.version}" exists in project "${project}" with different contents`,
+      detail: `"${input.version}" exists in application "${application}" with different contents`,
       cause: error,
     });
   }
@@ -42,16 +42,19 @@ export async function createDeployment(
 
 export async function getDeployment(
   ctx: RegistryContext,
-  project: string,
+  application: string,
   version: string,
 ): Promise<DeploymentRecord> {
-  const found = await requireJson<DeploymentRecord>(ctx, deploymentKey(project, version));
+  const found = await requireJson<DeploymentRecord>(ctx, deploymentKey(application, version));
   return found.value;
 }
 
-/** Versions of every deployment of `project`, lexicographically sorted. */
-export async function listDeployments(ctx: RegistryContext, project: string): Promise<string[]> {
-  const prefix = deploymentsPrefix(project);
+/** Versions of every deployment of `application`, lexicographically sorted. */
+export async function listDeployments(
+  ctx: RegistryContext,
+  application: string,
+): Promise<string[]> {
+  const prefix = deploymentsPrefix(application);
   return namesFromKeys(await ctx.store.list(prefix), prefix);
 }
 

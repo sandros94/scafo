@@ -39,7 +39,7 @@ export interface NodeListing {
   /** Where its peers reach it, and the port its daemon answers on. */
   internal: string;
   apiPort: number;
-  /** What the operator said this machine IS, as an environment's selector matches it. */
+  /** What the operator said this machine IS, as an application's selector matches it. */
   labels: Record<string, string>;
   /** The binaries its daemon booted with. Absent on a record written before they were kept. */
   versions?: NodeVersions;

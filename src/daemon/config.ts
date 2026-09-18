@@ -16,9 +16,9 @@ import { DEFAULT_JSON_BYTES } from "./_json.ts";
 import {
   DEFAULT_ACTIVE_TASKS,
   DEFAULT_OUTPUT_BYTES,
-  DEFAULT_PROJECT_ACTIVE_TASKS,
-  DEFAULT_PROJECT_QUEUED_TASKS,
-  DEFAULT_PROJECT_STAGED_BYTES,
+  DEFAULT_APPLICATION_ACTIVE_TASKS,
+  DEFAULT_APPLICATION_QUEUED_TASKS,
+  DEFAULT_APPLICATION_STAGED_BYTES,
   DEFAULT_QUEUED_TASKS,
   DEFAULT_QUEUE_TIMEOUT_MS,
   DEFAULT_RECEIVE_TIMEOUT_MS,
@@ -52,7 +52,7 @@ export interface DaemonConfig {
   };
   /** Apex domains the platform serves wildcard subdomains under. */
   platformDomains: string[];
-  /** How this node runs and gates the processes that serve its environments. */
+  /** How this node runs and gates the processes that serve its applications. */
   runtime: RuntimeConfig;
   /** Resource bounds applied independently while receiving and expanding deploys. */
   deploy?: DeployConfig;
@@ -85,11 +85,11 @@ export interface DeployConfig {
   /** Maximum entries in one tar archive. */
   archiveEntries: number;
   activeTasks: number;
-  projectActiveTasks: number;
+  applicationActiveTasks: number;
   queuedTasks: number;
-  projectQueuedTasks: number;
+  applicationQueuedTasks: number;
   stagedBytes: number;
-  projectStagedBytes: number;
+  applicationStagedBytes: number;
   receiveTimeoutMs: number;
   queueTimeoutMs: number;
   taskTimeoutMs: number;
@@ -146,7 +146,7 @@ export interface IngressConfig {
 
 /** Every runtime setting, with the defaults already applied. */
 export interface RuntimeConfig {
-  /** Executable that runs one environment; resolved against `PATH` unless it is a path. */
+  /** Executable that runs one application; resolved against `PATH` unless it is a path. */
   binPath: string;
   /** First port of the range runtime processes are given pairs from. */
   portRangeStart: number;
@@ -176,7 +176,7 @@ export const DEFAULT_REGION: string = "us-east-1";
 /** Loopback by default: the node API is only safe on a trusted network. */
 export const DEFAULT_LISTEN: string = "127.0.0.1:7400";
 
-/** Command that runs an environment when none is configured. */
+/** Command that runs an application when none is configured. */
 export const DEFAULT_RUNTIME_BIN: string = "celld";
 
 /** Address runtime processes bind to when none is configured: loopback only. */
@@ -415,22 +415,22 @@ const ORIGINS = {
     file: "deploy.archiveEntries",
   },
   activeTasks: { flag: "active-tasks", env: ["SCAFO_ACTIVE_TASKS"], file: "deploy.activeTasks" },
-  projectActiveTasks: {
-    flag: "project-active-tasks",
-    env: ["SCAFO_PROJECT_ACTIVE_TASKS"],
-    file: "deploy.projectActiveTasks",
+  applicationActiveTasks: {
+    flag: "application-active-tasks",
+    env: ["SCAFO_APPLICATION_ACTIVE_TASKS"],
+    file: "deploy.applicationActiveTasks",
   },
   queuedTasks: { flag: "queued-tasks", env: ["SCAFO_QUEUED_TASKS"], file: "deploy.queuedTasks" },
-  projectQueuedTasks: {
-    flag: "project-queued-tasks",
-    env: ["SCAFO_PROJECT_QUEUED_TASKS"],
-    file: "deploy.projectQueuedTasks",
+  applicationQueuedTasks: {
+    flag: "application-queued-tasks",
+    env: ["SCAFO_APPLICATION_QUEUED_TASKS"],
+    file: "deploy.applicationQueuedTasks",
   },
   stagedBytes: { flag: "staged-bytes", env: ["SCAFO_STAGED_BYTES"], file: "deploy.stagedBytes" },
-  projectStagedBytes: {
-    flag: "project-staged-bytes",
-    env: ["SCAFO_PROJECT_STAGED_BYTES"],
-    file: "deploy.projectStagedBytes",
+  applicationStagedBytes: {
+    flag: "application-staged-bytes",
+    env: ["SCAFO_APPLICATION_STAGED_BYTES"],
+    file: "deploy.applicationStagedBytes",
   },
   receiveTimeoutMs: {
     flag: "receive-timeout-ms",
@@ -569,22 +569,22 @@ function resolveDeploy(sources: Sources): DeployConfig {
     artifactBytes: resolvePositiveSafeInteger("artifactBytes", sources, DEFAULT_ARTIFACT_BYTES),
     archiveEntries: resolvePositiveSafeInteger("archiveEntries", sources, DEFAULT_ARCHIVE_ENTRIES),
     activeTasks: resolvePositiveSafeInteger("activeTasks", sources, DEFAULT_ACTIVE_TASKS),
-    projectActiveTasks: resolvePositiveSafeInteger(
-      "projectActiveTasks",
+    applicationActiveTasks: resolvePositiveSafeInteger(
+      "applicationActiveTasks",
       sources,
-      DEFAULT_PROJECT_ACTIVE_TASKS,
+      DEFAULT_APPLICATION_ACTIVE_TASKS,
     ),
     queuedTasks: resolveNonNegativeSafeInteger("queuedTasks", sources, DEFAULT_QUEUED_TASKS),
-    projectQueuedTasks: resolveNonNegativeSafeInteger(
-      "projectQueuedTasks",
+    applicationQueuedTasks: resolveNonNegativeSafeInteger(
+      "applicationQueuedTasks",
       sources,
-      DEFAULT_PROJECT_QUEUED_TASKS,
+      DEFAULT_APPLICATION_QUEUED_TASKS,
     ),
     stagedBytes: resolvePositiveSafeInteger("stagedBytes", sources, DEFAULT_STAGED_BYTES),
-    projectStagedBytes: resolvePositiveSafeInteger(
-      "projectStagedBytes",
+    applicationStagedBytes: resolvePositiveSafeInteger(
+      "applicationStagedBytes",
       sources,
-      DEFAULT_PROJECT_STAGED_BYTES,
+      DEFAULT_APPLICATION_STAGED_BYTES,
     ),
     receiveTimeoutMs: resolvePositiveSafeInteger(
       "receiveTimeoutMs",
@@ -596,18 +596,18 @@ function resolveDeploy(sources: Sources): DeployConfig {
     outputBytes: resolvePositiveSafeInteger("outputBytes", sources, DEFAULT_OUTPUT_BYTES),
   };
 
-  for (const [project, global] of [
-    ["projectActiveTasks", "activeTasks"],
-    ["projectQueuedTasks", "queuedTasks"],
-    ["projectStagedBytes", "stagedBytes"],
+  for (const [application, global] of [
+    ["applicationActiveTasks", "activeTasks"],
+    ["applicationQueuedTasks", "queuedTasks"],
+    ["applicationStagedBytes", "stagedBytes"],
   ] as const) {
-    if (deploy[project] > deploy[global]) {
+    if (deploy[application] > deploy[global]) {
       throw new ScafoError("invalid-input", "Invalid deploy limits", {
-        detail: `"deploy.${project}" must not exceed "deploy.${global}"`,
+        detail: `"deploy.${application}" must not exceed "deploy.${global}"`,
       });
     }
   }
-  for (const field of ["stagedBytes", "projectStagedBytes"] as const) {
+  for (const field of ["stagedBytes", "applicationStagedBytes"] as const) {
     if (deploy[field] < deploy.artifactBytes) {
       throw new ScafoError("invalid-input", "Invalid deploy byte limits", {
         detail: `"deploy.${field}" must be at least "deploy.artifactBytes"`,

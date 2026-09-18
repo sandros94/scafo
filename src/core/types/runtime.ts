@@ -1,21 +1,17 @@
 /*
- * The seam between placement and whatever actually serves an environment's
+ * The seam between placement and whatever actually serves an application's
  * traffic on a node. Core describes the contract; a driver
  * (`scafo/drivers/runtime/celld`) implements it, and the daemon wires the two
  * together.
  */
 
-import type { EnvironmentRecord } from "./registry.ts";
+import type { ApplicationRecord } from "./registry.ts";
 import type { ProcessSpec } from "./supervisor.ts";
 
-/** One runtime process of an environment, as the planner sees it. */
+/** One runtime process of an application, as the planner sees it. */
 export interface RuntimeProcess {
-  /**
-   * Id the process runs under in the supervisor: `project--env`.
-   */
-  processId: string;
-  project: string;
-  env: string;
+  /** The application this process serves; also its id in the supervisor. */
+  application: string;
   /** A failed supervisor stop must be retried before any other lifecycle action. */
   teardownPending?: true;
   /** Loopback port serving public traffic. */
@@ -53,8 +49,7 @@ export interface RuntimeNodeInput {
 
 /** Everything one runtime process is materialized from. */
 export interface RuntimeSpecInput {
-  project: string;
-  env: EnvironmentRecord;
+  application: ApplicationRecord;
   ports: { public: number; internal: number };
   node: RuntimeNodeInput;
   /**
@@ -68,7 +63,7 @@ export interface RuntimeSpecInput {
   baseEnv?: Record<string, string>;
 }
 
-/** Runs one environment's Celld process on a node. */
+/** Runs one application's Celld process on a node. */
 export interface RuntimeDriver {
   /**
    * Grace a caller must give one of this driver's processes between `SIGTERM`
@@ -76,6 +71,6 @@ export interface RuntimeDriver {
    * process with, so a process always finishes draining before it is killed.
    */
   readonly stopGraceMs: number;
-  /** Materializes the spec that runs one environment on this node. */
+  /** Materializes the spec that runs one application on this node. */
   processSpec(input: RuntimeSpecInput): ProcessSpec;
 }

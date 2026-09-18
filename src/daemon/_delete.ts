@@ -1,4 +1,4 @@
-/* Internal: operator-ordered environment deletion, and the hop to the coordinator. */
+/* Internal: operator-ordered application deletion, and the hop to the coordinator. */
 
 import type { H3Event } from "h3";
 import { signNodeToken } from "../core/auth/node-token.ts";
@@ -8,9 +8,10 @@ import { nowDate } from "../core/registry/context.ts";
 import { isLeaseExpired } from "../core/registry/lease.ts";
 import { getNode } from "../core/registry/nodes.ts";
 import { coordinatorKey } from "../core/registry/paths.ts";
-import { deleteEnvironment } from "../core/registry/reaper.ts";
+import { deleteApplication } from "../core/registry/reaper.ts";
 import type { CoordinatorLease } from "../core/types/registry.ts";
-import type { DaemonContext, EnvironmentDeleted } from "./app.ts";
+import type { ApplicationDeleted } from "./_application-routes.ts";
+import type { DaemonContext } from "./app.ts";
 import { forwardToNode } from "./_forward.ts";
 import { isProxiedHop } from "./_peer.ts";
 
@@ -33,7 +34,7 @@ export function forceRequested(event: H3Event): boolean {
 }
 
 /**
- * Deletes an environment, wherever the coordinator happens to be.
+ * Deletes an application, wherever the coordinator happens to be.
  *
  * Deleting is lease-gated — S3 has no conditional delete, so the lease is the
  * only thing keeping two deleters apart — which means exactly one node in the
@@ -45,12 +46,11 @@ export function forceRequested(event: H3Event): boolean {
  * finds out who won; another node holds it, and the request is forwarded there
  * once and its answer returned verbatim.
  */
-export async function deleteEnvironmentRequest(
+export async function deleteApplicationRequest(
   daemon: DaemonContext,
   event: H3Event,
-): Promise<Response | EnvironmentDeleted> {
-  const project = event.context.params?.project ?? "";
-  const env = event.context.params?.env ?? "";
+): Promise<Response | ApplicationDeleted> {
+  const application = event.context.params?.name ?? "";
   const force = forceRequested(event);
   const coordinator = daemon.coordinator;
 
@@ -65,14 +65,14 @@ export async function deleteEnvironmentRequest(
 
   const handle = coordinator?.handle() ?? null;
   if (handle !== null && lease?.node === daemon.nodeId) {
-    return deleteEnvironment(daemon.registry, project, env, handle, { force });
+    return deleteApplication(daemon.registry, application, handle, { force });
   }
 
   if (lease === null) {
     throw new ScafoError("draining", "No node is coordinating", {
       detail:
         `no node holds the coordinator lease, and this one could not take it, so there is ` +
-        `nowhere to carry out the deletion of "${project}/${env}" right now`,
+        `nowhere to carry out the deletion of "${application}" right now`,
     });
   }
 
@@ -103,7 +103,7 @@ async function currentLease(daemon: DaemonContext): Promise<CoordinatorLease | n
  * Forwards this request to the node holding the lease, speaking as this node.
  *
  * The caller's own authorization was settled HERE — an operator's scope is
- * checked against the project in the path before any of this — so the hop
+ * checked against the application in the path before any of this — so the hop
  * carries this node's identity rather than the caller's, and the coordinator
  * answers a peer of its own installation.
  */

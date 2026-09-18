@@ -28,8 +28,8 @@ const OPERATOR_ID = "op-aaaa1111";
 const SECOND_ID = "op-bbbb2222";
 const THIRD_ID = "op-cccc3333";
 const FOURTH_ID = "op-dddd4444";
-/** The project every operator-tier key in this file is scoped to; see {@link scopedHalf}. */
-const PROJECT = "acme";
+/** The application every operator-tier key in this file is scoped to; see {@link scopedHalf}. */
+const APPLICATION = "acme";
 
 /** Every problem body a caller that did not authenticate may see. */
 const AUTH_INVALID_PROBLEM = {
@@ -566,14 +566,14 @@ function publicHalf(id: string, keys: Keypair): Omit<TrustedOperator, "role"> {
 
 /**
  * The same, naming a SCOPE — which an operator-tier registration must, since a
- * key that names no projects reaches none of them.
+ * key that names no applications reaches none of them.
  *
  * Used wherever the tier a body lands at is `operator`, and left off wherever it
  * is `admin`, which is never scoped. What that refusal looks like on its own is
  * `test/operator-tenancy.test.ts`; these cases are about the tiers.
  */
 function scopedHalf(id: string, keys: Keypair): Omit<TrustedOperator, "role"> {
-  return { ...publicHalf(id, keys), projects: [PROJECT] };
+  return { ...publicHalf(id, keys), applications: [APPLICATION] };
 }
 
 /**
@@ -591,7 +591,7 @@ async function trust(id: string, keys: Keypair): Promise<void> {
 /**
  * The same, at a stated tier and with the lineage a rotation would have left.
  *
- * An operator-tier key is given a SCOPE, because one that names no projects is
+ * An operator-tier key is given a SCOPE, because one that names no applications is
  * a shape nothing grants: it reaches nothing, and a fixture carrying it would be
  * testing the broken record rather than the tier rules these cases are about.
  * `test/operator-tenancy.test.ts` is where the scope-less record is exercised.
@@ -608,7 +608,7 @@ async function trustAs(
     publicKey: { kty: "OKP", crv: "Ed25519", x: keys.publicKey.x },
     role,
     ...(supersedes === undefined ? {} : { supersedes }),
-    ...(role === "operator" ? { projects: [PROJECT] } : {}),
+    ...(role === "operator" ? { applications: [APPLICATION] } : {}),
   });
 }
 

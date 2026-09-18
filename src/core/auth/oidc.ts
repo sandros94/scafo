@@ -1,4 +1,4 @@
-/* Workload OIDC tokens: what a CI job presents to deploy a project. */
+/* Workload OIDC tokens: what a CI job presents to deploy an application. */
 
 import type { JWSAlgorithm } from "unjwt/jws";
 import { verify as verifyJws } from "unjwt/jws";
@@ -58,23 +58,23 @@ export interface OidcVerifierOptions {
 export interface OidcIdentity {
   /** The auth-owned identity persisted with an admitted workload deployment. */
   actor: OidcActor;
-  project: string;
+  application: string;
   issuer: TrustIssuer;
 }
 
 export interface OidcVerifier {
   /**
-   * Resolves the workload's identity for `project`. Throws
+   * Resolves the workload's identity for `application`. Throws
    * `ScafoError("auth-invalid")` when the token itself does not hold up, and
-   * `ScafoError("trust-mismatch")` when it does but the project's trust policy
-   * does not name its issuer or subject.
+   * `ScafoError("trust-mismatch")` when it does but the application's trust
+   * policy does not name its issuer or subject.
    */
-  verify(token: string, project: string): Promise<OidcIdentity>;
+  verify(token: string, application: string): Promise<OidcIdentity>;
 }
 
 /**
  * Builds a verifier for deploy-intake tokens. Trust is checked before anything
- * is fetched: an issuer the project does not name is refused without a request,
+ * is fetched: an issuer the application does not name is refused without a request,
  * so a token can never steer the daemon at a URL of its choosing. An issuer or
  * policy selected from unsigned claims is not an authorization result: it is
  * only enough to choose the preconfigured discovery endpoint.
@@ -94,15 +94,15 @@ export function createOidcVerifier(ctx: RegistryContext, opts?: OidcVerifierOpti
   });
 
   return {
-    async verify(token, project) {
+    async verify(token, application) {
       const iss = stringClaim(decodeCompactClaims(token), "iss");
 
-      const policy = await readJson<TrustPolicy>(ctx, trustKey(project));
+      const policy = await readJson<TrustPolicy>(ctx, trustKey(application));
       if (policy === null) {
-        throw authInvalid("Project has no trust policy");
+        throw authInvalid("Application has no trust policy");
       }
       if (!policy.value.issuers.some((issuer) => issuer.iss === iss)) {
-        throw authInvalid("Issuer is not configured for this project");
+        throw authInvalid("Issuer is not configured for this application");
       }
 
       let payload: unknown;
@@ -121,7 +121,7 @@ export function createOidcVerifier(ctx: RegistryContext, opts?: OidcVerifierOpti
 
       /* The audience belongs to the grant, not to this deployment: the same
          issuer minting tokens for a second audience is a second policy entry,
-         so what `aud` must name is read from the entries the project wrote for
+         so what `aud` must name is read from the entries the application wrote for
          `iss`. A token naming none of them was minted for somebody else, which
          is the token failing rather than the policy denying it. */
       const audiences = grantedAudiences(policy.value, iss, claims.aud);
@@ -131,9 +131,9 @@ export function createOidcVerifier(ctx: RegistryContext, opts?: OidcVerifierOpti
 
       const issuer = matchAudiences(policy.value, audiences, { iss, sub });
       if (issuer === null) {
-        throw trustMismatch(`"${sub}" is not a trusted subject of "${iss}" for "${project}"`);
+        throw trustMismatch(`"${sub}" is not a trusted subject of "${iss}" for "${application}"`);
       }
-      return { actor: { issuer: iss, subject: sub }, project, issuer };
+      return { actor: { issuer: iss, subject: sub }, application, issuer };
     },
   };
 }

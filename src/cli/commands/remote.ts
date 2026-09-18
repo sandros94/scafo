@@ -59,7 +59,8 @@ const addArgs: ArgsDef = {
     type: "string",
     description:
       `Tier to register at: admin (the first key is always one, and this path admits no other ` +
-      `— an operator-tier key needs a project scope, which only the wire path can give it)`,
+      `— an operator-tier key needs an application scope, which only the wire path can give ` +
+      `it)`,
   },
   config: { type: "string", description: "Path to scafo.config.jsonc, for --register" },
 };

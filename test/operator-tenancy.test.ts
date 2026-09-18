@@ -16,9 +16,8 @@ import { signNodeToken } from "../src/core/auth/index.ts";
 import { registerOperatorKey } from "../src/cli/_operator-key.ts";
 import {
   acquireLease,
+  createApplication,
   createDeployment,
-  createEnvironment,
-  createProject,
   registerNode,
 } from "../src/core/registry/index.ts";
 import { getOperator } from "../src/core/registry/operators.ts";
@@ -33,19 +32,25 @@ import { ctxWith, type ManualClock, TEST_VERSIONS } from "./_helpers.ts";
 
 const NODE_ID = "node-a";
 
-/** The tenant's own project, and the one next door that is none of its business. */
+/** The tenant's own application, and the one next door that is none of its business. */
 const MINE = "acme";
 const THEIRS = "globex";
-const ENVIRONMENT = "prod";
+/** The two names a `shop-*` key is measured against, beside the one it reaches. */
+const GLOB_MATCH = "shop-preview";
+const GLOB_BARE = "shop";
+/** Every application the node reports on, in the order its stubs report them. */
+const ALL = [MINE, THEIRS, GLOB_MATCH, GLOB_BARE];
 const VERSION = "aaaa1111";
 
 const ADMIN_ID = "op-admin111";
 /** An operator-tier key scoped to {@link MINE} and to nothing else. */
 const TENANT_ID = "op-tenant11";
-/** An operator-tier key that says "every project" out loud. */
+/** An operator-tier key that says "every application" out loud. */
 const WILD_ID = "op-wild1111";
+/** An operator-tier key whose whole scope is the prefix glob `shop-*`. */
+const GLOB_ID = "op-glob1111";
 /**
- * An operator-tier record carrying no projects, written straight into the bucket
+ * An operator-tier record carrying no applications, written straight into the bucket
  * by hand — the only way one can exist once every grant refuses to make one.
  */
 const ORPHAN_ID = "op-orphan11";
@@ -61,6 +66,7 @@ let tenant: Keypair;
 let wild: Keypair;
 let orphan: Keypair;
 let foreign: Keypair;
+let globber: Keypair;
 let deploys: StubDeploys;
 let app: H3;
 
@@ -72,6 +78,7 @@ beforeEach(async () => {
   wild = await generateJWK("EdDSA", { kid: WILD_ID });
   orphan = await generateJWK("EdDSA", { kid: ORPHAN_ID });
   foreign = await generateJWK("EdDSA", { kid: FOREIGN_ID });
+  globber = await generateJWK("EdDSA", { kid: GLOB_ID });
 
   await registerNode(clock.ctx, {
     v: 1,
@@ -80,16 +87,16 @@ beforeEach(async () => {
     addresses: { internal: "10.0.0.4", apiPort: 7400 },
   });
   await fileKey(ADMIN_ID, admin, { role: "admin" });
-  await fileKey(TENANT_ID, tenant, { role: "operator", projects: [MINE] });
-  await fileKey(WILD_ID, wild, { role: "operator", projects: ["*"] });
+  await fileKey(TENANT_ID, tenant, { role: "operator", applications: [MINE] });
+  await fileKey(WILD_ID, wild, { role: "operator", applications: ["*"] });
   await fileKey(ORPHAN_ID, orphan, { role: "operator" });
-  await fileKey(FOREIGN_ID, foreign, { role: "operator", projects: [THEIRS] });
+  await fileKey(FOREIGN_ID, foreign, { role: "operator", applications: [THEIRS] });
+  await fileKey(GLOB_ID, globber, { role: "operator", applications: ["shop-*"] });
 
-  for (const project of [MINE, THEIRS]) {
-    await createProject(clock.ctx, { slug: project });
-    await createEnvironment(clock.ctx, project, { name: ENVIRONMENT });
-    await createDeployment(clock.ctx, project, { version: VERSION });
-    await recordRevision(clock.ctx, project, ENVIRONMENT, VERSION);
+  for (const name of [MINE, THEIRS, GLOB_MATCH, GLOB_BARE]) {
+    await createApplication(clock.ctx, { name });
+    await createDeployment(clock.ctx, name, { version: VERSION });
+    await recordRevision(clock.ctx, name, VERSION);
   }
 
   deploys = stubDeploys();
@@ -97,35 +104,35 @@ beforeEach(async () => {
     config: daemonConfig(),
     nodeId: NODE_ID,
     registry: clock.ctx,
-    supervisor: bothProjectsRunning(),
+    supervisor: bothApplicationsRunning(),
     versions: TEST_VERSIONS,
-    reconciler: bothProjectsReconciled(),
+    reconciler: bothApplicationsReconciled(),
     coordinator: coordinatorWithUnplaced(),
     deploys,
     artifactStager: createFileArtifactStager(),
   });
 });
 
-describe("an operator-tier key naming no projects reaches nothing at all", () => {
-  it("is refused an environment route on EVERY project, its own included", async () => {
-    for (const project of [MINE, THEIRS]) {
-      const response = await call(pathIn(project, "/retire"), ORPHAN_ID, orphan, {
+describe("an operator-tier key naming no applications reaches nothing at all", () => {
+  it("is refused an application route on EVERY application, its own included", async () => {
+    for (const application of [MINE, THEIRS]) {
+      const response = await call(pathIn(application, "/retire"), ORPHAN_ID, orphan, {
         method: "POST",
       });
 
-      expect(response.status, project).toBe(403);
+      expect(response.status, application).toBe(403);
       await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
     }
   });
 
-  it("is refused a deploy into every project", async () => {
-    for (const project of [MINE, THEIRS]) {
-      expect((await upload(ORPHAN_ID, orphan, project)).status, project).toBe(403);
+  it("is refused a deploy into every application", async () => {
+    for (const application of [MINE, THEIRS]) {
+      expect((await upload(ORPHAN_ID, orphan, application)).status, application).toBe(403);
     }
     expect(deploys.started).toEqual([]);
   });
 
-  it("is refused the status of a deploy in every project", async () => {
+  it("is refused the status of a deploy in every application", async () => {
     const started = deploys.recordFor(MINE);
 
     const response = await call(`/v1/deploys/${started.id}`, ORPHAN_ID, orphan, { method: "GET" });
@@ -149,7 +156,7 @@ describe("an operator-tier key naming no projects reaches nothing at all", () =>
 
     expect(response.status, await response.clone().text()).toBe(200);
     const heir = await getOperator(clock.ctx, "op-heir1111");
-    expect(heir?.projects).toBeUndefined();
+    expect(heir?.applications).toBeUndefined();
     expect((await upload("op-heir1111", minted, MINE)).status).toBe(403);
   });
 
@@ -162,12 +169,12 @@ describe("an operator-tier key naming no projects reaches nothing at all", () =>
     await expect(getOperator(clock.ctx, ORPHAN_ID)).resolves.toBeNull();
   });
 
-  it("leaves an ADMIN and a NODE reaching every project, because neither is a tenant", async () => {
-    for (const project of [MINE, THEIRS]) {
-      expect((await upload(ADMIN_ID, admin, project)).status, project).toBe(202);
+  it("leaves an ADMIN and a NODE reaching every application, because neither is a tenant", async () => {
+    for (const application of [MINE, THEIRS]) {
+      expect((await upload(ADMIN_ID, admin, application)).status, application).toBe(202);
 
-      const asNode = await call(pathIn(project, "/retire"), NODE_ID, node, { method: "POST" });
-      expect(asNode.status, project).toBe(200);
+      const asNode = await call(pathIn(application, "/retire"), NODE_ID, node, { method: "POST" });
+      expect(asNode.status, application).toBe(200);
     }
   });
 });
@@ -186,22 +193,22 @@ describe("enrolling an operator-tier key must NAME what it reaches", () => {
     await expect(getOperator(clock.ctx, "op-joiner11")).resolves.toBeNull();
   });
 
-  it("refuses a scope naming no project", async () => {
+  it("refuses a scope naming no application", async () => {
     const response = await enroll(ADMIN_ID, admin, {
       ...publicHalf("op-joiner11", await minted()),
       role: "operator",
-      projects: [],
+      applications: [],
     });
 
     expect(response.status).toBe(400);
     await expect(getOperator(clock.ctx, "op-joiner11")).resolves.toBeNull();
   });
 
-  it('refuses "*" MIXED with named projects, rather than guessing which was meant', async () => {
+  it('refuses "*" MIXED with named applications, rather than guessing which was meant', async () => {
     const response = await enroll(ADMIN_ID, admin, {
       ...publicHalf("op-joiner11", await minted()),
       role: "operator",
-      projects: ["*", MINE],
+      applications: ["*", MINE],
     });
 
     expect(response.status).toBe(400);
@@ -224,7 +231,7 @@ describe("enrolling an operator-tier key must NAME what it reaches", () => {
     await expect(getOperator(clock.ctx, "op-joiner11")).resolves.toBeNull();
   });
 
-  it("lets the ceremony seed an ADMIN, which names no projects and never could", async () => {
+  it("lets the ceremony seed an ADMIN, which names no applications and never could", async () => {
     const fresh = ctxWith(new MemoryCasStore());
     const role = await registerOperatorKey(fresh.ctx, {
       id: "op-first111",
@@ -235,13 +242,15 @@ describe("enrolling an operator-tier key must NAME what it reaches", () => {
   });
 });
 
-describe('["*"] is how a key says "every project" out loud', () => {
-  it("reaches every project of the fleet", async () => {
-    for (const project of [MINE, THEIRS]) {
-      expect((await upload(WILD_ID, wild, project)).status, project).toBe(202);
+describe('["*"] is how a key says "every application" out loud', () => {
+  it("reaches every application of the fleet", async () => {
+    for (const application of [MINE, THEIRS]) {
+      expect((await upload(WILD_ID, wild, application)).status, application).toBe(202);
 
-      const response = await call(pathIn(project, "/retire"), WILD_ID, wild, { method: "POST" });
-      expect(response.status, project).toBe(200);
+      const response = await call(pathIn(application, "/retire"), WILD_ID, wild, {
+        method: "POST",
+      });
+      expect(response.status, application).toBe(200);
     }
   });
 
@@ -249,7 +258,7 @@ describe('["*"] is how a key says "every project" out loud', () => {
     const response = await enroll(WILD_ID, wild, {
       ...publicHalf("op-joiner11", await minted()),
       role: "operator",
-      projects: ["*"],
+      applications: ["*"],
     });
 
     expect(response.status).toBe(403);
@@ -261,13 +270,13 @@ describe('["*"] is how a key says "every project" out loud', () => {
     const response = await enroll(ADMIN_ID, admin, {
       ...publicHalf("op-joiner11", await minted()),
       role: "operator",
-      projects: ["*"],
+      applications: ["*"],
     });
 
     expect(response.status).toBe(200);
     await expect(getOperator(clock.ctx, "op-joiner11")).resolves.toMatchObject({
       role: "operator",
-      projects: ["*"],
+      applications: ["*"],
     });
   });
 
@@ -283,7 +292,7 @@ describe('["*"] is how a key says "every project" out loud', () => {
     await expect(getOperator(clock.ctx, "op-heir1111")).resolves.toMatchObject({
       role: "operator",
       supersedes: WILD_ID,
-      projects: ["*"],
+      applications: ["*"],
     });
   });
 
@@ -291,7 +300,7 @@ describe('["*"] is how a key says "every project" out loud', () => {
     const response = await enroll(TENANT_ID, tenant, {
       ...publicHalf("op-heir1111", await minted()),
       supersedes: TENANT_ID,
-      projects: ["*"],
+      applications: ["*"],
     });
 
     expect(response.status).toBe(403);
@@ -303,13 +312,13 @@ describe("GET /v1/operators shows an operator its OWN LINEAGE and nothing else",
   it("answers the caller's record, the one it supersedes, and its pending successor", async () => {
     await fileKey(TENANT_ID, tenant, {
       role: "operator",
-      projects: [MINE],
+      applications: [MINE],
       supersedes: "op-before11",
     });
-    await fileKey("op-before11", await minted(), { role: "operator", projects: [MINE] });
+    await fileKey("op-before11", await minted(), { role: "operator", applications: [MINE] });
     await fileKey("op-after111", await minted(), {
       role: "operator",
-      projects: [MINE],
+      applications: [MINE],
       supersedes: TENANT_ID,
     });
 
@@ -349,6 +358,7 @@ describe("GET /v1/operators shows an operator its OWN LINEAGE and nothing else",
     expect(body.operators.map((entry) => entry.id)).toEqual([
       ADMIN_ID,
       FOREIGN_ID,
+      GLOB_ID,
       ORPHAN_ID,
       TENANT_ID,
       WILD_ID,
@@ -373,13 +383,11 @@ describe("GET /v1/state is filtered to what the caller reaches", () => {
   it("hides another tenant's placements and processes", async () => {
     const state = await stateFor(TENANT_ID, tenant);
 
-    expect(state.placements.map((entry) => entry.project)).toEqual([MINE]);
-    expect(state.processes.map((entry) => entry.id)).toEqual([`${MINE}--${ENVIRONMENT}`]);
-    expect(state.coordinator?.unplaced?.map((entry) => entry.target)).toEqual([
-      `${MINE}/${ENVIRONMENT}`,
-    ]);
-    expect(state.reconcile?.placements.map((entry) => entry.project)).toEqual([MINE]);
-    expect(state.reconcile?.processes.map((entry) => entry.project)).toEqual([MINE]);
+    expect(state.placements.map((entry) => entry.application)).toEqual([MINE]);
+    expect(state.processes.map((entry) => entry.id)).toEqual([MINE]);
+    expect(state.coordinator?.unplaced?.map((entry) => entry.target)).toEqual([MINE]);
+    expect(state.reconcile?.placements.map((entry) => entry.application)).toEqual([MINE]);
+    expect(state.reconcile?.processes.map((entry) => entry.application)).toEqual([MINE]);
   });
 
   it("keeps the machine facts, which belong to the node rather than to a tenant", async () => {
@@ -396,11 +404,21 @@ describe("GET /v1/state is filtered to what the caller reaches", () => {
     expect((await stateFor(ORPHAN_ID, orphan)).scoped).toBe(true);
   });
 
-  it("shows a WILDCARD key every project, filtered by a filter that passes everything", async () => {
+  it("shows a WILDCARD key every application, filtered by a filter that passes everything", async () => {
     const state = await stateFor(WILD_ID, wild);
 
-    expect(state.placements.map((entry) => entry.project)).toEqual([MINE, THEIRS]);
-    expect(state.processes).toHaveLength(2);
+    expect(state.placements.map((entry) => entry.application)).toEqual(ALL);
+    expect(state.processes).toHaveLength(ALL.length);
+  });
+
+  it("shows a PREFIX GLOB key the names under its prefix and no others", async () => {
+    const state = await stateFor(GLOB_ID, globber);
+
+    expect(state.placements.map((entry) => entry.application)).toEqual([GLOB_MATCH]);
+    expect(state.processes.map((entry) => entry.id)).toEqual([GLOB_MATCH]);
+    expect(state.coordinator?.unplaced?.map((entry) => entry.target)).toEqual([GLOB_MATCH]);
+    expect(state.reconcile?.processes.map((entry) => entry.application)).toEqual([GLOB_MATCH]);
+    expect(state.scoped).toBe(true);
   });
 
   it("shows a scope-LESS operator-tier key nothing at all", async () => {
@@ -414,22 +432,22 @@ describe("GET /v1/state is filtered to what the caller reaches", () => {
   it("hands a NODE-SIGNED PEER the whole state, unmarked, because the deploy hop needs it", async () => {
     const state = await stateFor(NODE_ID, node);
 
-    expect(state.placements.map((entry) => entry.project)).toEqual([MINE, THEIRS]);
-    expect(state.processes).toHaveLength(2);
-    expect(state.coordinator?.unplaced).toHaveLength(2);
+    expect(state.placements.map((entry) => entry.application)).toEqual(ALL);
+    expect(state.processes).toHaveLength(ALL.length);
+    expect(state.coordinator?.unplaced).toHaveLength(ALL.length);
     expect(state.scoped).toBeUndefined();
   });
 
   it("hands an ADMIN the whole state, unmarked", async () => {
     const state = await stateFor(ADMIN_ID, admin);
 
-    expect(state.placements.map((entry) => entry.project)).toEqual([MINE, THEIRS]);
-    expect(state.processes).toHaveLength(2);
+    expect(state.placements.map((entry) => entry.application)).toEqual(ALL);
+    expect(state.processes).toHaveLength(ALL.length);
     expect(state.scoped).toBeUndefined();
   });
 });
 
-describe("a scoped operator can learn no foreign project name from this API", () => {
+describe("a scoped operator can learn no foreign application name from this API", () => {
   it("finds none in the operator listing", async () => {
     const response = await call("/v1/operators", TENANT_ID, tenant, { method: "GET" });
     const body = await response.text();
@@ -461,9 +479,9 @@ interface Call {
   body?: unknown;
 }
 
-/** The environment route `suffix` names, inside `project`. */
-function pathIn(project: string, suffix: string): string {
-  return `/v1/environments/${project}/${ENVIRONMENT}${suffix}`;
+/** The application route `suffix` names, for `application`. */
+function pathIn(application: string, suffix: string): string {
+  return `/v1/applications/${application}${suffix}`;
 }
 
 /** One call to the node, signed by `keys` for exactly this request. */
@@ -492,9 +510,9 @@ async function stateFor(id: string, keys: Keypair): Promise<DaemonState> {
   return (await response.json()) as DaemonState;
 }
 
-/** An artifact upload naming `project`, as a deploy client sends one. */
-async function upload(id: string, keys: Keypair, project: string): Promise<Response> {
-  return app.request(`/v1/projects/${project}/deploys`, {
+/** An artifact upload naming `application`, as a deploy client sends one. */
+async function upload(id: string, keys: Keypair, application: string): Promise<Response> {
+  return app.request(`/v1/applications/${application}/deploys`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${await signNodeToken(keys.privateKey, id)}`,
@@ -523,7 +541,7 @@ function publicHalf(id: string, keys: Keypair): Record<string, unknown> {
 async function fileKey(
   id: string,
   keys: Keypair,
-  operator?: { role: "admin" | "operator"; projects?: string[]; supersedes?: string },
+  operator?: { role: "admin" | "operator"; applications?: string[]; supersedes?: string },
 ): Promise<void> {
   await putJson<OperatorRecord>(clock.ctx, operatorKey(id), {
     v: 1,
@@ -533,10 +551,10 @@ async function fileKey(
   });
 }
 
-/** One running process per project, named the way the supervisor names them. */
-function bothProjectsRunning(): Supervisor {
-  const processes: ProcessStatus[] = [MINE, THEIRS].map((project) => ({
-    id: `${project}--${ENVIRONMENT}`,
+/** One running process per application, named the way the supervisor names them. */
+function bothApplicationsRunning(): Supervisor {
+  const processes: ProcessStatus[] = ALL.map((application) => ({
+    id: application,
     state: "running",
     pid: 4321,
     startedAt: "2026-01-01T00:00:00.000Z",
@@ -552,23 +570,20 @@ function bothProjectsRunning(): Supervisor {
   };
 }
 
-/** A reconcile loop that has read both projects. */
-function bothProjectsReconciled(): Reconciler {
+/** A reconcile loop that has read both applications. */
+function bothApplicationsReconciled(): Reconciler {
   const status: ReconcileStatus = {
     lastRunAt: "2026-01-01T00:00:00.000Z",
     running: false,
     lastActions: [],
     failures: [],
-    processes: [MINE, THEIRS].map((project) => ({
-      processId: `${project}--${ENVIRONMENT}`,
-      project,
-      env: ENVIRONMENT,
+    processes: ALL.map((application) => ({
+      application,
       port: 42_001,
       internalPort: 42_002,
     })),
-    placements: [MINE, THEIRS].map((project) => ({
-      project,
-      env: ENVIRONMENT,
+    placements: ALL.map((application) => ({
+      application,
       nodes: [NODE_ID],
       self: true,
     })),
@@ -587,17 +602,17 @@ function bothProjectsReconciled(): Reconciler {
   };
 }
 
-/** A coordinator holding this node's lease, with one unplaced environment per project. */
+/** A coordinator holding this node's lease, with one unplaced application each. */
 function coordinatorWithUnplaced(): Coordinator {
   const lastAssignment: AssignmentResult = {
     live: [NODE_ID],
     changed: [],
     removed: [],
     skipped: [],
-    unplaced: [MINE, THEIRS].map((project) => ({
-      target: `${project}/${ENVIRONMENT}`,
+    unplaced: ALL.map((application) => ({
+      target: application,
       reason: "placement-unavailable",
-      detail: `no live node carries the labels ${project}/${ENVIRONMENT} requires`,
+      detail: `no live node carries the labels "${application}" requires`,
     })),
   };
   const status: CoordinatorStatus = {
@@ -622,8 +637,8 @@ function coordinatorWithUnplaced(): Coordinator {
 interface StubDeploys extends DeployService {
   /** Every meta the route handed over, in order. */
   started: DeployMeta[];
-  /** Records a deploy for `project` without going through the route. */
-  recordFor(project: string): DeployStatus;
+  /** Records a deploy for `application` without going through the route. */
+  recordFor(application: string): DeployStatus;
 }
 
 /** A deploy intake that records what it was asked for and publishes nothing. */
@@ -632,13 +647,13 @@ function stubDeploys(): StubDeploys {
   const byId = new Map<string, DeployStatus>();
   let next = 0;
 
-  const record = (project: string): DeployStatus => {
+  const record = (application: string): DeployStatus => {
     next += 1;
     const status: DeployStatus = {
-      /* A deploy id names the project it belongs to; a poll is authenticated
-         against that project before anything is read. */
-      id: `${project}.000000000000000${String(next)}`,
-      project,
+      /* A deploy id names the application it belongs to; a poll is
+         authenticated against that application before anything is read. */
+      id: `${application}.000000000000000${String(next)}`,
+      application,
       state: "accepted",
     };
     byId.set(status.id, status);
@@ -649,7 +664,7 @@ function stubDeploys(): StubDeploys {
     started,
     recordFor: record,
     reserve: () => ({
-      project: "stub",
+      application: "stub",
       signal: new AbortController().signal,
       cancel: () => {},
       discard: () => Promise.resolve(),
@@ -662,7 +677,7 @@ function stubDeploys(): StubDeploys {
       return Promise.resolve({
         start: (artifact) => {
           void artifact.dispose();
-          return Promise.resolve(record(meta.project));
+          return Promise.resolve(record(meta.application));
         },
       });
     },

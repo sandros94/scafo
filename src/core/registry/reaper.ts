@@ -2,13 +2,14 @@
 
 import { ScafoError } from "../error.ts";
 import type {
+  ApplicationRecord,
   DeploymentRecord,
   DeployRecord,
   DomainClaim,
-  EnvironmentRecord,
   PlacementRecord,
 } from "../types/registry.ts";
 import { formatDuration } from "./_shared.ts";
+import { findApplication, listApplications } from "./applications.ts";
 import { deleteKey, readJson, requireJson } from "./cas.ts";
 import { nowDate, type RegistryContext } from "./context.ts";
 import { listDeployments } from "./deployments.ts";
@@ -19,18 +20,19 @@ import {
   updateDeployRecord,
 } from "./deploys.ts";
 import { releaseDomain } from "./domains.ts";
-import { listEnvironments } from "./environments.ts";
 import { type KeepAlive, type LeaseHandle, verifyLease } from "./lease.ts";
 import { isNodeAnswering, listNodeRecords, NODE_LIVENESS_WINDOW_MS } from "./nodes.ts";
 import {
+  applicationKey,
   deploymentKey,
+  deploymentsPrefix,
+  deploysPrefix,
   deployKey,
   domainsPrefix,
-  environmentKey,
   fleetPrefix,
   placementKey,
+  trustKey,
 } from "./paths.ts";
-import { listProjects } from "./projects.ts";
 import {
   assertDeletable,
   DEFAULT_RETIREMENT_GRACE_MS,
@@ -46,17 +48,17 @@ export interface ReapOptions extends RetirementOptions {
 }
 
 export interface ReapPlan {
-  environments: Array<{ project: string; env: string; reason: string }>;
+  applications: Array<{ application: string; reason: string }>;
   /** Unreferenced deployment records, by the version each is filed under. */
-  deployments: Array<{ project: string; version: string; reason: string }>;
+  deployments: Array<{ application: string; version: string; reason: string }>;
   /**
    * Deploys still on their way whose accepting node stopped answering. Nobody
    * else will ever finish them: the state lived in that daemon, and a poll would
    * otherwise report a deploy as uploading forever.
    */
-  staleDeploys: Array<{ project: string; id: string; reason: string }>;
+  staleDeploys: Array<{ application: string; id: string; reason: string }>;
   /** Finished deploys past {@link DEPLOY_RECORD_RETENTION_MS}. */
-  deploys: Array<{ project: string; id: string; reason: string }>;
+  deploys: Array<{ application: string; id: string; reason: string }>;
 }
 
 export interface ReapResult {
@@ -68,15 +70,15 @@ export interface ReapResult {
   skipped: Array<{ target: string; reason: string }>;
 }
 
-/** What {@link deleteEnvironment} is allowed to act on; see {@link assertDeletable}. */
-export interface DeleteEnvironmentOptions extends RetirementOptions {
+/** What {@link deleteApplication} is allowed to act on; see {@link assertDeletable}. */
+export interface DeleteApplicationOptions extends RetirementOptions {
   /** Bypasses the retirement-grace deletion requirement. */
   force?: boolean;
 }
 
 /** Plans reapable items. Execution rechecks fresh state before deletion. */
 export async function planReap(ctx: RegistryContext, opts?: ReapOptions): Promise<ReapPlan> {
-  const plan: ReapPlan = { environments: [], deployments: [], staleDeploys: [], deploys: [] };
+  const plan: ReapPlan = { applications: [], deployments: [], staleDeploys: [], deploys: [] };
   const now = nowDate(ctx).getTime();
   const maxAgeMs = opts?.deploymentRetention?.maxAgeMs;
   /* Read once, and only if a deploy has gone quiet long enough to be worth
@@ -86,38 +88,37 @@ export async function planReap(ctx: RegistryContext, opts?: ReapOptions): Promis
   const answering = async (): Promise<ReadonlySet<string>> =>
     (fleet ??= await answeringNodes(ctx, new Date(now)));
 
-  for (const project of await listProjects(ctx)) {
-    const environments = await readEnvironments(ctx, project);
-
-    for (const environment of environments) {
-      const reason = reapReason(environment, now, opts);
-      if (reason !== null) plan.environments.push({ project, env: environment.name, reason });
+  for (const application of await listApplications(ctx)) {
+    const record = await findApplication(ctx, application);
+    if (record !== null) {
+      const reason = reapReason(record, now, opts);
+      if (reason !== null) plan.applications.push({ application, reason });
     }
 
-    for (const record of await listDeployRecords(ctx, project)) {
-      if (isDeployTerminal(record.state)) {
-        const age = now - Date.parse(record.updatedAt);
+    for (const deploy of await listDeployRecords(ctx, application)) {
+      if (isDeployTerminal(deploy.state)) {
+        const age = now - Date.parse(deploy.updatedAt);
         if (!Number.isFinite(age) || age < DEPLOY_RECORD_RETENTION_MS) continue;
         plan.deploys.push({
-          project,
-          id: record.id,
+          application,
+          id: deploy.id,
           reason: `${String(Math.floor(age / 1000))}s old`,
         });
         continue;
       }
-      if (!idleTooLong(record, now) || (await answering()).has(record.node)) continue;
-      plan.staleDeploys.push({ project, id: record.id, reason: abandonedReason(record) });
+      if (!idleTooLong(deploy, now) || (await answering()).has(deploy.node)) continue;
+      plan.staleDeploys.push({ application, id: deploy.id, reason: abandonedReason(deploy) });
     }
 
     if (maxAgeMs === undefined) continue;
-    for (const version of await listDeployments(ctx, project)) {
-      const deployment = await readJson<DeploymentRecord>(ctx, deploymentKey(project, version));
+    for (const version of await listDeployments(ctx, application)) {
+      const deployment = await readJson<DeploymentRecord>(ctx, deploymentKey(application, version));
       if (deployment === null) continue;
 
       const age = now - Date.parse(deployment.value.createdAt);
       if (!Number.isFinite(age) || age < maxAgeMs) continue;
       plan.deployments.push({
-        project,
+        application,
         version,
         reason: `${String(Math.floor(age / 1000))}s old`,
       });
@@ -140,18 +141,18 @@ export async function executeReap(
   let lease = initial;
   const keepAlive = opts.keepAlive;
 
-  for (const target of plan.environments) {
+  for (const target of plan.applications) {
     if (keepAlive !== undefined) lease = await keepAlive();
     await assertLease(ctx, lease);
 
-    const key = environmentKey(target.project, target.env);
-    const found = await readJson<EnvironmentRecord>(ctx, key);
+    const key = applicationKey(target.application);
+    const found = await readJson<ApplicationRecord>(ctx, key);
     if (found === null) {
-      result.skipped.push({ target: key, reason: "environment no longer exists" });
+      result.skipped.push({ target: key, reason: "application no longer exists" });
       continue;
     }
 
-    /* Re-checked against fresh state, retirement included: an environment
+    /* Re-checked against fresh state, retirement included: an application
        unretired between the plan and this step is one an operator has taken back
        into service, and it must survive the run that was already going to
        delete it. */
@@ -160,13 +161,13 @@ export async function executeReap(
     if (reason === null) {
       result.skipped.push({
         target: key,
-        reason: "environment is no longer retired past its grace",
+        reason: "application is no longer retired past its grace",
       });
       continue;
     }
 
     result.deleted.push(
-      ...(await purgeEnvironment(ctx, target.project, found.value, () => assertLease(ctx, lease))),
+      ...(await purgeApplication(ctx, found.value, () => assertLease(ctx, lease))),
     );
   }
 
@@ -175,7 +176,7 @@ export async function executeReap(
     if (keepAlive !== undefined) lease = await keepAlive();
     await assertLease(ctx, lease);
 
-    const key = deploymentKey(target.project, target.version);
+    const key = deploymentKey(target.application, target.version);
     const found = await readJson<DeploymentRecord>(ctx, key);
     if (found === null) {
       result.skipped.push({ target: key, reason: "deployment no longer exists" });
@@ -198,7 +199,7 @@ export async function executeReap(
     if (keepAlive !== undefined) lease = await keepAlive();
     await assertLease(ctx, lease);
 
-    const key = deployKey(target.project, target.id);
+    const key = deployKey(target.application, target.id);
     const found = await readJson<DeployRecord>(ctx, key);
     if (found === null) {
       result.skipped.push({ target: key, reason: "deploy no longer exists" });
@@ -222,7 +223,7 @@ export async function executeReap(
        quiet for longer than a node may, and it is given up on rather than
        refused — nothing about the caller, its input or the fleet's capabilities
        was ever wrong. */
-    await updateDeployRecord(ctx, target.project, target.id, {
+    await updateDeployRecord(ctx, target.application, target.id, {
       state: "failed",
       code: "deploy-timeout",
       detail: abandonedReason(record),
@@ -234,7 +235,7 @@ export async function executeReap(
     if (keepAlive !== undefined) lease = await keepAlive();
     await assertLease(ctx, lease);
 
-    const key = deployKey(target.project, target.id);
+    const key = deployKey(target.application, target.id);
     const found = await readJson<DeployRecord>(ctx, key);
     if (found === null) {
       result.skipped.push({ target: key, reason: "deploy no longer exists" });
@@ -255,101 +256,99 @@ export async function executeReap(
   return result;
 }
 
-/** Deletes an explicit environment under coordinator fencing and
+/** Deletes an explicit application under coordinator fencing and
     {@link assertDeletable}; lease loss stops remaining destructive steps. */
-export async function deleteEnvironment(
+export async function deleteApplication(
   ctx: RegistryContext,
-  project: string,
-  env: string,
+  name: string,
   lease: LeaseHandle,
-  opts?: DeleteEnvironmentOptions,
+  opts?: DeleteApplicationOptions,
 ): Promise<{ deleted: string[] }> {
-  const found = await requireJson<EnvironmentRecord>(ctx, environmentKey(project, env));
-  assertDeletable(ctx, project, found.value, opts);
+  const found = await requireJson<ApplicationRecord>(ctx, applicationKey(name));
+  assertDeletable(ctx, found.value, opts);
 
-  const deleted = await purgeEnvironment(ctx, project, found.value, () => assertLease(ctx, lease));
+  const deleted = await purgeApplication(ctx, found.value, () => assertLease(ctx, lease));
   return { deleted };
 }
 
-/** Deletes claims, fleet state, placement, then the environment. `guard` runs
-    before each step so interruption leaves an iterable recovery state. */
-async function purgeEnvironment(
+/**
+ * Deletes everything of an application: its domain claims, its Celld fleet
+ * state, its deploy and deployment records, its trust policy, its placement,
+ * then the record itself. `guard` runs before each step so interruption leaves
+ * an iterable recovery state.
+ */
+async function purgeApplication(
   ctx: RegistryContext,
-  project: string,
-  environment: EnvironmentRecord,
+  application: ApplicationRecord,
   guard: () => Promise<void>,
 ): Promise<string[]> {
   const deleted: string[] = [];
+  const name = application.name;
 
-  /* Scan claims rather than trusting the environment's mirror. `releaseDomain`
+  /* Scan claims rather than trusting the application's mirror. `releaseDomain`
      removes the mirror before the claim; if a crash lands between those writes,
      the next run must still find and finish the claim. */
   const claims = domainsPrefix();
   for (const claimKey of await ctx.store.list(claims)) {
     const claim = await readJson<DomainClaim>(ctx, claimKey);
     if (claim === null) continue;
-    /* Only claims still naming this environment: one that has moved on belongs
+    /* Only claims still naming this application: one that has moved on belongs
        to whoever took it over, and releasing it would strand them. */
-    if (claim.value.project !== project || claim.value.environment !== environment.name) continue;
+    if (claim.value.application !== name) continue;
 
     await guard();
     await releaseDomain(ctx, claimKey.slice(claims.length, -".json".length));
     deleted.push(claimKey);
   }
 
-  for (const fleetKey of await ctx.store.list(`${fleetPrefix(project, environment.name)}/`)) {
+  for (const fleetKey of await ctx.store.list(`${fleetPrefix(name)}/`)) {
     await guard();
     await deleteKey(ctx, fleetKey);
     deleted.push(fleetKey);
   }
 
-  /* Deploy records are filed per PROJECT, so only the ones naming this
-     environment go; the project's other environments keep theirs. */
-  for (const record of await listDeployRecords(ctx, project)) {
-    if (record.environment !== environment.name) continue;
+  for (const prefix of [deploysPrefix(name), deploymentsPrefix(name)]) {
+    for (const key of await ctx.store.list(prefix)) {
+      await guard();
+      await deleteKey(ctx, key);
+      deleted.push(key);
+    }
+  }
 
-    const key = deployKey(project, record.id);
+  /* The trust policy goes with the application it names; it may outlive nothing,
+     or a pre-granted name would keep authorizing deploys into an application
+     that was deleted. */
+  const trust = trustKey(name);
+  if ((await readJson<unknown>(ctx, trust)) !== null) {
     await guard();
-    await deleteKey(ctx, key);
-    deleted.push(key);
+    await deleteKey(ctx, trust);
+    deleted.push(trust);
   }
 
   /* Before the record, because it points AT the record: a placement left behind
-     names an environment that is gone, and the only thing that would ever have
+     names an application that is gone, and the only thing that would ever have
      cleaned it up is the coordinator noticing the same absence a tick later. */
-  const placement = placementKey(project, environment.name);
+  const placement = placementKey(name);
   if ((await readJson<PlacementRecord>(ctx, placement)) !== null) {
     await guard();
     await deleteKey(ctx, placement);
     deleted.push(placement);
   }
 
-  const key = environmentKey(project, environment.name);
+  const key = applicationKey(name);
   await guard();
   await deleteKey(ctx, key);
   deleted.push(key);
   return deleted;
 }
 
-async function readEnvironments(
-  ctx: RegistryContext,
-  project: string,
-): Promise<EnvironmentRecord[]> {
-  const environments: EnvironmentRecord[] = [];
-  for (const name of await listEnvironments(ctx, project)) {
-    const found = await readJson<EnvironmentRecord>(ctx, environmentKey(project, name));
-    if (found !== null) environments.push(found.value);
-  }
-  return environments;
-}
-
-/** Why this environment may be reaped, or null when it may not. */
+/** Why this application may be reaped, or null when it may not. */
 function reapReason(
-  environment: EnvironmentRecord,
+  application: ApplicationRecord,
   now: number,
   opts?: ReapOptions,
 ): string | null {
-  const retired = retirementState(environment, new Date(now), opts);
+  const retired = retirementState(application, new Date(now), opts);
   if (retired?.expired === true) {
     return (
       `retired at ${retired.retiredAt}, ${formatDuration(retired.elapsedMs)} ago, ` +

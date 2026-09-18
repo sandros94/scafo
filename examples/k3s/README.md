@@ -53,12 +53,12 @@ kubectl -n kube-system logs deploy/traefik | grep -i "provider.*http"
 curl -sk https://<cluster-edge>/.well-known/scafo/health -H "Host: apps.example.com"
 ```
 
-A deployed environment answers at its own host the same way. Until a project is deployed, only the platform apex is routed: Scafo publishes no wildcard fallback, and an unclaimed host is a 404 at the edge.
+A deployed application answers at its own host the same way. Until an application is deployed, only the platform apex is routed: Scafo publishes no wildcard fallback, and an unclaimed host is a 404 at the edge.
 
 ## Certificates
 
 - The platform apex and `*.apps.example.com` come from cert-manager. The rules-less `scafo-platform-tls` Ingress exists only to put that Secret into Traefik's certificate store, which is matched by SNI for the `@http` routers.
-- A custom domain an environment claimed is issued by Traefik itself, HTTP-01 on the `web` entryPoint, once its DNS points at the cluster edge. Traefik skips any host the store already covers, so the wildcard is never re-issued.
+- A custom domain an application claimed is issued by Traefik itself, HTTP-01 on the `web` entryPoint, once its DNS points at the cluster edge. Traefik skips any host the store already covers, so the wildcard is never re-issued.
 
 ## Operating constraints
 
@@ -111,7 +111,7 @@ No pod holds an operator key, and `kubectl exec` is not where one is minted: the
 5. Deploy:
 
    ```sh
-   scafo deploy ./my-app --project shop --env production
+   scafo deploy ./my-app --name shop
    ```
 
 Without the apex, forward the node API instead: `kubectl -n scafo port-forward svc/scafo-nodes 7400:7400` and add `--node http://127.0.0.1:7400` to each command.

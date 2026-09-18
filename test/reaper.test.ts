@@ -1,4 +1,4 @@
-/* The reaper only deletes retired environments and old deployment history. */
+/* The reaper only deletes retired applications and old deployment history. */
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { recordRevision } from "../src/core/registry/_revision.ts";
@@ -6,44 +6,45 @@ import {
   acquireLease,
   checkDomain,
   claimDomain,
+  createApplication,
   createDeployment,
   createDeployRecord,
-  createEnvironment,
-  createProject,
   DEFAULT_RETIREMENT_GRACE_MS,
   DEPLOY_RECORD_RETENTION_MS,
   executeReap,
+  getApplication,
   getDeployRecord,
-  getEnvironment,
   heartbeatNode,
   type LeaseHandle,
   NODE_LIVENESS_WINDOW_MS,
   planReap,
   type ReapOptions,
   registerNode,
-  retireEnvironment,
-  unretireEnvironment,
+  retireApplication,
+  unretireApplication,
   updateDeployRecord,
 } from "../src/core/registry/index.ts";
 import {
+  applicationKey,
   deploymentKey,
   deployKey,
   domainKey,
-  environmentKey,
   fleetPrefix,
 } from "../src/core/registry/paths.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, invariants, type ManualClock, rejectsWith } from "./_helpers.ts";
 
-const PROJECT = "app";
+const APPLICATION = "preview";
+const KEEPER = "prod";
 const VERSION = "b1b1b1b1";
 const HOUR_MS = 3_600_000;
 const RETENTION_MS = 1_800_000;
 const FLEET_KEYS = [
-  `${fleetPrefix(PROJECT, "preview")}/node-a.json`,
-  `${fleetPrefix(PROJECT, "preview")}/state/routes.json`,
+  `${fleetPrefix(APPLICATION)}/node-a.json`,
+  `${fleetPrefix(APPLICATION)}/state/routes.json`,
 ];
-const SURVIVOR = `${fleetPrefix(PROJECT, "preview")}2/keep.json`;
+/* `fleets/preview` is a prefix of `fleets/preview2`; only one is meant. */
+const SURVIVOR = `${fleetPrefix(APPLICATION)}2/keep.json`;
 
 let inner: MemoryCasStore;
 let store: FaultStore;
@@ -56,11 +57,10 @@ beforeEach(async () => {
   store = new FaultStore(inner);
   clock = ctxWith(store);
 
-  await createProject(clock.ctx, { slug: PROJECT });
-  await createEnvironment(clock.ctx, PROJECT, { name: "prod" });
-  await createEnvironment(clock.ctx, PROJECT, { name: "preview" });
-  await createDeployment(clock.ctx, PROJECT, { version: VERSION });
-  await recordRevision(clock.ctx, PROJECT, "preview", VERSION);
+  await createApplication(clock.ctx, { name: KEEPER });
+  await createApplication(clock.ctx, { name: APPLICATION });
+  await createDeployment(clock.ctx, APPLICATION, { version: VERSION });
+  await recordRevision(clock.ctx, APPLICATION, VERSION);
   for (const key of [...FLEET_KEYS, SURVIVOR]) await store.put(key, "{}");
 
   clock.tick(HOUR_MS);
@@ -71,33 +71,36 @@ beforeEach(async () => {
 });
 
 describe("planReap", () => {
-  it("keeps every active environment, however old", async () => {
+  it("keeps every active application, however old", async () => {
     clock.tick(365 * 24 * HOUR_MS);
 
     const plan = await planReap(clock.ctx, opts);
 
-    expect(plan.environments).toEqual([]);
+    expect(plan.applications).toEqual([]);
   });
 
-  it("proposes a retired environment only after its grace", async () => {
-    await retireEnvironment(clock.ctx, PROJECT, "preview");
-    expect((await planReap(clock.ctx, opts)).environments).toEqual([]);
+  it("proposes a retired application only after its grace", async () => {
+    await retireApplication(clock.ctx, APPLICATION);
+    expect((await planReap(clock.ctx, opts)).applications).toEqual([]);
 
     clock.tick(DEFAULT_RETIREMENT_GRACE_MS);
     const plan = await planReap(clock.ctx, opts);
 
-    expect(plan.environments).toEqual([
-      expect.objectContaining({ env: "preview", reason: expect.stringContaining("retired at") }),
+    expect(plan.applications).toEqual([
+      expect.objectContaining({
+        application: APPLICATION,
+        reason: expect.stringContaining("retired at"),
+      }),
     ]);
   });
 
   it("honours an explicitly shorter retirement grace", async () => {
-    await retireEnvironment(clock.ctx, PROJECT, "prod");
+    await retireApplication(clock.ctx, KEEPER);
     clock.tick(HOUR_MS);
 
     const plan = await planReap(clock.ctx, { ...opts, graceMs: HOUR_MS });
 
-    expect(plan.environments.map((target) => target.env)).toEqual(["prod"]);
+    expect(plan.applications.map((target) => target.application)).toEqual([KEEPER]);
   });
 
   it("treats deployments as immutable history governed only by retention", async () => {
@@ -110,14 +113,14 @@ describe("planReap", () => {
 
 describe("executeReap", () => {
   async function retiredPlan(): Promise<Awaited<ReturnType<typeof planReap>>> {
-    await retireEnvironment(clock.ctx, PROJECT, "preview");
+    await retireApplication(clock.ctx, APPLICATION);
     clock.tick(DEFAULT_RETIREMENT_GRACE_MS);
     return planReap(clock.ctx, opts);
   }
 
-  it("deletes references before the retired environment record", async () => {
+  it("deletes references before the retired application record", async () => {
     const host = "preview.example.com";
-    await claimDomain(clock.ctx, host, PROJECT, "preview");
+    await claimDomain(clock.ctx, host, APPLICATION);
     const plan = await retiredPlan();
 
     const result = await executeReap(clock.ctx, plan, lease, opts);
@@ -125,40 +128,41 @@ describe("executeReap", () => {
     expect(result.deleted).toEqual([
       domainKey(host),
       ...FLEET_KEYS,
-      environmentKey(PROJECT, "preview"),
-      deploymentKey(PROJECT, VERSION),
+      deploymentKey(APPLICATION, VERSION),
+      applicationKey(APPLICATION),
     ]);
     await expect(checkDomain(clock.ctx, host)).resolves.toBeNull();
-    await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, "preview"), "not-found");
+    await rejectsWith(() => getApplication(clock.ctx, APPLICATION), "not-found");
+    /* A name that merely starts with the deleted one keeps its fleet keys. */
     await expect(store.get(SURVIVOR)).resolves.not.toBeNull();
     await invariants(store);
   });
 
-  it("re-checks retirement and spares an environment taken back", async () => {
+  it("re-checks retirement and spares an application taken back", async () => {
     const plan = await retiredPlan();
-    await unretireEnvironment(clock.ctx, PROJECT, "preview");
+    await unretireApplication(clock.ctx, APPLICATION);
 
     const result = await executeReap(clock.ctx, plan, lease, opts);
 
-    expect(result.deleted).not.toContain(environmentKey(PROJECT, "preview"));
+    expect(result.deleted).not.toContain(applicationKey(APPLICATION));
     expect(result.skipped).toContainEqual({
-      target: environmentKey(PROJECT, "preview"),
+      target: applicationKey(APPLICATION),
       reason: expect.stringContaining("no longer retired past its grace"),
     });
-    await expect(getEnvironment(clock.ctx, PROJECT, "preview")).resolves.toMatchObject({
-      name: "preview",
+    await expect(getApplication(clock.ctx, APPLICATION)).resolves.toMatchObject({
+      name: APPLICATION,
     });
   });
 
-  it("skips an environment already removed by another actor", async () => {
+  it("skips an application already removed by another actor", async () => {
     const plan = await retiredPlan();
-    await inner.del(environmentKey(PROJECT, "preview"));
+    await inner.del(applicationKey(APPLICATION));
 
     const result = await executeReap(clock.ctx, plan, lease, opts);
 
     expect(result.skipped).toContainEqual({
-      target: environmentKey(PROJECT, "preview"),
-      reason: "environment no longer exists",
+      target: applicationKey(APPLICATION),
+      reason: "application no longer exists",
     });
   });
 
@@ -171,16 +175,17 @@ describe("executeReap", () => {
     await rejectsWith(() => executeReap(clock.ctx, plan, lease, opts), "lease-lost");
 
     expect(store.dels).toBe(deletesBefore);
-    await expect(getEnvironment(clock.ctx, PROJECT, "preview")).resolves.toMatchObject({
-      name: "preview",
+    await expect(getApplication(clock.ctx, APPLICATION)).resolves.toMatchObject({
+      name: APPLICATION,
     });
   });
 });
 
 describe("deploy records", () => {
   const NODE = "node-a";
-  const RUNNING = `${PROJECT}.a1b2c3d4e5f60718`;
-  const FINISHED = `${PROJECT}.00112233445566ff`;
+  const RUNNING = `${APPLICATION}.a1b2c3d4e5f60718`;
+  const FINISHED = `${APPLICATION}.00112233445566ff`;
+  const NEIGHBOURS = `${KEEPER}.0f0f0f0f0f0f0f0f`;
 
   /** A node of this fleet that has just said it is still there. */
   async function beating(id: string): Promise<void> {
@@ -195,21 +200,13 @@ describe("deploy records", () => {
 
   /** A deploy still on its way, accepted by `node`. */
   async function running(node: string = NODE): Promise<void> {
-    await createDeployRecord(clock.ctx, PROJECT, {
-      id: RUNNING,
-      environment: "preview",
-      node,
-    });
+    await createDeployRecord(clock.ctx, APPLICATION, { id: RUNNING, node });
   }
 
   /** A deploy that finished, and has been sitting in the registry ever since. */
   async function finished(): Promise<void> {
-    await createDeployRecord(clock.ctx, PROJECT, {
-      id: FINISHED,
-      environment: "preview",
-      node: NODE,
-    });
-    await updateDeployRecord(clock.ctx, PROJECT, FINISHED, {
+    await createDeployRecord(clock.ctx, APPLICATION, { id: FINISHED, node: NODE });
+    await updateDeployRecord(clock.ctx, APPLICATION, FINISHED, {
       state: "deployed",
       deployment: VERSION,
     });
@@ -223,13 +220,13 @@ describe("deploy records", () => {
 
       const plan = await planReap(clock.ctx, opts);
       expect(plan.staleDeploys).toEqual([
-        expect.objectContaining({ project: PROJECT, id: RUNNING }),
+        expect.objectContaining({ application: APPLICATION, id: RUNNING }),
       ]);
 
       const result = await executeReap(clock.ctx, plan, lease, opts);
 
-      expect(result.failed).toEqual([deployKey(PROJECT, RUNNING)]);
-      await expect(getDeployRecord(clock.ctx, PROJECT, RUNNING)).resolves.toMatchObject({
+      expect(result.failed).toEqual([deployKey(APPLICATION, RUNNING)]);
+      await expect(getDeployRecord(clock.ctx, APPLICATION, RUNNING)).resolves.toMatchObject({
         state: "failed",
         code: "deploy-timeout",
         detail: `node "${NODE}" stopped answering while this deploy was accepted`,
@@ -243,7 +240,7 @@ describe("deploy records", () => {
       const plan = await planReap(clock.ctx, opts);
       await executeReap(clock.ctx, plan, lease, opts);
 
-      await expect(getDeployRecord(clock.ctx, PROJECT, RUNNING)).resolves.toMatchObject({
+      await expect(getDeployRecord(clock.ctx, APPLICATION, RUNNING)).resolves.toMatchObject({
         state: "failed",
         detail: expect.stringContaining(`node "ghost-1"`),
       });
@@ -258,7 +255,7 @@ describe("deploy records", () => {
       const plan = await planReap(clock.ctx, opts);
 
       expect(plan.staleDeploys).toEqual([]);
-      await expect(getDeployRecord(clock.ctx, PROJECT, RUNNING)).resolves.toMatchObject({
+      await expect(getDeployRecord(clock.ctx, APPLICATION, RUNNING)).resolves.toMatchObject({
         state: "accepted",
       });
     });
@@ -268,7 +265,7 @@ describe("deploy records", () => {
       await running();
       clock.tick(NODE_LIVENESS_WINDOW_MS + 1);
       /* The node is quiet, but the deploy itself wrote a moment ago. */
-      await updateDeployRecord(clock.ctx, PROJECT, RUNNING, { state: "uploading" });
+      await updateDeployRecord(clock.ctx, APPLICATION, RUNNING, { state: "uploading" });
 
       expect((await planReap(clock.ctx, opts)).staleDeploys).toEqual([]);
     });
@@ -291,10 +288,10 @@ describe("deploy records", () => {
 
       expect(result.failed).toEqual([]);
       expect(result.skipped).toContainEqual({
-        target: deployKey(PROJECT, RUNNING),
+        target: deployKey(APPLICATION, RUNNING),
         reason: expect.stringContaining("answering"),
       });
-      await expect(getDeployRecord(clock.ctx, PROJECT, RUNNING)).resolves.toMatchObject({
+      await expect(getDeployRecord(clock.ctx, APPLICATION, RUNNING)).resolves.toMatchObject({
         state: "accepted",
       });
     });
@@ -304,7 +301,7 @@ describe("deploy records", () => {
       await running();
       clock.tick(NODE_LIVENESS_WINDOW_MS + 1);
       const plan = await planReap(clock.ctx, opts);
-      await updateDeployRecord(clock.ctx, PROJECT, RUNNING, {
+      await updateDeployRecord(clock.ctx, APPLICATION, RUNNING, {
         state: "deployed",
         deployment: VERSION,
       });
@@ -312,7 +309,7 @@ describe("deploy records", () => {
       const result = await executeReap(clock.ctx, plan, lease, opts);
 
       expect(result.failed).toEqual([]);
-      await expect(getDeployRecord(clock.ctx, PROJECT, RUNNING)).resolves.toMatchObject({
+      await expect(getDeployRecord(clock.ctx, APPLICATION, RUNNING)).resolves.toMatchObject({
         state: "deployed",
       });
     });
@@ -326,7 +323,7 @@ describe("deploy records", () => {
 
       await rejectsWith(() => executeReap(clock.ctx, plan, lease, opts), "lease-lost");
 
-      await expect(getDeployRecord(clock.ctx, PROJECT, RUNNING)).resolves.toMatchObject({
+      await expect(getDeployRecord(clock.ctx, APPLICATION, RUNNING)).resolves.toMatchObject({
         state: "accepted",
       });
     });
@@ -339,13 +336,17 @@ describe("deploy records", () => {
 
       const plan = await planReap(clock.ctx, opts);
       expect(plan.deploys).toEqual([
-        expect.objectContaining({ project: PROJECT, id: FINISHED, reason: "604800s old" }),
+        expect.objectContaining({
+          application: APPLICATION,
+          id: FINISHED,
+          reason: "604800s old",
+        }),
       ]);
 
       const result = await executeReap(clock.ctx, plan, lease, opts);
 
-      expect(result.deleted).toContain(deployKey(PROJECT, FINISHED));
-      await rejectsWith(() => getDeployRecord(clock.ctx, PROJECT, FINISHED), "not-found");
+      expect(result.deleted).toContain(deployKey(APPLICATION, FINISHED));
+      await rejectsWith(() => getDeployRecord(clock.ctx, APPLICATION, FINISHED), "not-found");
     });
 
     it("is kept while it is still inside the window", async () => {
@@ -369,18 +370,14 @@ describe("deploy records", () => {
       clock.tick(DEPLOY_RECORD_RETENTION_MS);
       const plan = await planReap(clock.ctx, opts);
       /* Another deploy takes the id's place in the window the plan was made in. */
-      await store.del(deployKey(PROJECT, FINISHED));
-      await createDeployRecord(clock.ctx, PROJECT, {
-        id: FINISHED,
-        environment: "preview",
-        node: NODE,
-      });
+      await store.del(deployKey(APPLICATION, FINISHED));
+      await createDeployRecord(clock.ctx, APPLICATION, { id: FINISHED, node: NODE });
 
       const result = await executeReap(clock.ctx, plan, lease, opts);
 
-      expect(result.deleted).not.toContain(deployKey(PROJECT, FINISHED));
+      expect(result.deleted).not.toContain(deployKey(APPLICATION, FINISHED));
       expect(result.skipped).toContainEqual({
-        target: deployKey(PROJECT, FINISHED),
+        target: deployKey(APPLICATION, FINISHED),
         reason: expect.stringContaining("retention"),
       });
     });
@@ -389,12 +386,12 @@ describe("deploy records", () => {
       await finished();
       clock.tick(DEPLOY_RECORD_RETENTION_MS);
       const plan = await planReap(clock.ctx, opts);
-      await inner.del(deployKey(PROJECT, FINISHED));
+      await inner.del(deployKey(APPLICATION, FINISHED));
 
       const result = await executeReap(clock.ctx, plan, lease, opts);
 
       expect(result.skipped).toContainEqual({
-        target: deployKey(PROJECT, FINISHED),
+        target: deployKey(APPLICATION, FINISHED),
         reason: expect.stringContaining("no longer exists"),
       });
     });
@@ -407,33 +404,33 @@ describe("deploy records", () => {
 
       await rejectsWith(() => executeReap(clock.ctx, plan, lease, opts), "lease-lost");
 
-      await expect(getDeployRecord(clock.ctx, PROJECT, FINISHED)).resolves.toMatchObject({
+      await expect(getDeployRecord(clock.ctx, APPLICATION, FINISHED)).resolves.toMatchObject({
         state: "deployed",
       });
     });
   });
 
-  it("goes with the environment the deploys were made into", async () => {
+  it("goes with the application the deploys were made into", async () => {
     await running();
     await finished();
-    await retireEnvironment(clock.ctx, PROJECT, "preview");
+    await retireApplication(clock.ctx, APPLICATION);
     clock.tick(DEFAULT_RETIREMENT_GRACE_MS);
 
     const result = await executeReap(clock.ctx, await planReap(clock.ctx, opts), lease, opts);
 
-    expect(result.deleted).toContain(deployKey(PROJECT, RUNNING));
-    expect(result.deleted).toContain(deployKey(PROJECT, FINISHED));
+    expect(result.deleted).toContain(deployKey(APPLICATION, RUNNING));
+    expect(result.deleted).toContain(deployKey(APPLICATION, FINISHED));
   });
 
-  it("stays behind when another environment of the project is deleted", async () => {
-    await running();
-    await retireEnvironment(clock.ctx, PROJECT, "prod");
+  it("stays behind when another application of the fleet is deleted", async () => {
+    await createDeployRecord(clock.ctx, KEEPER, { id: NEIGHBOURS, node: NODE });
+    await retireApplication(clock.ctx, APPLICATION);
     clock.tick(DEFAULT_RETIREMENT_GRACE_MS);
 
     await executeReap(clock.ctx, await planReap(clock.ctx, opts), lease, opts);
 
-    await expect(getDeployRecord(clock.ctx, PROJECT, RUNNING)).resolves.toMatchObject({
-      environment: "preview",
+    await expect(getDeployRecord(clock.ctx, KEEPER, NEIGHBOURS)).resolves.toMatchObject({
+      application: KEEPER,
     });
   });
 });

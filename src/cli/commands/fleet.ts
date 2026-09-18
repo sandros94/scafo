@@ -14,7 +14,7 @@
  * touches nothing else: every process keeps running, every route stays
  * published, and everything already deployed stays deployed. It is what the
  * first step of an upgrade asks for — stop the writers — and it is admin-only,
- * because it is a statement about the installation rather than about a project.
+ * because it is a statement about the installation rather than about an application.
  *
  * The two halves reach an installation differently, and deliberately. `nodes`
  * reads the BUCKET, because "which machines are still answering?" is asked when

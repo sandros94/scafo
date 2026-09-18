@@ -6,7 +6,7 @@ import { sign as signJws } from "unjwt/jws";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createOidcVerifier, OIDC_AUDIENCE, type OidcVerifier } from "../src/core/auth/index.ts";
 import type { ScafoError } from "../src/core/error.ts";
-import { createProject, setTrustPolicy } from "../src/core/registry/index.ts";
+import { setTrustPolicy } from "../src/core/registry/index.ts";
 import type { TrustPolicy } from "../src/core/types/registry.ts";
 import { fromBase64Url, toBase64Url } from "../src/core/utils/base64.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
@@ -22,12 +22,12 @@ const DISCOVERY_URL = `${ISS}/.well-known/openid-configuration`;
 const JWKS_URL = `${ISS}/keys.json`;
 const KID = "issuer-key-1";
 
-/** The project whose policy trusts {@link ISS}. */
-const TRUSTING = "pro-a";
+/** The application whose policy trusts {@link ISS}. */
+const TRUSTING = "app-a";
 /** No trust policy at all. */
-const UNCONFIGURED = "pro-b";
+const UNCONFIGURED = "app-b";
 /** A policy that names a different issuer. */
-const OTHER_ISSUER = "pro-c";
+const OTHER_ISSUER = "app-c";
 
 const SUBJECT = "repo:acme/app:ref:refs/heads/main";
 const SUBJECT_GLOB = "repo:acme/app:ref:refs/heads/*";
@@ -67,9 +67,8 @@ beforeEach(async () => {
   discoveryDoc = { issuer: ISS, jwks_uri: JWKS_URL };
   jwksDoc = { keys: [keys.publicKey] } satisfies JWKSet;
 
-  for (const project of [TRUSTING, UNCONFIGURED, OTHER_ISSUER]) {
-    await createProject(clock.ctx, { slug: project });
-  }
+  /* A policy is written under a name, and nothing else has to exist for it: an
+     admin pre-grants a name and the first deploy creates the application. */
   await setTrustPolicy(clock.ctx, TRUSTING, policyFor(ISS, [SUBJECT_GLOB]));
   await setTrustPolicy(clock.ctx, OTHER_ISSUER, policyFor("https://elsewhere.test", ["repo:*"]));
 
@@ -82,7 +81,7 @@ describe("a token the policy admits", () => {
 
     expect(identity).toEqual({
       actor: { issuer: ISS, subject: SUBJECT },
-      project: TRUSTING,
+      application: TRUSTING,
       issuer: { iss: ISS, aud: OIDC_AUDIENCE, subjects: [SUBJECT_GLOB] },
     });
     expect(calls).toEqual([DISCOVERY_URL, JWKS_URL]);
@@ -132,14 +131,25 @@ describe("a token the policy admits", () => {
 });
 
 describe("trust is checked before anything is fetched", () => {
-  it("refuses a project with no trust policy without a single request", async () => {
+  it("refuses an application with no trust policy without a single request", async () => {
     expect(await refusal(await mint(), UNCONFIGURED)).toMatchObject(AUTH_INVALID);
     expect(calls).toEqual([]);
   });
 
-  it("refuses an issuer the project does not name, without a single request", async () => {
+  it("admits a token for exactly the application the policy was written under", async () => {
+    /* A policy is per application and exact: a name that merely starts with a
+       trusted one gets nothing from it, and asks for nothing on its behalf. */
+    expect(await refusal(await mint(), `${TRUSTING}-preview`)).toMatchObject(AUTH_INVALID);
+    expect(calls).toEqual([]);
+
+    await expect(verifier.verify(await mint(), TRUSTING)).resolves.toMatchObject({
+      application: TRUSTING,
+    });
+  });
+
+  it("refuses an issuer the application does not name, without a single request", async () => {
     /* SSRF guard: the token picks the URL, so nothing may be fetched until the
-       project's own policy has named that issuer. */
+       application's own policy has named that issuer. */
     expect(await refusal(await mint(), OTHER_ISSUER)).toMatchObject(AUTH_INVALID);
     expect(await refusal(await mint({ iss: "http://169.254.169.254" }))).toMatchObject(
       AUTH_INVALID,
@@ -402,8 +412,8 @@ function mint(overrides?: Record<string, unknown>, kid: string = KID): Promise<s
   return signJws(claims(overrides), keys.privateKey, { alg: "RS256", protectedHeader: { kid } });
 }
 
-function refusal(token: string, project: string = TRUSTING): Promise<ScafoError> {
-  return rejectionOf(() => verifier.verify(token, project));
+function refusal(token: string, application: string = TRUSTING): Promise<ScafoError> {
+  return rejectionOf(() => verifier.verify(token, application));
 }
 
 /** Serves the issuer's discovery document and key set, logging every URL asked for. */

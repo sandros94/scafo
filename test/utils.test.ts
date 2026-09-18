@@ -1,7 +1,8 @@
-/* The naming grammar is a bijection, plus the utilities the registry hashes and retries with. */
+/* The naming grammar, plus the utilities the registry hashes and retries with. */
 
 import { describe, expect, it } from "vitest";
 import { ScafoError } from "../src/core/error.ts";
+import { assertDeployId, parseDeployId } from "../src/core/registry/paths.ts";
 import { fromBase64Url, toBase64Url } from "../src/core/utils/base64.ts";
 import { withRetry } from "../src/core/utils/backoff.ts";
 import {
@@ -13,7 +14,7 @@ import { sha256Hex } from "../src/core/utils/hash.ts";
 import { isHost } from "../src/core/utils/host.ts";
 import { stableStringify } from "../src/core/utils/json.ts";
 import { assertPositiveSafeInteger } from "../src/core/utils/number.ts";
-import { assertSlug, formatHostLabel, isSlug, parseHostLabel } from "../src/core/utils/slug.ts";
+import { assertSlug, isSlug, SLUG_MAX_LENGTH } from "../src/core/utils/slug.ts";
 import { randomSlug, rejectsWith, seededRng } from "./_helpers.ts";
 
 const PROPERTY_ITERATIONS = 2000;
@@ -73,62 +74,77 @@ function rejectedInteger(value: unknown): ScafoError {
   return rejection as ScafoError;
 }
 
-describe("host labels", () => {
-  it("round-trips every generated label, with and without a ref", () => {
+describe("application names", () => {
+  it("accepts every generated name, and the host it is served at", () => {
     const rng = seededRng(0x5ca10_001);
 
     for (let i = 0; i < PROPERTY_ITERATIONS; i++) {
-      const project = randomSlug(rng, 20);
-      const ref = randomSlug(rng, 20);
-      expect(isSlug(project) && isSlug(ref)).toBe(true);
+      const name = randomSlug(rng, 20);
 
-      const bare = formatHostLabel(project);
-      expect(bare).toBe(project);
-      expect(parseHostLabel(bare)).toEqual({ project });
-
-      const scoped = formatHostLabel(project, ref);
-      expect(scoped).toBe(`${project}--${ref}`);
-      expect(parseHostLabel(scoped)).toEqual({ project, ref });
+      expect(isSlug(name)).toBe(true);
+      expect(() => assertSlug(name)).not.toThrow();
+      expect(isHost(`${name}.example.com`)).toBe(true);
     }
   });
 
-  it("re-formats every label it parses to the same bytes", () => {
+  it("rejects anything that is not one run of hyphen-separated alphanumerics", () => {
+    for (const name of ["a--b", "a---b", "--a", "a--", "-a", "a-", "A", "a_b", "", "a.b"]) {
+      expect({ name, slug: isSlug(name) }).toEqual({ name, slug: false });
+      expect(() => assertSlug(name), name).toThrow(ScafoError);
+    }
+  });
+
+  it("refuses a name past the DNS label limit", () => {
+    expect(isSlug("a".repeat(SLUG_MAX_LENGTH))).toBe(true);
+    expect(isSlug("a".repeat(SLUG_MAX_LENGTH + 1))).toBe(false);
+    expect(() => assertSlug("a".repeat(SLUG_MAX_LENGTH + 1))).toThrow(ScafoError);
+  });
+
+  it("holds hosts to their own grammar", () => {
+    expect(isHost("Example.com")).toBe(false);
+    expect(isHost("example.com.")).toBe(false);
+  });
+});
+
+describe("deploy ids", () => {
+  const TOKEN = "0123456789abcdef";
+
+  it("reads back the application name of every id it is given", () => {
+    for (const name of ["shop", "shop-preview", "shop2", "shop-2-preview", "a", "a1-b2-c3"]) {
+      const id = `${name}.${TOKEN}`;
+
+      expect(parseDeployId(id)).toEqual({ application: name, token: TOKEN });
+      expect(() => assertDeployId(id)).not.toThrow();
+    }
+  });
+
+  it("reads back every generated name, whatever hyphens and digits it carries", () => {
     const rng = seededRng(0x5ca10_002);
 
     for (let i = 0; i < PROPERTY_ITERATIONS; i++) {
-      const segments = Array.from({ length: 1 + Math.floor(rng() * 3) }, () => randomSlug(rng, 18));
-      const label = segments.join("--");
-      const parsed = parseHostLabel(label);
+      const name = randomSlug(rng, 20);
 
-      /* Three segments are not a label at all, so parsing them must give up. */
-      const reformatted = parsed === null ? null : formatHostLabel(parsed.project, parsed.ref);
-      expect({ label, reformatted }).toEqual({
-        label,
-        reformatted: segments.length > 2 ? null : label,
-      });
+      expect(parseDeployId(`${name}.${TOKEN}`)).toEqual({ application: name, token: TOKEN });
     }
   });
 
-  it("rejects labels that are not one project, optionally one ref", () => {
-    expect(isSlug("a--b")).toBe(false);
-    expect(() => assertSlug("a--b")).toThrow(ScafoError);
-
-    for (const label of ["a---b", "--a", "a--", "a--b--c", "-a", "a-", "A", "a_b", ""]) {
-      expect({ label, parsed: parseHostLabel(label) }).toEqual({ label, parsed: null });
+  it("refuses an id whose first half is not an application name", () => {
+    for (const name of ["-shop", "shop-", "shop--preview", "SHOP", "shop_preview", ""]) {
+      expect({ name, parsed: parseDeployId(`${name}.${TOKEN}`) }).toEqual({ name, parsed: null });
     }
   });
 
-  it("refuses labels past the DNS label limit at both ends", () => {
-    const long = "a".repeat(40);
-    expect(() => formatHostLabel(long, long)).toThrow(ScafoError);
-    expect(parseHostLabel(`${long}--${long}`)).toBeNull();
-    expect(parseHostLabel("a".repeat(64))).toBeNull();
+  it("refuses an id whose second half is not sixteen hex characters", () => {
+    for (const token of ["", "0123456789abcde", "0123456789abcdef0", "0123456789ABCDEF", "zzzz"]) {
+      expect({ token, parsed: parseDeployId(`shop.${token}`) }).toEqual({ token, parsed: null });
+    }
   });
 
-  it("accepts the hosts a label composes into", () => {
-    expect(isHost(`${formatHostLabel("proj", "pr-12")}.example.com`)).toBe(true);
-    expect(isHost("Example.com")).toBe(false);
-    expect(isHost("example.com.")).toBe(false);
+  it("refuses an id with no separator at all, naming what was typed", async () => {
+    expect(parseDeployId(`shop${TOKEN}`)).toBeNull();
+
+    const error = await rejectsWith(() => Promise.resolve(assertDeployId("shop")), "invalid-slug");
+    expect(error.detail).toContain('"shop"');
   });
 });
 

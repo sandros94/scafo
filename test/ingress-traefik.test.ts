@@ -39,7 +39,7 @@ import { ctxWith, type ManualClock } from "./_helpers.ts";
 const NODE_ID = "node-a";
 const PEER = "node-b";
 const HOST = "shop.apps.test";
-const OTHER_HOST = "shop--staging.apps.test";
+const OTHER_HOST = "shop-staging.apps.test";
 const APEX = "apps.test";
 const TOKEN = "SdUvvcE1nlEQm4iJ4Nx6BdxUjHZ2Uzt4vPXH0cQnJKk";
 
@@ -164,7 +164,7 @@ describe("rendering the fleet's routing", () => {
      * thing. `{"http":{"routers":{},"services":{}}}` is refused by Traefik's
      * decoder — "routers cannot be a standalone element" — which makes the poll a
      * failed one, and a failed poll leaves the configuration Traefik last read in
-     * place. A fleet that stopped serving an environment would go on serving it.
+     * place. A fleet that stopped serving an application would go on serving it.
      */
     expect(renderTraefikConfig(fleet([]))).toEqual({});
     expect(JSON.stringify(renderTraefikConfig(fleet([])))).toBe("{}");
@@ -403,7 +403,7 @@ describe("the token both routing routes are behind", () => {
 
 /** One host and the nodes answering on it, in the order the routing states them. */
 function route(host: string, ...upstreams: FleetUpstream[]): FleetRoute {
-  return { host, project: "shop", env: "production", upstreams };
+  return { host, application: "shop", upstreams };
 }
 
 /** Where one node answers, as the fleet advertises it. */

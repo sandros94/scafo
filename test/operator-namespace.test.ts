@@ -26,7 +26,7 @@ const NODE_ID = "node-a";
 const NODE_ADDRESS = "10.42.7.19";
 const OPERATOR_ID = "op-aaaa1111";
 const SECOND_ID = "op-bbbb2222";
-const PROJECT = "acme";
+const APPLICATION = "acme";
 
 let clock: ManualClock;
 
@@ -201,7 +201,7 @@ describe("the record a fleet trusts", () => {
       publicKey: publicHalf(),
       role: "operator",
       supersedes: OPERATOR_ID,
-      projects: [PROJECT],
+      applications: [APPLICATION],
     };
     await trustOperator(clock.ctx, wanted);
 

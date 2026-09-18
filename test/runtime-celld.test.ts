@@ -37,11 +37,11 @@ describe("celld process specs", () => {
     },
   );
 
-  it("owns one stable process per environment", () => {
+  it("owns one stable process per application", () => {
     const spec = createCelldDriver({ binPath: "/opt/celld" }).processSpec(specInput());
-    expect(spec.id).toBe("shop--production");
+    expect(spec.id).toBe("shop");
     expect(spec.command).toBe("/opt/celld");
-    expect(spec.args).toContain("bucket/fleets/shop/production");
+    expect(spec.args).toContain("bucket/fleets/shop");
     expect(spec.env).toMatchObject({
       AWS_ACCESS_KEY_ID: "access",
       AWS_SECRET_ACCESS_KEY: "secret",
@@ -51,8 +51,8 @@ describe("celld process specs", () => {
   });
 
   it("hands the process no variables of its own", () => {
-    /* An environment's variables travel in its deployed configuration, so a
-       process is started with none of them in its environment. */
+    /* An application's variables travel in its deployed configuration, so a
+       process is started with none of them in its own process environment. */
     const spec = createCelldDriver({
       operatorEnv: { CELLD_IDLE_EVICT_S: "900" },
     }).processSpec(specInput());
@@ -91,11 +91,9 @@ describe("celld process specs", () => {
 
 function specInput(overrides?: Partial<RuntimeSpecInput>): RuntimeSpecInput {
   return {
-    project: "shop",
-    env: {
+    application: {
       v: 1,
-      name: "production",
-      prefix: "fleets/shop/production",
+      name: "shop",
       deployment: { revision: 1, deployedAt: "2026-01-01T00:00:00.000Z" },
       domains: [],
       createdAt: "2026-01-01T00:00:00.000Z",

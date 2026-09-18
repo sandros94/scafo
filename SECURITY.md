@@ -2,13 +2,13 @@
 
 ## Trust model
 
-One Scafo installation is one trusted workload domain. Repositories, dependencies, build inputs, deployers, runtime code, and operational credential holders must trust one another. Project, operator, and OIDC scopes authorize actions; they do not isolate hostile workloads.
+One Scafo installation is one trusted workload domain. Repositories, dependencies, build inputs, deployers, runtime code, and operational credential holders must trust one another. Application, operator, and OIDC scopes authorize actions; they do not isolate hostile workloads.
 
-Do not use one installation for arbitrary customer code, public build submission, or mutually untrusted projects. Use separate installations, buckets, and host or VM boundaries for separate trust domains.
+Do not use one installation for arbitrary customer code, public build submission, or mutually untrusted applications. Use separate installations, buckets, and host or VM boundaries for separate trust domains.
 
 ## Protected surfaces
 
-- Node and operator API requests use signed tokens. Operator roles and project scopes limit actions; OIDC deploy policy binds a workload deployer to a project.
+- Node and operator API requests use signed tokens. Operator roles and application scopes limit actions; OIDC deploy policy binds a workload deployer to an application.
 - `/.well-known/scafo/health` and `/v1/ingress/ask` are intentionally public. `/v1/ingress/routes` and `/v1/storage` are the ingress's only privileged surfaces: the routing reveals every node's address for every host, and storage carries private keys in both directions. Both live on the node's own listener and require its ingress bearer token, which is all the ingress ever holds. The ingress enforces the rest of that boundary itself: it never proxies either prefix through the public platform API apex.
 - `/.well-known/celld/health` is the application runtime health endpoint, not the Scafo node/API health endpoint.
 - Registry conditional writes prevent lost updates. Coordinator leases and fences protect stale placement decisions and other lease-gated work.
@@ -20,7 +20,7 @@ Do not use one installation for arbitrary customer code, public build submission
 - Celld's internal operator API is mostly unauthenticated. Keep it on a private network or overlay; do not expose it publicly. See Celld's [security guidance](https://github.com/denoland/celld/blob/main/docs/security.md).
 - Celld and bucket credentials are administrative authority. Celld child processes receive fleet credentials; Scafo provides no OS credential boundary against trusted-workload compromise or native escape.
 - The bucket is both durable registry and availability boundary. It must support conditional writes and ranged reads, and provide reliable, low-latency lease traffic. Scafo cannot make an unreliable object store highly available.
-- Deploy admission bounds artifact bytes and entries, retained builder output, node/project concurrency and queue depth, staged bytes, and receive/queue/task deadlines. These are scheduling bounds, not OS resource admission. Apply host or container CPU, memory, process, filesystem, and network limits.
+- Deploy admission bounds artifact bytes and entries, retained builder output, node/application concurrency and queue depth, staged bytes, and receive/queue/task deadlines. These are scheduling bounds, not OS resource admission. Apply host or container CPU, memory, process, filesystem, and network limits.
 - `scafo sail` closes deploy intake, cancels deploy work, joins builder cleanup, then drains runtimes on `SIGINT`/`SIGTERM`. For bare-host production, use the installer systemd unit or an equivalent cgroup-owning supervisor that terminates the daemon first, removes remaining builders on exit or timeout, and allows at least 50 seconds of shutdown grace. If `CELLD_SHUTDOWN_TOTAL_MS` is larger, allow at least 10 additional seconds.
 - In containers, keep the direct Node entrypoint as PID 1 in a private PID namespace. Do not use host PID mode or a persistent wrapper. Physical-host failure remains outside process-code guarantees.
 - Application authentication, public TLS, and ingress policy remain operator responsibilities.
@@ -36,7 +36,7 @@ Do not use one installation for arbitrary customer code, public build submission
 
 ## Celld boundary
 
-Scafo requires Celld 0.5.0 — `scafo sail` runs `celld --version` at start and refuses an older binary — and creates one Celld fleet per environment. Celld owns deployment adoption, application health, cells, and runtime resource policy; Scafo owns registry, authorization, placement, supervision, deploy intake, and the routing every ingress reads.
+Scafo requires Celld 0.5.0 — `scafo sail` runs `celld --version` at start and refuses an older binary — and creates one Celld fleet per application. Celld owns deployment adoption, application health, cells, and runtime resource policy; Scafo owns registry, authorization, placement, supervision, deploy intake, and the routing every ingress reads.
 
 Celld exposes one current deployment per fleet. Scafo records a monotonic deployment revision, not a selected version; it provides no old-build routing or historical deployment selector. See [Celld issue #181](https://github.com/denoland/celld/issues/181).
 

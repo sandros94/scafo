@@ -16,6 +16,7 @@ import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import { loadDaemonConfig } from "../../daemon/config.ts";
 import { ScafoError } from "../../core/error.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
+import { resolveApplication } from "../_application.ts";
 import { createRegistry } from "../_bootstrap.ts";
 import { nothingRecorded, readObservations, windowFrom } from "../_observe-read.ts";
 import { formatTraces, selectTraces } from "../_traces.ts";
@@ -34,7 +35,8 @@ const bucketArgs: ArgsDef = {
 
 const tracesArgs: ArgsDef = {
   ...bucketArgs,
-  project: { type: "string", description: "Only what belongs to this project" },
+  name: { type: "string", description: "Only what belongs to this application" },
+  env: { type: "string", description: "Narrow to the application <name>-<env> instead" },
   since: {
     type: "string",
     description: "How far back to read: a duration (90s, 15m, 1h, 7d) or an ISO-8601 instant (1h)",
@@ -69,7 +71,9 @@ async function runTraces(flags: Record<string, unknown>): Promise<void> {
 
   const found = await readObservations(registry, { window });
   const selection = selectTraces(found.records, {
-    ...(text(flags.project) === undefined ? {} : { project: text(flags.project) as string }),
+    ...(text(flags.name) === undefined
+      ? {}
+      : { application: resolveApplication({ name: text(flags.name), env: text(flags.env) }) }),
     ...(flags.all === true ? { all: true } : {}),
     ...limit,
   });

@@ -6,9 +6,8 @@ import { runAssignment } from "../src/daemon/_assign.ts";
 import { drainThisNode } from "../src/cli/_bootstrap.ts";
 import {
   acquireLease,
+  createApplication,
   createDeployment,
-  createEnvironment,
-  createProject,
   drainNode,
   getNode,
   heartbeatNode,
@@ -22,7 +21,6 @@ import type { NodeRecord } from "../src/core/types/registry.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, type ManualClock, rejectionOf, rejectsWith } from "./_helpers.ts";
 
-const PROJECT = "app";
 const VERSION = "b1b1b1b1";
 const NODE_A = "node-a";
 const NODE_B = "node-b";
@@ -38,8 +36,6 @@ beforeEach(async () => {
   clock = ctxWith(store);
   logged = [];
 
-  await createProject(clock.ctx, { slug: PROJECT });
-  await createDeployment(clock.ctx, PROJECT, { version: VERSION });
   for (const id of [NODE_A, NODE_B]) await register(id);
 
   const acquired = await acquireLease(clock.ctx, NODE_A);
@@ -109,24 +105,24 @@ describe("registering again", () => {
 });
 
 describe("what the coordinator does about it", () => {
-  it("moves an environment off a draining node on the very next pass", async () => {
-    await deployed("prod");
+  it("moves an application off a draining node on the very next pass", async () => {
+    await deployed("shop");
     await runAssignment(clock.ctx, lease);
-    expect((await readPlacement(clock.ctx, PROJECT, "prod"))?.nodes).toEqual([NODE_A, NODE_B]);
+    expect((await readPlacement(clock.ctx, "shop"))?.nodes).toEqual([NODE_A, NODE_B]);
 
     /* No time passes at all: this is the difference between a graceful stop and
        a crash, which would have to wait out the whole liveness window first. */
     await drainNode(clock.ctx, NODE_B);
     await runAssignment(clock.ctx, lease);
 
-    expect((await readPlacement(clock.ctx, PROJECT, "prod"))?.nodes).toEqual([NODE_A]);
+    expect((await readPlacement(clock.ctx, "shop"))?.nodes).toEqual([NODE_A]);
   });
 
-  it("hands a single-replica environment to the node that is staying", async () => {
+  it("hands a single-replica application to the node that is staying", async () => {
     await deployed("solo");
-    await createEnvironment(clock.ctx, PROJECT, { name: "ignored" });
+    await createApplication(clock.ctx, { name: "ignored" });
     const first = await runAssignment(clock.ctx, lease);
-    const holder = (await readPlacement(clock.ctx, PROJECT, "solo"))?.nodes ?? [];
+    const holder = (await readPlacement(clock.ctx, "solo"))?.nodes ?? [];
     expect(first.live).toEqual([NODE_A, NODE_B]);
 
     await drainNode(clock.ctx, holder[0] === NODE_A ? NODE_A : NODE_B);
@@ -134,15 +130,15 @@ describe("what the coordinator does about it", () => {
 
     /* Whichever node held it, it is now on the other one — and "all" is what
        "solo" resolves to here, so the assertion is about the fleet shrinking. */
-    const after = (await readPlacement(clock.ctx, PROJECT, "solo"))?.nodes ?? [];
+    const after = (await readPlacement(clock.ctx, "solo"))?.nodes ?? [];
     expect(after).toHaveLength(1);
     expect(after[0]).not.toBe(holder[0]);
   });
 
   it("refuses to decide anything when every node is draining", async () => {
-    await deployed("prod");
+    await deployed("shop");
     await runAssignment(clock.ctx, lease);
-    const before = await readPlacement(clock.ctx, PROJECT, "prod");
+    const before = await readPlacement(clock.ctx, "shop");
 
     for (const id of [NODE_A, NODE_B]) await drainNode(clock.ctx, id);
 
@@ -153,7 +149,7 @@ describe("what the coordinator does about it", () => {
      */
     const error = await rejectsWith(() => runAssignment(clock.ctx, lease), "placement-unavailable");
     expect(error.detail).toContain("no registered node");
-    expect(await readPlacement(clock.ctx, PROJECT, "prod")).toEqual(before);
+    expect(await readPlacement(clock.ctx, "shop")).toEqual(before);
   });
 });
 
@@ -217,10 +213,11 @@ describe("drainThisNode, as a shutdown calls it", () => {
   });
 });
 
-/** An environment with a deployment to serve, so it is a real placement target. */
+/** An application with a deployment to serve, so it is a real placement target. */
 async function deployed(name: string): Promise<void> {
-  await createEnvironment(clock.ctx, PROJECT, { name });
-  await recordRevision(clock.ctx, PROJECT, name, VERSION);
+  await createApplication(clock.ctx, { name });
+  await createDeployment(clock.ctx, name, { version: VERSION });
+  await recordRevision(clock.ctx, name, VERSION);
 }
 
 /** Registers `id` as a node that has just beaten, exactly as a boot does. */

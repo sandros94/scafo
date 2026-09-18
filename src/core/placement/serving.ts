@@ -4,9 +4,9 @@ import type { NodeServing } from "../types/registry.ts";
 import type { RuntimeProcess } from "../types/runtime.ts";
 
 /**
- * The `serving` a node publishes for these processes: one entry per environment,
- * keyed `project/env`, carrying the port public traffic reaches it on. Keys are
- * in code-unit order, so two nodes describing the same processes write the same
+ * The `serving` a node publishes for these processes: one entry per
+ * application, carrying the port public traffic reaches it on. Keys are in
+ * code-unit order, so two nodes describing the same processes write the same
  * bytes and {@link sameServing} can compare cheaply.
  *
  * A process whose stop failed is still listed: it may well still be answering,
@@ -16,14 +16,9 @@ import type { RuntimeProcess } from "../types/runtime.ts";
  */
 export function servingOf(processes: RuntimeProcess[]): NodeServing {
   const entries = processes
-    .map((process) => [servingKey(process.project, process.env), { port: process.port }] as const)
+    .map((process) => [process.application, { port: process.port }] as const)
     .sort(([a], [b]) => (a === b ? 0 : a < b ? -1 : 1));
   return Object.fromEntries(entries);
-}
-
-/** The one name an environment goes by wherever the project and the name are one key. */
-export function servingKey(project: string, env: string): string {
-  return `${project}/${env}`;
 }
 
 /** Whether two published sets say the same thing, key for key and port for port. */

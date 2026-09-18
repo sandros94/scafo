@@ -204,13 +204,13 @@ async function trust(
   id: string,
   keys: Keypair,
   role: OperatorRole,
-  projects?: string[],
+  applications?: string[],
 ): Promise<void> {
   await trustOperator(clock.ctx, {
     id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: keys.publicKey.x },
     role,
-    ...(projects === undefined ? {} : { projects }),
+    ...(applications === undefined ? {} : { applications }),
   });
 }
 

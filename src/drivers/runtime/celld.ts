@@ -1,9 +1,8 @@
-/* Materializes one environment-owned Celld process and its start-time config. */
+/* Materializes one application-owned Celld process and its start-time config. */
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { ScafoError } from "../../core/error.ts";
-import { formatProcessId } from "../../core/placement/ids.ts";
 import { fleetPrefix } from "../../core/registry/paths.ts";
 import type { RuntimeDriver, RuntimeSpecInput } from "../../core/types/runtime.ts";
 import type { ProcessSpec } from "../../core/types/supervisor.ts";
@@ -22,7 +21,7 @@ export const DEFAULT_CELLD_BIN: string = "celld";
  * here would report.
  *
  * CHECKED WHERE A DAEMON STARTS, which is the moment a machine picks up a
- * binary. What keeps one environment's fleet from being served by two Celld
+ * binary. What keeps one application's fleet from being served by two Celld
  * versions at once is the separate gate on starting a process and on taking a
  * deploy; see `core/placement/version-skew.ts`.
  */
@@ -56,7 +55,7 @@ export const OPERATOR_RESERVED_ENV: string[] = [
   "CELLD_ADDR",
   "CELLD_INTERNAL_ADDR",
   "CELLD_ADVERTISE",
-  /* Derived from ingress topology, not environment input. */
+  /* Derived from ingress topology, not application input. */
   "CELLD_TRUST_FORWARDED_HEADERS",
 ];
 
@@ -77,7 +76,7 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
     stopGraceMs: shutdownTotalMs + STOP_HEADROOM_MS,
 
     processSpec(input: RuntimeSpecInput): ProcessSpec {
-      const fleet = fleetPrefix(input.project, input.env.name);
+      const fleet = fleetPrefix(input.application.name);
       const objectPrefix = joinPrefix(input.node.keyPrefix, fleet);
       /* Both listeners bind the node's bind host; peers are told the advertise
          host below, and the two are only the same thing when nothing sits between
@@ -87,7 +86,7 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
       const internalListen = `${bindHost}:${String(input.ports.internal)}`;
 
       return {
-        id: formatProcessId({ project: input.project, env: input.env.name }),
+        id: input.application.name,
         command: binPath,
         args: [
           "--bucket",
