@@ -459,10 +459,17 @@ export function createReconciler(
 /**
  * The parts of the process environment worth handing to a runtime process: enough to find
  * and run the executable, and nothing that belongs to the daemon alone.
+ *
+ * `DOCKER_HOST` TRAVELS WITH THEM, unconditionally and unread. Celld finds the
+ * engine's socket by itself — the default paths, or the one this names — and
+ * scafo asks it nothing about containers; an operator who named a socket for
+ * the daemon named it for the processes the daemon starts and for the publish
+ * that builds their images, and dropping it here would leave those looking
+ * somewhere else.
  */
 export function runtimeBaseEnv(env: Record<string, string | undefined>): Record<string, string> {
   const base: Record<string, string> = {};
-  for (const name of ["PATH", "HOME", "TMPDIR", "TZ", "RUST_LOG"]) {
+  for (const name of ["PATH", "HOME", "TMPDIR", "TZ", "RUST_LOG", "DOCKER_HOST"]) {
     const value = env[name];
     if (value !== undefined) base[name] = value;
   }
