@@ -222,8 +222,9 @@ export async function watchDeploy(
       /* The node's own code when it sent one: the refusal it made is what the
          caller has to act on, and a CLI that relabelled every failure as bad
          input would report "turn container classes on at that node" as a
-         mistake in the artifact. */
-      throw new ScafoError(status.code ?? "invalid-input", "Deploy failed", {
+         mistake in the artifact. A record an earlier build wrote without one
+         says nothing about whose failure it was, so it is not the caller's. */
+      throw new ScafoError(status.code ?? "internal", "Deploy failed", {
         detail: status.detail,
       });
     }

@@ -24,7 +24,9 @@ export type ScafoErrorCode =
   | "invalid-varset"
   | "invalid-input"
   | "version-skew"
-  | "store-unavailable";
+  | "store-unavailable"
+  | "publish-failed"
+  | "internal";
 
 /** RFC 9457 problem document, as produced by {@link ScafoError.toProblem}. */
 export interface ProblemDetails {
@@ -78,6 +80,15 @@ const DEFAULT_STATUS: Record<ScafoErrorCode, number> = {
      there was nothing left to repeat. UNAVAILABLE rather than a bucket that
      misbehaves: nothing about the answer was wrong, there was no answer. */
   "store-unavailable": 503,
+  /* Celld's publish command ended badly, and an exit code plus prose is all it
+     says about why. A BAD GATEWAY rather than a bad request: the artifact, the
+     engine and the bucket are all possible causes, and naming the caller for
+     every one of them would be a guess. Its own output is kept as the detail. */
+  "publish-failed": 502,
+  /* Something failed that scafo has no name for. It is the node's own, never
+     the caller's: a failure nobody can name is not one to blame on the request,
+     and what it was is in the node's log rather than in the answer. */
+  "internal": 500,
 };
 
 /**

@@ -402,7 +402,7 @@ it("reports a detected version when celld fails after it may have published", as
       .run(input(await packDirectory(source)), { signal: new AbortController().signal })
       .catch((failure: unknown) => failure);
 
-    expect(error).toMatchObject({ code: "invalid-input" });
+    expect(error).toMatchObject({ code: "publish-failed" });
     expect((error as Error & { detail?: string }).detail).toContain("abcdef12");
     expect((error as Error & { detail?: string }).detail).toContain("may already have published");
   } finally {
@@ -480,7 +480,7 @@ it("bounds failed publish detail by UTF-8 bytes", async () => {
       failure = error;
     }
 
-    expect(failure).toMatchObject({ code: "invalid-input" });
+    expect(failure).toMatchObject({ code: "publish-failed" });
     const detail = (failure as ScafoError).detail ?? "";
     expect(new TextEncoder().encode(detail).byteLength).toBeLessThanOrEqual(4096);
     expect(detail).not.toContain("�");

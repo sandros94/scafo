@@ -154,7 +154,8 @@ describe("watching a deploy the node already accepted", () => {
             { ...ACCEPTED, state: "failed", detail: "celld exited with code 1" },
           ]),
         }),
-      "invalid-input",
+      /* No code came with it, so nothing says the caller was at fault. */
+      "internal",
     );
 
     expect(error.detail).toBe("celld exited with code 1");

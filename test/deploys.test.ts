@@ -1066,10 +1066,29 @@ describe("what happens to an accepted deploy", () => {
     expect(status.state).toBe("failed");
     expect(status.detail).toContain("celld exited with code 1");
     expect(status.deployment).toBeUndefined();
-    /* Whatever the runner threw carried no code of ours, and one is not
-       invented for it: the prose is all there is to report. */
-    expect(status.code).toBeUndefined();
-    await expect(getDeployRecord(clock.ctx, PROJECT, id)).resolves.not.toHaveProperty("code");
+    /* Whatever the runner threw carried no code of ours, so it is the node's
+       own unexpected failure and is recorded as one: a poll that had to guess
+       would guess at the caller. */
+    expect(status.code).toBe("internal");
+    await expect(getDeployRecord(clock.ctx, PROJECT, id)).resolves.toMatchObject({
+      code: "internal",
+    });
+  });
+
+  it("keeps the code of what failed after celld had published", async () => {
+    /* A version id no registry key can be built from: the publish happened, and
+       the refusal that follows it is the one a pipeline has to act on. */
+    publish = () => Promise.resolve({ celldVersionId: "not a version" });
+
+    const id = (await responseId(await upload(await operatorToken()))) as string;
+
+    const status = await settled(id);
+    expect(status.state).toBe("failed");
+    expect(status.code).toBe("invalid-slug");
+    expect(status.detail).toContain('celld published version "not a version"');
+    await expect(getDeployRecord(clock.ctx, PROJECT, id)).resolves.toMatchObject({
+      code: "invalid-slug",
+    });
   });
 
   it("caps every retained background failure detail on a UTF-8 boundary", async () => {

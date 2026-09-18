@@ -319,7 +319,7 @@ function run(
       const prefix = `${partial}"${command} ${args[0] ?? ""}" ${ended}: `;
       const tailBytes = Math.max(1, 4096 - new TextEncoder().encode(prefix).byteLength);
       reject(
-        new ScafoError("invalid-input", "Publish failed", {
+        new ScafoError("publish-failed", "Publish failed", {
           detail:
             prefix + decodeUtf8Tail(output.bytes(), Math.min(opts.outputBytes, tailBytes)).trim(),
         }),

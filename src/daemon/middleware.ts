@@ -97,7 +97,7 @@ function toProblem(error: HTTPError): ProblemDetails {
 
   /* Do not expose unexpected internals to clients. */
   console.error("[scafo] unhandled error while serving a request", error);
-  return { type: "urn:scafo:internal", title: "Internal Server Error", status: 500 };
+  return new ScafoError("internal", "Internal Server Error").toProblem();
 }
 
 /** Reads a bearer token; missing and malformed headers are `auth-invalid`. */

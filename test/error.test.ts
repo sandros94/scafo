@@ -18,6 +18,8 @@ const CODES: ScafoErrorCode[] = [
   "not-found",
   "invalid-input",
   "store-unavailable",
+  "publish-failed",
+  "internal",
 ];
 
 describe("a failure that crossed a process boundary", () => {

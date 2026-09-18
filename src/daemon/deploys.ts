@@ -252,11 +252,18 @@ export function createDeployService(
       return deployment;
     } catch (error) {
       if (celldVersionId === undefined) throw error;
-      throw new Error(
+      /* What failed keeps its code: that a version is already out is said
+         beside the refusal, and must not turn it into a failure with no name. */
+      const published =
         `celld published version "${celldVersionId}", but Scafo could not confirm or finish ` +
-          `recording its deployment revision: ${boundedDetail(error)}`,
-        { cause: error },
-      );
+        `recording its deployment revision: `;
+      if (!isScafoError(error)) throw new Error(published + boundedDetail(error), { cause: error });
+      /* Its message leads the record already, so only its specifics follow. */
+      throw new ScafoError(error.code, error.message, {
+        status: error.status,
+        detail: published + (error.detail ?? error.message),
+        cause: error,
+      });
     }
   }
 
@@ -270,13 +277,14 @@ export function createDeployService(
    *
    * THE ERROR ITSELF is what arrives, not a line about it: a scafo failure's
    * code is the half a pipeline can act on, and it is kept beside the prose so
-   * that a poll answers with it. Anything else — what the runner threw, above
-   * all — carries no code of ours, and none is invented for it.
+   * that a poll answers with it. Anything else is this node's own unexpected
+   * failure and is recorded as `internal`, so that no reader has to guess — a
+   * guess lands on the caller.
    */
   async function recordFailure(id: string, project: string, error: unknown): Promise<void> {
     const failure = {
       state: "failed",
-      ...(isScafoError(error) ? { code: error.code } : {}),
+      code: isScafoError(error) ? error.code : "internal",
       detail: boundedDetail(error),
     } as const;
     const next = update(id, failure);
