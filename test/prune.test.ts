@@ -9,6 +9,7 @@ import {
   deploymentKey,
   deployBlobsPrefix,
   deployPointerKey,
+  deployQueuesPrefix,
   fleetPrefix,
 } from "../src/core/registry/paths.ts";
 import { executePrune, planPrune, type PrunePlan } from "../src/core/registry/prune.ts";
@@ -33,10 +34,10 @@ const PINNED = digestOf("c");
 const SHARED_BLOB = blobKey(SHARED);
 
 /** Four versions, published an hour apart in this order. */
-const V1 = "aaaa1111";
-const V2 = "bbbb2222";
-const V3 = "cccc3333";
-const V4 = "dddd4444";
+const V1 = "aaaa1111aaaa1111";
+const V2 = "bbbb2222bbbb2222";
+const V3 = "cccc3333cccc3333";
+const V4 = "dddd4444dddd4444";
 
 let inner: MemoryCasStore;
 let store: FaultStore;
@@ -71,7 +72,7 @@ describe("reading the fleet's own selector", () => {
 
   it.each([
     ["an array", "[]"],
-    ["a bare string", `"dddd4444"`],
+    ["a bare string", `"dddd4444dddd4444"`],
     ["a pointer with no version", JSON.stringify({ prefix: "deploy/app/x", script_name: "app" })],
     ["a pointer with no prefix", JSON.stringify({ version: "x", script_name: "app" })],
     ["a pointer with no script", JSON.stringify({ version: "x", prefix: "deploy/app/x" })],
@@ -100,6 +101,76 @@ describe("reading the fleet's own selector", () => {
   });
 });
 
+/*
+ * What prune reads as a deployment at all. Celld's layout is
+ * `deploy/<script>/<version>/…`, and the other keyspaces beneath `deploy/` —
+ * the saved images, and the attachment naming each fleet-global queue's one
+ * consumer — are its protocol rather than publications. The SHAPE is what tells
+ * them apart, and anything under the prefix without it is neither weighed nor
+ * deleted.
+ */
+describe("what prune reads as a deployment", () => {
+  it("leaves a queue consumer attachment where it is", async () => {
+    await publishAll();
+    await pointAt(V4);
+    await attachQueue("orders", V4);
+
+    const made = await plan({ keep: 1, olderThanMs: 0 });
+
+    expect([...names(made.keep), ...names(made.delete)]).toEqual([
+      `${SCRIPT}/${V4}`,
+      `${SCRIPT}/${V3}`,
+      `${SCRIPT}/${V2}`,
+      `${SCRIPT}/${V1}`,
+    ]);
+    await executePrune(clock.ctx, made);
+
+    expect(await store.list("")).toContain(queueKey("orders"));
+  });
+
+  it("leaves one alone though the queue's name is shaped like a version", async () => {
+    await publishAll();
+    await pointAt(V4);
+    /* A queue an operator named in hexadecimal is still a queue: the keyspace
+       it lives in is what says so, not the look of the name. */
+    await attachQueue("abcdef0123456789", V4);
+
+    const made = await plan({ keep: 0, olderThanMs: 0 });
+
+    expect(names(made.delete)).not.toContain("queues/abcdef0123456789");
+    await executePrune(clock.ctx, made);
+
+    expect(await store.list("")).toContain(queueKey("abcdef0123456789"));
+  });
+
+  it.each([
+    ["a version no Celld wrote", `${DEPLOY}${SCRIPT}/not-a-digest/manifest.json`],
+    ["a script name Celld would refuse", `${DEPLOY}Bad_Name/${V1}/manifest.json`],
+    ["a nested key under the saved images", `${DEPLOY}images/${V1}/layer.tar`],
+  ])("leaves a directory with %s where it is", async (_case, key) => {
+    await publishAll();
+    await pointAt(V4);
+    await store.put(key, JSON.stringify({ version: "whatever this is" }));
+
+    const made = await plan({ keep: 0, olderThanMs: 0 });
+
+    expect([...made.keep, ...made.delete].flatMap((one) => one.keys)).not.toContain(key);
+    await executePrune(clock.ctx, made);
+
+    expect(await store.list("")).toContain(key);
+  });
+
+  it("weighs a version Celld wrote that scafo never recorded, as the oldest there is", async () => {
+    await publishAll();
+    await pointAt(V4);
+    await publish("ffff6666ffff6666", { record: false });
+
+    const made = await plan({ keep: 1, olderThanMs: 0 });
+
+    expect(names(made.delete).at(-1)).toBe(`${SCRIPT}/ffff6666ffff6666`);
+  });
+});
+
 describe("what a plan protects", () => {
   it("never proposes the version a pointer names, however old it is", async () => {
     await publishAll();
@@ -115,20 +186,20 @@ describe("what a plan protects", () => {
   it("protects what another script's pointer names, not only the fleet-wide one", async () => {
     await publishAll();
     await pointAt(V4);
-    await publish("eeee5555", { script: "worker" });
+    await publish("eeee5555eeee5555", { script: "worker" });
     await store.put(
       `${DEPLOY}worker/current.json`,
       JSON.stringify({
-        version: "eeee5555",
-        prefix: "deploy/worker/eeee5555",
+        version: "eeee5555eeee5555",
+        prefix: "deploy/worker/eeee5555eeee5555",
         script_name: "worker",
       }),
     );
 
     const made = await plan({ keep: 0 });
 
-    expect(made.current).toEqual([V4, "eeee5555"]);
-    expect(names(made.delete)).not.toContain("worker/eeee5555");
+    expect(made.current).toEqual([V4, "eeee5555eeee5555"]);
+    expect(names(made.delete)).not.toContain("worker/eeee5555eeee5555");
   });
 });
 
@@ -151,12 +222,12 @@ describe("what a plan selects", () => {
     await publishAll();
     await pointAt(V4);
     /* Written last, so only the missing record can put it at the back. */
-    await publish("ffff6666", { record: false });
+    await publish("ffff6666ffff6666", { record: false });
 
     const made = await plan({ keep: 3 });
 
     /* Newest first throughout, so the one nothing recorded is at the very back. */
-    expect(names(made.delete)).toEqual([`${SCRIPT}/${V1}`, `${SCRIPT}/ffff6666`]);
+    expect(names(made.delete)).toEqual([`${SCRIPT}/${V1}`, `${SCRIPT}/ffff6666ffff6666`]);
   });
 
   it("deletes only what is older than the window it was given", async () => {
@@ -177,17 +248,17 @@ describe("what a plan selects", () => {
   it("reads a publication with no record as older than any window", async () => {
     await publishAll();
     await pointAt(V4);
-    await publish("ffff6666", { record: false });
+    await publish("ffff6666ffff6666", { record: false });
 
     const made = await plan({ keep: 0, olderThanMs: 365 * 24 * HOUR_MS });
 
-    expect(names(made.delete)).toEqual([`${SCRIPT}/ffff6666`]);
+    expect(names(made.delete)).toEqual([`${SCRIPT}/ffff6666ffff6666`]);
   });
 
   it("carries every object of a doomed publication and the record filed under its version", async () => {
     await publishAll();
     await pointAt(V4);
-    await publish("ffff6666", { record: false });
+    await publish("ffff6666ffff6666", { record: false });
 
     const made = await plan({ keep: 1 });
     const oldest = made.delete.find((one) => one.version === V1);
@@ -200,7 +271,9 @@ describe("what a plan selects", () => {
     ]);
     expect(oldest?.recordKey).toBe(deploymentKey(PROJECT, V1));
     /* Nothing to delete beside the objects when scafo never recorded the deployment. */
-    expect(made.delete.find((one) => one.version === "ffff6666")?.recordKey).toBeUndefined();
+    expect(
+      made.delete.find((one) => one.version === "ffff6666ffff6666")?.recordKey,
+    ).toBeUndefined();
   });
 
   it("never names a pointer or a shared asset blob in anything it plans", async () => {
@@ -605,6 +678,27 @@ function blobKey(digest: string): string {
   return `${deployBlobsPrefix(PROJECT, ENV)}assets/sha256/${digest.slice(0, 2)}/${digest}`;
 }
 
+/** Celld's attachment for one fleet-global queue: the deployment allowed to consume it. */
+async function attachQueue(queue: string, version: string): Promise<void> {
+  await store.put(
+    queueKey(queue),
+    JSON.stringify({
+      schema_version: 1,
+      queue,
+      consumer: {
+        script_name: SCRIPT,
+        version,
+        prefix: `deploy/${SCRIPT}/${version}`,
+      },
+    }),
+  );
+}
+
+/** Where Celld files that attachment: `deploy/queues/<queue>/consumer.json`. */
+function queueKey(queue: string): string {
+  return `${deployQueuesPrefix(PROJECT, ENV)}${queue}/consumer.json`;
+}
+
 /** A full digest made of one repeated hex character, readable in a failure message. */
 function digestOf(character: string): string {
   return character.repeat(64);
@@ -623,7 +717,7 @@ async function pointAt(version: string, script: string = SCRIPT): Promise<void> 
 
 /** A Celld-shaped version id for the nth publication of a series. */
 function versionOf(index: number): string {
-  return index.toString(16).padStart(8, "0");
+  return index.toString(16).padStart(16, "0");
 }
 
 function names(publications: Array<{ script: string; version: string }>): string[] {

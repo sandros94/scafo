@@ -24,10 +24,11 @@ import { deleteKey, readJson } from "./cas.ts";
 import type { RegistryContext } from "./context.ts";
 import {
   deployBlobsPrefix,
+  deployImagesPrefix,
   deploymentKey,
   deployPointerKey,
   deployPrefix,
-  ID_RE,
+  deployQueuesPrefix,
 } from "./paths.ts";
 
 /** One deployment Celld published, as the bucket still holds it. */
@@ -117,7 +118,7 @@ export async function planPrune(ctx: RegistryContext, opts: PlanPruneOptions): P
   const keys = await ctx.store.list(prefix);
 
   const current = await readPointers(ctx, opts, prefix, keys);
-  const ordered = (await readDeployments(ctx, opts.project, prefix, keys)).sort(byNewestFirst);
+  const ordered = (await readDeployments(ctx, opts, prefix, keys)).sort(byNewestFirst);
 
   const plan: PrunePlan = {
     project: opts.project,
@@ -414,18 +415,33 @@ function pointerProblem(key: string, wrong: string): ScafoError {
  */
 async function readDeployments(
   ctx: RegistryContext,
-  project: string,
+  opts: Pick<PlanPruneOptions, "project" | "env">,
   prefix: string,
   keys: string[],
 ): Promise<StoredDeployment[]> {
   const found = new Map<string, StoredDeployment>();
+  /* Celld's own keyspaces beneath `deploy/`, skipped by the prefix they live
+     under rather than by the look of the names inside them: a queue called
+     `abcdef0123456789` is still a queue. */
+  const protocols = [
+    deployImagesPrefix(opts.project, opts.env),
+    deployQueuesPrefix(opts.project, opts.env),
+  ];
 
   for (const key of keys) {
+    if (protocols.some((one) => key.startsWith(one))) continue;
+
     const rest = key.slice(prefix.length).split("/");
     if (rest.length < 3) continue;
 
     const [script, version] = rest;
-    if (script === "" || version === "") continue;
+    if (script === undefined || version === undefined) continue;
+    /* THE SHAPE IS THE GUARANTEE that these two segments name a publication at
+       all: a name Celld would have accepted for the script, and a version id of
+       the width its own `deployment_version` produces. Anything else under the
+       prefix belongs to something this cannot read, and is neither weighed nor
+       deleted. */
+    if (!SCRIPT_NAME_RE.test(script) || !VERSION_RE.test(version)) continue;
 
     const id = `${script}/${version}`;
     const deployment = found.get(id);
@@ -437,13 +453,11 @@ async function readDeployments(
   }
 
   for (const deployment of found.values()) {
-    /* Only an id the registry could have filed a deployment under is worth a
-       read; Celld's version ids are content digests, but nothing here guarantees
-       that every directory under `deploy/` was written by a version of it that
-       agreed. */
-    if (!ID_RE.test(deployment.version)) continue;
-
-    const key = deploymentKey(project, deployment.version);
+    /* Every version that got this far is one scafo could have filed a record
+       under, so the read needs no guard of its own. A version with no record is
+       still a deployment Celld published — one scafo never filed — and stays a
+       candidate, weighed as the oldest thing in the fleet. */
+    const key = deploymentKey(opts.project, deployment.version);
     const record = await readJson<DeploymentRecord>(ctx, key);
     if (record === null) continue;
 
@@ -452,6 +466,23 @@ async function readDeployments(
   }
   return [...found.values()];
 }
+
+/**
+ * A script name Celld accepts, and so the only kind of first segment a
+ * publication has: one to 63 bytes of lowercase letters, digits and hyphens,
+ * beginning and ending on a letter or a digit.
+ */
+const SCRIPT_NAME_RE = /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/;
+
+/**
+ * A version id, as Celld's `deployment_version` writes one: a sha256 in
+ * lowercase hexadecimal, truncated to its first sixteen characters in every
+ * release scafo has run against. The width is allowed up to the whole digest
+ * on purpose: were upstream to stop truncating, an exact match would make
+ * prune read no deployment at all and free nothing, without a word — while
+ * nothing else under `deploy/<script>/` is ever named in hexadecimal.
+ */
+const VERSION_RE = /^[a-f\d]{16,64}$/;
 
 /** Newest first; a deployment scafo has no record of sorts last, as the oldest. */
 function byNewestFirst(a: StoredDeployment, b: StoredDeployment): number {

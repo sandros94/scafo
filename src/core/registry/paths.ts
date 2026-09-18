@@ -330,6 +330,31 @@ export function deployBlobsPrefix(project: string, env: string): string {
 }
 
 /**
+ * Prefix Celld saves container images under: one `<content key>.tar` per
+ * image, shared by every deployment that runs it.
+ *
+ * A KEYSPACE OF CELLD'S PROTOCOL, not a deployment. Nothing here reads it, and
+ * `scafo deployment prune` never weighs what is under it as one.
+ */
+export function deployImagesPrefix(project: string, env: string): string {
+  return `${deployPrefix(project, env)}images/`;
+}
+
+/**
+ * Prefix Celld records queue consumers under: one
+ * `<queue>/consumer.json` naming the single deployment allowed to consume that
+ * fleet-global queue.
+ *
+ * A KEYSPACE OF CELLD'S PROTOCOL, not a deployment, though it sits at the same
+ * depth as one. Nothing here reads it and `scafo deployment prune` never
+ * deletes under it: an attachment outlives the deploy that wrote it, and the
+ * fleet that stops consuming a queue is Celld's to decide, not scafo's.
+ */
+export function deployQueuesPrefix(project: string, env: string): string {
+  return `${deployPrefix(project, env)}queues/`;
+}
+
+/**
  * Prefix the TLS material an ingress persists through this node lives under:
  * its certificates, its account keys, and anything else it must keep across
  * restarts. The keys beneath it are the CALLER's, not the registry's — nothing
