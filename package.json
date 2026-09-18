@@ -83,6 +83,7 @@
     "lint": "oxlint . && oxfmt --check .",
     "fmt": "automd && oxlint --fix . && oxfmt .",
     "prepack": "pnpm build",
+    "scale": "node scripts/scale-report.ts",
     "test": "vitest run --slowTestThreshold=1000",
     "test:coverage": "vitest run --coverage --slowTestThreshold=1000",
     "typecheck": "tsc --noEmit"
