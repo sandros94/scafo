@@ -1,0 +1,17 @@
+{
+  /* The end-to-end fixture application that declares a container class. This
+     file reaches celld byte for byte, `name` included: scafo never rewrites it.
+
+     The class is the smallest one the runtime accepts a container on: a
+     SQLite-backed Durable Object, its binding, and its migration. The image is
+     the Dockerfile beside this file, so the node that accepts the deploy builds
+     it with the engine client it ships and saves it to the bucket — which is
+     why a node with no engine under it cannot take this deploy at all. */
+  "name": "container-app",
+  "main": "index.js",
+  "compatibility_date": "2025-01-01",
+  "vars": { "APP_VERSION": "v1" },
+  "containers": [{ "class_name": "Sidecar", "image": "./Dockerfile", "instance_type": "basic" }],
+  "durable_objects": { "bindings": [{ "name": "SIDECAR", "class_name": "Sidecar" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Sidecar"] }],
+}
