@@ -219,7 +219,13 @@ export async function watchDeploy(
     if (!SETTLED.includes(status.state)) continue;
 
     if (status.state === "failed") {
-      throw new ScafoError("invalid-input", "Deploy failed", { detail: status.detail });
+      /* The node's own code when it sent one: the refusal it made is what the
+         caller has to act on, and a CLI that relabelled every failure as bad
+         input would report "turn container classes on at that node" as a
+         mistake in the artifact. */
+      throw new ScafoError(status.code ?? "invalid-input", "Deploy failed", {
+        detail: status.detail,
+      });
     }
     if (status.deployment !== undefined) {
       console.log(`scafo: deployment ${status.deployment}`);

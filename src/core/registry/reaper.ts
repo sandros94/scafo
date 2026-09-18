@@ -218,8 +218,13 @@ export async function executeReap(
       continue;
     }
 
+    /* `deploy-timeout` because that is what happened to it: the deploy went
+       quiet for longer than a node may, and it is given up on rather than
+       refused — nothing about the caller, its input or the fleet's capabilities
+       was ever wrong. */
     await updateDeployRecord(ctx, target.project, target.id, {
       state: "failed",
+      code: "deploy-timeout",
       detail: abandonedReason(record),
     });
     result.failed.push(key);

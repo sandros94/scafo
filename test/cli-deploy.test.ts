@@ -159,6 +159,28 @@ describe("watching a deploy the node already accepted", () => {
 
     expect(error.detail).toBe("celld exited with code 1");
   });
+
+  it("exits with the code the node failed the deploy with, not one of its own", async () => {
+    /* A refusal a pipeline acts on: "turn container classes on at that node" is
+       not "your input was wrong", and only the code tells them apart. */
+    const error = await rejectsWith(
+      () =>
+        watchDeploy(WATCHED, () => Promise.resolve("minted"), ACCEPTED, {
+          pollMs: 0,
+          fetchFn: answering([
+            {
+              ...ACCEPTED,
+              state: "failed",
+              code: "capability-missing",
+              detail: "this node runs no container class",
+            },
+          ]),
+        }),
+      "capability-missing",
+    );
+
+    expect(error.detail).toBe("this node runs no container class");
+  });
 });
 
 /** Every line a command put on the terminal while it ran. */

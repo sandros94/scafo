@@ -3,7 +3,7 @@
  * installation answers a poll and a node restarting mid-deploy loses nothing.
  */
 
-import { ScafoError } from "../error.ts";
+import { ScafoError, type ScafoErrorCode } from "../error.ts";
 import type {
   DeploymentSource,
   CarriedVarset,
@@ -53,6 +53,8 @@ export interface DeployRecordPatch {
   /** The deployment the deploy produced, by version. */
   deployment?: string;
   varset?: CarriedVarset;
+  /** The code of the error that failed it, when it was a typed one. */
+  code?: ScafoErrorCode;
   detail?: string;
 }
 

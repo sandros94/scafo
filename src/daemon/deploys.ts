@@ -1,7 +1,7 @@
 /* Asynchronous deploy intake: accepts staged artifacts, schedules publishing,
    and exposes bounded in-memory status history. */
 
-import { describeError, isScafoError, ScafoError } from "../core/error.ts";
+import { describeError, isScafoError, ScafoError, type ScafoErrorCode } from "../core/error.ts";
 import { servingKey } from "../core/placement/serving.ts";
 import { findVersionSkew, versionSkewError } from "../core/placement/version-skew.ts";
 import { createDeployment } from "../core/registry/deployments.ts";
@@ -68,6 +68,8 @@ export interface DeployStatus {
   state: DeployState;
   /** Varset the deploy carried; set once it has been deployed, absent when none. */
   varset?: CarriedVarset;
+  /** The code of the error that failed it, when it was a typed one. */
+  code?: ScafoErrorCode;
   /** Why it failed, when it did. */
   detail?: string;
 }
@@ -129,6 +131,7 @@ export function deployStatusOf(record: DeployRecord): DeployStatus {
     state: record.state,
     ...(record.deployment === undefined ? {} : { deployment: record.deployment }),
     ...(record.varset === undefined ? {} : { varset: record.varset }),
+    ...(record.code === undefined ? {} : { code: record.code }),
     ...(record.detail === undefined ? {} : { detail: record.detail }),
   };
 }
@@ -264,20 +267,30 @@ export function createDeployService(
    * {@link publish} included, so this is where a deploy stops moving whatever
    * stopped it. A record that has already finished refuses the write, which is
    * the right answer for a cancellation arriving after the commit point.
+   *
+   * THE ERROR ITSELF is what arrives, not a line about it: a scafo failure's
+   * code is the half a pipeline can act on, and it is kept beside the prose so
+   * that a poll answers with it. Anything else — what the runner threw, above
+   * all — carries no code of ours, and none is invented for it.
    */
-  async function recordFailure(id: string, project: string, detail: string): Promise<void> {
-    const next = update(id, { state: "failed", detail });
+  async function recordFailure(id: string, project: string, error: unknown): Promise<void> {
+    const failure = {
+      state: "failed",
+      ...(isScafoError(error) ? { code: error.code } : {}),
+      detail: boundedDetail(error),
+    } as const;
+    const next = update(id, failure);
     /* Already terminal HERE: nothing to record, and nothing to overwrite. A
        deploy this node has forgotten still gets the write — the bound on the
        cache is not a statement about the deploy. */
     if (next !== null && next.state !== "failed") return;
 
     try {
-      await updateDeployRecord(daemon.registry, project, id, { state: "failed", detail });
-    } catch (error) {
-      if (isScafoError(error) && error.code === "cas-conflict") return;
+      await updateDeployRecord(daemon.registry, project, id, failure);
+    } catch (refused) {
+      if (isScafoError(refused) && refused.code === "cas-conflict") return;
       console.error(
-        `scafo: deploy "${id}" could not be recorded as failed: ${describeError(error)}`,
+        `scafo: deploy "${id}" could not be recorded as failed: ${describeError(refused)}`,
       );
     }
   }
@@ -336,7 +349,7 @@ export function createDeployService(
           const answer = snapshot(accepted);
           const continuation = scheduled.completion.then(
             () => undefined,
-            (error) => recordFailure(id, meta.project, boundedDetail(error)),
+            (error: unknown) => recordFailure(id, meta.project, error),
           );
           continuations.add(continuation);
           void continuation.finally(() => continuations.delete(continuation));

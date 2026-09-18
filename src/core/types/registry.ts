@@ -4,6 +4,8 @@
  * bucket root (or to the store prefix, when one is configured).
  */
 
+import type { ScafoErrorCode } from "../error.ts";
+
 /**
  * How many nodes serve one environment: a whole number of at least 1, or `"all"`
  * for every node that is live at the moment the decision is made.
@@ -305,6 +307,13 @@ export interface DeployRecord {
   deployment?: string;
   /** Varset the deploy carried; absent when it carried none. */
   varset?: CarriedVarset;
+  /**
+   * The code of the error that failed it, when it was a typed one. The prose
+   * says what went wrong; the code is what an operator or a pipeline acts on —
+   * a node that runs no container class is a switch to turn on, not input to
+   * fix — so it is kept beside the detail rather than left in the prose.
+   */
+  code?: ScafoErrorCode;
   /** Why it failed, when it did. */
   detail?: string;
   /**

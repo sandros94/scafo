@@ -231,6 +231,7 @@ describe("deploy records", () => {
       expect(result.failed).toEqual([deployKey(PROJECT, RUNNING)]);
       await expect(getDeployRecord(clock.ctx, PROJECT, RUNNING)).resolves.toMatchObject({
         state: "failed",
+        code: "deploy-timeout",
         detail: `node "${NODE}" stopped answering while this deploy was accepted`,
       });
     });

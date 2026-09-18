@@ -1066,6 +1066,10 @@ describe("what happens to an accepted deploy", () => {
     expect(status.state).toBe("failed");
     expect(status.detail).toContain("celld exited with code 1");
     expect(status.deployment).toBeUndefined();
+    /* Whatever the runner threw carried no code of ours, and one is not
+       invented for it: the prose is all there is to report. */
+    expect(status.code).toBeUndefined();
+    await expect(getDeployRecord(clock.ctx, PROJECT, id)).resolves.not.toHaveProperty("code");
   });
 
   it("caps every retained background failure detail on a UTF-8 boundary", async () => {
@@ -1092,6 +1096,7 @@ describe("what happens to an accepted deploy", () => {
     expect(response.status).toBe(202);
     await expect(settled(id)).resolves.toMatchObject({
       state: "failed",
+      code: "resource-limit",
       detail:
         "Artifact expands too large: the archive exceeded the 1024-byte expanded-artifact limit",
     });
@@ -1351,6 +1356,18 @@ describe("polling a deploy on another node of the fleet", () => {
       state: "deployed",
       deployment: VERSION_ID,
     });
+  });
+
+  it("carries the code of a failure across, so a poll from memory and one from the record agree", async () => {
+    publish = () =>
+      Promise.reject(new ScafoError("version-skew", "Two Celld versions over one fleet"));
+    const id = (await responseId(await upload(await operatorToken()))) as string;
+    const remembered = await settled(id);
+
+    const response = await poll(other, id, await operatorToken());
+
+    expect(remembered.code).toBe("version-skew");
+    await expect(response.json()).resolves.toMatchObject({ state: "failed", code: "version-skew" });
   });
 
   it("answers the workload token that started the deploy, which is the CI case", async () => {
