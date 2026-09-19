@@ -2,7 +2,8 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { recordRevision } from "../src/core/registry/_revision.ts";
-import { readDesired } from "../src/daemon/_desired.ts";
+import { desiredFrom, type DesiredState } from "../src/daemon/_desired.ts";
+import { createRegistryView } from "../src/core/registry/view.ts";
 import {
   acquireLease,
   applicationKey,
@@ -47,7 +48,7 @@ beforeEach(async () => {
 describe("an application nobody has placed", () => {
   it("is served nowhere, and reported nowhere either", async () => {
     for (const nodeId of [SELF, PEER, "node-c"]) {
-      const state = await readDesired(registry, { nodeId });
+      const state = await desiredFor(registry, nodeId);
 
       expect(state.applications, nodeId).toEqual([]);
       expect(state.fleet, nodeId).toEqual([]);
@@ -60,7 +61,7 @@ describe("an application that has been placed", () => {
   it("is served here when the decision names this node", async () => {
     await writePlacement(registry, APP, [SELF, PEER], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await desiredFor(registry, SELF);
 
     expect(state.applications.map((entry) => entry.name)).toEqual([APP]);
     expect(state.placements).toEqual([{ application: APP, nodes: [SELF, PEER], self: true }]);
@@ -69,7 +70,7 @@ describe("an application that has been placed", () => {
   it("is NOT served here when the decision names other nodes", async () => {
     await writePlacement(registry, APP, [PEER], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await desiredFor(registry, SELF);
 
     expect(state.applications).toEqual([]);
     /* Still part of the fleet view: this node routes to it, it just does not run it. */
@@ -82,7 +83,7 @@ describe("an application that has been placed", () => {
     await writePlacement(registry, APP, [SELF], lease);
     await writePlacement(registry, STAGING, [PEER], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await desiredFor(registry, SELF);
 
     expect(state.applications.map((entry) => entry.name)).toEqual([APP]);
     expect(state.placements).toEqual([
@@ -94,7 +95,7 @@ describe("an application that has been placed", () => {
   it("is served nowhere when the decision names nobody", async () => {
     await writePlacement(registry, APP, [], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await desiredFor(registry, SELF);
 
     expect(state.applications).toEqual([]);
     expect(state.placements[0]).toMatchObject({ nodes: [], self: false });
@@ -105,7 +106,7 @@ describe("an application that has been placed", () => {
     await writePlacement(registry, APP, [PEER], lease);
     await writePlacement(registry, OTHER, [SELF], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await desiredFor(registry, SELF);
 
     expect(state.applications.map((entry) => entry.name)).toEqual([OTHER]);
     expect(state.placements.map((view) => `${view.application}:${String(view.self)}`)).toEqual([
@@ -122,7 +123,7 @@ describe("an application that carries a node selector", () => {
     await setNodeSelector(registry, APP, FAST);
 
     for (const nodeId of [SELF, PEER, "node-c"]) {
-      const state = await readDesired(registry, { nodeId });
+      const state = await desiredFor(registry, nodeId);
       expect(state.applications, nodeId).toEqual([]);
       expect(state.fleet, nodeId).toEqual([]);
       expect(state.placements, nodeId).toEqual([]);
@@ -133,7 +134,7 @@ describe("an application that carries a node selector", () => {
     await setNodeSelector(registry, APP, FAST);
     await writePlacement(registry, APP, [SELF], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await desiredFor(registry, SELF);
 
     expect(state.applications.map((entry) => entry.name)).toEqual([APP]);
     expect(state.placements).toEqual([
@@ -145,7 +146,7 @@ describe("an application that carries a node selector", () => {
     await setNodeSelector(registry, APP, FAST);
     await writePlacement(registry, APP, [PEER], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await desiredFor(registry, SELF);
 
     expect(state.applications).toEqual([]);
     expect(state.placements[0]).toMatchObject({ self: false, selector: FAST });
@@ -157,7 +158,7 @@ describe("an application that carries a node selector", () => {
     await writePlacement(registry, APP, [SELF], lease);
     await writePlacement(registry, STAGING, [SELF, PEER], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await desiredFor(registry, SELF);
 
     expect(state.placements).toEqual([
       { application: APP, nodes: [SELF], self: true, selector: FAST },
@@ -171,7 +172,7 @@ describe("an application that carries a node selector", () => {
 
     await setNodeSelector(registry, APP, null);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await desiredFor(registry, SELF);
     expect(state.applications.map((entry) => entry.name)).toEqual([APP]);
     expect(state.placements).toEqual([{ application: APP, nodes: [SELF], self: true }]);
   });
@@ -181,7 +182,7 @@ describe("an application that carries a node selector", () => {
     await setNodeSelector(registry, APP, FAST);
     await writePlacement(registry, STAGING, [SELF], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await desiredFor(registry, SELF);
 
     expect(state.applications.map((entry) => entry.name)).toEqual([STAGING]);
   });
@@ -193,7 +194,7 @@ describe("what is left out for reasons other than placement", () => {
     await writePlacement(registry, "fresh", [SELF], lease);
     await writePlacement(registry, APP, [SELF], lease);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await desiredFor(registry, SELF);
 
     expect(state.applications.map((entry) => entry.name)).toEqual([APP]);
     expect(state.placements.map((view) => view.application)).toEqual(["fresh", APP]);
@@ -203,7 +204,7 @@ describe("what is left out for reasons other than placement", () => {
     await writePlacement(registry, APP, [SELF], lease);
     await blockApplication(registry, APP);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await desiredFor(registry, SELF);
 
     expect(state.applications).toEqual([]);
     expect(state.fleet).toEqual([]);
@@ -215,7 +216,7 @@ describe("what is left out for reasons other than placement", () => {
     await writePlacement(registry, APP, [SELF], lease);
     await retireApplication(registry, APP);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await desiredFor(registry, SELF);
 
     expect(state.applications).toEqual([]);
     expect(state.placements).toEqual([{ application: APP, nodes: [SELF], self: true }]);
@@ -224,11 +225,11 @@ describe("what is left out for reasons other than placement", () => {
   it("takes it straight back the moment it is unretired", async () => {
     await writePlacement(registry, APP, [SELF], lease);
     await retireApplication(registry, APP);
-    expect((await readDesired(registry, { nodeId: SELF })).applications).toEqual([]);
+    expect((await desiredFor(registry, SELF)).applications).toEqual([]);
 
     await unretireApplication(registry, APP);
 
-    const state = await readDesired(registry, { nodeId: SELF });
+    const state = await desiredFor(registry, SELF);
     expect(state.applications.map((entry) => entry.name)).toEqual([APP]);
     expect(state.applications[0].deployment?.revision).toBe(1);
   });
@@ -238,7 +239,7 @@ describe("what is left out for reasons other than placement", () => {
     await retireApplication(registry, APP);
 
     for (const nodeId of [SELF, PEER, "node-c"]) {
-      expect((await readDesired(registry, { nodeId })).applications, nodeId).toEqual([]);
+      expect((await desiredFor(registry, nodeId)).applications, nodeId).toEqual([]);
     }
   });
 
@@ -248,7 +249,7 @@ describe("what is left out for reasons other than placement", () => {
     await deletePlacement(registry, APP, lease);
 
     for (const nodeId of [SELF, PEER, "node-c"]) {
-      const state = await readDesired(registry, { nodeId });
+      const state = await desiredFor(registry, nodeId);
       expect(state.applications, nodeId).toEqual([]);
       expect(state.fleet, nodeId).toEqual([]);
       expect(state.placements, nodeId).toEqual([]);
@@ -258,7 +259,7 @@ describe("what is left out for reasons other than placement", () => {
   it("reads nothing at all out of an empty registry", async () => {
     const empty = ctxWith(new MemoryCasStore()).ctx;
 
-    expect(await readDesired(empty, { nodeId: SELF })).toEqual({
+    expect(await desiredFor(empty, SELF)).toEqual({
       applications: [],
       fleet: [],
       placements: [],
@@ -281,7 +282,7 @@ describe("how a pass reads all of that", () => {
     const { ctx, observing } = await watchedInstallation();
     observing.reset();
 
-    await readDesired(ctx, { nodeId: SELF });
+    await desiredFor(ctx, SELF);
 
     expect(observing.peakReads).toBeGreaterThan(1);
     expect(observing.peakReads).toBeLessThanOrEqual(DEFAULT_CONCURRENCY);
@@ -292,7 +293,7 @@ describe("how a pass reads all of that", () => {
 
     for (const concurrency of [1, 3]) {
       observing.reset();
-      await readDesired(ctx, { nodeId: SELF, concurrency });
+      await desiredFor(ctx, SELF, { concurrency });
       expect(observing.peakReads, `bounded to ${String(concurrency)}`).toBe(concurrency);
     }
   });
@@ -301,11 +302,8 @@ describe("how a pass reads all of that", () => {
     const { ctx, observing, names } = await watchedInstallation();
     observing.delays.set(applicationKey(names[0]), 20);
 
-    const overlapped = await readDesired(ctx, { nodeId: SELF });
-    const sequential = await readDesired(ctx, {
-      nodeId: SELF,
-      concurrency: 1,
-    });
+    const overlapped = await desiredFor(ctx, SELF);
+    const sequential = await desiredFor(ctx, SELF, { concurrency: 1 });
 
     expect(overlapped).toEqual(sequential);
     expect(overlapped.applications.map((entry) => entry.name)).toEqual(names);
@@ -318,10 +316,23 @@ describe("how a pass reads all of that", () => {
     observing.faults.set(applicationKey(names[1]), new Error("the second"));
     observing.faults.set(applicationKey(names[5]), new Error("the sixth"));
 
-    await expect(readDesired(ctx, { nodeId: SELF })).rejects.toThrow("the second");
-    await expect(readDesired(ctx, { nodeId: SELF, concurrency: 1 })).rejects.toThrow("the second");
+    await expect(desiredFor(ctx, SELF)).rejects.toThrow("the second");
+    await expect(desiredFor(ctx, SELF, { concurrency: 1 })).rejects.toThrow("the second");
   });
 });
+
+/**
+ * What `nodeId` should be serving, as one pass works it out: a registry view
+ * synced from scratch, and the pure decision taken off the snapshot it answers.
+ */
+async function desiredFor(
+  ctx: RegistryContext,
+  nodeId: string,
+  opts?: { concurrency?: number },
+): Promise<DesiredState> {
+  const view = createRegistryView(ctx, opts === undefined ? {} : opts);
+  return desiredFrom(await view.sync(), { nodeId });
+}
 
 /** An application with a deployment notice, ready to be served. */
 async function deployed(name: string): Promise<void> {
@@ -332,7 +343,7 @@ async function deployed(name: string): Promise<void> {
 
 /** Whether this node would run `name`. */
 async function isDesired(name: string): Promise<boolean> {
-  const state = await readDesired(registry, { nodeId: SELF });
+  const state = await desiredFor(registry, SELF);
   return state.applications.some((entry) => entry.name === name);
 }
 

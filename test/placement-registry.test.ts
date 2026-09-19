@@ -29,6 +29,7 @@ import {
   unblockApplication,
   writePlacement,
 } from "../src/core/registry/index.ts";
+import { DEFAULT_LEASE_TTL_MS } from "../src/core/registry/lease.ts";
 import type { RegistryContext } from "../src/core/registry/context.ts";
 import { applicationKey, placementKey } from "../src/core/registry/paths.ts";
 import type { NodeRecord, PlacementRecord } from "../src/core/types/registry.ts";
@@ -160,7 +161,8 @@ describe("writePlacement", () => {
 
   it("rewrites the decision when it changes, at the writer's own fence", async () => {
     await writePlacement(clock.ctx, APPLICATION, [NODE_A], lease);
-    clock.tick(30_000);
+    /* Past the lease this node holds, so the next one is another coordinator. */
+    clock.tick(DEFAULT_LEASE_TTL_MS + 1000);
     const second = await acquireLease(clock.ctx, NODE_B);
     if (second === null) throw new Error("the second lease was refused");
 
@@ -174,7 +176,7 @@ describe("writePlacement", () => {
   it("refuses to undo a decision made at a higher fence than its own", async () => {
     /* The node that superseded this one has already decided. A stale coordinator
        that overwrote it would move applications back to a fleet it last saw. */
-    clock.tick(30_000);
+    clock.tick(DEFAULT_LEASE_TTL_MS + 1000);
     const newer = await acquireLease(clock.ctx, NODE_B);
     if (newer === null) throw new Error("the second lease was refused");
     await writePlacement(clock.ctx, APPLICATION, [NODE_B], newer);

@@ -11,8 +11,7 @@ import {
   updateDeployRecord,
 } from "../core/registry/deploys.ts";
 import { assertDeploysUnfrozen, readFreeze } from "../core/registry/freeze.ts";
-import { listNodeRecords } from "../core/registry/nodes.ts";
-import { recordRevision } from "../core/registry/_revision.ts";
+import { deploymentRevision, recordRevision } from "../core/registry/_revision.ts";
 import { fleetPrefix } from "../core/registry/paths.ts";
 import { setNodeSelector, setReplicas } from "../core/registry/placement.ts";
 import {
@@ -34,6 +33,7 @@ import type {
   OidcActor,
   ReplicaCount,
 } from "../core/types/registry.ts";
+import { registryView } from "./_view.ts";
 import type { DaemonContext } from "./app.ts";
 import {
   createDeployScheduler,
@@ -222,12 +222,21 @@ export function createDeployService(
       /* The commit point. Past it the deployment revision is written and there
          is nothing left to abandon, so the signal is not consulted again: a
          cancellation that arrives now would only mislabel work that is done. */
-      await recordRevision(daemon.registry, meta.application, deployment.version, { signal });
+      const recorded = await recordRevision(daemon.registry, meta.application, deployment.version, {
+        signal,
+      });
       await updateDeployRecord(daemon.registry, meta.application, id, {
         state: "deployed",
         deployment: deployment.version,
       });
       update(id, { state: "deployed" });
+      /* The local process is told to adopt at once rather than at its own next
+         pointer poll, so this node is already serving the new deployment by the
+         time the caller reads `deployed`. Every other node serving the
+         application does the same on the pass that sees the revision move.
+         Nothing waits on it and nothing depends on it: see `Reconciler.reload`. */
+      const revision = deploymentRevision(recorded.application);
+      void daemon.reconciler?.reload(meta.application, revision === null ? {} : { revision });
       return deployment;
     } catch (error) {
       if (celldVersionId === undefined) throw error;
@@ -364,10 +373,16 @@ export function createDeployService(
  * version is serving it, and the caller's answer is a 409 it can act on rather
  * than an upload that is thrown away. The publish path asks nothing more — the
  * refusal has already happened, and the node the deploy lands on is this one.
+ *
+ * ASKED OF THE VIEW, which answers from memory while its node records are
+ * younger than the node-refresh interval and re-reads them when they are not.
+ * A record older than that window says nothing useful anyway — liveness is the
+ * age of a heartbeat — and a burst of fifty deploys must not be fifty listings
+ * of the fleet.
  */
 async function assertOneCelldVersion(daemon: DaemonContext, application: string): Promise<void> {
   const about = { application, celld: daemon.versions.celld };
-  const skew = findVersionSkew(await listNodeRecords(daemon.registry), {
+  const skew = findVersionSkew([...(await registryView(daemon).freshNodes())], {
     ...about,
     selfId: daemon.nodeId,
     now: nowDate(daemon.registry),

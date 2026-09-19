@@ -35,7 +35,8 @@ import {
 import type { ApplicationRecord, TrustPolicy } from "../src/core/types/registry.ts";
 import type { CasStore } from "../src/core/types/store.ts";
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
-import { readDesired } from "../src/daemon/_desired.ts";
+import { desiredFrom } from "../src/daemon/_desired.ts";
+import { createRegistryView } from "../src/core/registry/view.ts";
 import { createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
@@ -454,7 +455,7 @@ describe("what a block does to a node", () => {
     it("drops a blocked application, and nobody else's", async () => {
       await blockApplication(registry, APPLICATION);
 
-      const state = await readDesired(registry, { nodeId: NODE_ID });
+      const state = desiredFrom(await createRegistryView(registry).sync(), { nodeId: NODE_ID });
 
       expect(state.applications.map((entry) => entry.name)).toEqual([NEIGHBOUR]);
       expect(state.fleet.map((entry) => entry.name)).toEqual([NEIGHBOUR]);
@@ -463,7 +464,7 @@ describe("what a block does to a node", () => {
     it("keeps its placement view, which is what unblocking comes back to", async () => {
       await blockApplication(registry, APPLICATION);
 
-      const state = await readDesired(registry, { nodeId: NODE_ID });
+      const state = desiredFrom(await createRegistryView(registry).sync(), { nodeId: NODE_ID });
 
       /* The block takes it out of service, not out of the fleet: the decision
          about which nodes would run it is still the coordinator's and still
@@ -473,10 +474,10 @@ describe("what a block does to a node", () => {
 
     it("brings it all back on the next pass, from records nothing touched", async () => {
       await blockApplication(registry, APPLICATION);
-      await readDesired(registry, { nodeId: NODE_ID });
+      desiredFrom(await createRegistryView(registry).sync(), { nodeId: NODE_ID });
 
       await unblockApplication(registry, APPLICATION);
-      const state = await readDesired(registry, { nodeId: NODE_ID });
+      const state = desiredFrom(await createRegistryView(registry).sync(), { nodeId: NODE_ID });
 
       expect(state.applications.map((entry) => entry.name).sort()).toEqual([
         NEIGHBOUR,

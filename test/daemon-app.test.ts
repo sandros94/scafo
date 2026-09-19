@@ -412,6 +412,7 @@ describe("GET /v1/state, on the node that is coordinating", () => {
             unplaced: [UNPLACED],
           },
           lastAssignFailure: null,
+          skippedAssignments: 0,
         }),
       },
     });
@@ -691,6 +692,7 @@ function appReconciling(status: ReconcileStatus): H3 {
     reconciler: {
       runOnce: () => Promise.resolve([]),
       kick: () => {},
+      reload: (): Promise<void> => Promise.resolve(),
       start: () => {},
       shutdown: () => Promise.resolve(),
       stop: () => {},
@@ -783,6 +785,7 @@ async function appCoordinating(unplaced: AssignmentFailure[]): Promise<H3> {
           unplaced,
         },
         lastAssignFailure: null,
+        skippedAssignments: 0,
       }),
     },
   });

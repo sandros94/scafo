@@ -33,6 +33,8 @@ import { NODE_LIVENESS_WINDOW_MS } from "../src/core/registry/nodes.ts";
 import {
   blockApplication,
   createApplication,
+  createDeployRecord,
+  heartbeatNode,
   findApplication,
   freezeDeploys,
   getApplication,
@@ -1179,6 +1181,40 @@ describe("polling a deploy", () => {
     await expect(response.json()).resolves.toMatchObject({ id, state: "deployed" });
   });
 
+  it("gives up on a deploy whose node stopped answering, without waiting for a sweep", async () => {
+    /* The state of a deploy lived in the daemon that accepted it, so a node
+       that went took it with it. The caller is told now — the reaper writes the
+       same thing down later, at its own cadence. */
+    const id = `${APPLICATION}.0123456789abcdef`;
+    await createDeployRecord(clock.ctx, APPLICATION, { id, node: "ghost-1" });
+    clock.tick(NODE_LIVENESS_WINDOW_MS + 1);
+
+    const response = await get(`/v1/deploys/${id}`, await operatorToken());
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      id,
+      state: "failed",
+      code: "deploy-timeout",
+      detail: `node "ghost-1" stopped answering while this deploy was accepted`,
+    });
+    /* A poll is a read: the record still says what it said. */
+    await expect(getDeployRecord(clock.ctx, APPLICATION, id)).resolves.toMatchObject({
+      state: "accepted",
+    });
+  });
+
+  it("keeps reporting a deploy its node is still answering for", async () => {
+    const id = `${APPLICATION}.fedcba9876543210`;
+    await createDeployRecord(clock.ctx, APPLICATION, { id, node: OPERATOR });
+    clock.tick(NODE_LIVENESS_WINDOW_MS + 1);
+    await heartbeatNode(clock.ctx, OPERATOR);
+
+    const response = await get(`/v1/deploys/${id}`, await operatorToken());
+
+    await expect(response.json()).resolves.toMatchObject({ id, state: "accepted" });
+  });
+
   it("answers an id it has never heard of as a miss, to an operator", async () => {
     const response = await get("/v1/deploys/0000000000000000", await operatorToken());
 
@@ -1487,6 +1523,7 @@ function fakeReconciler(processes: () => RuntimeProcess[] = () => running): Reco
   return {
     runOnce: () => Promise.resolve([]),
     kick: () => {},
+    reload: (): Promise<void> => Promise.resolve(),
     start: () => {},
     shutdown: () => Promise.resolve(),
     stop: () => {},

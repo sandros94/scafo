@@ -522,6 +522,7 @@ function fakeReconciler(routing: FleetRouting | undefined): Reconciler {
   return {
     runOnce: () => Promise.resolve([]),
     kick: () => {},
+    reload: (): Promise<void> => Promise.resolve(),
     start: () => {},
     shutdown: () => Promise.resolve(),
     stop: () => {},

@@ -2,6 +2,8 @@ export * from "./context.ts";
 export * from "./counting.ts";
 export * from "./paths.ts";
 export * from "./cas.ts";
+export * from "./changes.ts";
+export * from "./view.ts";
 export * from "./lease.ts";
 export * from "./meta.ts";
 export * from "./applications.ts";

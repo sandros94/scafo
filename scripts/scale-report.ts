@@ -13,6 +13,10 @@
 import { S3Client } from "uns3";
 import { DEFAULT_LEASE_TTL_MS } from "../src/core/registry/lease.ts";
 import { NODE_HEARTBEAT_INTERVAL_MS } from "../src/core/registry/nodes.ts";
+import {
+  DEFAULT_NODE_REFRESH_INTERVAL_MS,
+  DEFAULT_REGISTRY_RESYNC_MS,
+} from "../src/core/registry/view.ts";
 import type { CasStore } from "../src/core/types/store.ts";
 import {
   DEFAULT_ACTIVE_TASKS,
@@ -24,6 +28,7 @@ import { OBSERVE_FLUSH_INTERVAL_MS } from "../src/daemon/observe-flush.ts";
 import { DEFAULT_RECONCILE_INTERVAL_MS } from "../src/daemon/reconcile.ts";
 import { createUns3Store } from "../src/drivers/store/uns3.ts";
 import type { MeterSnapshot } from "../test/scale/_meter.ts";
+import { PAST_CADENCES, PAST_QUEUED_TASKS, pastIdleCost } from "../test/scale/_before.ts";
 import {
   createScaleWorld,
   deployBurst,
@@ -133,6 +138,7 @@ async function main(): Promise<void> {
 
   for (const report of reports) lines.push(...profileSection(report, remote));
   lines.push(...steadyStateSection(reports));
+  lines.push(...beforeSection(reports));
   lines.push(...burstSection(bursts));
   lines.push(...footer());
 
@@ -267,12 +273,7 @@ function notesLines(report: ProfileReport): string[] {
 }
 
 function steadyStateSection(reports: ProfileReport[]): string[] {
-  const perMinute = {
-    reconcile: 60_000 / DEFAULT_RECONCILE_INTERVAL_MS,
-    heartbeat: 60_000 / NODE_HEARTBEAT_INTERVAL_MS,
-    coordinatorTick: 60_000 / Math.max(1, Math.floor(DEFAULT_LEASE_TTL_MS / 3)),
-    reap: 60_000 / DEFAULT_REAP_INTERVAL_MS,
-  };
+  const perMinute = cadences();
 
   const lines = [
     `## Steady state: an installation with nobody deploying`,
@@ -281,15 +282,19 @@ function steadyStateSection(reports: ProfileReport[]): string[] {
     ``,
     `| loop | interval | per minute |`,
     `| --- | ---: | ---: |`,
-    `| reconcile pass (every node) | ${String(DEFAULT_RECONCILE_INTERVAL_MS / 1000)}s | ${String(perMinute.reconcile)} |`,
+    `| reconcile pass (every node) | ${String(DEFAULT_RECONCILE_INTERVAL_MS / 1000)}s | ${String(perMinute.reconcile + perMinute.nodeRefresh + perMinute.resync)} |`,
+    `| — of those, one that re-reads the node records | ${String(DEFAULT_NODE_REFRESH_INTERVAL_MS / 1000)}s | ${String(perMinute.nodeRefresh)} |`,
+    `| — of those, one that re-reads everything | ${String(DEFAULT_REGISTRY_RESYNC_MS / 1000)}s | ${String(perMinute.resync)} |`,
     `| heartbeat (every node) | ${String(NODE_HEARTBEAT_INTERVAL_MS / 1000)}s | ${String(perMinute.heartbeat)} |`,
     `| coordinator tick: lease renewal + assignment pass (one node) | ${String(Math.floor(DEFAULT_LEASE_TTL_MS / 3) / 1000)}s | ${String(perMinute.coordinatorTick)} |`,
     `| reap (the coordinator, on its tick) | ${String(DEFAULT_REAP_INTERVAL_MS / 1000)}s | ${String(perMinute.reap)} |`,
     `| observation flush | ${String(OBSERVE_FLUSH_INTERVAL_MS / 1000)}s | 0 — observability is off unless an operator turns it on |`,
     ``,
-    `A coordinator tick renews the lease with one conditional PUT and then runs an`,
-    `assignment pass. Idle means nothing changes, so no placement is rewritten and`,
-    `no record is deleted.`,
+    `A reconcile pass reads ONE object — the change hint — and stops there unless`,
+    `the token moved or one of its own timers is up. A coordinator tick renews the`,
+    `lease with one conditional PUT and skips the assignment pass entirely when`,
+    `nothing it decides from has changed. Idle means nothing changes, so no`,
+    `placement is rewritten and no record is deleted.`,
     ``,
     `| profile | class A / node / min | class B / node / min | class A / month | class B / month | DELETE / month |`,
     `| --- | ---: | ---: | ---: | ---: | ---: |`,
@@ -348,10 +353,39 @@ function steadyStateSection(reports: ProfileReport[]): string[] {
   return lines;
 }
 
+/**
+ * How often each measured pass runs in one minute.
+ *
+ * A reconcile pass is ONE loop with three costs: the ordinary pass that reads
+ * the change hint and stops, the one on which the node records come due, and the
+ * one on which everything is listed again. They are counted apart because they
+ * cost different amounts, and together they are every pass the loop runs.
+ */
+function cadences(): {
+  reconcile: number;
+  nodeRefresh: number;
+  resync: number;
+  heartbeat: number;
+  coordinatorTick: number;
+  reap: number;
+} {
+  const passes = 60_000 / DEFAULT_RECONCILE_INTERVAL_MS;
+  const nodeRefresh = 60_000 / DEFAULT_NODE_REFRESH_INTERVAL_MS;
+  const resync = 60_000 / DEFAULT_REGISTRY_RESYNC_MS;
+  return {
+    reconcile: Math.max(0, passes - nodeRefresh - resync),
+    nodeRefresh,
+    resync,
+    heartbeat: 60_000 / NODE_HEARTBEAT_INTERVAL_MS,
+    coordinatorTick: 60_000 / Math.max(1, Math.floor(DEFAULT_LEASE_TTL_MS / 3)),
+    reap: 60_000 / DEFAULT_REAP_INTERVAL_MS,
+  };
+}
+
 /** What one minute of an idle installation costs, per node and altogether. */
 function idleCost(
   report: ProfileReport,
-  perMinute: { reconcile: number; heartbeat: number; coordinatorTick: number; reap: number },
+  perMinute: ReturnType<typeof cadences>,
 ): {
   nodeClassA: number;
   nodeClassB: number;
@@ -368,15 +402,25 @@ function idleCost(
   const classB = (snapshot: MeterSnapshot): number => snapshot.gets;
 
   const reconcile = of("idleReconcilePass");
+  const refresh = of("nodeRefreshPass");
+  const resync = of("resyncPass");
   const beat = of("heartbeat");
   const assign = of("coordinatorAssignPass");
-  const reap = of("reapPass");
+  /* The sweep AFTER the first: a terminal deploy record never moves again, so
+     from the second pass onward the sweep lists the history and reads none of
+     it, and that is what a running coordinator costs. */
+  const reap = of("reapPassAgain");
 
-  const nodeClassA = perMinute.reconcile * classA(reconcile) + perMinute.heartbeat * classA(beat);
-  const nodeClassB = perMinute.reconcile * classB(reconcile) + perMinute.heartbeat * classB(beat);
-  /* The lease renewal is the one write a tick makes on its own. */
+  const perPass = (measure: (snapshot: MeterSnapshot) => number): number =>
+    perMinute.reconcile * measure(reconcile) +
+    perMinute.nodeRefresh * measure(refresh) +
+    perMinute.resync * measure(resync);
+
+  const nodeClassA = perPass(classA) + perMinute.heartbeat * classA(beat);
+  const nodeClassB = perPass(classB) + perMinute.heartbeat * classB(beat);
+  /* The lease renewal is already in what the tick measured. */
   const coordinatorClassA =
-    perMinute.coordinatorTick * (classA(assign) + 1) + perMinute.reap * classA(reap);
+    perMinute.coordinatorTick * classA(assign) + perMinute.reap * classA(reap);
   const coordinatorClassB =
     perMinute.coordinatorTick * classB(assign) + perMinute.reap * classB(reap);
 
@@ -386,11 +430,58 @@ function idleCost(
     installationClassA: nodeClassA * report.profile.nodes + coordinatorClassA,
     installationClassB: nodeClassB * report.profile.nodes + coordinatorClassB,
     installationDeletes:
-      perMinute.reconcile * reconcile.dels +
+      perPass((snapshot) => snapshot.dels) +
       perMinute.heartbeat * beat.dels +
       perMinute.coordinatorTick * assign.dels +
       perMinute.reap * reap.dels,
   };
+}
+
+/**
+ * The same monthly figures for the build that read the whole installation on
+ * every pass, so the improvement is a table rather than a claim.
+ *
+ * The numbers are FROZEN FORMULAS, not measurements: nothing here drives that
+ * code, because it no longer exists. See `test/scale/_before.ts`.
+ */
+function beforeSection(reports: ProfileReport[]): string[] {
+  const lines = [
+    `### What it cost before`,
+    ``,
+    `Before the change hint, the registry view and the cached sweep, every`,
+    `periodic pass read the whole installation to find out that nothing had`,
+    `changed. The deploy queue admitted ${String(PAST_QUEUED_TASKS)} deploys and refused the rest.`,
+    ``,
+    `| profile | class A / month, before | after | class B / month, before | after |`,
+    `| --- | ---: | ---: | ---: | ---: |`,
+  ];
+
+  const perMinute = cadences();
+  for (const report of reports) {
+    const shape = {
+      applications: report.profile.applications,
+      nodes: report.profile.nodes,
+      deployRecords: report.profile.deployRecords,
+    };
+    const past = pastIdleCost(shape);
+    const now = idleCost(report, perMinute);
+    lines.push(
+      `| ${report.profile.name} | ` +
+        `${count(past.classA * MINUTES_PER_MONTH)} | ` +
+        `${count(now.installationClassA * MINUTES_PER_MONTH)} | ` +
+        `${count(past.classB * MINUTES_PER_MONTH)} | ` +
+        `${count(now.installationClassB * MINUTES_PER_MONTH)} |`,
+    );
+  }
+
+  lines.push(
+    ``,
+    `The cadences moved too: the coordinator lease went from`,
+    `${String(PAST_CADENCES.coordinatorTickMs / 1000)}s to ${String(Math.floor(DEFAULT_LEASE_TTL_MS / 3) / 1000)}s between renewals, and the reap from`,
+    `${String(PAST_CADENCES.reapIntervalMs / 1000)}s to ${String(DEFAULT_REAP_INTERVAL_MS / 1000)}s between sweeps.`,
+    ``,
+  );
+  return lines;
 }
 
 function burstSection(bursts: BurstOutcome[]): string[] {
@@ -400,7 +491,9 @@ function burstSection(bursts: BurstOutcome[]): string[] {
     `\`n\` deploys of \`n\` different applications, started together against ONE node's`,
     `deploy service at its default bounds — ${String(DEFAULT_QUEUED_TASKS)} queued deploys node-wide,`,
     `${String(DEFAULT_APPLICATION_QUEUED_TASKS)} per application, ${String(DEFAULT_ACTIVE_TASKS)} publishing at a time — with each`,
-    `publish taking a fixed virtual ${String(bursts[0]?.durationMs ?? 0)}ms.`,
+    `publish taking a fixed virtual ${String(bursts[0]?.durationMs ?? 0)}ms. Each deploy comes back`,
+    `for a place in the queue when it is refused, through the very retry loop`,
+    `\`scafo deploy\` runs; \`--no-wait\` is what fails instead.`,
     ``,
     `| n | accepted | deployed | refused | GET | PUT | LIST pages | CAS conflicts | peak in flight |`,
     `| ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |`,
@@ -423,16 +516,18 @@ function footer(): string[] {
   return [
     `## Where the cadences and bounds come from`,
     ``,
-    `- reconcile interval — \`DEFAULT_RECONCILE_INTERVAL_MS\`, \`src/daemon/reconcile.ts:22\``,
-    `- heartbeat interval — \`NODE_HEARTBEAT_INTERVAL_MS\`, \`src/core/registry/nodes.ts:10\``,
-    `- liveness window — \`NODE_LIVENESS_WINDOW_MS\`, \`src/core/registry/nodes.ts:13\``,
-    `- lease lifetime — \`DEFAULT_LEASE_TTL_MS\`, \`src/core/registry/lease.ts:16\``,
-    `- coordinator tick, a third of the lease — \`src/daemon/coordinator.ts:74\``,
-    `- reap interval — \`DEFAULT_REAP_INTERVAL_MS\`, \`src/daemon/coordinator.ts:18\``,
-    `- observation flush interval — \`OBSERVE_FLUSH_INTERVAL_MS\`, \`src/daemon/observe-flush.ts:23\``,
-    `- observability off unless asked for — \`src/daemon/config.ts:236\``,
-    `- deploy scheduler bounds — \`src/daemon/_deploy-scheduler.ts:4\`–\`12\``,
-    `- deploy record retention — \`DEPLOY_RECORD_RETENTION_MS\`, \`src/core/registry/deploys.ts:22\``,
+    `- reconcile interval — \`DEFAULT_RECONCILE_INTERVAL_MS\`, \`src/daemon/reconcile.ts\``,
+    `- heartbeat interval — \`NODE_HEARTBEAT_INTERVAL_MS\`, \`src/core/registry/nodes.ts\``,
+    `- liveness window — \`NODE_LIVENESS_WINDOW_MS\`, \`src/core/registry/nodes.ts\``,
+    `- lease lifetime — \`DEFAULT_LEASE_TTL_MS\`, \`src/core/registry/lease.ts\``,
+    `- coordinator tick, a third of the lease — \`src/daemon/coordinator.ts\``,
+    `- reap interval — \`DEFAULT_REAP_INTERVAL_MS\`, \`src/daemon/coordinator.ts\``,
+    `- observation flush interval — \`OBSERVE_FLUSH_INTERVAL_MS\`, \`src/daemon/observe-flush.ts\``,
+    `- observability off unless asked for — \`src/daemon/config.ts\``,
+    `- registry resync interval — \`DEFAULT_REGISTRY_RESYNC_MS\`, \`src/core/registry/view.ts\``,
+    `- node refresh interval — \`DEFAULT_NODE_REFRESH_INTERVAL_MS\`, \`src/core/registry/view.ts\``,
+    `- deploy scheduler bounds — \`src/daemon/_deploy-scheduler.ts\``,
+    `- deploy record retention — \`DEPLOY_RECORD_RETENTION_MS\`, \`src/core/registry/deploys.ts\``,
     ``,
   ];
 }

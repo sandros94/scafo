@@ -5,6 +5,7 @@ import type { DaemonConfig } from "../daemon/config.ts";
 import { advertisedAddress, parseHostPort } from "../daemon/config.ts";
 import { isScafoError, ScafoError } from "../core/error.ts";
 import { updateJson } from "../core/registry/cas.ts";
+import { hintingStore } from "../core/registry/changes.ts";
 import { nowIso, type RegistryContext } from "../core/registry/context.ts";
 import { drainNode, registerNode, registerNodeIfAbsent } from "../core/registry/nodes.ts";
 import { nodeKey } from "../core/registry/paths.ts";
@@ -23,23 +24,33 @@ import {
   wireguardStateDir,
 } from "./_wireguard.ts";
 
-/** The registry this node reads and writes, as configured. */
+/**
+ * The registry this node reads and writes, as configured.
+ *
+ * Every context is built here, for the daemon and for the CLI alike, and every
+ * one of them HINTS: a write under an application, placement or domain prefix
+ * mints a fresh change token, so a `scafo app retire` run straight against the
+ * bucket reaches the fleet within a reconcile pass exactly as a deploy through a
+ * node does. See {@link hintingStore} for what a lost hint costs.
+ */
 export function createRegistry(config: DaemonConfig): RegistryContext {
   return {
-    store: createUns3Store(
-      new S3Client({
-        endpoint: config.bucket.endpoint,
-        region: config.bucket.region,
-        credentials: {
-          accessKeyId: config.bucket.accessKey,
-          secretAccessKey: config.bucket.secretKey,
-        },
-        /* Self-hosted S3 implementations are addressed by path; virtual-host
-           style needs per-bucket DNS that a single store rarely has. */
-        bucketStyle: "path",
-        defaultBucket: config.bucket.bucket,
-      }),
-      { bucket: config.bucket.bucket, prefix: config.bucket.prefix },
+    store: hintingStore(
+      createUns3Store(
+        new S3Client({
+          endpoint: config.bucket.endpoint,
+          region: config.bucket.region,
+          credentials: {
+            accessKeyId: config.bucket.accessKey,
+            secretAccessKey: config.bucket.secretKey,
+          },
+          /* Self-hosted S3 implementations are addressed by path; virtual-host
+             style needs per-bucket DNS that a single store rarely has. */
+          bucketStyle: "path",
+          defaultBucket: config.bucket.bucket,
+        }),
+        { bucket: config.bucket.bucket, prefix: config.bucket.prefix },
+      ),
     ),
   };
 }

@@ -11,6 +11,7 @@ import { ScafoError } from "../error.ts";
 import { assertReplicas } from "../placement/replicas.ts";
 import { assertSelector } from "../placement/selector.ts";
 import type { ApplicationRecord, NodeSelector, ReplicaCount } from "../types/registry.ts";
+import { type ConcurrencyGate, DEFAULT_CONCURRENCY, mapConcurrent } from "../utils/concurrency.ts";
 import { isSlug } from "../utils/slug.ts";
 import { isCasConflict, namesFromKeys } from "./_shared.ts";
 import { createJson, readJson, requireJson, updateJson, type UpdateJsonOptions } from "./cas.ts";
@@ -140,14 +141,30 @@ export async function listApplications(ctx: RegistryContext): Promise<string[]> 
   return names;
 }
 
-/** Application records in name order; records deleted after listing are omitted. */
-export async function listApplicationRecords(ctx: RegistryContext): Promise<ApplicationRecord[]> {
-  const records: ApplicationRecord[] = [];
-  for (const name of await listApplications(ctx)) {
-    const found = await findApplication(ctx, name);
-    if (found !== null) records.push(found);
-  }
-  return records;
+export interface ListApplicationRecordsOptions {
+  /** Reads in flight at once, or a gate to share. Defaults to {@link DEFAULT_CONCURRENCY}. */
+  concurrency?: number | ConcurrencyGate;
+}
+
+/**
+ * Application records in name order; records deleted after listing are omitted.
+ *
+ * READ WITH BOUNDED CONCURRENCY rather than one after another: this answers an
+ * operator route, and an operator asking about a few hundred applications over a
+ * bucket that takes a hundred milliseconds a read should not wait half a minute
+ * for a serial loop. The bound is what keeps it from being a burst the store
+ * rate-limits. A caller inside a pass that already holds a gate passes that gate
+ * — never one it is itself holding a slot of.
+ */
+export async function listApplicationRecords(
+  ctx: RegistryContext,
+  opts?: ListApplicationRecordsOptions,
+): Promise<ApplicationRecord[]> {
+  const names = await listApplications(ctx);
+  const found = await mapConcurrent(names, opts?.concurrency ?? DEFAULT_CONCURRENCY, async (name) =>
+    findApplication(ctx, name),
+  );
+  return found.filter((record): record is ApplicationRecord => record !== null);
 }
 
 /**

@@ -5,6 +5,12 @@ import { assertPositiveSafeInteger } from "../core/utils/number.ts";
 import { DEFAULT_ARCHIVE_ENTRIES, DEFAULT_ARTIFACT_BYTES } from "../core/types/deploy.ts";
 import { DEFAULT_PORT_RANGE_START } from "../core/placement/ports.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
+import { DEFAULT_LEASE_TTL_MS } from "../core/registry/lease.ts";
+import {
+  DEFAULT_NODE_REFRESH_INTERVAL_MS,
+  DEFAULT_REGISTRY_RESYNC_MS,
+} from "../core/registry/view.ts";
+import { DEFAULT_REAP_INTERVAL_MS } from "./coordinator.ts";
 import type { TransportConfig, TransportMode } from "../core/types/transport.ts";
 import { assertEnvVars, parseEnvVarEntries } from "../core/utils/env.ts";
 import { assertHost, formatHostPort, isHost, parseInterfaceAddress } from "../core/utils/host.ts";
@@ -54,6 +60,13 @@ export interface DaemonConfig {
   platformDomains: string[];
   /** How this node runs and gates the processes that serve its applications. */
   runtime: RuntimeConfig;
+  /**
+   * How often this node re-reads the registry it holds a view of. Absent leaves
+   * every interval at its default, exactly as {@link DaemonConfig.deploy} does.
+   */
+  registry?: RegistryViewConfig;
+  /** How the node behaves on the ticks it spends holding the coordinator lease. */
+  coordinator?: CoordinatorConfig;
   /** Resource bounds applied independently while receiving and expanding deploys. */
   deploy?: DeployConfig;
   /** Whether this node reports on itself at all. Off unless it was turned on. */
@@ -142,6 +155,25 @@ export interface IngressConfig {
   token?: [string, ...string[]];
   /** Traefik entry points; never empty because omission attaches to all of them. */
   entryPoints?: string[];
+}
+
+/**
+ * How often a node looks at the registry beyond the change hint it reads once a
+ * pass. Both are bounds on how stale a view may get, never on correctness.
+ */
+export interface RegistryViewConfig {
+  /** Full re-read interval, whatever the hint says: the bound on a lost hint. */
+  resyncIntervalMs: number;
+  /** Node re-read interval; liveness is an age, and no write announces a death. */
+  nodeRefreshIntervalMs: number;
+}
+
+/** What the node does while it holds the coordinator lease. */
+export interface CoordinatorConfig {
+  /** Lifetime written into the lease; it is renewed at a third of it. */
+  leaseTtlMs: number;
+  /** Time between two reap passes while holding. */
+  reapIntervalMs: number;
 }
 
 /** Every runtime setting, with the defaults already applied. */
@@ -283,6 +315,30 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
       bindHost: resolveBindHost(sources) ?? defaultBindHost(transport, tunnelHost),
       ...(celldEnv === undefined ? {} : { celldEnv }),
     },
+    registry: {
+      resyncIntervalMs: resolvePositiveSafeInteger(
+        "registryResyncMs",
+        sources,
+        DEFAULT_REGISTRY_RESYNC_MS,
+      ),
+      nodeRefreshIntervalMs: resolvePositiveSafeInteger(
+        "registryNodeRefreshMs",
+        sources,
+        DEFAULT_NODE_REFRESH_INTERVAL_MS,
+      ),
+    },
+    coordinator: {
+      leaseTtlMs: resolvePositiveSafeInteger(
+        "coordinatorLeaseTtlMs",
+        sources,
+        DEFAULT_LEASE_TTL_MS,
+      ),
+      reapIntervalMs: resolvePositiveSafeInteger(
+        "coordinatorReapIntervalMs",
+        sources,
+        DEFAULT_REAP_INTERVAL_MS,
+      ),
+    },
     deploy: resolveDeploy(sources),
     observability: {
       enabled: observing,
@@ -408,6 +464,26 @@ const ORIGINS = {
     file: "runtime.portRangeStart",
   },
   bindHost: { flag: "bind-host", env: ["SCAFO_BIND_HOST"], file: "runtime.bindHost" },
+  registryResyncMs: {
+    flag: "registry-resync-ms",
+    env: ["SCAFO_REGISTRY_RESYNC_MS"],
+    file: "registry.resyncIntervalMs",
+  },
+  registryNodeRefreshMs: {
+    flag: "registry-node-refresh-ms",
+    env: ["SCAFO_REGISTRY_NODE_REFRESH_MS"],
+    file: "registry.nodeRefreshIntervalMs",
+  },
+  coordinatorLeaseTtlMs: {
+    flag: "coordinator-lease-ttl-ms",
+    env: ["SCAFO_COORDINATOR_LEASE_TTL_MS"],
+    file: "coordinator.leaseTtlMs",
+  },
+  coordinatorReapIntervalMs: {
+    flag: "coordinator-reap-interval-ms",
+    env: ["SCAFO_COORDINATOR_REAP_INTERVAL_MS"],
+    file: "coordinator.reapIntervalMs",
+  },
   artifactBytes: {
     flag: "artifact-bytes",
     env: ["SCAFO_ARTIFACT_BYTES"],

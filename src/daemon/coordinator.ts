@@ -1,7 +1,9 @@
 /* Lease-elected coordinator for assignment and reaping. */
 
 import { isScafoError, ScafoError } from "../core/error.ts";
+import { assignmentInputs } from "../core/placement/assignment-inputs.ts";
 import { nowDate } from "../core/registry/context.ts";
+import { isNodeLive } from "../core/registry/nodes.ts";
 import {
   acquireLease,
   DEFAULT_LEASE_TTL_MS,
@@ -9,13 +11,29 @@ import {
   releaseLease,
   renewLease,
 } from "../core/registry/lease.ts";
-import { executeReap, planReap, type ReapOptions } from "../core/registry/reaper.ts";
+import {
+  createReapCache,
+  executeReap,
+  planReap,
+  type ReapOptions,
+} from "../core/registry/reaper.ts";
 import type { CoordinatorLease } from "../core/types/registry.ts";
 import { type AssignmentResult, runAssignment } from "./_assign.ts";
+import { registryView } from "./_view.ts";
 import type { DaemonContext } from "./app.ts";
 
-/** Time between two reaps when none is configured. */
-export const DEFAULT_REAP_INTERVAL_MS: number = 60_000;
+/**
+ * Time between two reaps when none is configured.
+ *
+ * TEN MINUTES, because nothing a reap does is urgent: it deletes deploy records
+ * a week past their retention, applications a day past their retirement grace,
+ * and fails deploys whose node is already gone — and the poll route answers that
+ * last one at read time, so nobody waits for a sweep to hear it. What it costs
+ * is a listing of every deploy record in the installation, which is the largest
+ * periodic read there is, so it runs at the cadence of the slowest thing it
+ * decides rather than at the cadence of a lease renewal.
+ */
+export const DEFAULT_REAP_INTERVAL_MS: number = 600_000;
 
 /** What the loop is doing, as reported by the node API. */
 export interface CoordinatorStatus {
@@ -33,6 +51,8 @@ export interface CoordinatorStatus {
   lastAssignment: AssignmentResult | null;
   /** Why the last assignment did nothing; null when it went through. */
   lastAssignFailure: string | null;
+  /** Assignment passes skipped because nothing they decide from had moved. */
+  skippedAssignments: number;
 }
 
 /** The loop, and the handle to run it once or on a timer. */
@@ -68,11 +88,13 @@ export interface CoordinatorOptions {
 
 /** Builds a candidate coordinator; work starts only on start or runOnce. */
 export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptions): Coordinator {
-  const ttlMs = opts?.ttlMs ?? DEFAULT_LEASE_TTL_MS;
+  const ttlMs = opts?.ttlMs ?? daemon.config.coordinator?.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS;
   /* Renew at a third of the TTL: one renewal may fail or run late and the lease
      still holds; a second miss in the same TTL loses it. */
   const tickMs = Math.max(1, Math.floor(ttlMs / 3));
-  const reapIntervalMs = opts?.reapIntervalMs ?? DEFAULT_REAP_INTERVAL_MS;
+  const reapIntervalMs =
+    opts?.reapIntervalMs ?? daemon.config.coordinator?.reapIntervalMs ?? DEFAULT_REAP_INTERVAL_MS;
+  const view = registryView(daemon);
   const assignOptions = {
     keepAlive,
     ...(opts?.livenessWindowMs === undefined ? {} : { livenessWindowMs: opts.livenessWindowMs }),
@@ -97,12 +119,24 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
   let lastAssignAt: string | null = null;
   let lastAssignment: AssignmentResult | null = null;
   let lastAssignFailure: string | null = null;
+  /**
+   * The inputs the last COMPLETED assignment pass decided from, or null when
+   * there is nothing to compare against: before the first pass, after one that
+   * failed, and after this node has been away from the lease — another node may
+   * have decided differently while it was.
+   */
+  let decidedFrom: string | null = null;
+  let skippedAssignments = 0;
+  /* Kept for as long as this node runs: a terminal deploy record never moves,
+     so it is read once and judged from what is held on every sweep after. */
+  const reapCache = createReapCache();
   let rememberedPending = new Map<string, string>();
 
   /** Drops to candidate. Nothing lease-gated may run again until it is retaken. */
   function drop(lease: LeaseHandle): void {
     if (held === null) return;
     held = null;
+    decidedFrom = null;
     console.log(
       `scafo: coordinator lease lost at fence ${String(lease.lease.fence)}, this node is no longer the coordinator`,
     );
@@ -129,6 +163,8 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
     const taken = await acquireLease(daemon.registry, daemon.nodeId, { ttlMs });
     if (taken === null) return;
     held = taken;
+    /* Whoever held it before may have decided something this node never saw. */
+    decidedFrom = null;
     renewedMs = nowDate(daemon.registry).getTime();
     console.log(`scafo: coordinator lease taken at fence ${String(taken.lease.fence)}`);
   }
@@ -152,13 +188,47 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
     return renewed;
   }
 
-  /** Runs assignment every held tick; failed assignments preserve the last decision. */
+  /**
+   * Runs assignment every held tick, unless nothing it decides from has moved
+   * since the last pass that finished; failed assignments preserve the last
+   * decision.
+   *
+   * SKIPPING IS SAFE BECAUSE THE DECISION IS A FUNCTION. Rendezvous hashing over
+   * the same applications and the same live nodes reaches the same placement, so
+   * a pass over inputs that are byte for byte the ones the last pass saw can
+   * only write what is already written. The fingerprint is recorded AFTER the
+   * pass rather than before it: a pass that failed half way through has left the
+   * installation somewhere the next one has to finish from.
+   */
   async function assign(lease: LeaseHandle): Promise<void> {
     try {
-      lastAssignment = await runAssignment(daemon.registry, lease, assignOptions);
+      const snapshot = await view.sync();
+      const live = snapshot.nodes
+        .filter((record) =>
+          isNodeLive(
+            record,
+            nowDate(daemon.registry),
+            opts?.livenessWindowMs === undefined ? {} : { windowMs: opts.livenessWindowMs },
+          ),
+        )
+        .map((record) => record.id);
+      const inputs = assignmentInputs({
+        applications: snapshot.applications,
+        placements: snapshot.placements,
+        live,
+      });
+      if (inputs === decidedFrom) {
+        skippedAssignments++;
+        lastAssignFailure = null;
+        return;
+      }
+
+      lastAssignment = await runAssignment(daemon.registry, lease, { ...assignOptions, snapshot });
+      decidedFrom = inputs;
       observePending(lastAssignment);
       lastAssignFailure = null;
     } catch (error) {
+      decidedFrom = null;
       if (isScafoError(error) && error.code === "lease-lost") drop(lease);
       lastAssignment = null;
       lastAssignFailure = describe(error);
@@ -188,7 +258,16 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
 
   async function reap(lease: LeaseHandle): Promise<void> {
     try {
-      const plan = await planReap(daemon.registry, reapOptions);
+      /* The applications and the fleet come from the view this tick already
+         synced, so a sweep's whole cost is the one listing of the deploy
+         history and a read of the records whose ETag moved. */
+      const snapshot = view.current();
+      const plan = await planReap(daemon.registry, {
+        ...reapOptions,
+        applications: snapshot.applications,
+        nodes: snapshot.nodes,
+        cache: reapCache,
+      });
       /* Planning reads the whole registry; the plan is executed under a lease
          that is fresh from here, not from the start of the tick. */
       await executeReap(daemon.registry, plan, await keepAlive(), reapOptions);
@@ -272,6 +351,7 @@ export function createCoordinator(daemon: DaemonContext, opts?: CoordinatorOptio
         lastAssignAt,
         lastAssignment: lastAssignment === null ? null : { ...lastAssignment },
         lastAssignFailure,
+        skippedAssignments,
       };
     },
 

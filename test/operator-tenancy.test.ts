@@ -592,6 +592,7 @@ function bothApplicationsReconciled(): Reconciler {
   return {
     runOnce: () => Promise.resolve([]),
     kick: () => {},
+    reload: (): Promise<void> => Promise.resolve(),
     start: () => {},
     shutdown: () => Promise.resolve(),
     stop: () => {},
@@ -623,6 +624,7 @@ function coordinatorWithUnplaced(): Coordinator {
     lastAssignAt: "2026-01-01T00:00:00.000Z",
     lastAssignment,
     lastAssignFailure: null,
+    skippedAssignments: 0,
   };
 
   return {

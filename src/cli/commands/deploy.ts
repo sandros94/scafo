@@ -11,6 +11,8 @@ import type { StagedArtifact } from "../../core/types/deploy.ts";
 import { isScafoError, ScafoError } from "../../core/error.ts";
 import { parseReplicas } from "../../core/placement/replicas.ts";
 import { parseLabelEntries } from "../../core/utils/labels.ts";
+import { jitteredDelayMs } from "../../core/utils/backoff.ts";
+import { DEFAULT_QUEUE_TIMEOUT_MS } from "../../daemon/_deploy-scheduler.ts";
 import { packDirectory } from "../../drivers/archive/tar-zst.ts";
 import { resolveApplication } from "../_application.ts";
 import {
@@ -80,6 +82,21 @@ const deployArgs: ArgsDef = {
     type: "string",
     description: "Path to scafo.config.jsonc, read for its remote pin",
   },
+  "wait": {
+    type: "boolean",
+    default: true,
+    description:
+      "Wait for a place in the node's deploy queue when it is full, honouring what the " +
+      "node says about when to come back",
+    negativeDescription: "Fail at once when the node's queue is full",
+  },
+  "queue-timeout": {
+    type: "string",
+    valueHint: "seconds",
+    description:
+      "How long to keep waiting for a place in the node's queue before giving up " +
+      `(${String(DEFAULT_QUEUE_TIMEOUT_MS / 1000)}, the node's own queue deadline)`,
+  },
   "token": {
     type: "string",
     /* A node token is spent by the first request that presents it, so one passed
@@ -143,13 +160,17 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
 
   let accepted: Response;
   try {
-    accepted = await uploadArtifact({
-      nodeUrl,
-      token: await authorize(),
-      application,
-      metadata: meta,
-      artifact,
-    });
+    accepted = await uploadUntilAdmitted(
+      async () =>
+        uploadArtifact({
+          nodeUrl,
+          token: await authorize(),
+          application,
+          metadata: meta,
+          artifact,
+        }),
+      queueWaitFrom(flags),
+    );
   } finally {
     await artifact.dispose();
   }
@@ -193,6 +214,100 @@ export function deployMetadataFrom(flags: Record<string, unknown>): DeployMetada
     ...(replicas === undefined ? {} : { replicas }),
     ...(nodeSelector === undefined ? {} : { nodeSelector }),
   };
+}
+
+/** How long a deploy keeps asking a node that has no room for it right now. */
+export interface QueueWait {
+  /** False fails on the first refusal, as `--no-wait` asks. */
+  wait: boolean;
+  /** How long the waiting may go on, in milliseconds, measured from the first try. */
+  timeoutMs: number;
+  /** Injectable for tests; defaults to `setTimeout`. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Injectable for tests; defaults to `Date.now`. */
+  nowMs?: () => number;
+  /** Injectable for tests; defaults to `Math.random`. */
+  jitter?: () => number;
+  /** Where the two lines about waiting go; defaults to stdout. */
+  log?: (line: string) => void;
+}
+
+/** What the flags say about waiting for a place in the queue. */
+export function queueWaitFrom(flags: Record<string, unknown>): QueueWait {
+  const written = text(flags["queue-timeout"]);
+  if (written === undefined) {
+    return { wait: flags.wait !== false, timeoutMs: DEFAULT_QUEUE_TIMEOUT_MS };
+  }
+
+  const seconds = Number(written);
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    throw new ScafoError("invalid-input", "Invalid queue timeout", {
+      detail: `"--queue-timeout" must be a number of seconds, got ${JSON.stringify(written)}`,
+    });
+  }
+  return { wait: flags.wait !== false, timeoutMs: Math.round(seconds * 1000) };
+}
+
+/**
+ * Uploads, and keeps asking while the node has no room, until it is admitted or
+ * the wait runs out.
+ *
+ * WHY WAIT AT ALL. A node takes one deploy at a time and queues the rest; a
+ * whole team pushing inside one publish fills that queue, and the deploys past
+ * it are refused with `deploy-overloaded` and a `Retry-After`. Every one of
+ * those is a red pipeline somebody has to re-run by hand, for no reason other
+ * than arriving in a busy second — so the command comes back instead, when the
+ * node said to, until the node's own queue deadline has passed. `--no-wait`
+ * fails on the first refusal, which is what a caller that would rather see the
+ * queue than sit in it asks for.
+ *
+ * The staged artifact is re-SENT, never re-packed: `send` opens a fresh stream
+ * over the same file each time.
+ *
+ * Two lines and no more: one when the waiting starts, one when it ends.
+ */
+export async function uploadUntilAdmitted<T>(send: () => Promise<T>, opts: QueueWait): Promise<T> {
+  const sleep = opts.sleep ?? delay;
+  const nowMs = opts.nowMs ?? ((): number => Date.now());
+  const log = opts.log ?? ((line: string): void => console.log(line));
+  const startedMs = nowMs();
+  let waiting = false;
+
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const response = await send();
+      if (waiting) {
+        log(
+          `scafo: admitted after waiting ${String(Math.round((nowMs() - startedMs) / 1000))}s ` +
+            `for a place in the node's deploy queue`,
+        );
+      }
+      return response;
+    } catch (error) {
+      if (!opts.wait || !isScafoError(error) || error.code !== "deploy-overloaded") throw error;
+
+      /* The node's own number when it named one, and the jittered backoff
+         otherwise — never less than the node asked for, so fifty callers
+         refused in the same second do not all come back in the next one. */
+      const backoffMs = jitteredDelayMs(attempt, {
+        baseMs: 1000,
+        maxMs: 15_000,
+        ...(opts.jitter === undefined ? {} : { jitter: opts.jitter }),
+      });
+      const waitMs = Math.max(error.retryAfterMs ?? 0, backoffMs);
+      if (nowMs() + waitMs - startedMs > opts.timeoutMs) throw error;
+
+      if (!waiting) {
+        waiting = true;
+        log(
+          `scafo: the node's deploy queue is full; waiting up to ` +
+            `${String(Math.round(opts.timeoutMs / 1000))}s for a place in it ` +
+            `(--no-wait fails at once instead)`,
+        );
+      }
+      await sleep(waitMs);
+    }
+  }
 }
 
 export interface DeployUploadOptions {

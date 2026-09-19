@@ -35,6 +35,7 @@ import {
 import type { NodeRecord } from "../../src/core/types/registry.ts";
 import type { ProcessStatus } from "../../src/core/types/supervisor.ts";
 import { createUns3Store } from "../../src/drivers/store/uns3.ts";
+import { ADOPTION_BOUND_MS } from "./_harness.ts";
 
 const env = process.env;
 const E2E = env.SCAFO_E2E === "1";
@@ -124,7 +125,15 @@ const REASSIGN_STEP_TIMEOUT_MS = 300_000;
 /** Draining reassignment must finish before the liveness-expiry bound. */
 const GRACEFUL_DRAIN_BUDGET_MS = 60_000;
 
-/** The lease TTL the daemon runs with; failover is bounded by a few of these. */
+/**
+ * The lease TTL the daemon runs with; failover is bounded by a few of these.
+ *
+ * Read off the default rather than written down again: the lease lifetime is a
+ * setting, and a bound that quoted a number of its own would pass or fail for
+ * reasons that have nothing to do with failover.
+ */
+/* Set on every node through the setting an operator has, shorter than the
+   default so that the failover case waits seconds rather than minutes. */
 const LEASE_TTL_MS = 15_000;
 
 /** One node's ingress, daemon, and host-facing ports. */
@@ -267,6 +276,39 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
         servedAt[node.id] = Date.now() - at;
       }
       observed.servedAfterDeployMs = servedAt;
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "has the node that did NOT accept a deploy serving it seconds later",
+    async () => {
+      /*
+       * A deploy lands on ONE node. The others are told nothing directly: their
+       * next reconcile pass sees the application's deployment revision move, and
+       * each asks its own runtime process to adopt the fleet's pointer at once
+       * rather than waiting out that process's own thirty-second poll. This
+       * measures the node that took no part in the deploy.
+       */
+      const accepting = nodes[0] as Node;
+      const peer = nodes.find((node) => node.id !== accepting.id) as Node;
+
+      const result = await runCli(deployArgs(await stageApp("v2"), APPLICATION, [], accepting), {});
+      expectCleanExit(result);
+      expect(result.output, daemonLogTail()).toContain("deployed");
+      const deployedAt = Date.now();
+
+      await untilServes(peer, hostOf(APPLICATION), "v2");
+      const adoptedMs = Date.now() - deployedAt;
+      observed.peerAdoptedMs = { node: peer.id, ms: adoptedMs };
+      console.log(
+        `e2e: ${peer.id}, which did not accept the deploy, served v2 ` +
+          `${String(adoptedMs)}ms after it was deployed`,
+      );
+      expect(
+        adoptedMs,
+        `${String(adoptedMs)}ms from "deployed" to ${peer.id} serving v2`,
+      ).toBeLessThan(ADOPTION_BOUND_MS);
     },
     STEP_TIMEOUT_MS,
   );
@@ -740,8 +782,11 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expect(failoverMs).toBeGreaterThanOrEqual(LEASE_TTL_MS - LEASE_TTL_MS / 3);
       expect(failoverMs).toBeLessThanOrEqual(3 * LEASE_TTL_MS);
 
-      const answer = await untilServes(survivor, hostOf(APPLICATION), "v1");
-      expect(JSON.parse(answer.body).version).toBe("v1");
+      /* v2, because the deploy that measured peer adoption put it there: what
+         this step is about is that a coordinator's death interrupts nothing the
+         survivor is serving. */
+      const answer = await untilServes(survivor, hostOf(APPLICATION), "v2");
+      expect(JSON.parse(answer.body).version).toBe("v2");
     },
     STEP_TIMEOUT_MS,
   );
@@ -838,6 +883,7 @@ async function startNode(id: string, labels?: string): Promise<Node> {
       /* What the peers dial: the fleet document's upstreams are this address. */
       SCAFO_ADVERTISE: `${bridgeAddress}:${String(NODE_PORT)}`,
       SCAFO_BIND_HOST: "0.0.0.0",
+      SCAFO_COORDINATOR_LEASE_TTL_MS: String(LEASE_TTL_MS),
       CELLD_ESBUILD: "/usr/local/bin/esbuild",
       ...(labels === undefined ? {} : { SCAFO_NODE_LABELS: labels }),
     })

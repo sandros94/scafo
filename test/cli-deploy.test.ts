@@ -7,10 +7,14 @@ import {
   configEditFrom,
   deploy,
   deployMetadataFrom,
+  type QueueWait,
+  queueWaitFrom,
+  uploadUntilAdmitted,
   watchDeploy,
 } from "../src/cli/commands/deploy.ts";
+import { DEFAULT_QUEUE_TIMEOUT_MS } from "../src/daemon/_deploy-scheduler.ts";
 import { editedConfig, isEmptyEdit } from "../src/cli/_deploy-config.ts";
-import type { ProblemDetails } from "../src/core/error.ts";
+import { type ProblemDetails, ScafoError } from "../src/core/error.ts";
 import type { DeployStatus } from "../src/daemon/deploys.ts";
 import { rejectsWith } from "./_helpers.ts";
 
@@ -238,3 +242,132 @@ async function printedBy(run: () => Promise<unknown>): Promise<string[]> {
   }
   return lines;
 }
+
+describe("waiting for a place in the node's deploy queue", () => {
+  /** A node that refuses `refusals` times and then takes the deploy. */
+  function nodeRefusing(refusals: number, headers?: Record<string, string>) {
+    let sent = 0;
+    return {
+      attempts: (): number => sent,
+      send: async (): Promise<Response> => {
+        sent++;
+        if (sent > refusals) return new Response(`{"id":"shop.1"}`, { status: 202 });
+        const asked = headers?.["retry-after"];
+        throw new ScafoError(
+          "deploy-overloaded",
+          "This node has no room",
+          asked === undefined ? {} : { retryAfterMs: Number(asked) * 1000 },
+        );
+      },
+    };
+  }
+
+  /** A wait whose clock, sleeping and jitter the test owns. */
+  function waiting(overrides: Partial<QueueWait> = {}): {
+    opts: QueueWait;
+    slept: number[];
+    lines: string[];
+  } {
+    const slept: number[] = [];
+    const lines: string[] = [];
+    let nowMs = 0;
+    return {
+      slept,
+      lines,
+      opts: {
+        wait: true,
+        timeoutMs: 600_000,
+        nowMs: () => nowMs,
+        sleep: (ms: number): Promise<void> => {
+          slept.push(ms);
+          nowMs += ms;
+          return Promise.resolve();
+        },
+        /* No randomness: what is measured is the formula, not the draw. */
+        jitter: () => 1,
+        log: (line: string) => lines.push(line),
+        ...overrides,
+      },
+    };
+  }
+
+  it("comes back until it is admitted, and says so once at each end", async () => {
+    const node = nodeRefusing(3);
+    const { opts, slept, lines } = waiting();
+
+    const response = await uploadUntilAdmitted(node.send, opts);
+
+    expect(response.status).toBe(202);
+    expect(node.attempts()).toBe(4);
+    /* One second, doubling, capped: the backoff helper's own formula. */
+    expect(slept).toEqual([1000, 2000, 4000]);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("queue is full");
+    expect(lines[1]).toContain("admitted after waiting 7s");
+  });
+
+  it("waits as long as the node asked when the node asked for longer", async () => {
+    const node = nodeRefusing(1, { "retry-after": "30" });
+    const { opts, slept } = waiting();
+
+    await uploadUntilAdmitted(node.send, opts);
+
+    expect(slept).toEqual([30_000]);
+  });
+
+  it("says nothing at all when the first try is taken", async () => {
+    const node = nodeRefusing(0);
+    const { opts, lines } = waiting();
+
+    await uploadUntilAdmitted(node.send, opts);
+
+    expect(lines).toEqual([]);
+  });
+
+  it("gives up rather than waiting past its deadline, with the node's own refusal", async () => {
+    const node = nodeRefusing(100);
+    const { opts, slept } = waiting({ timeoutMs: 5000 });
+
+    await rejectsWith(() => uploadUntilAdmitted(node.send, opts), "deploy-overloaded");
+
+    /* Never a sleep that would end past the deadline: it stops instead. */
+    expect(slept.reduce((total, ms) => total + ms, 0)).toBeLessThanOrEqual(5000);
+  });
+
+  it("fails on the first refusal when --no-wait was given", async () => {
+    const node = nodeRefusing(100);
+    const { opts, slept, lines } = waiting({ wait: false });
+
+    await rejectsWith(() => uploadUntilAdmitted(node.send, opts), "deploy-overloaded");
+
+    expect(node.attempts()).toBe(1);
+    expect(slept).toEqual([]);
+    expect(lines).toEqual([]);
+  });
+
+  it("never waits on a refusal that is not about the queue", async () => {
+    const { opts } = waiting();
+    let sent = 0;
+
+    await rejectsWith(
+      () =>
+        uploadUntilAdmitted(() => {
+          sent++;
+          return Promise.reject(new ScafoError("invalid-input", "no config in the archive"));
+        }, opts),
+      "invalid-input",
+    );
+
+    expect(sent).toBe(1);
+  });
+
+  it("reads the flags a caller wrote, and refuses a timeout that is not one", () => {
+    expect(queueWaitFrom(flagsOf(["--name", "app"]))).toMatchObject({
+      wait: true,
+      timeoutMs: DEFAULT_QUEUE_TIMEOUT_MS,
+    });
+    expect(queueWaitFrom(flagsOf(["--no-wait"]))).toMatchObject({ wait: false });
+    expect(queueWaitFrom(flagsOf(["--queue-timeout", "90"]))).toMatchObject({ timeoutMs: 90_000 });
+    expect(() => queueWaitFrom(flagsOf(["--queue-timeout", "soon"]))).toThrow("queue timeout");
+  });
+});

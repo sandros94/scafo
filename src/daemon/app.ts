@@ -9,9 +9,15 @@ import { deploymentRevision } from "../core/registry/_revision.ts";
 import { findApplication } from "../core/registry/applications.ts";
 import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
+import type { RegistryView } from "../core/registry/view.ts";
 import { checkDomain } from "../core/registry/domains.ts";
 import { isLeaseExpired } from "../core/registry/lease.ts";
-import { getDeployRecord } from "../core/registry/deploys.ts";
+import {
+  abandonedDeploy,
+  getDeployRecord,
+  isDeployIdle,
+  isDeployTerminal,
+} from "../core/registry/deploys.ts";
 import { coordinatorKey, nodeKey, parseDeployId } from "../core/registry/paths.ts";
 import type { IngressFormat } from "../core/types/ingress.ts";
 import {
@@ -22,6 +28,7 @@ import {
 import type {
   ApplicationRecord,
   CoordinatorLease,
+  DeployRecord,
   NodeRecord,
   NodeVersions,
 } from "../core/types/registry.ts";
@@ -57,6 +64,13 @@ export interface DaemonContext {
   /** Persistent node identity; configuration may only pin it. */
   nodeId: string;
   registry: RegistryContext;
+  /**
+   * The registry view this node's loops share: the reconcile pass, the
+   * coordinator and deploy intake's version-skew gate all read it rather than
+   * listing the installation each for themselves. Built on first use by
+   * `registryView`, so a caller that wants one on its own clock supplies it.
+   */
+  view?: RegistryView;
   supervisor: Supervisor;
   /**
    * The binaries this daemon booted with, and what its node record reports. The
@@ -275,7 +289,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
         detail: `"${id}" is not a deploy of application "${parsed.application}"`,
       });
     }
-    return deployStatusOf(record);
+    return deployStatusOf(await judgeAbandoned(daemon, record));
   });
 
   /* Trusted-key administration requires an operator token, never a node token. */
@@ -297,6 +311,29 @@ export function createNodeApp(daemon: DaemonContext): H3 {
   }
 
   return app;
+}
+
+/**
+ * The record as it stands, or the failure a deploy nobody is carrying out any
+ * more has already suffered.
+ *
+ * JUDGED AT READ TIME rather than waited for. The state of a deploy lives in the
+ * daemon that accepted it, so a node that stopped answering has taken it with
+ * it; the record it left says `uploading` and will say so until a coordinator
+ * sweeps. A caller polling for an answer gets one now instead — `deploy-timeout`,
+ * the same code and the same detail the sweep will eventually write down.
+ *
+ * It costs ONE extra read and only for a deploy that is both unfinished and has
+ * not moved for a whole liveness window, which is the only case where the
+ * question can have a different answer. Nothing is written: a poll is a read.
+ */
+async function judgeAbandoned(daemon: DaemonContext, record: DeployRecord): Promise<DeployRecord> {
+  const now = nowDate(daemon.registry);
+  if (!isDeployIdle(record, now) || isDeployTerminal(record.state)) return record;
+
+  const node = await readJson<NodeRecord>(daemon.registry, nodeKey(record.node));
+  const failure = abandonedDeploy(record, { now, node: node?.value ?? null });
+  return failure === null ? record : { ...record, ...failure };
 }
 
 /** Where the status of a deploy is polled. */

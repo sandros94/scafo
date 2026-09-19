@@ -63,6 +63,16 @@ export interface RuntimeSpecInput {
   baseEnv?: Record<string, string>;
 }
 
+/** Where one running process of this node is reached to be spoken to. */
+export interface RuntimeReloadInput {
+  /** The application the process serves; it is also the process's supervisor id. */
+  application: string;
+  /** Host the process's internal listener was bound on, as this node dials it. */
+  host: string;
+  /** Port of that internal listener. */
+  port: number;
+}
+
 /** Runs one application's Celld process on a node. */
 export interface RuntimeDriver {
   /**
@@ -73,4 +83,19 @@ export interface RuntimeDriver {
   readonly stopGraceMs: number;
   /** Materializes the spec that runs one application on this node. */
   processSpec(input: RuntimeSpecInput): ProcessSpec;
+  /**
+   * Asks a process of this node to adopt the fleet's current deployment NOW,
+   * instead of when its own poll comes round.
+   *
+   * AN OPTIMIZATION AND NOTHING MORE. The runtime already notices a pointer that
+   * moved, on a timer of its own; this only shortens the wait between a deploy
+   * being recorded and the application serving it. Every caller therefore treats
+   * a failure — a refused connection, a refusal, a listener that did not answer
+   * in time — as "log once and carry on", and no state anywhere depends on it
+   * having happened.
+   *
+   * Bounded by the driver: a caller never waits on this longer than a deploy can
+   * afford. Throws whatever went wrong, so a caller may say what it was.
+   */
+  reload(input: RuntimeReloadInput): Promise<void>;
 }

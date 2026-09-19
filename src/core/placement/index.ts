@@ -1,3 +1,4 @@
+export * from "./assignment-inputs.ts";
 export * from "./fleet-routes.ts";
 export * from "./hosts.ts";
 export * from "./ports.ts";

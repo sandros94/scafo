@@ -11,7 +11,7 @@ type ListPage = Awaited<ReturnType<S3Client["list"]>>;
 
 function pageOf(keys: string[], more: Partial<ListPage> = {}): ListPage {
   return {
-    contents: keys.map((key) => ({ key, size: 0, etag: undefined, lastModified: "" })),
+    contents: keys.map((key) => ({ key, size: 0, etag: `e-${key}`, lastModified: "" })),
     commonPrefixes: [],
     isTruncated: false,
     ...more,
@@ -24,8 +24,22 @@ function agedPage(times: Record<string, string>): ListPage {
     contents: Object.entries(times).map(([key, lastModified]) => ({
       key,
       size: 0,
-      etag: undefined,
+      etag: `e-${key}`,
       lastModified,
+    })),
+    commonPrefixes: [],
+    isTruncated: false,
+  } as ListPage;
+}
+
+/** A page whose objects carry exactly the ETags the store sent, warts included. */
+function etaggedPage(etags: Record<string, string | undefined>): ListPage {
+  return {
+    contents: Object.entries(etags).map(([key, etag]) => ({
+      key,
+      size: 0,
+      etag,
+      lastModified: "2026-01-01T00:00:00.000Z",
     })),
     commonPrefixes: [],
     isTruncated: false,
@@ -97,8 +111,8 @@ describe("listing what the store said about each object", () => {
     const entries = await createUns3Store(client, { bucket: "b", prefix: "p" }).listEntries("");
 
     expect(entries).toEqual([
-      { key: "a.json", lastModified: new Date("2026-01-01T00:00:00.000Z") },
-      { key: "b.json", lastModified: new Date("2026-01-02T03:04:05.000Z") },
+      { key: "a.json", etag: `"e-p/a.json"`, lastModified: new Date("2026-01-01T00:00:00.000Z") },
+      { key: "b.json", etag: `"e-p/b.json"`, lastModified: new Date("2026-01-02T03:04:05.000Z") },
     ]);
   });
 
@@ -107,7 +121,37 @@ describe("listing what the store said about each object", () => {
 
     const entries = await createUns3Store(client, { bucket: "b", prefix: "p" }).listEntries("");
 
-    expect(entries).toEqual([{ key: "a.json" }, { key: "b.json" }]);
+    expect(entries).toEqual([
+      { key: "a.json", etag: `"e-p/a.json"` },
+      { key: "b.json", etag: `"e-p/b.json"` },
+    ]);
+  });
+
+  it("quotes a listed ETag the way a header carries one, weak marker taken off", async () => {
+    /* The XML listing hands over the value with its quotes already stripped, and
+       a weak marker `If-Match` would refuse. Both are normalized to the one form
+       `get` and `put` answer with, so a cached listing entry is a precondition. */
+    const { client } = scripted([
+      etaggedPage({
+        "p/bare.json": "abc123",
+        "p/quoted.json": `"abc124"`,
+        "p/weak.json": `W/abc125`,
+      }),
+    ]);
+
+    const entries = await createUns3Store(client, { bucket: "b", prefix: "p" }).listEntries("");
+
+    expect(entries.map((entry) => entry.etag)).toEqual([`"abc123"`, `"abc124"`, `"abc125"`]);
+  });
+
+  it("refuses a listing that named no ETag, because nothing could tell a change from none", async () => {
+    const { client } = scripted([etaggedPage({ "p/a.json": undefined })]);
+
+    const error = await rejectsWith(
+      () => createUns3Store(client, { bucket: "b", prefix: "p" }).listEntries(""),
+      "store-nonconforming",
+    );
+    expect(error.detail).toContain("p/a.json");
   });
 
   it("skips the folder phantoms a file-backed store lists, exactly as the keys do", async () => {

@@ -4,10 +4,17 @@
  */
 
 import { ScafoError, type ScafoErrorCode } from "../error.ts";
-import type { DeploymentSource, DeployRecord, DeployState, OidcActor } from "../types/registry.ts";
+import type {
+  DeploymentSource,
+  DeployRecord,
+  DeployState,
+  NodeRecord,
+  OidcActor,
+} from "../types/registry.ts";
 import { formatDuration, isCasConflict, namesFromKeys } from "./_shared.ts";
 import { createJson, readJson, updateJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
+import { isNodeAnswering, NODE_LIVENESS_WINDOW_MS } from "./nodes.ts";
 import { deployKey, deploysPrefix, parseDeployId } from "./paths.ts";
 
 /**
@@ -146,6 +153,51 @@ export async function getDeployRecord(
     });
   }
   return found.value;
+}
+
+/**
+ * Whether a deploy still on its way has not moved for a whole liveness window.
+ *
+ * THE FIRST HALF of abandonment, and the cheap one. A deploy that wrote a moment
+ * ago is being carried out whatever the fleet says about its node's heartbeat,
+ * so nothing asks about the fleet until this is true.
+ */
+export function isDeployIdle(record: DeployRecord, now: Date): boolean {
+  const idleMs = now.getTime() - Date.parse(record.updatedAt);
+  return Number.isFinite(idleMs) && idleMs >= NODE_LIVENESS_WINDOW_MS;
+}
+
+/**
+ * How a deploy nobody is carrying out any more ended, or null while it is still
+ * somebody's to finish.
+ *
+ * ASKED BOTH BY THE SWEEP AND BY A POLL, which is why it is here rather than in
+ * the reaper: the state of a deploy lived in the daemon that accepted it, so a
+ * node that stopped answering has taken it with it, and the caller waiting on
+ * the other end must be told now rather than at the coordinator's next sweep.
+ * A poll ANSWERS with this and writes nothing — the sweep is what records it —
+ * so the two never disagree about the outcome, only about when it is stored.
+ *
+ * `deploy-timeout` because that is what happened to it: the deploy went quiet
+ * for longer than a node may, and it is given up on rather than refused —
+ * nothing about the caller, its input or the fleet's capabilities was ever wrong.
+ *
+ * `node` is the accepting node's record, or null when it has none at all, which
+ * is not "recently seen": nothing says when it was last there.
+ */
+export function abandonedDeploy(
+  record: DeployRecord,
+  opts: { now: Date; node: NodeRecord | null },
+): DeployRecordPatch | null {
+  if (isDeployTerminal(record.state)) return null;
+  if (!isDeployIdle(record, opts.now)) return null;
+  if (opts.node !== null && isNodeAnswering(opts.node, opts.now)) return null;
+
+  return {
+    state: "failed",
+    code: "deploy-timeout",
+    detail: `node "${record.node}" stopped answering while this deploy was ${record.state}`,
+  };
 }
 
 /** Deploy records of `application` in id order; ones deleted while listing are omitted. */

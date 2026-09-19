@@ -9,6 +9,7 @@ import {
   createApplication,
   createDeployment,
   createDeployRecord,
+  createReapCache,
   DEFAULT_RETIREMENT_GRACE_MS,
   DEPLOY_RECORD_RETENTION_MS,
   executeReap,
@@ -24,9 +25,12 @@ import {
   unretireApplication,
   updateDeployRecord,
 } from "../src/core/registry/index.ts";
+import { deleteKey } from "../src/core/registry/cas.ts";
 import {
   applicationKey,
   deploymentKey,
+  deploymentsRootPrefix,
+  deploysRootPrefix,
   deployKey,
   domainKey,
   fleetPrefix,
@@ -108,6 +112,24 @@ describe("planReap", () => {
     expect((await planReap(clock.ctx, opts)).deployments).toEqual([
       expect.objectContaining({ version: VERSION, reason: expect.stringContaining("old") }),
     ]);
+  });
+
+  it("lists every application's deployments once, and reads each record once", async () => {
+    /* A deployment record is written once and never rewritten, so a sweep that
+       has already read one has nothing left to ask about it. */
+    const cache = createReapCache();
+    const withCache: ReapOptions = { ...opts, cache };
+    await planReap(clock.ctx, withCache);
+
+    store.readKeys.length = 0;
+    store.listedPrefixes.length = 0;
+    const plan = await planReap(clock.ctx, withCache);
+
+    expect(plan.deployments).not.toEqual([]);
+    expect(store.readKeys.filter((key) => key.startsWith(deploymentsRootPrefix()))).toEqual([]);
+    expect(
+      store.listedPrefixes.filter((prefix) => prefix.startsWith(deploymentsRootPrefix())),
+    ).toEqual([deploymentsRootPrefix()]);
   });
 });
 
@@ -431,6 +453,61 @@ describe("deploy records", () => {
 
     await expect(getDeployRecord(clock.ctx, KEEPER, NEIGHBOURS)).resolves.toMatchObject({
       application: KEEPER,
+    });
+  });
+
+  describe("what a second sweep costs", () => {
+    it("lists the whole history once and reads no record it has already read", async () => {
+      /* What makes a ten-minute sweep affordable over a week of history: a deploy
+         that has finished never moves again, so its ETag never moves either. */
+      for (let index = 0; index < 5; index++) {
+        const id = `${APPLICATION}.${String(index).padStart(16, "0")}`;
+        await createDeployRecord(clock.ctx, APPLICATION, { id, node: NODE });
+        await updateDeployRecord(clock.ctx, APPLICATION, id, {
+          state: "deployed",
+          deployment: VERSION,
+        });
+      }
+      const cache = createReapCache();
+      const withCache: ReapOptions = { ...opts, cache };
+
+      await planReap(clock.ctx, withCache);
+      store.readKeys.length = 0;
+      const plan = await planReap(clock.ctx, withCache);
+
+      expect(plan.deploys).toEqual([]);
+      expect(store.readKeys.filter((key) => key.startsWith(deploysRootPrefix()))).toEqual([]);
+    });
+
+    it("reads a record again the moment it moves, and forgets one that is gone", async () => {
+      const cache = createReapCache();
+      const withCache: ReapOptions = { ...opts, cache };
+      await running();
+      await planReap(clock.ctx, withCache);
+
+      await updateDeployRecord(clock.ctx, APPLICATION, RUNNING, { state: "uploading" });
+      store.readKeys.length = 0;
+      await planReap(clock.ctx, withCache);
+      expect(store.readKeys.filter((key) => key.startsWith(deploysRootPrefix()))).toEqual([
+        deployKey(APPLICATION, RUNNING),
+      ]);
+
+      await deleteKey(clock.ctx, deployKey(APPLICATION, RUNNING));
+      await planReap(clock.ctx, withCache);
+      expect(cache.records.size).toBe(0);
+    });
+
+    it("reads one listing of every application's deploys, not one per application", async () => {
+      await createDeployRecord(clock.ctx, KEEPER, { id: NEIGHBOURS, node: NODE });
+      await running();
+      store.listedPrefixes.length = 0;
+
+      await planReap(clock.ctx, opts);
+
+      /* One listing of the whole history, whatever the applications number. */
+      expect(
+        store.listedPrefixes.filter((prefix) => prefix.startsWith(deploysRootPrefix())),
+      ).toEqual([deploysRootPrefix()]);
     });
   });
 });

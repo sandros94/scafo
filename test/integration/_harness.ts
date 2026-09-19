@@ -48,6 +48,18 @@ export const STEP_TIMEOUT_MS: number = 180_000;
 /** Per-assertion ceiling; the reconcile interval is 5s, so this is many passes. */
 export const DEADLINE_MS: number = 120_000;
 export const BOOT_DEADLINE_MS: number = 60_000;
+/**
+ * How long a node's runtime process may take to serve a deployment that has
+ * just been recorded.
+ *
+ * WELL UNDER CELLD'S OWN THIRTY-SECOND POINTER POLL, which is the whole point of
+ * asking a process to adopt at once: a deploy whose caller already holds a
+ * `deployed` record must not leave the application serving the previous version
+ * for half a minute. Ten seconds rather than five, because this is measured on
+ * whatever machine CI gave the suite — the reconcile interval alone is five —
+ * and a bound that fails on a loaded runner teaches nothing.
+ */
+export const ADOPTION_BOUND_MS: number = 10_000;
 /** SeaweedFS is the slowest thing here to become useful, by a wide margin. */
 export const STORE_DEADLINE_MS: number = 120_000;
 /** A blocked local tunnel must not consume the whole store readiness budget. */

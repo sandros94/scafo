@@ -11,12 +11,14 @@ import {
   createDeployment,
   DEFAULT_RETIREMENT_GRACE_MS,
   getApplication,
+  registerNode,
   readJson,
   retireApplication,
 } from "../src/core/registry/index.ts";
 import { deploymentKey, coordinatorKey } from "../src/core/registry/paths.ts";
 import type { CoordinatorLease } from "../src/core/types/registry.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
+import { hintingStore } from "../src/core/registry/changes.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, type ManualClock, rejectsWith } from "./_helpers.ts";
 
@@ -30,7 +32,9 @@ let clock: ManualClock;
 
 beforeEach(async () => {
   store = new FaultStore(new MemoryCasStore());
-  clock = ctxWith(store);
+  /* Hinting, as `createRegistry` builds every registry: a coordinator decides
+     from its view, and a view only re-reads what it is told has moved. */
+  clock = ctxWith(hintingStore(store));
 
   await deployed(APP);
 });
@@ -181,6 +185,15 @@ describe("createCoordinator", () => {
 
   it("renews mid-pass, so a pass longer than the TTL does not lose the lease", async () => {
     for (const name of ["one", "two", "three", "four"]) await deployed(name);
+    /* A live node, so the pass has placements to decide and write: a pass with
+       nothing to read is not one that can outlast anything. */
+    await registerNode(clock.ctx, {
+      v: 1,
+      id: "node-a",
+      publicKey: { kty: "OKP", crv: "Ed25519", x: "node-a" },
+      addresses: { internal: "10.0.0.1", apiPort: 7400 },
+      heartbeatAt: new Date(clock.nowMs()).toISOString(),
+    });
     const coordinator = coordinatorFor("node-a");
     await coordinator.runOnce();
 

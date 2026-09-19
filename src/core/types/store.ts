@@ -25,6 +25,19 @@ export interface StoredEntry {
   /** The key, exactly as {@link CasStore.list} would have returned it. */
   key: string;
   /**
+   * The object's ETag, in the SAME FORM {@link CasStore.get} and
+   * {@link CasStore.put} answer with, so a listed entry and a read of the same
+   * key compare equal with `===` and a cached one conditions a later write.
+   *
+   * REQUIRED, because it is what makes "read only what changed" possible: a
+   * caller holding a listing and a cache of ETags knows which keys it has to
+   * read and which it may skip. A store whose listing carries no ETag for an
+   * entry is `ScafoError("store-nonconforming")` — there is nothing to compare,
+   * and guessing "changed" would read the whole installation every pass while
+   * guessing "unchanged" would never see a write at all.
+   */
+  etag: string;
+  /**
    * When the store says the object was last written, when its listing carried a
    * timestamp that reads as a date. A store that said nothing usable leaves it
    * out rather than guessing, and a caller that needs an age reads the absence

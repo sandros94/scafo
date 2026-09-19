@@ -6,12 +6,11 @@ import { assignNodes } from "../core/placement/rendezvous.ts";
 import { resolveReplicas } from "../core/placement/replicas.ts";
 import { describeSelector, eligibleNodes } from "../core/placement/selector.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
-import { listApplicationRecords } from "../core/registry/applications.ts";
 import type { KeepAlive, LeaseHandle } from "../core/registry/lease.ts";
-import { isNodeLive, listNodeRecords } from "../core/registry/nodes.ts";
+import { isNodeLive } from "../core/registry/nodes.ts";
+import { createRegistryView, type RegistrySnapshot } from "../core/registry/view.ts";
 import {
   deletePlacement,
-  listPlacements,
   type PlacementOutcome,
   writePlacement,
 } from "../core/registry/placement.ts";
@@ -61,6 +60,13 @@ export interface AssignmentOptions {
   livenessWindowMs?: number;
   /** Called between applications, so a pass longer than the lease TTL keeps it. */
   keepAlive?: KeepAlive;
+  /**
+   * The registry as the caller has already read it. A coordinator hands over the
+   * snapshot its view synced for this tick, so the pass costs nothing beyond the
+   * writes it makes; a caller with no view of its own leaves it out and one is
+   * synced here, which reads the installation exactly once.
+   */
+  snapshot?: RegistrySnapshot;
 }
 
 /**
@@ -88,12 +94,13 @@ export async function runAssignment(
   lease: LeaseHandle,
   opts?: AssignmentOptions,
 ): Promise<AssignmentResult> {
+  const snapshot = opts?.snapshot ?? (await createRegistryView(ctx).sync());
   const now = nowDate(ctx);
   const window = opts?.livenessWindowMs;
   /* Kept as RECORDS rather than reduced to ids here: an application's selector
      is matched against the labels an operator set on a node, and only the record
      carries them. */
-  const fleet: NodeRecord[] = (await listNodeRecords(ctx)).filter((record) =>
+  const fleet: NodeRecord[] = snapshot.nodes.filter((record) =>
     isNodeLive(record, now, window === undefined ? {} : { windowMs: window }),
   );
   const live = fleet.map((record) => record.id);
@@ -116,20 +123,19 @@ export async function runAssignment(
     unplaced: [],
   };
 
-  return runAssignmentOverFleet(ctx, lease, fleet, result, opts?.keepAlive);
+  return runAssignmentOverFleet(ctx, lease, fleet, snapshot, result, opts?.keepAlive);
 }
 
 async function runAssignmentOverFleet(
   ctx: RegistryContext,
   initial: LeaseHandle,
   fleet: NodeRecord[],
+  snapshot: RegistrySnapshot,
   result: AssignmentResult,
   keepAlive?: KeepAlive,
 ): Promise<AssignmentResult> {
-  const [records, placements] = await Promise.all([
-    listApplicationRecords(ctx),
-    listPlacements(ctx),
-  ]);
+  const records = snapshot.applications;
+  const placements = snapshot.placements;
   /* The handle every write is fenced with, refreshed as the pass goes on. */
   let lease = initial;
   const served = new Set<string>();

@@ -13,7 +13,19 @@ export interface LeaseHandle {
   etag: string;
 }
 
-export const DEFAULT_LEASE_TTL_MS: number = 15_000;
+/**
+ * How long a lease claims authority for when the caller states nothing.
+ *
+ * FORTY-FIVE SECONDS BUYS BACK NO FAILOVER TIME AND CUTS THE IDLE WRITES TO A
+ * THIRD. What a dead coordinator held is only reassigned once the fleet has
+ * decided the node is gone, and that decision is the liveness window —
+ * ninety seconds of missed heartbeats. Both clocks start at the same death, so
+ * any lease lifetime up to that window expires while the fleet is still waiting
+ * to notice, and shortening it only makes the holder write more often: the lease
+ * is renewed at a third of this, forever, on an installation where nothing is
+ * happening.
+ */
+export const DEFAULT_LEASE_TTL_MS: number = 45_000;
 
 /**
  * What long lease-gated work calls at its safe points — between two

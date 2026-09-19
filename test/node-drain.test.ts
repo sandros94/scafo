@@ -13,6 +13,7 @@ import {
   heartbeatNode,
   isNodeLive,
   type LeaseHandle,
+  nodeKey,
   NODE_LIVENESS_WINDOW_MS,
   readPlacement,
   registerNode,
@@ -165,7 +166,11 @@ describe("drainThisNode, as a shutdown calls it", () => {
   it("retries a write the bucket refused once, within its bounded budget", async () => {
     let tries = 0;
     store.failAfter(0);
-    store.onBeforePut = (): void => {
+    /* The node's own record only: a drain also mints a change token, so that
+       the fleet stops placing work here on its next pass rather than on its
+       node-refresh timer, and that write is not the one under test. */
+    store.onBeforePut = (key: string): void => {
+      if (key !== nodeKey(NODE_A)) return;
       tries++;
       /* The bucket comes back for the second attempt. */
       if (tries >= 2) store.clearFaults();

@@ -681,6 +681,7 @@ function soleCoordinator(): NonNullable<Parameters<typeof createNodeApp>[0]["coo
       lastAssignAt: null,
       lastAssignment: null,
       lastAssignFailure: null,
+      skippedAssignments: 0,
     }),
     handle: () => held,
   };

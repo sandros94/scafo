@@ -37,6 +37,26 @@ export async function withRetry<T>(fn: () => Promise<T>, opts?: RetryOptions): P
   }
 }
 
+/**
+ * How long the `attempt`-th retry waits: full jitter over an exponentially
+ * growing window, `random() * min(maxMs, baseMs * 2 ** attempt)`.
+ *
+ * The very formula {@link withRetry} uses, exported for the loops that cannot be
+ * one — a caller retrying until a DEADLINE rather than for a number of tries,
+ * or one that has been told by the other end how long to wait. Jitter matters
+ * more there than anywhere: fifty pipelines refused by the same full queue in
+ * the same second would otherwise come back in the same second too.
+ */
+export function jitteredDelayMs(
+  attempt: number,
+  opts?: { baseMs?: number; maxMs?: number; jitter?: () => number },
+): number {
+  const baseMs = opts?.baseMs ?? 50;
+  const maxMs = opts?.maxMs ?? 2000;
+  const jitter = opts?.jitter ?? Math.random;
+  return jitter() * Math.min(maxMs, baseMs * 2 ** attempt);
+}
+
 function isCasConflict(err: unknown): boolean {
   return isScafoError(err) && err.code === "cas-conflict";
 }

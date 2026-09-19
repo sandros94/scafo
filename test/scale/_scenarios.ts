@@ -13,20 +13,43 @@
 import type { JWK_OKP_Private } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { signNodeToken } from "../../src/core/auth/index.ts";
-import { acquireLease, type LeaseHandle } from "../../src/core/registry/lease.ts";
-import { executeReap, planReap } from "../../src/core/registry/reaper.ts";
+import { hintingStore } from "../../src/core/registry/changes.ts";
+import {
+  acquireLease,
+  DEFAULT_LEASE_TTL_MS,
+  type LeaseHandle,
+} from "../../src/core/registry/lease.ts";
+import { heartbeatNode } from "../../src/core/registry/nodes.ts";
+import {
+  createReapCache,
+  executeReap,
+  planReap,
+  type ReapCache,
+} from "../../src/core/registry/reaper.ts";
+import {
+  DEFAULT_NODE_REFRESH_INTERVAL_MS,
+  DEFAULT_REGISTRY_RESYNC_MS,
+} from "../../src/core/registry/view.ts";
 import { trustOperator } from "../../src/core/registry/operators.ts";
 import type { RegistryContext } from "../../src/core/registry/context.ts";
 import type { DeployRunner, StagedArtifact } from "../../src/core/types/deploy.ts";
 import type { RuntimeDriver } from "../../src/core/types/runtime.ts";
 import type { CasStore } from "../../src/core/types/store.ts";
+import type { NodeServing } from "../../src/core/types/registry.ts";
 import type { ProcessSpec, ProcessStatus, Supervisor } from "../../src/core/types/supervisor.ts";
-import { runAssignment, type AssignmentResult } from "../../src/daemon/_assign.ts";
+import { registryView } from "../../src/daemon/_view.ts";
+import { createCoordinator } from "../../src/daemon/coordinator.ts";
+import { type QueueWait, uploadUntilAdmitted } from "../../src/cli/commands/deploy.ts";
 import { createNodeApp, type DaemonContext } from "../../src/daemon/app.ts";
 import type { DaemonConfig } from "../../src/daemon/config.ts";
+import { DEFAULT_QUEUE_TIMEOUT_MS } from "../../src/daemon/_deploy-scheduler.ts";
 import { createDeployService, type DeployStatus } from "../../src/daemon/deploys.ts";
 import { createHeartbeat } from "../../src/daemon/heartbeat.ts";
-import { createReconciler, type Reconciler } from "../../src/daemon/reconcile.ts";
+import {
+  createReconciler,
+  DEFAULT_RECONCILE_INTERVAL_MS,
+  type Reconciler,
+} from "../../src/daemon/reconcile.ts";
 import type { StorageService } from "../../src/daemon/storage.ts";
 import { renderTraefikConfig } from "../../src/drivers/ingress/traefik.ts";
 import { MIN_CELLD_VERSION } from "../../src/drivers/runtime/celld.ts";
@@ -50,13 +73,24 @@ const ADMIN_ID = "op-scale-admin";
 /** The token an ingress presents for the routing and storage surfaces. */
 const INGRESS_TOKEN = "ingress-token-for-measurement";
 
-/** Every scenario that measures one pass or one request. */
+/**
+ * Every scenario that measures one pass or one request, in the order they run.
+ *
+ * THE ORDER IS PART OF THE MEASUREMENT. A node's loops carry state between
+ * passes — the registry view, the reaper's record cache — and what a pass costs
+ * depends on what the pass before it left. Each scenario below therefore runs
+ * against the state its predecessors produced, exactly as a running node does.
+ */
 export const SCENARIOS: readonly ScenarioName[] = [
   "idleReconcilePass",
+  "nodeRefreshPass",
+  "resyncPass",
   "coordinatorAssignPass",
   "reapPass",
+  "reapPassAgain",
   "heartbeat",
   "oneDeploy",
+  "peerSeesDeploy",
   "listApplicationsRoute",
   "stateRoute",
   "ingressRoutes",
@@ -65,10 +99,14 @@ export const SCENARIOS: readonly ScenarioName[] = [
 
 export type ScenarioName =
   | "idleReconcilePass"
+  | "nodeRefreshPass"
+  | "resyncPass"
   | "coordinatorAssignPass"
   | "reapPass"
+  | "reapPassAgain"
   | "heartbeat"
   | "oneDeploy"
+  | "peerSeesDeploy"
   | "listApplicationsRoute"
   | "stateRoute"
   | "ingressRoutes"
@@ -93,7 +131,20 @@ export interface ScaleWorld {
   meter: MeteringStore;
   /** What the measured code is given, and the only thing it ever touches. */
   registry: RegistryContext;
+  /** The moment the installation was seeded at; the clock starts here. */
   now: Date;
+  /** Moves the world's clock on, so a loop's own timer comes due. */
+  advance(ms: number): void;
+  /** Epoch milliseconds as every measured piece of code reads them. */
+  nowMs(): number;
+  /** The node under measurement, built once and kept: its view lives across passes. */
+  node?: ScaleNode;
+}
+
+/** One assembled node of the installation, with the loops that hold state. */
+export interface ScaleNode {
+  daemon: DaemonContext;
+  reconciler: Reconciler;
 }
 
 export interface ScaleWorldOptions {
@@ -109,7 +160,10 @@ export async function createScaleWorld(
   opts?: ScaleWorldOptions,
 ): Promise<ScaleWorld> {
   const store = opts?.store ?? new MemoryCasStore();
-  const now = (): Date => SCALE_NOW;
+  let nowMs = SCALE_NOW.getTime();
+  const now = (): Date => new Date(nowMs);
+  /* Seeded through the BARE store: seeding is setup, and a change token for each
+     of fifty thousand records would measure nothing but the seeding. */
   const seed = await seedRegistry(
     { store, now },
     profile,
@@ -118,8 +172,20 @@ export async function createScaleWorld(
       : { now: SCALE_NOW, concurrency: opts.concurrency },
   );
 
-  const meter = meterStore(store);
-  return { profile, seed, store, meter, registry: { store: meter, now }, now: SCALE_NOW };
+  /* Hinting UNDER the meter, so the token a mutation mints is counted as the
+     bucket write it is, and the registry every scenario drives is shaped
+     exactly like the one `createRegistry` builds on a real node. */
+  const meter = meterStore(hintingStore(store));
+  return {
+    profile,
+    seed,
+    store,
+    meter,
+    registry: { store: meter, now },
+    now: SCALE_NOW,
+    advance: (ms: number): void => void (nowMs += ms),
+    nowMs: (): number => nowMs,
+  };
 }
 
 /** Runs one named scenario against `world`. */
@@ -127,6 +193,18 @@ export async function runScenario(name: ScenarioName, world: ScaleWorld): Promis
   switch (name) {
     case "idleReconcilePass": {
       return idleReconcilePass(world);
+    }
+    case "nodeRefreshPass": {
+      return nodeRefreshPass(world);
+    }
+    case "resyncPass": {
+      return resyncPass(world);
+    }
+    case "reapPassAgain": {
+      return reapPass(world, { scenario: "reapPassAgain" });
+    }
+    case "peerSeesDeploy": {
+      return peerSeesDeploy(world);
     }
     case "coordinatorAssignPass": {
       return coordinatorAssignPass(world);
@@ -158,19 +236,22 @@ export async function runScenario(name: ScenarioName, world: ScaleWorld): Promis
 /* --------------------------------------------------------------- (a) reconcile */
 
 /**
- * One node's reconcile pass in steady state.
+ * One node's reconcile pass in steady state: the pass a node spends almost all
+ * of its life running.
  *
- * The SECOND pass is the measured one: the first starts a process for every
- * application placed here, and from then on the supervisor reports them all
- * running, so the measured pass plans nothing and its whole cost is what it
- * spent finding that out.
+ * The SECOND pass is the measured one. The first starts a process for every
+ * application placed here and fills the node's registry view; from then on the
+ * supervisor reports them all running and the change hint has not moved, so the
+ * measured pass plans nothing and its whole cost is finding that out.
  */
 export async function idleReconcilePass(world: ScaleWorld): Promise<ScenarioResult> {
-  const { daemon } = reconcilingDaemon(world);
-  const reconciler = daemon.reconciler as Reconciler;
-  await reconciler.runOnce();
+  const { reconciler } = scaleNode(world);
+  await settled(world);
 
   world.meter.reset();
+  /* Inside the reconcile interval and inside every timer the view holds: what
+     is measured is a pass where nothing at all has come due. */
+  world.advance(DEFAULT_RECONCILE_INTERVAL_MS);
   const started = performance.now();
   const plan = await reconciler.runOnce();
   const wallMs = performance.now() - started;
@@ -188,27 +269,141 @@ export async function idleReconcilePass(world: ScaleWorld): Promise<ScenarioResu
   };
 }
 
-/* -------------------------------------------------------------- (b) assignment */
-
-/** One assignment pass of the lease holder over an installation it has nothing to change in. */
-export async function coordinatorAssignPass(world: ScaleWorld): Promise<ScenarioResult> {
-  const lease = await heldLease(world);
+/**
+ * The pass on which the node records come due again.
+ *
+ * Liveness is the AGE of a heartbeat, and no write announces a death, so nothing
+ * hints about it: the nodes are re-listed on a timer of their own. In steady
+ * state every node has beaten since the last look, so every node record is read.
+ */
+export async function nodeRefreshPass(world: ScaleWorld): Promise<ScenarioResult> {
+  const { reconciler } = scaleNode(world);
+  await settled(world);
+  /* Every node beats on its own interval; by the time this pass runs, they have. */
+  await beatEveryNode(world);
 
   world.meter.reset();
+  world.advance(DEFAULT_NODE_REFRESH_INTERVAL_MS);
   const started = performance.now();
-  const result: AssignmentResult = await runAssignment(world.registry, lease);
+  const plan = await reconciler.runOnce();
   const wallMs = performance.now() - started;
 
+  return {
+    scenario: "nodeRefreshPass",
+    snapshot: world.meter.snapshot(),
+    wallMs,
+    notes: { actions: plan.length, failures: reconciler.status().failures.length },
+  };
+}
+
+/**
+ * A full resync with nothing changed: the bound on a hint that never arrived.
+ *
+ * Every kind is listed again whatever the token says, and not one record is
+ * read — every ETag is the one the view already holds.
+ */
+export async function resyncPass(world: ScaleWorld): Promise<ScenarioResult> {
+  const { reconciler } = scaleNode(world);
+  await settled(world);
+
+  world.meter.reset();
+  world.advance(DEFAULT_REGISTRY_RESYNC_MS);
+  const started = performance.now();
+  const plan = await reconciler.runOnce();
+  const wallMs = performance.now() - started;
+
+  return {
+    scenario: "resyncPass",
+    snapshot: world.meter.snapshot(),
+    wallMs,
+    notes: { actions: plan.length, failures: reconciler.status().failures.length },
+  };
+}
+
+/**
+ * What one deploy costs a node that did NOT accept it.
+ *
+ * The peer is caught up first, then a deploy is published elsewhere, and the
+ * measured pass is the one that notices: the hint moved, so it lists what
+ * routing is decided from and reads back exactly the records that changed.
+ */
+export async function peerSeesDeploy(world: ScaleWorld): Promise<ScenarioResult> {
+  const peer = buildNode(world, world.seed.nodes.at(-1) as string);
+  /* Caught up first, boot effects and all: what is measured is the pass that
+     notices a deploy, not the pass that finds out what this node runs. */
+  await peer.reconciler.runOnce();
+  await peer.reconciler.runOnce();
+
+  const application = world.seed.applications[1] as string;
+  const accepting = daemonFor(world);
+  accepting.deploys = createDeployService(
+    accepting,
+    fixedRunner(() => Promise.resolve(hex16(`${application}/peer-deploy`))),
+  );
+  const status = await startDeploy(accepting, application);
+  const settled = await settleDeploy(accepting, status.id);
+  await accepting.deploys.stop(new Error("the deploy is over"));
+
+  world.meter.reset();
+  world.advance(DEFAULT_RECONCILE_INTERVAL_MS);
+  const started = performance.now();
+  const plan = await peer.reconciler.runOnce();
+  const wallMs = performance.now() - started;
+
+  return {
+    scenario: "peerSeesDeploy",
+    snapshot: world.meter.snapshot(),
+    wallMs,
+    notes: {
+      state: settled.state,
+      actions: plan.length,
+      failures: peer.reconciler.status().failures.length,
+    },
+  };
+}
+
+/* -------------------------------------------------------------- (b) assignment */
+
+/**
+ * One assignment pass of the lease holder over an installation it has nothing to
+ * change in.
+ *
+ * THE MEASURED TICK IS ONE THAT DECIDES NOTHING. The tick before it read the
+ * fleet and decided every application; this one holds the same inputs against
+ * what that pass decided from, finds them identical, and skips the pass
+ * entirely — so the whole of what a coordinator costs an idle installation is
+ * the hint it reads and the lease it renews.
+ */
+export async function coordinatorAssignPass(world: ScaleWorld): Promise<ScenarioResult> {
+  const { daemon } = scaleNode(world);
+  const coordinator = daemon.coordinator ?? createCoordinator(daemon);
+  daemon.coordinator = coordinator;
+  const tickMs = Math.floor(DEFAULT_LEASE_TTL_MS / 3);
+
+  /* The scenarios before this one moved the world's clock past a heartbeat
+     interval or two; a fleet nobody has heard from is one no pass may place
+     work on, and that is a different measurement from this one. */
+  await beatEveryNode(world);
+  world.advance(DEFAULT_NODE_REFRESH_INTERVAL_MS);
+  await coordinator.runOnce();
+
+  world.meter.reset();
+  world.advance(tickMs);
+  const started = performance.now();
+  await coordinator.runOnce();
+  const wallMs = performance.now() - started;
+
+  const status = coordinator.status();
   return {
     scenario: "coordinatorAssignPass",
     snapshot: world.meter.snapshot(),
     wallMs,
     notes: {
-      live: result.live.length,
-      changed: result.changed.length,
-      removed: result.removed.length,
-      skipped: result.skipped.length,
-      unplaced: result.unplaced.length,
+      holding: String(status.holding),
+      skippedAssignments: status.skippedAssignments,
+      changed: status.lastAssignment?.changed.length ?? 0,
+      removed: status.lastAssignment?.removed.length ?? 0,
+      unplaced: status.lastAssignment?.unplaced.length ?? 0,
     },
   };
 }
@@ -221,17 +416,32 @@ export async function coordinatorAssignPass(world: ScaleWorld): Promise<Scenario
  * no deployment is ever a candidate and the pass weighs applications and
  * deploys alone.
  */
-export async function reapPass(world: ScaleWorld): Promise<ScenarioResult> {
+export async function reapPass(
+  world: ScaleWorld,
+  opts?: { scenario?: ScenarioName },
+): Promise<ScenarioResult> {
   const lease = await heldLease(world);
+  const cache = reapCacheOf(world);
+  const snapshot = registryView(scaleNode(world).daemon).current();
+  const reapOptions = {
+    cache,
+    applications: snapshot.applications,
+    nodes: snapshot.nodes,
+  };
+  /* The SECOND pass of the pair is what "reapPassAgain" measures: the first
+     read every record once, and a terminal one never moves again. */
+  if (opts?.scenario === "reapPassAgain") {
+    await executeReap(world.registry, await planReap(world.registry, reapOptions), lease, {});
+  }
 
   world.meter.reset();
   const started = performance.now();
-  const plan = await planReap(world.registry, {});
+  const plan = await planReap(world.registry, reapOptions);
   const result = await executeReap(world.registry, plan, lease, {});
   const wallMs = performance.now() - started;
 
   return {
-    scenario: "reapPass",
+    scenario: opts?.scenario ?? "reapPass",
     snapshot: world.meter.snapshot(),
     wallMs,
     notes: {
@@ -249,8 +459,8 @@ export async function reapPass(world: ScaleWorld): Promise<ScenarioResult> {
 
 /** One heartbeat of a node that is serving everything placed on it. */
 export async function heartbeat(world: ScaleWorld): Promise<ScenarioResult> {
-  const { daemon } = reconcilingDaemon(world);
-  await (daemon.reconciler as Reconciler).runOnce();
+  const { daemon, reconciler } = scaleNode(world);
+  await reconciler.runOnce();
   const beating = createHeartbeat(daemon);
 
   world.meter.reset();
@@ -263,7 +473,7 @@ export async function heartbeat(world: ScaleWorld): Promise<ScenarioResult> {
     snapshot: world.meter.snapshot(),
     wallMs,
     notes: {
-      serving: (daemon.reconciler as Reconciler).status().processes.length,
+      serving: reconciler.status().processes.length,
       failure: beating.status().lastFailure ?? "none",
     },
   };
@@ -322,6 +532,18 @@ export interface BurstOptions {
   deploys: number;
   /** Virtual milliseconds one publish takes. Defaults to ten seconds. */
   durationMs?: number;
+  /**
+   * Whether each deploy comes back for a place in the queue when it is refused,
+   * as `scafo deploy` does. False is what `--no-wait` asks for, and measures the
+   * node's bound rather than what a team of developers experiences.
+   */
+  wait?: boolean;
+  /**
+   * One application every deploy of the burst goes into, instead of one each:
+   * a pipeline pushing the same repository over and over, which the per-
+   * application bound is there to keep out of everyone else's queue.
+   */
+  application?: string;
 }
 
 /**
@@ -337,7 +559,10 @@ export interface BurstOptions {
  */
 export async function deployBurst(world: ScaleWorld, opts: BurstOptions): Promise<BurstOutcome> {
   const durationMs = opts.durationMs ?? 10_000;
-  const applications = world.seed.applications.slice(0, opts.deploys);
+  const applications =
+    opts.application === undefined
+      ? world.seed.applications.slice(0, opts.deploys)
+      : Array.from({ length: opts.deploys }, () => opts.application as string);
   if (applications.length < opts.deploys) {
     throw new Error(
       `the ${world.profile.name} profile holds ${String(applications.length)} applications, ` +
@@ -360,9 +585,29 @@ export async function deployBurst(world: ScaleWorld, opts: BurstOptions): Promis
   const refused: Record<string, number> = {};
   const accepted: DeployStatus[] = [];
 
+  /* THE CLI'S OWN RETRY LOOP, not an imitation of it: `scafo deploy` calls this
+     very function, so what the burst measures is what a developer experiences.
+     Its clock is virtual — the waiting is a yield rather than a delay — because
+     what is being measured is admission and cost, not wall time. */
+  let waitedMs = 0;
+  const queueWait: QueueWait = {
+    wait: opts.wait !== false,
+    timeoutMs: DEFAULT_QUEUE_TIMEOUT_MS,
+    nowMs: () => waitedMs,
+    sleep: async (ms: number): Promise<void> => {
+      waitedMs += ms;
+      await tick();
+    },
+    /* No randomness: two runs of a profile must produce the same numbers. */
+    jitter: () => 0.5,
+    log: (): void => {},
+  };
+
   const runs = applications.map(async (application) => {
     try {
-      accepted.push(await startDeploy(daemon, application));
+      accepted.push(
+        await uploadUntilAdmitted(async () => startDeploy(daemon, application), queueWait),
+      );
     } catch (error) {
       const code = codeOf(error);
       refused[code] = (refused[code] ?? 0) + 1;
@@ -436,13 +681,13 @@ export async function stateRoute(world: ScaleWorld): Promise<ScenarioResult> {
 
 /** One `GET /v1/ingress/routes` and one `/v1/ingress/routes/traefik`. */
 export async function ingressRoutes(world: ScaleWorld): Promise<ScenarioResult> {
-  const { daemon } = reconcilingDaemon(world);
+  const { daemon, reconciler } = scaleNode(world);
   daemon.storage = ingressStorage();
   daemon.ingressFormats = {
-    traefik: (routing, { prefer }) =>
+    traefik: (routing, { prefer }): unknown =>
       renderTraefikConfig(routing, prefer === undefined ? {} : { prefer }),
   };
-  await (daemon.reconciler as Reconciler).runOnce();
+  await reconciler.runOnce();
   const app = createNodeApp(daemon);
   const headers = { authorization: `Bearer ${INGRESS_TOKEN}` };
 
@@ -464,7 +709,7 @@ export async function ingressRoutes(world: ScaleWorld): Promise<ScenarioResult> 
       traefikStatus: traefik.status,
       genericBytes: encoder.encode(genericBody).length,
       traefikBytes: encoder.encode(traefikBody).length,
-      routes: (daemon.reconciler as Reconciler).fleetRouting()?.routes.length ?? 0,
+      routes: reconciler.fleetRouting()?.routes.length ?? 0,
     },
   };
 }
@@ -501,8 +746,8 @@ export async function ingressAsk(world: ScaleWorld): Promise<ScenarioResult> {
 /* ------------------------------------------------------------------- internals */
 
 /** The daemon a node assembles, with the seeded installation under it. */
-export function daemonFor(world: ScaleWorld): DaemonContext {
-  const nodeId = world.seed.nodes[0] as string;
+export function daemonFor(world: ScaleWorld, id?: string): DaemonContext {
+  const nodeId = id ?? (world.seed.nodes[0] as string);
   return {
     config: daemonConfig(nodeId),
     nodeId,
@@ -512,12 +757,62 @@ export function daemonFor(world: ScaleWorld): DaemonContext {
   };
 }
 
-/** A daemon with a real reconcile loop over a supervisor that always succeeds. */
-function reconcilingDaemon(world: ScaleWorld): { daemon: DaemonContext } {
-  const daemon = daemonFor(world);
+/**
+ * The node every pass of this world runs on, built once and kept.
+ *
+ * KEPT, because the state that makes a pass cheap lives on it: the registry
+ * view's caches, the revisions it has seen, the processes it believes it runs.
+ * A scenario that built a node of its own would measure a cold boot every time,
+ * which is the one pass a node runs once.
+ */
+function scaleNode(world: ScaleWorld): ScaleNode {
+  world.node ??= buildNode(world, world.seed.nodes[0] as string);
+  return world.node;
+}
+
+/** One assembled node of the installation, with a real reconcile loop. */
+function buildNode(world: ScaleWorld, nodeId: string): ScaleNode {
+  const daemon = daemonFor(world, nodeId);
   daemon.supervisor = runningSupervisor();
-  daemon.reconciler = createReconciler(daemon, specOnlyDriver(), { baseEnv: { PATH: "/bin" } });
-  return { daemon };
+  const reconciler = createReconciler(daemon, specOnlyDriver(), { baseEnv: { PATH: "/bin" } });
+  daemon.reconciler = reconciler;
+  return { daemon, reconciler };
+}
+
+/** The reap cache one coordinator keeps for as long as it holds the lease. */
+const reapCaches = new WeakMap<ScaleWorld, ReapCache>();
+
+function reapCacheOf(world: ScaleWorld): ReapCache {
+  let cache = reapCaches.get(world);
+  if (cache === undefined) {
+    cache = createReapCache();
+    reapCaches.set(world, cache);
+  }
+  return cache;
+}
+
+/**
+ * Runs passes until one changes nothing, so what follows measures steady state.
+ *
+ * A NODE'S FIRST PASSES ARE NOT ITS STEADY STATE. The first starts a process for
+ * every application placed here and says so to the fleet, which mints a change
+ * token; the second is the one that reads that token back. Only the third is the
+ * pass a node spends the rest of its life running.
+ */
+async function settled(world: ScaleWorld): Promise<void> {
+  const { reconciler } = scaleNode(world);
+  for (let pass = 0; pass < 4; pass++) {
+    world.meter.reset();
+    await reconciler.runOnce();
+    if (world.meter.snapshot().listCalls === 0) return;
+  }
+}
+
+/** Every node of the installation says it is still there, as each one's own loop does. */
+async function beatEveryNode(world: ScaleWorld): Promise<void> {
+  for (const id of world.seed.nodes) {
+    await heartbeatNode(world.registry, id, { serving: world.seed.serving.get(id) as NodeServing });
+  }
 }
 
 /** The coordinator lease, taken by the node every scenario measures. */
@@ -746,6 +1041,8 @@ function specOnlyDriver(): RuntimeDriver {
       args: [],
       env: {},
     }),
+    /* Nothing is running, so nothing is ever asked to adopt. */
+    reload: (): Promise<void> => Promise.resolve(),
   };
 }
 

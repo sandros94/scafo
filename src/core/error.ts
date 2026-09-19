@@ -41,6 +41,16 @@ export interface ScafoErrorOptions extends ErrorOptions {
   status?: number;
   /** Human-readable specifics safe to expose to API clients. */
   detail?: string;
+  /**
+   * How long the answering node asked the caller to wait before trying again,
+   * in milliseconds, read off its `Retry-After`.
+   *
+   * NOT PART OF THE PROBLEM DOCUMENT, and never rendered into one: it is a
+   * transport header, it is the answering node's to set, and it is carried here
+   * only so a client that retries has the number the node named rather than one
+   * it invented.
+   */
+  retryAfterMs?: number;
 }
 
 const DEFAULT_STATUS: Record<ScafoErrorCode, number> = {
@@ -97,6 +107,8 @@ export class ScafoError extends Error {
   readonly code: ScafoErrorCode;
   readonly status: number;
   readonly detail?: string;
+  /** See {@link ScafoErrorOptions.retryAfterMs}; absent when nothing said one. */
+  readonly retryAfterMs?: number;
 
   constructor(code: ScafoErrorCode, message: string, opts?: ScafoErrorOptions) {
     super(message, opts);
@@ -104,6 +116,7 @@ export class ScafoError extends Error {
     this.code = code;
     this.status = opts?.status ?? DEFAULT_STATUS[code];
     this.detail = opts?.detail;
+    this.retryAfterMs = opts?.retryAfterMs;
   }
 
   /** Serializes the error into an RFC 9457 `application/problem+json` body. */
@@ -163,6 +176,7 @@ export function describeError(error: unknown): string {
 export function fromProblem(
   problem: ProblemDetails,
   fallback: ScafoErrorCode = "invalid-input",
+  opts?: { retryAfterMs?: number },
 ): ScafoError {
   const type = typeof problem.type === "string" ? problem.type : "";
   const named = type.startsWith(PROBLEM_TYPE_PREFIX) ? type.slice(PROBLEM_TYPE_PREFIX.length) : "";
@@ -177,5 +191,6 @@ export function fromProblem(
   return new ScafoError(code, title, {
     status,
     ...(typeof problem.detail === "string" ? { detail: problem.detail } : {}),
+    ...(opts?.retryAfterMs === undefined ? {} : { retryAfterMs: opts.retryAfterMs }),
   });
 }

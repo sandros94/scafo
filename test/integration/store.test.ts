@@ -164,6 +164,29 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
       /* Bucket clocks are their own; a minute either way is still this write. */
       expect(Math.abs((at ?? 0) - wroteAt)).toBeLessThan(60_000);
     });
+
+    it("lists the same ETag a read answers with, and moves it only on a rewrite", async () => {
+      /* The whole of change detection rests on this: a pass holding a listing and
+         a cache of ETags reads only the keys whose ETag moved. A store that
+         listed a different spelling of the same ETag would make every record
+         look changed on every pass; one that never moved it would hide writes. */
+      const run = randomHex(4);
+      const key = `v1/etag-${run}/a.json`;
+      const written = await store.put(key, `{"n":1}`);
+
+      const listed = await store.listEntries(`v1/etag-${run}/`);
+      expect(listed.map((entry) => entry.key)).toEqual([key]);
+      expect(listed[0]?.etag).toBe(written.etag);
+      expect(listed[0]?.etag).toBe((await store.get(key))?.etag);
+
+      /* Listed again with nothing written in between: the same value. */
+      expect((await store.listEntries(`v1/etag-${run}/`))[0]?.etag).toBe(written.etag);
+
+      const rewritten = await store.put(key, `{"n":2}`);
+      const after = await store.listEntries(`v1/etag-${run}/`);
+      expect(after[0]?.etag).toBe(rewritten.etag);
+      expect(after[0]?.etag).not.toBe(written.etag);
+    });
   });
 
   describe("write-then-read round trips", () => {

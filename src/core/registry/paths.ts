@@ -53,6 +53,18 @@ export function freezeKey(): string {
   return `${ROOT}/freeze.json`;
 }
 
+/**
+ * The installation's change hint: one object every node reads once a pass to
+ * find out whether the registry is worth listing again.
+ *
+ * A HINT AND NOT A RECORD. Nothing about the installation is stored here, and
+ * losing a write of it costs latency — bounded by the resync interval — rather
+ * than correctness.
+ */
+export function changesKey(): string {
+  return `${ROOT}/changes.json`;
+}
+
 export function coordinatorKey(): string {
   return `${ROOT}/coordinator/lease.json`;
 }
@@ -212,10 +224,39 @@ export function trustKey(application: string): string {
   return `${ROOT}/trust/${application}.json`;
 }
 
+/**
+ * Prefix EVERY application's deployment records live under.
+ *
+ * One listing of this answers the whole installation's deployment history, for
+ * the same reason {@link deploysRootPrefix} exists: a listing per application is
+ * one request per application on every sweep.
+ */
+export function deploymentsRootPrefix(): string {
+  return `${ROOT}/deployments/`;
+}
+
 /** Prefix one application's deployment records live under, keyed by Celld version. */
 export function deploymentsPrefix(application: string): string {
   assertSlug(application);
-  return `${ROOT}/deployments/${application}/`;
+  return `${deploymentsRootPrefix()}${application}/`;
+}
+
+/**
+ * The application and version a key under {@link deploymentsRootPrefix} names,
+ * or null when the key is no deployment record of ours.
+ */
+export function parseDeploymentKey(key: string): { application: string; version: string } | null {
+  const root = deploymentsRootPrefix();
+  if (!key.startsWith(root) || !key.endsWith(".json")) return null;
+
+  const rest = key.slice(root.length, -".json".length);
+  const slash = rest.indexOf("/");
+  if (slash < 0) return null;
+
+  const application = rest.slice(0, slash);
+  const version = rest.slice(slash + 1);
+  if (version.includes("/") || !isSlug(application) || !ID_RE.test(version)) return null;
+  return { application, version };
 }
 
 export function deploymentKey(application: string, version: string): string {
@@ -262,15 +303,51 @@ export function assertDeployId(id: string): void {
   });
 }
 
+/**
+ * Prefix EVERY application's deploy records live under.
+ *
+ * One listing of this answers the whole installation's deploy history, which is
+ * what the reaper walks: a listing per application would be one request per
+ * application on every sweep, where this is one per thousand records.
+ */
+export function deploysRootPrefix(): string {
+  return `${ROOT}/deploys/`;
+}
+
 /** Prefix one application's deploy records live under. */
 export function deploysPrefix(application: string): string {
   assertSlug(application);
-  return `${ROOT}/deploys/${application}/`;
+  return `${deploysRootPrefix()}${application}/`;
 }
 
 export function deployKey(application: string, id: string): string {
   assertDeployId(id);
   return `${deploysPrefix(application)}${id}.json`;
+}
+
+/**
+ * The application and deploy a key under {@link deploysRootPrefix} names, or
+ * null when the key is no deploy record of ours.
+ *
+ * The id must name the very application the key is filed under. A record that
+ * disagrees with its own key is one nothing here may act on: the caller reading
+ * it would be reading it on behalf of another application.
+ */
+export function parseDeployKey(key: string): { application: string; id: string } | null {
+  const root = deploysRootPrefix();
+  if (!key.startsWith(root) || !key.endsWith(".json")) return null;
+
+  const rest = key.slice(root.length, -".json".length);
+  const slash = rest.indexOf("/");
+  if (slash < 0) return null;
+
+  const application = rest.slice(0, slash);
+  const id = rest.slice(slash + 1);
+  if (id.includes("/")) return null;
+
+  const parsed = parseDeployId(id);
+  if (parsed === null || parsed.application !== application) return null;
+  return { application, id };
 }
 
 /**

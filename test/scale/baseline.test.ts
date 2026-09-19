@@ -1,17 +1,24 @@
 /*
- * What every periodic pass and every hot request costs the bucket TODAY, as
- * exact formulas of the installation's size.
+ * What every periodic pass and every hot request is ALLOWED to cost the bucket,
+ * as exact formulas of the installation's size.
  *
- * CHARACTERIZATION, NOT A TARGET. Each number below is what the current code
- * spends, down to the operation, and each assertion names what makes it up. A
- * change that makes a pass cheaper fails these tests, and that failure is the
- * point: the new number is written down, deliberately, beside the reason.
+ * BUDGETS, NOT CHARACTERIZATION. Each number below is what the design commits
+ * to, down to the operation, and each assertion names what makes it up. A change
+ * that spends more fails here, and so does one that spends less: the new number
+ * is written down, deliberately, beside the reason.
+ *
+ * The principles these hold the code to:
+ *   - an idle installation costs the bucket O(nodes), never O(applications) and
+ *     never O(history);
+ *   - a change is seen by every node within one reconcile interval;
+ *   - nothing new is stateful, so a lost change hint costs latency and never
+ *     correctness.
  *
  * The scenarios of one profile run in the order they are declared, against one
  * seeded installation, because that is what a node does — it reconciles, it
- * assigns, it reaps, it beats — and seeding an installation of five thousand
- * applications once per scenario would measure nothing but the seeding. Each
- * scenario is therefore measured against the state the ones before it left.
+ * assigns, it reaps, it beats — and because the state a pass leaves is what
+ * makes the next one cheap. Each scenario is therefore measured against the
+ * state the ones before it left.
  */
 
 import { beforeAll, describe, expect, it } from "vitest";
@@ -32,7 +39,7 @@ import {
 import { writePlacement } from "../../src/core/registry/placement.ts";
 import { setTrustPolicy } from "../../src/core/registry/trust.ts";
 import { MemoryCasStore } from "../../src/drivers/store/memory.ts";
-import { LIST_PAGE_KEYS } from "./_meter.ts";
+import { pages } from "./_before.ts";
 import {
   createScaleWorld,
   runScenario,
@@ -54,7 +61,7 @@ import {
   type ScaleProfile,
 } from "./_seed.ts";
 
-/** Profiles the characterization runs at; L is here while the file stays quick. */
+/** Profiles the budgets are held at; L is here while the file stays quick. */
 const MEASURED: readonly ProfileName[] = ["S", "M", "L"] as const;
 
 /** Every profile's scenarios, measured once and asserted many times. */
@@ -76,70 +83,103 @@ function cost(name: ProfileName, scenario: ScenarioName): ScenarioResult {
   return result;
 }
 
-/** Requests one listing of `keys` keys costs, a thousand keys to the page. */
-function pages(keys: number): number {
-  return Math.max(1, Math.ceil(keys / LIST_PAGE_KEYS));
-}
-
 /** Every profile under measurement, with its shape, for a table-driven assertion. */
 const profiles: Array<[ProfileName, ScaleProfile]> = MEASURED.map((name) => [name, PROFILES[name]]);
 
 describe("one node's reconcile pass in steady state", () => {
-  it.each(profiles)("costs what reading the desired state costs at %s", (name, profile) => {
+  it.each(profiles)("costs one GET at %s, whatever the installation holds", (name) => {
     const { snapshot, notes } = cost(name, "idleReconcilePass");
-    const applications = profile.applications;
 
     /* Nothing is planned and nothing is started: this is the pass a node spends
        almost all of its life running. */
     expect(notes.actions).toBe(0);
     expect(notes.failures).toBe(0);
 
-    /* One application record and one placement record each, plus one record per
-       node for the fleet's routing. */
-    expect(snapshot.gets).toBe(2 * applications + profile.nodes);
-    /* The three listings a pass runs: applications, placements, nodes. */
-    expect(snapshot.listCalls).toBe(3);
-    expect(snapshot.listPages).toBe(
-      pages(applications) + pages(applications) + pages(profile.nodes),
-    );
-    /* A pass that has nothing to do writes nothing at all. */
+    /* THE BUDGET: the change hint, and nothing else at all. The token is the one
+       the pass before it saw, no timer is up, so the view it already holds is
+       the answer. */
+    expect(snapshot.gets).toBe(1);
+    expect(snapshot.listCalls).toBe(0);
+    expect(snapshot.listPages).toBe(0);
     expect(snapshot.puts).toBe(0);
     expect(snapshot.dels).toBe(0);
   });
 });
 
-describe("one assignment pass of the lease holder", () => {
-  it.each(profiles)("re-reads the whole installation to decide nothing at %s", (name, profile) => {
-    const { snapshot, notes } = cost(name, "coordinatorAssignPass");
-    const applications = profile.applications;
+describe("the pass on which the node records come due", () => {
+  it.each(profiles)("re-reads liveness and nothing else at %s", (name, profile) => {
+    const { snapshot, notes } = cost(name, "nodeRefreshPass");
+    expect(notes.failures).toBe(0);
 
-    /* Every application keeps the placement it had: a steady-state pass. */
-    expect(notes.changed).toBe(0);
-    expect(notes.removed).toBe(0);
-    expect(notes.skipped).toBe(applications);
-    expect(notes.live).toBe(profile.nodes);
-
-    /* One node record each, then one application record and one placement
-       record each. */
-    expect(snapshot.gets).toBe(2 * applications + profile.nodes);
-    /* Nodes, applications, placements. */
-    expect(snapshot.listCalls).toBe(3);
-    expect(snapshot.listPages).toBe(
-      pages(profile.nodes) + pages(applications) + pages(applications),
-    );
-    /* An unchanged placement is never rewritten. */
+    /* Liveness is the AGE of a heartbeat and no write announces a death, so the
+       nodes are the one kind read on a timer rather than on a hint. */
+    expect(snapshot.listCalls).toBe(1);
+    expect(snapshot.listPages).toBe(pages(profile.nodes));
+    /* The hint, then one record per node: in steady state every node has beaten
+       since the last look, so every one of them has moved. */
+    expect(snapshot.gets).toBe(1 + profile.nodes);
     expect(snapshot.puts).toBe(0);
+    expect(snapshot.dels).toBe(0);
+  });
+});
+
+describe("a full resync with nothing changed", () => {
+  it.each(profiles)("costs its listings and not one record at %s", (name, profile) => {
+    const { snapshot, notes } = cost(name, "resyncPass");
+    expect(notes.failures).toBe(0);
+
+    /* The bound on a hint that never arrived: every kind is listed again
+       whatever the token says. Applications, placements, nodes. */
+    expect(snapshot.listCalls).toBe(3);
+    expect(snapshot.listPages).toBe(2 * pages(profile.applications) + pages(profile.nodes));
+    /* The hint, and NOT ONE RECORD: every ETag is the one the view holds. */
+    expect(snapshot.gets).toBe(1);
+    expect(snapshot.puts).toBe(0);
+    expect(snapshot.dels).toBe(0);
+  });
+});
+
+describe("one deploy, as the node that did not accept it sees it", () => {
+  it.each(profiles)("reads the hint, the listings and the one record at %s", (name, profile) => {
+    const { snapshot, notes } = cost(name, "peerSeesDeploy");
+    expect(notes.state).toBe("deployed");
+    expect(notes.failures).toBe(0);
+
+    /* The token moved, so everything routing is decided from is listed: the
+       token is opaque, and what a node SERVES is hinted the same way. */
+    expect(snapshot.listCalls).toBe(3);
+    expect(snapshot.listPages).toBe(2 * pages(profile.applications) + pages(profile.nodes));
+    /* The hint, then exactly the records that changed: one application record,
+       whose deployment revision moved. */
+    expect(snapshot.gets).toBe(2);
+    expect(snapshot.puts).toBe(0);
+    expect(snapshot.dels).toBe(0);
+  });
+});
+
+describe("one coordinator tick over an installation nothing has changed in", () => {
+  it.each(profiles)("renews the lease and decides nothing at %s", (name) => {
+    const { snapshot, notes } = cost(name, "coordinatorAssignPass");
+
+    /* The pass is SKIPPED, not merely quiet: the inputs are the ones the last
+       completed pass decided from, and rendezvous hashing over them can only
+       reach the same answer. */
+    expect(notes.holding).toBe("true");
+    expect(notes.skippedAssignments).toBe(1);
+
+    /* THE BUDGET: the change hint, and the lease renewal. Nothing else. */
+    expect(snapshot.gets).toBe(1);
+    expect(snapshot.puts).toBe(1);
+    expect(snapshot.listCalls).toBe(0);
+    expect(snapshot.listPages).toBe(0);
     expect(snapshot.dels).toBe(0);
   });
 });
 
 describe("one reaper pass with nothing to reap", () => {
-  it.each(profiles)("reads every deploy record of every application at %s", (name, profile) => {
+  it.each(profiles)("reads the whole history once at %s", (name, profile) => {
     const { snapshot, notes } = cost(name, "reapPass");
-    const applications = profile.applications;
-    /* `oneDeploy` has not run yet at this point in the order, so the history is
-       exactly what was seeded. */
-    const deploys = applications * profile.deployRecords;
+    const deploys = profile.applications * profile.deployRecords;
 
     expect(notes.plannedApplications).toBe(0);
     expect(notes.plannedDeploys).toBe(0);
@@ -148,13 +188,29 @@ describe("one reaper pass with nothing to reap", () => {
        weighed and none of them is read. */
     expect(notes.plannedDeployments).toBe(0);
 
-    /* One application record each, then EVERY deploy record of every one. */
-    expect(snapshot.gets).toBe(applications + deploys);
-    /* The applications, then one deploy listing per application. */
-    expect(snapshot.listCalls).toBe(1 + applications);
-    expect(snapshot.listPages).toBe(
-      pages(applications) + applications * pages(profile.deployRecords),
-    );
+    /* ONE listing of every deploy record of the installation, not one per
+       application; the applications themselves come from the view the
+       coordinator already holds, so they cost nothing. */
+    expect(snapshot.listCalls).toBe(1);
+    expect(snapshot.listPages).toBe(pages(deploys));
+    /* The first sweep reads every record once, because it has seen none of them. */
+    expect(snapshot.gets).toBe(deploys);
+    expect(snapshot.puts).toBe(0);
+    expect(snapshot.dels).toBe(0);
+  });
+
+  it.each(profiles)("reads not one record on the sweep after at %s", (name, profile) => {
+    const { snapshot, notes } = cost(name, "reapPassAgain");
+    const deploys = profile.applications * profile.deployRecords;
+
+    expect(notes.plannedDeploys).toBe(0);
+    expect(notes.plannedStaleDeploys).toBe(0);
+
+    /* THE BUDGET: the listing, and nothing else. A deploy that has finished
+       never moves again, so its ETag never moves either. */
+    expect(snapshot.listCalls).toBe(1);
+    expect(snapshot.listPages).toBe(pages(deploys));
+    expect(snapshot.gets).toBe(0);
     expect(snapshot.puts).toBe(0);
     expect(snapshot.dels).toBe(0);
   });
@@ -164,7 +220,9 @@ describe("one heartbeat", () => {
   it.each(profiles)("reads and rewrites one node record at %s", (name) => {
     const { snapshot } = cost(name, "heartbeat");
 
-    /* The read-modify-write of this node's own record, and nothing else. */
+    /* The read-modify-write of this node's own record, and nothing else. A
+       heartbeat is NOT hinted: one every thirty seconds from every node would
+       cost the whole fleet a listing several times a minute, forever. */
     expect(snapshot.gets).toBe(1);
     expect(snapshot.puts).toBe(1);
     expect(snapshot.listCalls).toBe(0);
@@ -198,8 +256,9 @@ describe("the admin routes", () => {
     const { snapshot, notes } = cost(name, "listApplicationsRoute");
     expect(notes.status).toBe(200);
 
-    /* The operator record the guard re-reads per request, then one record per
-       application. */
+    /* An operator asks rarely and must be shown the truth, so this reads the
+       bucket rather than a view — with bounded concurrency rather than one
+       record after another. */
     expect(snapshot.gets).toBe(1 + profile.applications);
     expect(snapshot.listCalls).toBe(1);
     expect(snapshot.listPages).toBe(pages(profile.applications));
@@ -238,6 +297,32 @@ describe("what an ingress polls", () => {
     /* A claimed domain costs the claim and then the application it names. */
     expect(notes.customStatus).toBe(200);
     expect(notes.customGets).toBe(2);
+  });
+});
+
+describe("an idle installation's monthly bill", () => {
+  it.each(profiles)("does not grow with the number of applications at %s", (name, profile) => {
+    /*
+     * THE PRINCIPLE, held as an assertion rather than as prose: what an
+     * installation where nobody is deploying costs the bucket is a function of
+     * how many MACHINES it has, and of nothing else. Every term below is one of
+     * the budgets above.
+     */
+    const reconcile = cost(name, "idleReconcilePass").snapshot;
+    const refresh = cost(name, "nodeRefreshPass").snapshot;
+    const resync = cost(name, "resyncPass").snapshot;
+    const beat = cost(name, "heartbeat").snapshot;
+    const tick = cost(name, "coordinatorAssignPass").snapshot;
+    const reap = cost(name, "reapPassAgain").snapshot;
+
+    /* Only the two whole-installation listings are counted per application, and
+       they are pages of a thousand keys: at every profile here, one page each. */
+    expect(reconcile.requests).toBe(1);
+    expect(tick.requests).toBe(2);
+    expect(beat.requests).toBe(2);
+    expect(refresh.requests).toBe(pages(profile.nodes) + 1 + profile.nodes);
+    expect(resync.requests).toBe(1 + 2 * pages(profile.applications) + pages(profile.nodes));
+    expect(reap.requests).toBe(pages(profile.applications * profile.deployRecords));
   });
 });
 

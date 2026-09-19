@@ -1,6 +1,7 @@
 import { ScafoError } from "../error.ts";
 import type { NodeRecord, NodeServing } from "../types/registry.ts";
 import { deepEqual, isCasConflict, namesFromKeys } from "./_shared.ts";
+import { writeChangeHint } from "./changes.ts";
 import { createJson, readJson, requireJson, updateJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
 import { claimIdentity, identityReservation } from "./identity.ts";
@@ -17,7 +18,10 @@ export const NODE_LIVENESS_WINDOW_MS: number = 3 * NODE_HEARTBEAT_INTERVAL_MS;
 export async function registerNode(ctx: RegistryContext, record: NodeRecord): Promise<NodeRecord> {
   const key = nodeKey(record.id);
   const existing = await registerNodeIfAbsent(ctx, record);
-  if (existing === null) return record;
+  if (existing === null) {
+    await announceFleetChange(ctx);
+    return record;
+  }
 
   const updated = await updateJson<NodeRecord>(ctx, key, (current) => {
     if (current.id !== record.id) {
@@ -27,7 +31,24 @@ export async function registerNode(ctx: RegistryContext, record: NodeRecord): Pr
     }
     return record;
   });
+  await announceFleetChange(ctx);
   return updated.value;
+}
+
+/**
+ * Mints a change token, so the rest of the fleet re-reads the node records on
+ * its next pass instead of on its node-refresh timer.
+ *
+ * A NODE RECORD IS NOT HINTED BY THE STORE, because a heartbeat rewrites one
+ * every thirty seconds and a token for each of those would cost every node a
+ * listing several times a minute — which is the cost the hint exists to remove.
+ * The two writes worth announcing are the ones that change what the fleet is:
+ * a machine arriving, and a machine saying it is leaving. Both happen once.
+ *
+ * Never throws: the record it follows has already been written.
+ */
+async function announceFleetChange(ctx: RegistryContext): Promise<void> {
+  await writeChangeHint(ctx.store);
 }
 
 /** Claims and creates a node only when absent; compatible existing records stay unchanged. */
@@ -142,6 +163,7 @@ export async function heartbeatNode(
 export async function drainNode(ctx: RegistryContext, id: string): Promise<string> {
   const at = nowIso(ctx);
   await updateJson<NodeRecord>(ctx, nodeKey(id), (current) => ({ ...current, drainingAt: at }));
+  await announceFleetChange(ctx);
   return at;
 }
 

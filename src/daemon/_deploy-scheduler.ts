@@ -3,8 +3,28 @@ import type { StagedArtifact } from "../core/types/deploy.ts";
 
 export const DEFAULT_ACTIVE_TASKS: number = 1;
 export const DEFAULT_APPLICATION_ACTIVE_TASKS: number = 1;
-export const DEFAULT_QUEUED_TASKS: number = 4;
-export const DEFAULT_APPLICATION_QUEUED_TASKS: number = 2;
+/**
+ * Deploys one node holds while it waits for the one publishing to finish.
+ *
+ * Sized for a TEAM rather than for a machine, because queueing is nearly free
+ * and refusing is not: a queued deploy is a staged artifact and a parked
+ * request, bounded independently by {@link DEFAULT_STAGED_BYTES}, while a
+ * refused one is a red pipeline somebody has to re-run by hand. Thirty to fifty
+ * developers pushing inside one publish are ordinary in an installation this is
+ * meant for, and the queue deadline — ten minutes — is what stops the queue
+ * from becoming a place work goes to be forgotten.
+ */
+export const DEFAULT_QUEUED_TASKS: number = 64;
+
+/**
+ * Of those, how many may belong to one application.
+ *
+ * Small on purpose: a pipeline that pushes the same application four times over
+ * has three runs whose output nobody will ever serve, and the fourth is the only
+ * one that matters. It bounds a single noisy repository without reaching the
+ * node-wide queue everyone else shares.
+ */
+export const DEFAULT_APPLICATION_QUEUED_TASKS: number = 4;
 export const DEFAULT_STAGED_BYTES: number = 5 * 1024 ** 3;
 export const DEFAULT_APPLICATION_STAGED_BYTES: number = 3 * 1024 ** 3;
 export const DEFAULT_RECEIVE_TIMEOUT_MS: number = 600_000;

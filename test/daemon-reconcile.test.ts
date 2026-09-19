@@ -14,6 +14,7 @@ import type { DaemonContext } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { createHeartbeat } from "../src/daemon/heartbeat.ts";
 import { createReconciler } from "../src/daemon/reconcile.ts";
+import { hintingStore } from "../src/core/registry/changes.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith } from "./_helpers.ts";
 
@@ -52,7 +53,10 @@ describe("application-owned reconciliation", () => {
     ]);
   });
 
-  it("takes no runtime action for a new deployment revision", async () => {
+  it("asks the running process to adopt a new deployment rather than restarting it", async () => {
+    /* A deploy another node accepted: the process here is still serving what it
+       adopted last, and it is told to adopt now instead of waiting out its own
+       pointer poll. Nothing is started, stopped or replaced. */
     const world = await seededWorld();
     await world.reconciler.runOnce();
     world.events.length = 0;
@@ -60,8 +64,43 @@ describe("application-owned reconciliation", () => {
     await recordRevision(world.daemon.registry, APP, VERSION_TWO);
 
     expect(await world.reconciler.runOnce()).toEqual([]);
-    expect(world.events).toEqual(["ingress:1"]);
+    expect(world.events).toEqual(["ingress:1", `reload:${APP}`]);
+    expect(world.driver.reloaded).toEqual([APP]);
     expect(world.supervisor.started).toHaveLength(1);
+    expect(world.supervisor.stopped).toEqual([]);
+  });
+
+  it("asks nothing of a process it has just started, which booted onto the pointer", async () => {
+    const world = await seededWorld();
+
+    await world.reconciler.runOnce();
+
+    expect(world.driver.reloaded).toEqual([]);
+  });
+
+  it("asks only once per revision, however many passes see it", async () => {
+    const world = await seededWorld();
+    await world.reconciler.runOnce();
+    await createDeployment(world.daemon.registry, APP, { version: VERSION_TWO });
+    await recordRevision(world.daemon.registry, APP, VERSION_TWO);
+
+    await world.reconciler.runOnce();
+    await world.reconciler.runOnce();
+
+    expect(world.driver.reloaded).toEqual([APP]);
+  });
+
+  it("carries on when the process will not take the reload", async () => {
+    /* The runtime adopts a moved pointer on its own poll, so a listener that is
+       busy or gone costs latency and nothing else. */
+    const world = await seededWorld();
+    await world.reconciler.runOnce();
+    world.driver.reloadFails = true;
+    await createDeployment(world.daemon.registry, APP, { version: VERSION_TWO });
+    await recordRevision(world.daemon.registry, APP, VERSION_TWO);
+
+    expect(await world.reconciler.runOnce()).toEqual([]);
+    expect(world.reconciler.status().failures).toEqual([]);
   });
 
   it("stops a process whose spawn completes after reconciliation shuts down", async () => {
@@ -332,7 +371,10 @@ async function attachHeartbeat(world: Awaited<ReturnType<typeof seededWorld>>) {
 }
 
 async function seededWorld() {
-  const registry = ctxWith(new MemoryCasStore());
+  /* Hinting, exactly as `createRegistry` builds one: a pass only re-reads what
+     it is told has moved, so a registry a test writes into by hand has to say
+     so the same way the real one does. */
+  const registry = ctxWith(hintingStore(new MemoryCasStore()));
   await createApplication(registry.ctx, { name: APP });
   await createDeployment(registry.ctx, APP, { version: VERSION_ONE });
   await recordRevision(registry.ctx, APP, VERSION_ONE);
@@ -429,16 +471,29 @@ function fakeSupervisor(events: string[]): FakeSupervisor {
 
 interface FakeDriver extends RuntimeDriver {
   inputs: RuntimeSpecInput[];
+  /** Applications asked to adopt their new deployment, in the order they were. */
+  reloaded: string[];
+  /** Made to fail every reload, as a listener that is gone does. */
+  reloadFails: boolean;
 }
 
 function fakeDriver(events: string[]): FakeDriver {
   return {
     stopGraceMs: 30_000,
     inputs: [],
+    reloaded: [],
+    reloadFails: false,
     processSpec(input) {
       events.push("spec");
       this.inputs.push(input);
       return { id: input.application.name, command: "celld", args: [], env: {} };
+    },
+    reload(input): Promise<void> {
+      this.reloaded.push(input.application);
+      events.push(`reload:${input.application}`);
+      return this.reloadFails
+        ? Promise.reject(new Error("nothing is listening there"))
+        : Promise.resolve();
     },
   };
 }

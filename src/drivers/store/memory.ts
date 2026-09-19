@@ -90,11 +90,17 @@ export class MemoryCasStore implements CasStore {
     return Promise.resolve(keys);
   }
 
-  /** The same listing, each key carrying the moment its object was written. */
+  /** The same listing, each key carrying its ETag and the moment it was written. */
   listEntries(prefix: string): Promise<StoredEntry[]> {
     const entries = [...this.#objects.entries()]
       .filter(([key]) => key.startsWith(prefix))
-      .map(([key, object]): StoredEntry => ({ key, lastModified: object.modified }))
+      .map(([key, object]): StoredEntry => ({
+        key,
+        /* The very value `get` and `put` answer with, so a listed entry is a
+           usable `ifMatch` and compares equal to a read of the same key. */
+        etag: object.etag,
+        lastModified: object.modified,
+      }))
       .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
     return Promise.resolve(entries);
   }

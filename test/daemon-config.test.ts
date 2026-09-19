@@ -4,7 +4,14 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { DEFAULT_LEASE_TTL_MS } from "../src/core/registry/lease.ts";
 import {
+  DEFAULT_NODE_REFRESH_INTERVAL_MS,
+  DEFAULT_REGISTRY_RESYNC_MS,
+} from "../src/core/registry/view.ts";
+import { DEFAULT_REAP_INTERVAL_MS } from "../src/daemon/coordinator.ts";
+import {
+  type DaemonConfig,
   DEFAULT_JSON_BYTES,
   DEFAULT_BIND_HOST,
   DEFAULT_CONFIG_PATHS,
@@ -792,6 +799,83 @@ describe("JSON request limit", () => {
       "invalid-input",
     );
     expect(error.detail).toContain("api.jsonBytes");
+  });
+});
+
+describe("how often a node looks at the registry, and what it does while it coordinates", () => {
+  /** Every interval, by the three spellings it is written in. */
+  const SETTINGS = [
+    ["registry.resyncIntervalMs", "SCAFO_REGISTRY_RESYNC_MS", "registry-resync-ms"],
+    [
+      "registry.nodeRefreshIntervalMs",
+      "SCAFO_REGISTRY_NODE_REFRESH_MS",
+      "registry-node-refresh-ms",
+    ],
+    ["coordinator.leaseTtlMs", "SCAFO_COORDINATOR_LEASE_TTL_MS", "coordinator-lease-ttl-ms"],
+    [
+      "coordinator.reapIntervalMs",
+      "SCAFO_COORDINATOR_REAP_INTERVAL_MS",
+      "coordinator-reap-interval-ms",
+    ],
+  ] as const;
+
+  /** What the loader resolved for the dotted key `path`. */
+  function at(config: DaemonConfig, path: string): unknown {
+    const [section, key] = path.split(".") as ["registry" | "coordinator", string];
+    return (config[section] as unknown as Record<string, unknown>)[key];
+  }
+
+  it("supplies defaults suited to a small node when nothing configures them", async () => {
+    const config = await loadDaemonConfig({ env: REQUIRED_ENV });
+
+    expect(config.registry).toEqual({
+      resyncIntervalMs: DEFAULT_REGISTRY_RESYNC_MS,
+      nodeRefreshIntervalMs: DEFAULT_NODE_REFRESH_INTERVAL_MS,
+    });
+    expect(config.coordinator).toEqual({
+      leaseTtlMs: DEFAULT_LEASE_TTL_MS,
+      reapIntervalMs: DEFAULT_REAP_INTERVAL_MS,
+    });
+  });
+
+  it.each(SETTINGS)(
+    "takes %s from flag, environment, or file in that order",
+    async (path, variable, flag) => {
+      const [section, key] = path.split(".") as [string, string];
+      const file = JSON.stringify({ [section]: { [key]: 1000 } });
+      const read = fileAt(CONFIG_PATH, file);
+
+      const fromFile = await loadDaemonConfig({
+        configPath: CONFIG_PATH,
+        readFile: read,
+        env: REQUIRED_ENV,
+      });
+      const fromEnv = await loadDaemonConfig({
+        configPath: CONFIG_PATH,
+        readFile: read,
+        env: { ...REQUIRED_ENV, [variable]: "2000" },
+      });
+      const fromFlag = await loadDaemonConfig({
+        configPath: CONFIG_PATH,
+        readFile: read,
+        env: { ...REQUIRED_ENV, [variable]: "2000" },
+        flags: { [flag]: "3000" },
+      });
+
+      expect([at(fromFile, path), at(fromEnv, path), at(fromFlag, path)]).toEqual([
+        1000, 2000, 3000,
+      ]);
+    },
+  );
+
+  it.each(SETTINGS)("refuses a %s that is not a positive whole number", async (path, variable) => {
+    for (const written of ["0", "-1", "1.5", "NaN", "soon"]) {
+      const error = await rejectsWith(
+        () => loadDaemonConfig({ env: { ...REQUIRED_ENV, [variable]: written } }),
+        "invalid-input",
+      );
+      expect(error.detail, written).toContain(path);
+    }
   });
 });
 

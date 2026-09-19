@@ -110,6 +110,28 @@ export const sailArgs: ArgsDef = {
   },
   "port-range-start": { type: "string", description: "First port runtime processes use" },
   "bind-host": { type: "string", description: "Address runtime processes bind their listeners to" },
+  "registry-resync-ms": {
+    type: "string",
+    description:
+      "How often this node re-reads the whole registry regardless of the change hint, " +
+      "in milliseconds: the bound on a hint that never arrived (60000)",
+  },
+  "registry-node-refresh-ms": {
+    type: "string",
+    description:
+      "How often this node re-reads the fleet's node records, in milliseconds; liveness is " +
+      "the age of a heartbeat and no write announces a death (30000)",
+  },
+  "coordinator-lease-ttl-ms": {
+    type: "string",
+    description:
+      "Lifetime written into the coordinator lease, in milliseconds; it is renewed at a " +
+      "third of it (45000)",
+  },
+  "coordinator-reap-interval-ms": {
+    type: "string",
+    description: "Time between two reap passes while this node coordinates (600000)",
+  },
   "artifact-bytes": {
     type: "string",
     description: "Maximum compressed and expanded bytes per deploy artifact",

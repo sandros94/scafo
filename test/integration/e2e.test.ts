@@ -41,6 +41,7 @@ import {
 import type { NodeRecord, OperatorRecord, TrustPolicy } from "../../src/core/types/registry.ts";
 import {
   NODE_IMAGE,
+  ADOPTION_BOUND_MS,
   BOOT_DEADLINE_MS,
   BRIDGE_NETWORK,
   type BucketSettings,
@@ -453,7 +454,21 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expect(versionV2).not.toBe(versionV1);
       observed.versionV2 = versionV2;
 
+      /*
+       * FROM `deployed` TO SERVED, measured. The accepting node asks its local
+       * runtime process to adopt the fleet's pointer the moment the revision is
+       * recorded, instead of leaving it to the runtime's own thirty-second poll —
+       * so the application answers with the new version in seconds. The bound is
+       * well under that poll, and loose enough to hold on a loaded machine.
+       */
+      const deployedAt = Date.now();
       await untilServes(appHost(), "v2");
+      const adoptedMs = Date.now() - deployedAt;
+      observed.adoptedMs = adoptedMs;
+      console.log(`e2e: ${APPLICATION} served v2 ${String(adoptedMs)}ms after it was deployed`);
+      expect(adoptedMs, `${String(adoptedMs)}ms from "deployed" to serving v2`).toBeLessThan(
+        ADOPTION_BOUND_MS,
+      );
 
       const operator = await httpGet(caddyHttpPort, "/", { host: OPERATOR_HOST });
       expect(operator.body, "the operator's own route outlives a deploy").toBe("operator");

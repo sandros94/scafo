@@ -28,6 +28,7 @@ import { deleteKey } from "../src/core/registry/cas.ts";
 import { applicationKey, placementKey } from "../src/core/registry/paths.ts";
 import type { NodeRecord, NodeSelector, PlacementRecord } from "../src/core/types/registry.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
+import { hintingStore } from "../src/core/registry/changes.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, type ManualClock, rejectsWith } from "./_helpers.ts";
 
@@ -45,7 +46,9 @@ let written: string[];
 
 beforeEach(async () => {
   store = new FaultStore(new MemoryCasStore());
-  clock = ctxWith(store);
+  /* Hinting, as `createRegistry` builds every registry: a coordinator decides
+     from its view, and a view only re-reads what it is told has moved. */
+  clock = ctxWith(hintingStore(store));
   written = [];
   store.onBeforePut = (key: string): void => {
     written.push(key);

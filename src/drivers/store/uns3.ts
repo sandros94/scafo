@@ -65,7 +65,11 @@ export function createUns3Store(client: S3Client, opts: Uns3StoreOptions): CasSt
            them as zero-byte entries ending in `/` — phantoms this store
            never wrote, which a caller iterating keys must never meet. */
         if (object.key.endsWith("/")) continue;
-        entries.push({ key: toStoreKey(object.key), ...modifiedAt(object.lastModified) });
+        entries.push({
+          key: toStoreKey(object.key),
+          etag: listedEtag(object.etag, object.key),
+          ...modifiedAt(object.lastModified),
+        });
       }
       next = nextPage(page, prefix);
     } while (next !== undefined);
@@ -133,6 +137,30 @@ export function createUns3Store(client: S3Client, opts: Uns3StoreOptions): CasSt
 
     listEntries,
   };
+}
+
+/**
+ * A listed ETag in the form {@link etagOf} answers a response header with, so a
+ * listing and a `get` of the same key compare equal.
+ *
+ * TWO NORMALIZATIONS, because the two sources say the same value differently.
+ * The XML listing carries `<ETag>` with its quotes already taken off by the S3
+ * client, while a header keeps them; and either may carry a weak marker, which
+ * `If-Match` never accepts. Stripping the marker and putting the quoting back is
+ * what makes a cached listing entry usable as a precondition.
+ *
+ * Throws `ScafoError("store-nonconforming")` when the listing named no ETag at
+ * all: change detection is impossible without one, and a caller that took the
+ * absence for "unchanged" would never read a record again.
+ */
+function listedEtag(etag: string | undefined, objectKey: string): string {
+  if (etag === undefined || etag === "") {
+    throw new ScafoError("store-nonconforming", "The store listed an object without an ETag", {
+      detail: `"${objectKey}" was listed without an ETag, so a change to it cannot be detected`,
+    });
+  }
+  const strong = etag.startsWith("W/") ? etag.slice(2) : etag;
+  return strong.startsWith(`"`) && strong.endsWith(`"`) ? strong : `"${strong}"`;
 }
 
 /**

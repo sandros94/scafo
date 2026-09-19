@@ -1,11 +1,8 @@
 /* Internal: what the registry says THIS node should be serving. */
 
 import { deploymentRevision } from "../core/registry/_revision.ts";
-import { findApplication, listApplications } from "../core/registry/applications.ts";
-import type { RegistryContext } from "../core/registry/context.ts";
-import { listPlacements } from "../core/registry/placement.ts";
-import { createConcurrencyGate, mapConcurrent } from "../core/utils/concurrency.ts";
-import type { ApplicationRecord, NodeSelector, PlacementRecord } from "../core/types/registry.ts";
+import type { RegistrySnapshot } from "../core/registry/view.ts";
+import type { ApplicationRecord, NodeSelector } from "../core/types/registry.ts";
 
 /** One application's placement as this node reads it. */
 export interface PlacementView {
@@ -33,65 +30,39 @@ export interface DesiredState {
   placements: PlacementView[];
 }
 
-/** Reads desired applications for one node. Nothing is served without an
- * explicit placement naming it. The record reads share one concurrency gate and
- * retain listing order. */
-export async function readDesired(
-  registry: RegistryContext,
-  opts: { nodeId: string; concurrency?: number },
-): Promise<DesiredState> {
-  const gate = createConcurrencyGate(opts.concurrency);
-  const [names, placements] = await Promise.all([
-    listApplications(registry),
-    listPlacements(registry, { concurrency: gate }),
-  ]);
-
-  /* The gate bounds these tasks from the outside, and each of them holds its
-     slot for the one read it makes: a task that took a slot and then awaited the
-     same gate from inside would deadlock as soon as every slot was taken. */
-  const parts = await mapConcurrent(names, gate, async (name) =>
-    readApplication(registry, name, opts.nodeId, placements.get(name)),
-  );
-
+/**
+ * Reads this node's desired state off a registry snapshot. Nothing is served
+ * without an explicit placement naming it.
+ *
+ * PURE, and over a snapshot rather than over the bucket: the records it needs
+ * are the ones every other loop on this node needs, so they are read once by the
+ * view and decided on here. A pass that read them for itself would be the pass
+ * that made an idle installation cost its own size several times a minute.
+ */
+export function desiredFrom(snapshot: RegistrySnapshot, opts: { nodeId: string }): DesiredState {
   const state: DesiredState = { applications: [], fleet: [], placements: [] };
-  for (const part of parts) {
-    state.applications.push(...part.applications);
-    state.fleet.push(...part.fleet);
-    state.placements.push(...part.placements);
+
+  for (const record of snapshot.applications) {
+    /* Unplaced is not a state this node may resolve on its own: only the
+       coordinator says where an application runs. */
+    const placement = snapshot.placements.get(record.name);
+    if (placement === undefined) continue;
+
+    const self = placement.nodes.includes(opts.nodeId);
+    state.placements.push({
+      application: record.name,
+      nodes: [...placement.nodes],
+      self,
+      ...(record.nodeSelector === undefined ? {} : { selector: { ...record.nodeSelector } }),
+    });
+
+    /* A blocked application is served nowhere; its placement stays for unblocking. */
+    if (record.blocked === true) continue;
+    if (!isServable(record)) continue;
+
+    state.fleet.push(record);
+    if (self) state.applications.push(record);
   }
-  return state;
-}
-
-/** What one application contributes to this node's state, and nothing else's. */
-async function readApplication(
-  registry: RegistryContext,
-  name: string,
-  nodeId: string,
-  placement: PlacementRecord | undefined,
-): Promise<DesiredState> {
-  const state: DesiredState = { applications: [], fleet: [], placements: [] };
-  /* Unplaced is not a state this node may resolve on its own: only the
-     coordinator says where an application runs. */
-  if (placement === undefined) return state;
-
-  /* One record answers placement view, selector, blocking and deployment state. */
-  const record = await findApplication(registry, name);
-  /* A record deleted after listing is absent on the next pass. */
-  if (record === null) return state;
-
-  state.placements.push({
-    application: name,
-    nodes: [...placement.nodes],
-    self: placement.nodes.includes(nodeId),
-    ...(record.nodeSelector === undefined ? {} : { selector: { ...record.nodeSelector } }),
-  });
-
-  /* A blocked application is served nowhere; its placement stays for unblocking. */
-  if (record.blocked === true) return state;
-  if (!isServable(record)) return state;
-
-  state.fleet.push(record);
-  if (placement.nodes.includes(nodeId)) state.applications.push(record);
   return state;
 }
 

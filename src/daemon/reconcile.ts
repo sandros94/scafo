@@ -1,18 +1,21 @@
 /* Reconciles this node's registry placement with its supervised processes. */
 
+import { describeError } from "../core/error.ts";
 import { renderFleetRouting } from "../core/placement/fleet-routes.ts";
 import { createPortAllocator } from "../core/placement/ports.ts";
 import { planReconcile, type ReconcileAction } from "../core/placement/reconcile.ts";
 import { sameServing, servingOf } from "../core/placement/serving.ts";
+import { deploymentRevision } from "../core/registry/_revision.ts";
 import { nowDate } from "../core/registry/context.ts";
 import { countingRegistry, storeOpsOf } from "../core/registry/counting.ts";
-import { listNodeRecords } from "../core/registry/nodes.ts";
 import type { FleetRouting } from "../core/types/ingress.ts";
-import type { NodeServing } from "../core/types/registry.ts";
+import type { ApplicationRecord, NodeServing } from "../core/types/registry.ts";
 import type { RuntimeDriver, RuntimeProcess } from "../core/types/runtime.ts";
-import { type PlacementView, readDesired } from "./_desired.ts";
+import { desiredFrom, type PlacementView } from "./_desired.ts";
 import { createExecutor, failureOf, type ReconcileFailure } from "./_execute.ts";
 import { recordRouting } from "./_ingress.ts";
+import { runtimeDialHost } from "./config.ts";
+import { registryView } from "./_view.ts";
 import type { DaemonContext } from "./app.ts";
 
 export type { PlacementView } from "./_desired.ts";
@@ -43,6 +46,16 @@ export interface Reconciler {
   runOnce(): Promise<ReconcileAction[]>;
   /** Queues one immediate follow-up pass while preserving single-flight execution. */
   kick(): void;
+  /**
+   * Asks this node's process for `application`, if it runs one, to adopt the
+   * fleet's current deployment now rather than at its own next poll.
+   *
+   * NEVER THROWS and never makes anything wait on it: the runtime's own pointer
+   * poll is the fallback, so a failure is one line in the log. `revision` is what
+   * the caller has just recorded, and telling this loop about it is what keeps
+   * the next pass from asking for the same reload again.
+   */
+  reload(application: string, opts?: { revision?: number }): Promise<void>;
   start(): void;
   /** Closes the loop permanently, cancels its pass and waits for it to quiesce. */
   shutdown(): Promise<void>;
@@ -88,6 +101,9 @@ export function createReconciler(
   /* Count every registry operation from this pass when observation is enabled. */
   const counted = observe === undefined ? undefined : countingRegistry(daemon.registry);
   const registry = counted?.registry ?? daemon.registry;
+  /* The view every loop on this node shares; its reads are already counted by
+     whoever built it, so it is taken from the daemon rather than rebuilt here. */
+  const view = registryView(daemon);
 
   /* Process state is rebuilt from supervisor ids after daemon restart. */
   const known = new Map<string, RuntimeProcess>();
@@ -120,6 +136,69 @@ export function createReconciler(
   let fleetRouting: FleetRouting | undefined;
   /* What the heartbeat was last asked to tell the fleet this node serves. */
   let announced: NodeServing | undefined;
+  /* The deployment revision each application was on when this node last looked.
+     A revision that MOVED while a process was already running is a deploy some
+     other node accepted, and the process here is still serving what it adopted
+     last — so it is asked to adopt now rather than at its own next poll. */
+  const adopted = new Map<string, number>();
+
+  /**
+   * Asks the local process of `application` to adopt now. Answers whether
+   * anything was asked, and never throws: see {@link Reconciler.reload}.
+   */
+  async function reload(application: string, opts?: { revision?: number }): Promise<void> {
+    if (opts?.revision !== undefined) adopted.set(application, opts.revision);
+
+    const process = executor
+      .currentProcesses()
+      .find((entry) => entry.application === application && entry.teardownPending !== true);
+    if (process === undefined) return;
+
+    try {
+      await driver.reload({
+        application,
+        host: runtimeDialHost(daemon.config.runtime),
+        port: process.internalPort,
+      });
+    } catch (error) {
+      /* The runtime's own pointer poll adopts it within its interval either way,
+         so this is worth one line and nothing else. */
+      console.error(
+        `scafo: "${application}" could not be asked to adopt its new deployment ` +
+          `(${describeError(error)}); its runtime will pick it up on its own poll`,
+      );
+    }
+  }
+
+  /**
+   * Asks every process whose application's deployment revision moved since the
+   * last pass to adopt it now.
+   *
+   * ONLY FOR A PROCESS THAT WAS ALREADY RUNNING. One this pass has just started
+   * reads the pointer as it boots, so there is nothing to tell it, and a first
+   * pass after a restart would otherwise ask every process on the node at once.
+   */
+  function adopt(desired: ApplicationRecord[], before: ReadonlySet<string>): void {
+    const running = new Set(executor.currentProcesses().map((entry) => entry.application));
+    const served = new Set<string>();
+
+    for (const record of desired) {
+      const revision = deploymentRevision(record);
+      if (revision === null) continue;
+      served.add(record.name);
+
+      const last = adopted.get(record.name);
+      adopted.set(record.name, revision);
+      if (last === undefined || last === revision) continue;
+      if (!before.has(record.name) || !running.has(record.name)) continue;
+      void reload(record.name);
+    }
+    /* An application this node no longer serves is one it has nothing to
+       remember about: were it placed here again, its process would start fresh. */
+    for (const name of adopted.keys()) {
+      if (!served.has(name)) adopted.delete(name);
+    }
+  }
 
   /**
    * Tells the fleet, through the heartbeat, when what this node serves has
@@ -127,12 +206,20 @@ export function createReconciler(
    * just started is reachable now, and thirty seconds is a long time for a route
    * to wait; a process that just stopped is worse, because until the fleet
    * hears, it keeps routing to a port nothing answers on.
+   *
+   * It HINTS as well as beating, because a node record is not hinted by the
+   * store: a heartbeat rewrites one every thirty seconds, and a token minted for
+   * each of those would cost every node a listing several times a minute. This
+   * beat is the rare one that carries something the fleet's routing depends on,
+   * so it says so, and the peers pick it up within a reconcile interval instead
+   * of on their node-refresh timer.
    */
   function announce(): void {
     const serving = servingOf(executor.currentProcesses());
     if (sameServing(serving, announced)) return;
     announced = serving;
     void daemon.heartbeat?.beat();
+    void view.hint();
   }
 
   /**
@@ -153,11 +240,12 @@ export function createReconciler(
     let plan: ReconcileAction[] = [];
     let placements: PlacementView[] = [];
     try {
-      /* Other nodes' placements are not desired locally and are stopped if present. */
-      const [state, nodes] = await Promise.all([
-        readDesired(registry, { nodeId: daemon.nodeId }),
-        listNodeRecords(registry),
-      ]);
+      /* One hint GET when nothing moved; a listing of what could have moved, and
+         a read of exactly the records that did, when something has. Other nodes'
+         placements are not desired locally and are stopped if present. */
+      const snapshot = await view.sync();
+      const state = desiredFrom(snapshot, { nodeId: daemon.nodeId });
+      const nodes = [...snapshot.nodes];
       const desired = state.applications;
       placements = state.placements;
       /* Rendered from what the pass read, before anything here changes: this
@@ -171,6 +259,9 @@ export function createReconciler(
         api: daemon.config.api.public,
       });
       const actual = executor.currentProcesses();
+      /* Taken before anything is started, so a process this pass creates is told
+         apart from one that was already serving something older. */
+      const before = new Set(actual.map((entry) => entry.application));
       plan = planReconcile({
         desired,
         actual,
@@ -188,6 +279,9 @@ export function createReconciler(
            which it polls for itself — so there is no call to fail and nothing to
            record a failure against. */
         recordRouting(daemon, { desired, processes: executor.currentProcesses() });
+        /* After execution, so a process this pass started is not asked to adopt
+           what it has just booted onto. */
+        adopt(desired, before);
       }
     } catch (error) {
       /* A registry read failure must not be interpreted as every application removed. */
@@ -249,6 +343,8 @@ export function createReconciler(
     runOnce: (): Promise<ReconcileAction[]> => startPass(false),
 
     kick,
+
+    reload,
 
     start(): void {
       if (terminal || timer !== null) return;

@@ -107,6 +107,12 @@ export class FaultStore implements CasStore {
   puts: number = 0;
   /** Deletes dispatched to the wrapped store. */
   dels: number = 0;
+  /** Listings dispatched to the wrapped store, keys and entries alike. */
+  lists: number = 0;
+  /** Keys read, in order, so a caller can ask what a pass actually looked at. */
+  readKeys: string[] = [];
+  /** Prefixes listed, in order, keys and entries alike. */
+  listedPrefixes: string[] = [];
   /** Runs before every put; write through the wrapped store here to race the caller. */
   onBeforePut?: (key: string) => void | Promise<void>;
   /**
@@ -144,11 +150,13 @@ export class FaultStore implements CasStore {
 
   get(key: string): Promise<StoredObject | null> {
     this.gets++;
+    this.readKeys.push(key);
     return this.#inner.get(key);
   }
 
   getBytes(key: string, opts?: { range: ByteRange }): Promise<Uint8Array | null> {
     this.gets++;
+    this.readKeys.push(key);
     return this.#inner.getBytes(key, opts);
   }
 
@@ -169,10 +177,14 @@ export class FaultStore implements CasStore {
   }
 
   list(prefix: string): Promise<string[]> {
+    this.lists++;
+    this.listedPrefixes.push(prefix);
     return this.#inner.list(prefix);
   }
 
   listEntries(prefix: string): Promise<StoredEntry[]> {
+    this.lists++;
+    this.listedPrefixes.push(prefix);
     return this.#inner.listEntries(prefix);
   }
 

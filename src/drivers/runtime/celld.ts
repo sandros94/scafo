@@ -103,8 +103,38 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
         env: processEnv(input, operatorEnv),
       };
     },
+
+    async reload(input): Promise<void> {
+      const url = `http://${input.host}:${String(input.port)}/reload`;
+      const response = await fetch(url, {
+        method: "POST",
+        signal: AbortSignal.timeout(RELOAD_TIMEOUT_MS),
+      });
+      if (!response.ok) {
+        throw new ScafoError("capability-missing", "Celld refused to reload", {
+          detail: `POST ${url} answered HTTP ${String(response.status)}`,
+        });
+      }
+      /* The body is read to completion so the connection is not left hanging on
+         a keep-alive socket this node never speaks on again. */
+      await response.text();
+    },
   };
 }
+
+/**
+ * How long the internal listener has to answer a reload before this node stops
+ * waiting for it.
+ *
+ * SHORT, because of what is on the other side of the wait: a deploy's caller,
+ * already holding a `deployed` record. The reload only shortens the seconds
+ * between that record and the application serving what it names, and Celld's own
+ * pointer poll covers the case where it never lands — so a listener that is busy,
+ * gone, or on a version whose API has moved must cost the deploy a few seconds
+ * and nothing more. The endpoint itself is unauthenticated, on loopback, and
+ * documented upstream as alpha.
+ */
+const RELOAD_TIMEOUT_MS = 3000;
 
 /** How long `--version` may take before the binary counts as unreadable. */
 const VERSION_TIMEOUT_MS = 10_000;
