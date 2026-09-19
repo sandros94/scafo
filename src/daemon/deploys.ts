@@ -48,6 +48,7 @@ import {
   DEFAULT_TASK_TIMEOUT_MS,
   type DeployReservation,
   type DeploySchedulerOptions,
+  type DeploySchedulerUsage,
 } from "./_deploy-scheduler.ts";
 
 /** Maximum in-memory deploy statuses. */
@@ -101,6 +102,8 @@ export interface DeployService {
   admit(meta: DeployMeta): Promise<DeployAdmission>;
   /** The deploy's status, or null when this daemon has never heard of it. */
   get(id: string): DeployStatus | null;
+  /** What is charged to the node's deploy bounds right now: tasks running, queued, and bytes staged. */
+  usage(): DeploySchedulerUsage;
   /** Closes admission and joins every receive, task, and cleanup. */
   stop(reason: unknown): Promise<void>;
 }
@@ -360,6 +363,10 @@ export function createDeployService(
     async stop(reason): Promise<void> {
       await scheduler.stop(reason);
       await Promise.allSettled(continuations);
+    },
+
+    usage(): DeploySchedulerUsage {
+      return scheduler.usage();
     },
   };
 }

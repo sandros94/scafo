@@ -656,6 +656,7 @@ function stubDeploys(): StubDeploys {
     },
     get: (id) => byId.get(id) ?? null,
     stop: () => Promise.resolve(),
+    usage: () => ({ activeTasks: 0, queuedTasks: 0, stagedBytes: 0, applications: {} }),
   };
 }
 

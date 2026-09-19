@@ -324,6 +324,10 @@ describe("who may deploy", () => {
     });
     const retained = (await responseId(await upload(await operatorToken()))) as string;
     await settled(retained);
+    /* A deploy reads `deployed` BEFORE its artifact is disposed and its bytes are
+       given back, and with the bounds this tight the next upload would be refused
+       for room (429) rather than for its size (400) until they are. */
+    await released();
     runs = [];
     const dispose = vi.fn(() => Promise.resolve());
     daemon.artifactStager = {
@@ -1685,6 +1689,19 @@ async function settled(id: string): Promise<DeployStatus> {
       expect(status?.state).not.toBe("accepted");
       expect(status?.state).not.toBe("uploading");
       return status as DeployStatus;
+    },
+    { timeout: 5000, interval: 5 },
+  );
+}
+
+/** Waits until nothing is charged to the node's deploy bounds any more. */
+async function released(): Promise<void> {
+  await vi.waitFor(
+    () => {
+      const usage = daemon.deploys?.usage();
+      expect(usage?.activeTasks).toBe(0);
+      expect(usage?.queuedTasks).toBe(0);
+      expect(usage?.stagedBytes).toBe(0);
     },
     { timeout: 5000, interval: 5 },
   );
