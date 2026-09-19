@@ -22,6 +22,7 @@ Ask before acting when intent is ambiguous. For design or product decisions, run
 - `pnpm build`, `pnpm compile [linux-amd64|linux-arm64]`, `pnpm test`
 - `pnpm vitest run test/utils.test.ts`, `pnpm typecheck`, `pnpm lint`, `pnpm fmt`
 - `node dist/cli/index.mjs sail --help`
+- `pnpm scale:real` — an on-demand benchmark on real containers (`--help` for its flags), never run in CI and asserting no budget: it sweeps emulated machine sizes and store latencies so a default is chosen from the slowest profile it holds on, not from one big development machine.
 
 The ordinary integration suite starts an S3 store with testcontainers. Set `SCAFO_TEST_STORE=seaweedfs|rustfs`, or supply `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, and `S3_BUCKET`.
 
