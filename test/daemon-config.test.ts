@@ -377,6 +377,15 @@ describe("platform domains", () => {
     expect(config.platformDomains).toEqual(["apps.test", "edge.example.com"]);
   });
 
+  it("takes one whole domain per --platform-domains, the flag repeating", async () => {
+    const config = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_PLATFORM_DOMAINS: "from.env" },
+      flags: { "platform-domains": ["apps.test", "edge.example.com"] },
+    });
+
+    expect(config.platformDomains).toEqual(["apps.test", "edge.example.com"]);
+  });
+
   it("reads a list written as an array in the config file", async () => {
     const config = await loadDaemonConfig({
       configPath: CONFIG_PATH,
@@ -423,6 +432,15 @@ describe("the labels a node carries", () => {
   it("reads the comma syntax a flag and an environment variable carry", async () => {
     const config = await loadDaemonConfig({
       env: { ...REQUIRED_ENV, SCAFO_NODE_LABELS: " tier=fast, region = eu-west-1 ,," },
+    });
+
+    expect(config.node.labels).toEqual({ tier: "fast", region: "eu-west-1" });
+  });
+
+  it("takes one whole pair per --node-labels, the flag repeating", async () => {
+    const config = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_NODE_LABELS: "tier=slow" },
+      flags: { "node-labels": ["tier=fast", "region=eu-west-1"] },
     });
 
     expect(config.node.labels).toEqual({ tier: "fast", region: "eu-west-1" });
@@ -799,6 +817,25 @@ describe("the variables an operator hands every runtime process", () => {
     expect(config.runtime.celldEnv).toEqual({ CELLD_OTEL: "1", OTEL_HEADERS: "a=1,b=2" });
   });
 
+  it("takes one whole pair per --celld-env, a comma inside a value included", async () => {
+    /* The flag repeats, so nothing about a value is separator-shaped: the
+       environment variable is the one form whose entries commas divide. */
+    const config = await loadDaemonConfig({
+      env: REQUIRED_ENV,
+      flags: { "celld-env": ["OTEL_HEADERS=a=1,b=2", "RUST_LOG=debug"] },
+    });
+
+    expect(config.runtime.celldEnv).toEqual({ OTEL_HEADERS: "a=1,b=2", RUST_LOG: "debug" });
+  });
+
+  it("reads a variable per comma-separated entry of SCAFO_CELLD_ENV, which carries no comma in a value", async () => {
+    const config = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_CELLD_ENV: "OTEL_HEADERS=a=1,RUST_LOG=debug" },
+    });
+
+    expect(config.runtime.celldEnv).toEqual({ OTEL_HEADERS: "a=1", RUST_LOG: "debug" });
+  });
+
   it("keeps everything after the first equals sign as the value", async () => {
     const config = await loadDaemonConfig({
       flags: { "celld-env": "CELLD_OTEL_RESOURCE=service.name=shop" },
@@ -816,7 +853,7 @@ describe("the variables an operator hands every runtime process", () => {
         JSON.stringify({ runtime: { celldEnv: { CELLD_OTEL: "0", RUST_BACKTRACE: "1" } } }),
       ),
       env: { ...REQUIRED_ENV, SCAFO_CELLD_ENV: "CELLD_OTEL=1" },
-      flags: { "celld-env": "CELLD_OTEL=1,RUST_LOG=debug" },
+      flags: { "celld-env": ["CELLD_OTEL=1", "RUST_LOG=debug"] },
     });
 
     expect(config.runtime.celldEnv).toEqual({ CELLD_OTEL: "1", RUST_LOG: "debug" });
@@ -1380,6 +1417,15 @@ describe("the Traefik entryPoints the routers attach to", () => {
     expect(config.ingress).toEqual({ entryPoints: ["websecure"] });
   });
 
+  it("takes one whole entryPoint per --traefik-entrypoints, the flag repeating", async () => {
+    const config = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_TRAEFIK_ENTRYPOINTS: "from-env" },
+      flags: { "traefik-entrypoints": ["web", "websecure"] },
+    });
+
+    expect(config.ingress).toEqual({ entryPoints: ["web", "websecure"] });
+  });
+
   it("reads the array the file carries, which is what the text parses into", async () => {
     const config = await loadDaemonConfig({
       configPath: CONFIG_PATH,
@@ -1426,10 +1472,10 @@ describe("the tokens guarding what the ingress reads", () => {
     expect(config.ingress).toEqual({ token: ["from-flag"] });
   });
 
-  it("takes a plain string or an array from the file, the array carrying entries whole", async () => {
+  it("takes a plain string or an array from the file, both carrying tokens whole", async () => {
     const asString = await loadDaemonConfig({
       configPath: CONFIG_PATH,
-      readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { token: "new,old" } })),
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { token: "one,token" } })),
       env: REQUIRED_ENV,
     });
     const asArray = await loadDaemonConfig({
@@ -1441,8 +1487,17 @@ describe("the tokens guarding what the ingress reads", () => {
       env: REQUIRED_ENV,
     });
 
-    expect(asString.ingress).toEqual({ token: ["new", "old"] });
+    expect(asString.ingress).toEqual({ token: ["one,token"] });
     expect(asArray.ingress).toEqual({ token: ["new", "with,comma"] });
+  });
+
+  it("takes one whole token per --ingress-token, primary first", async () => {
+    const config = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_TOKEN: "from-env" },
+      flags: { "ingress-token": ["new-token", "old,token"] },
+    });
+
+    expect(config.ingress).toEqual({ token: ["new-token", "old,token"] });
   });
 
   it("leaves the node minting its own when nothing names any", async () => {

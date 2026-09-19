@@ -10,7 +10,7 @@ import {
 import type { StagedArtifact } from "../../core/types/deploy.ts";
 import { isScafoError, ScafoError } from "../../core/error.ts";
 import { parseReplicas } from "../../core/placement/replicas.ts";
-import { parseLabels } from "../../core/utils/labels.ts";
+import { parseLabelEntries } from "../../core/utils/labels.ts";
 import { packDirectory } from "../../drivers/archive/tar-zst.ts";
 import { resolveApplication } from "../_application.ts";
 import {
@@ -20,6 +20,7 @@ import {
   parseVarFlags,
   readConfiguredName,
 } from "../_deploy-config.ts";
+import { flagList } from "../_flags.ts";
 import { nodeBaseUrl, nodeRequest, type Authorize, operatorSigner } from "../_node.ts";
 import { resolveOperatorHome } from "../_home.ts";
 import { OPERATOR_KEY_FORMS, operatorFlags, resolveOperator } from "../_operator.ts";
@@ -70,7 +71,9 @@ const deployArgs: ArgsDef = {
   },
   "node-selector": {
     type: "string",
-    description: "Labels a node must carry to serve this application (region=eu-west-1,tier=fast)",
+    multiple: true,
+    valueHint: "key=value",
+    description: "Label a node must carry to serve this application; one pair per flag",
   },
   "key": { type: "string", description: `Operator key to sign with: ${OPERATOR_KEY_FORMS}` },
   "config": {
@@ -167,12 +170,8 @@ async function runDeploy(flags: Record<string, unknown>): Promise<void> {
  * value is whatever follows the first colon, commas and all.
  */
 export function configEditFrom(flags: Record<string, unknown>): ConfigEdit {
-  const given = Array.isArray(flags.var) ? (flags.var as unknown[]) : [];
   return {
-    vars: parseVarFlags(
-      given.filter((entry): entry is string => typeof entry === "string"),
-      "--var",
-    ),
+    vars: parseVarFlags(flagList(flags.var), "--var"),
     /* citty turns `--no-bundle` into `bundle: false`; the negated name itself
        never reaches the parsed flags. */
     noBundle: flags.bundle === false,
@@ -183,9 +182,9 @@ export function configEditFrom(flags: Record<string, unknown>): ConfigEdit {
 export function deployMetadataFrom(flags: Record<string, unknown>): DeployMetadata {
   const wantedReplicas = text(flags.replicas);
   const replicas = wantedReplicas === undefined ? undefined : parseReplicas(wantedReplicas);
-  const wantedSelector = text(flags["node-selector"]);
+  const wantedSelector = flagList(flags["node-selector"]);
   const nodeSelector =
-    wantedSelector === undefined ? undefined : parseLabels(wantedSelector, "--node-selector");
+    wantedSelector.length === 0 ? undefined : parseLabelEntries(wantedSelector, "--node-selector");
 
   return {
     /* Only when they were asked for: a deploy that names no replica count and no

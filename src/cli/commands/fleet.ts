@@ -27,6 +27,7 @@ import { ScafoError } from "../../core/error.ts";
 import { readFreeze } from "../../core/registry/freeze.ts";
 import { loadDaemonConfig } from "../../daemon/config.ts";
 import { createRegistry } from "../_bootstrap.ts";
+import { configFlags } from "../_flags.ts";
 import { describeFreeze, describeUnfreeze, type FleetApi, fleetApi } from "../_fleet.ts";
 import { resolveOperatorHome } from "../_home.ts";
 import { nodeBaseUrl, operatorSigner } from "../_node.ts";
@@ -100,7 +101,7 @@ export const fleet: CommandDef = defineCommand({
 async function runNodes(flags: Record<string, unknown>): Promise<void> {
   const config = await loadDaemonConfig({
     configPath: typeof flags.config === "string" ? flags.config : undefined,
-    flags: stringFlags(flags),
+    flags: configFlags(flags),
     env: process.env,
     readFile: readTextFile,
   });
@@ -168,13 +169,4 @@ function guarded(
       reportFailure(error);
     }
   };
-}
-
-/** The declared flags that were actually given; anything else the parser adds is not configuration. */
-function stringFlags(flags: Record<string, unknown>): Record<string, string | undefined> {
-  const given: Record<string, string | undefined> = {};
-  for (const [name, value] of Object.entries(flags)) {
-    if (typeof value === "string") given[name] = value;
-  }
-  return given;
 }

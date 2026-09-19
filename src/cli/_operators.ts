@@ -7,6 +7,7 @@ import type { OperatorRole, TrustedOperator } from "../core/registry/operators.t
 import { WILDCARD_APPLICATION } from "../core/registry/operators.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
 import { assertSlug } from "../core/utils/slug.ts";
+import { flagList } from "./_flags.ts";
 import {
   type NodeCallOptions,
   type NodeOptions,
@@ -420,15 +421,16 @@ export function assertScopedEnrollment(
       detail:
         `the bucket path names no applications, and an operator-tier key that names none may ` +
         `reach nothing at all — so this would file a key that authenticates and can do nothing; ` +
-        `enrol it over the wire with --remote <name> --apps <a,b>, which is where an ` +
+        `enrol it over the wire with --remote <name> --apps <name>, repeated once per ` +
+        `application, which is where an ` +
         `operator-tier key gets the scope it needs`,
     });
   }
 }
 
 /**
- * The applications `--apps` names, as a comma-separated list — the same shape
- * `--endpoint` and `--node-labels` take, since citty has no array argument.
+ * The applications `--apps` names, one per occurrence of the flag — the same
+ * shape every list on the command line takes, and nothing in an entry is split.
  *
  * An entry is an application name, a prefix glob such as `shop-*`, or the
  * wildcard. Names are checked here rather than at the node, for the reason
@@ -444,13 +446,7 @@ export function assertScopedEnrollment(
  * stays absent, and the node refuses that for an operator-tier key.
  */
 export function operatorApplications(value: unknown): { applications?: string[] } {
-  const given = typeof value === "string" ? value.trim() : "";
-  if (given === "") return {};
-
-  const applications = given
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry !== "");
+  const applications = flagList(value);
   for (const entry of applications) {
     if (entry !== WILDCARD_APPLICATION && !entry.endsWith("*")) assertSlug(entry);
   }

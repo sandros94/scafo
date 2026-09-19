@@ -219,9 +219,13 @@ describe("admitting a key over the wire", () => {
 });
 
 describe("the applications an enrollment scopes a key to", () => {
-  it("reads a comma-separated list, the way endpoints and labels are read", () => {
-    expect(operatorApplications("acme,globex")).toEqual({ applications: ["acme", "globex"] });
-    expect(operatorApplications(" acme , globex ")).toEqual({ applications: ["acme", "globex"] });
+  it("reads one whole entry per --apps, the way every list on the command line is read", () => {
+    expect(operatorApplications(["acme", "globex"])).toEqual({
+      applications: ["acme", "globex"],
+    });
+    expect(operatorApplications([" acme ", " globex "])).toEqual({
+      applications: ["acme", "globex"],
+    });
   });
 
   it("leaves an absent list absent, for the NODE to decide what that means", () => {
@@ -229,28 +233,35 @@ describe("the applications an enrollment scopes a key to", () => {
        what it means depends on the tier the key lands at, which is the node's
        to settle — every application for an admin, and a refusal below that. */
     expect(operatorApplications(undefined)).toEqual({});
-    expect(operatorApplications("")).toEqual({});
+    expect(operatorApplications([])).toEqual({});
+    expect(operatorApplications([""])).toEqual({});
   });
 
   it('passes "*" through unchecked, because whether it is allowed is the node\'s to say', () => {
     /* It is not a slug, so validating it here would mean either teaching this
        the rule that it stands alone — policy in the one place that cannot
        enforce it — or refusing it with a message about lowercase letters. */
-    expect(operatorApplications("*")).toEqual({ applications: ["*"] });
-    expect(operatorApplications("*,acme")).toEqual({ applications: ["*", "acme"] });
+    expect(operatorApplications(["*"])).toEqual({ applications: ["*"] });
+    expect(operatorApplications(["*", "acme"])).toEqual({ applications: ["*", "acme"] });
   });
 
   it("passes a PREFIX GLOB through for the same reason, unchecked and unexpanded", () => {
     /* "shop-*" reaches "shop-preview" and not "shop", and whether a glob is
        allowed where it was used is the node's to say rather than this end's. */
-    expect(operatorApplications("shop-*")).toEqual({ applications: ["shop-*"] });
-    expect(operatorApplications("acme,shop-*,globex")).toEqual({
+    expect(operatorApplications(["shop-*"])).toEqual({ applications: ["shop-*"] });
+    expect(operatorApplications(["acme", "shop-*", "globex"])).toEqual({
       applications: ["acme", "shop-*", "globex"],
     });
   });
 
   it("refuses a name that is not an application name, here rather than at the node", async () => {
-    expect((await rejectionOf(async () => operatorApplications("Not A Name"))).code).toBe(
+    expect((await rejectionOf(async () => operatorApplications(["Not A Name"]))).code).toBe(
+      "invalid-slug",
+    );
+
+    /* A comma is part of the name it was written in rather than a separator,
+       so a list written the old way is refused instead of quietly scoping. */
+    expect((await rejectionOf(async () => operatorApplications(["acme,globex"]))).code).toBe(
       "invalid-slug",
     );
   });

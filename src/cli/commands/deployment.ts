@@ -25,6 +25,7 @@ import { verifiedReleaseList } from "../../core/registry/_celld-contract.ts";
 import { resolveApplication } from "../_application.ts";
 import { createRegistry } from "../_bootstrap.ts";
 import { confirm } from "../_confirm.ts";
+import { configFlags } from "../_flags.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
 import { warn, warnUnstable } from "../_warn.ts";
 
@@ -424,7 +425,7 @@ function plural(count: number, noun: string): string {
 async function openRegistry(flags: Record<string, unknown>): Promise<RegistryContext> {
   const config = await loadDaemonConfig({
     configPath: text(flags.config),
-    flags: stringFlags(flags),
+    flags: configFlags(flags),
     env: process.env,
     readFile: readTextFile,
   });
@@ -435,13 +436,4 @@ function text(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed === "" ? undefined : trimmed;
-}
-
-/** The declared flags that were actually given; anything else the parser adds is not configuration. */
-function stringFlags(flags: Record<string, unknown>): Record<string, string | undefined> {
-  const given: Record<string, string | undefined> = {};
-  for (const [name, value] of Object.entries(flags)) {
-    if (typeof value === "string") given[name] = value;
-  }
-  return given;
 }

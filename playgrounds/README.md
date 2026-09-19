@@ -20,7 +20,7 @@ rm -rf .env .scafo
 
 Bucket credentials are fleet-root authority. Trust keys with `--register` for bootstrap/recovery or through an admin-authenticated node API. Admins manage the fleet's keys; operators can grant no higher tier and revoke only their replacement lineage.
 
-Operator-tier keys require application scope, given by `--apps` when the key is enrolled over the wire. An entry is an exact application name, a prefix glob such as `shop-*`, or `*`; `--apps "*"` grants every application and requires an admin. Keep bucket credentials out of tenant workflows.
+Operator-tier keys require application scope, given by `--apps` when the key is enrolled over the wire. The flag repeats, one entry each: an exact application name, a prefix glob such as `shop-*`, or `*`; `--apps "*"` grants every application and requires an admin. Keep bucket credentials out of tenant workflows.
 
 Scoped callers see only their key lineage and reachable applications.
 

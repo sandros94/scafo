@@ -50,6 +50,7 @@ import {
   nodeStateDir,
   registerThisNode,
 } from "../_bootstrap.ts";
+import { configFlags } from "../_flags.ts";
 import { INGRESS_TOKEN_FILE, ingressTokenNotice } from "../_ingress-token.ts";
 import { deprecatedAlias, readPackageVersion, readTextFile, reportFailure } from "../_utils.ts";
 
@@ -66,7 +67,9 @@ export const sailArgs: ArgsDef = {
   "state-dir": { type: "string", description: "Directory this node keeps its identity in" },
   "node-labels": {
     type: "string",
-    description: "What this node is, for applications to select on (region=eu-west-1,tier=fast)",
+    multiple: true,
+    valueHint: "key=value",
+    description: "What this node is, for applications to select on; one pair per flag",
   },
   "listen": { type: "string", description: "host:port the node API binds to" },
   "advertise": { type: "string", description: "host:port other nodes reach this one at" },
@@ -80,20 +83,30 @@ export const sailArgs: ArgsDef = {
     description: "host:port peers send this node's tunnel traffic to",
   },
   "wg-port": { type: "string", description: "UDP port the tunnel interface listens on (51820)" },
-  "platform-domains": { type: "string", description: "Comma-separated apex domains to serve" },
+  "platform-domains": {
+    type: "string",
+    multiple: true,
+    valueHint: "domain",
+    description: "Apex domain to serve; repeat the flag for several",
+  },
   "ingress-token": {
     type: "string",
+    multiple: true,
+    valueHint: "token",
     description:
-      "Token(s) admitted on /v1/ingress and /v1/storage, instead of one this node mints: " +
-      "new,old admits both while a rotation is in flight, and the first is written to the " +
-      "state directory's ingress-token file. Restart the daemon before reloading the ingress",
+      "Token admitted on /v1/ingress and /v1/storage, instead of one this node mints: " +
+      "repeat the flag to admit the previous one as well while a rotation is in flight, and " +
+      "the first is written to the state directory's ingress-token file. Restart the daemon " +
+      "before reloading the ingress",
   },
   "celld-bin": { type: "string", description: "Executable that runs an application" },
   "celld-env": {
     type: "string",
+    multiple: true,
+    valueHint: "NAME=value",
     description:
-      "Upstream Celld variables for every runtime process, NAME=value,NAME2=value2; " +
-      "a value cannot contain a comma here — write those as runtime.celldEnv in the config file",
+      "Upstream Celld variable for every runtime process; one pair per flag, and a value " +
+      "written here may hold anything, commas included",
   },
   "port-range-start": { type: "string", description: "First port runtime processes use" },
   "bind-host": { type: "string", description: "Address runtime processes bind their listeners to" },
@@ -152,7 +165,9 @@ export const sailArgs: ArgsDef = {
   },
   "traefik-entrypoints": {
     type: "string",
-    description: "Traefik entryPoints the published routers attach to (web,websecure)",
+    multiple: true,
+    valueHint: "name",
+    description: "Traefik entryPoint the published routers attach to; repeat the flag for several",
   },
 };
 
@@ -178,7 +193,7 @@ export const up: CommandDef = deprecatedAlias({
 async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   const config = await loadDaemonConfig({
     configPath: typeof flags.config === "string" ? flags.config : undefined,
-    flags: stringFlags(flags),
+    flags: configFlags(flags),
     env: process.env,
     readFile: readTextFile,
   });
@@ -491,22 +506,4 @@ function untilSignalled(shutdown: () => Promise<void>): Promise<void> {
     process.once("SIGINT", () => stop("SIGINT"));
     process.once("SIGTERM", () => stop("SIGTERM"));
   });
-}
-
-/**
- * The declared flags that were actually given; anything else the parser adds is
- * not configuration.
- *
- * A switch reaches the loader as the text that loader accepts for one. Only a
- * flag the operator actually WROTE gets here — an unpassed boolean is undefined
- * rather than false — so a `--flag` says on, a `--no-flag` says off, and a flag
- * nobody wrote leaves the process environment and the config file to answer.
- */
-function stringFlags(flags: Record<string, unknown>): Record<string, string | undefined> {
-  const given: Record<string, string | undefined> = {};
-  for (const [name, value] of Object.entries(flags)) {
-    if (typeof value === "string") given[name] = value;
-    else if (typeof value === "boolean") given[name] = value ? "true" : "false";
-  }
-  return given;
 }

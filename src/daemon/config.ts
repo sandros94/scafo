@@ -6,9 +6,9 @@ import { DEFAULT_ARCHIVE_ENTRIES, DEFAULT_ARTIFACT_BYTES } from "../core/types/d
 import { DEFAULT_PORT_RANGE_START } from "../core/placement/ports.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
 import type { TransportConfig, TransportMode } from "../core/types/transport.ts";
-import { assertEnvVars, parseEnvVars } from "../core/utils/env.ts";
+import { assertEnvVars, parseEnvVarEntries } from "../core/utils/env.ts";
 import { assertHost, formatHostPort, isHost, parseInterfaceAddress } from "../core/utils/host.ts";
-import { assertLabels, parseLabels } from "../core/utils/labels.ts";
+import { assertLabels, parseLabelEntries } from "../core/utils/labels.ts";
 /* Import the driver's reserved names instead of duplicating that contract. */
 import { OPERATOR_RESERVED_ENV, TELEMETRY_ENV } from "../drivers/runtime/celld.ts";
 import { parseJsoncDocument } from "./_jsonc.ts";
@@ -159,8 +159,12 @@ export interface RuntimeConfig {
 export interface LoadConfigOptions {
   /** Config file to read; defaults to {@link DEFAULT_CONFIG_PATHS}, first readable wins. */
   configPath?: string;
-  /** Command-line flags, keyed by their kebab-case name (`access-key`). */
-  flags?: Record<string, string | undefined>;
+  /**
+   * Command-line flags, keyed by their kebab-case name (`access-key`). A
+   * list-valued setting arrives as the array its flag was repeated into; every
+   * other setting arrives as text.
+   */
+  flags?: Record<string, string | string[] | undefined>;
   /** Environment to read; pass `process.env`. Defaults to no environment at all. */
   env?: Record<string, string | undefined>;
   /** Reads a file as text, resolving null when it does not exist. */
@@ -491,9 +495,36 @@ export function describeWireguardSetting(setting: "address" | "endpoint" | "port
 type Setting = keyof typeof ORIGINS;
 
 interface Sources {
-  flags: Record<string, string | undefined>;
+  flags: Record<string, string | string[] | undefined>;
   env: Record<string, string | undefined>;
   file: Record<string, unknown> | undefined;
+}
+
+/**
+ * Every entry a list-valued setting names on the command line or in the
+ * environment, unread and untrimmed, or undefined when neither source states it.
+ *
+ * THIS IS THE ONE PLACE THE TWO SPELLINGS OF A LIST DIFFER. A flag repeats, and
+ * each occurrence is one whole entry — nothing is split, so an entry may hold a
+ * comma. An environment variable cannot repeat, so it carries the entries as
+ * comma-separated text and an entry there may hold no comma. The config file has
+ * a third spelling of its own, a JSON array, which each setting reads for itself
+ * once neither of these answered.
+ *
+ * A repeated flag nobody wrote reaches the loader as an empty array, which says
+ * nothing and lets the environment answer; a flag written empty says an empty
+ * entry, which is a setting's own to refuse.
+ */
+function listFlagOrEnv(origin: Origin, sources: Sources): string[] | undefined {
+  const flag = sources.flags[origin.flag];
+  if (typeof flag === "string") return [flag];
+  if (Array.isArray(flag) && flag.length > 0) return flag;
+
+  for (const variable of origin.env) {
+    const value = sources.env[variable];
+    if (value !== undefined) return value.split(",");
+  }
+  return undefined;
 }
 
 function resolve(setting: Setting, sources: Sources): string | undefined {
@@ -680,16 +711,16 @@ function resolveBindHost(sources: Sources): string | undefined {
  * What this node says it is, or undefined when the operator said nothing.
  *
  * Two spellings, because the sources can carry two shapes: a flag and an
- * environment variable can only hold text, so they are written `k=v,k2=v2`,
- * while the config file holds the object that text parses into. The inline form
- * wins whole rather than merging with the file's — labels describe one machine,
- * and a set half-stated in two places is one nobody can read off either.
+ * environment variable state one `k=v` pair per entry, while the config file
+ * holds the object those pairs parse into. The inline form wins whole rather
+ * than merging with the file's — labels describe one machine, and a set
+ * half-stated in two places is one nobody can read off either.
  */
 function resolveNodeLabels(sources: Sources): Record<string, string> | undefined {
   const origin: Origin = ORIGINS.nodeLabels;
 
-  const inline = flagOrEnv(origin, sources);
-  if (inline !== undefined) return parseLabels(inline, `"${origin.file}"`);
+  const inline = listFlagOrEnv(origin, sources);
+  if (inline !== undefined) return parseLabelEntries(inline, `"${origin.file}"`);
 
   const value = fileValue(sources.file, origin.file);
   if (value === undefined || value === null) return undefined;
@@ -702,13 +733,13 @@ function resolveNodeLabels(sources: Sources): Record<string, string> | undefined
  * The variables an operator hands every runtime process, or undefined when they
  * handed over none.
  *
- * Two spellings, as the node labels have: a flag and an environment variable can
- * only carry text, written `NAME=value,NAME2=value2`, while the config file
- * carries the object that text parses into. A VALUE MAY NOT CONTAIN A COMMA in
- * the inline form — the separator wins — so a value that needs one is written in
- * the config file, which has no such limit. The inline form replaces the file's
- * whole set rather than merging into it, for the reason labels do: a set
- * half-stated in two places is one nobody can read off either.
+ * Two spellings, as the node labels have: a flag and an environment variable
+ * state one `NAME=value` pair per entry, while the config file carries the
+ * object those pairs parse into. A VALUE HOLDING A COMMA is written by repeating
+ * the flag, or in the config file; the environment variable is the one form that
+ * cannot carry one, because its entries are separated by commas. The inline form
+ * replaces the file's whole set rather than merging into it, for the reason
+ * labels do: a set half-stated in two places is one nobody can read off either.
  *
  * A name the runtime driver derives for itself is refused here, naming the
  * variable, because this is the last moment an operator is still looking at
@@ -716,7 +747,7 @@ function resolveNodeLabels(sources: Sources): Record<string, string> | undefined
  */
 function resolveCelldEnv(sources: Sources): Record<string, string> | undefined {
   const origin: Origin = ORIGINS.celldEnv;
-  const inline = flagOrEnv(origin, sources);
+  const inline = listFlagOrEnv(origin, sources);
 
   let vars: Record<string, string>;
   if (inline === undefined) {
@@ -726,7 +757,7 @@ function resolveCelldEnv(sources: Sources): Record<string, string> | undefined {
     assertEnvVars(value, `"${origin.file}"`);
     vars = { ...value };
   } else {
-    vars = parseEnvVars(inline, `"${origin.file}"`);
+    vars = parseEnvVarEntries(inline, `"${origin.file}"`);
   }
 
   for (const name of Object.keys(vars)) {
@@ -742,19 +773,25 @@ function resolveCelldEnv(sources: Sources): Record<string, string> | undefined {
   return Object.keys(vars).length === 0 ? undefined : vars;
 }
 
-/** Resolves explicit ingress tokens. Text uses comma separation; JSON arrays
- * retain entries verbatim. An explicit empty value is rejected, not treated as absent. */
+/**
+ * Resolves explicit ingress tokens, in the order the source states them, primary
+ * first. An explicit empty value is rejected, not treated as absent.
+ *
+ * A file holding one token writes it as the string it is; several are an array,
+ * and each entry is one whole token.
+ */
 function resolveIngressTokens(sources: Sources): [string, ...string[]] | undefined {
   const origin: Origin = ORIGINS.ingressToken;
-  const written = suppliedFlagOrEnv(origin, sources) ?? fileValue(sources.file, origin.file);
+  const inFile: unknown = fileValue(sources.file, origin.file);
+  const written: unknown =
+    listFlagOrEnv(origin, sources) ?? (typeof inFile === "string" ? [inFile] : inFile);
   if (written === undefined || written === null) return undefined;
 
-  const spellings: unknown = typeof written === "string" ? written.split(",") : written;
-  if (!Array.isArray(spellings) || spellings.some((entry) => typeof entry !== "string")) {
+  if (!Array.isArray(written) || written.some((entry) => typeof entry !== "string")) {
     throw refuseIngressTokens(written, "must be a token, or a list of them");
   }
 
-  const tokens = (spellings as string[]).map((entry) => entry.trim());
+  const tokens = (written as string[]).map((entry) => entry.trim());
   const [primary, ...rest] = tokens;
   if (tokens.length === 0 || tokens.some((token) => token === "")) {
     throw refuseIngressTokens(
@@ -771,34 +808,19 @@ function refuseIngressTokens(written: unknown, why: string): ScafoError {
   return new ScafoError("invalid-input", "Invalid configuration value", {
     detail:
       `"${origin.file}" (--${origin.flag}, or ${origin.env.join(" or ")}) ${why}, got ` +
-      `${JSON.stringify(written)}. Write one token, several separated by commas, or an array of ` +
-      `them with the one in use first; leave the setting out altogether to have this node mint ` +
-      `its own instead`,
+      `${JSON.stringify(written)}. Write one token, several by repeating --${origin.flag} or ` +
+      `separating them with commas in the environment, or an array of them in the config file, ` +
+      `with the one in use first; leave the setting out altogether to have this node mint its ` +
+      `own instead`,
   });
-}
-
-/** Returns the first explicitly supplied flag or environment value, including blank. */
-function suppliedFlagOrEnv(origin: Origin, sources: Sources): string | undefined {
-  const flag = sources.flags[origin.flag];
-  if (flag !== undefined) return flag;
-
-  for (const variable of origin.env) {
-    const value = sources.env[variable];
-    if (value !== undefined) return value;
-  }
-  return undefined;
 }
 
 function resolvePlatformDomains(sources: Sources): string[] {
   const origin: Origin = ORIGINS.platformDomains;
-  const inline = flagOrEnv(origin, sources);
-  const domains =
-    inline === undefined
-      ? fileStringList(sources.file, origin.file)
-      : inline
-          .split(",")
-          .map((entry) => entry.trim())
-          .filter((entry) => entry !== "");
+  const inline = listFlagOrEnv(origin, sources);
+  const domains = (inline ?? fileStringList(sources.file, origin.file))
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
 
   for (const domain of domains) assertHost(domain);
   return domains;
@@ -816,28 +838,27 @@ function resolveIngress(sources: Sources): IngressConfig | undefined {
   return { ...(token === undefined ? {} : { token }), entryPoints };
 }
 
-/** Resolves Traefik entry points from comma text or JSON. Empty is rejected:
- * Traefik otherwise attaches routers to every entry point. */
+/** Resolves Traefik entry points from a repeated flag, comma text or JSON. Empty
+ * is rejected: Traefik otherwise attaches routers to every entry point. */
 function resolveEntryPoints(sources: Sources): string[] | undefined {
   const origin: Origin = ORIGINS.traefikEntryPoints;
-  const inline = flagOrEnv(origin, sources);
+  const inline = listFlagOrEnv(origin, sources);
 
   if (inline === undefined) {
     const written = fileValue(sources.file, origin.file);
     if (written === undefined || written === null) return undefined;
   }
 
-  const names = (
-    inline === undefined ? fileStringList(sources.file, origin.file) : inline.split(",")
-  )
+  const names = (inline ?? fileStringList(sources.file, origin.file))
     .map((entry) => entry.trim())
     .filter((entry) => entry !== "");
 
   if (names.length === 0) {
     throw new ScafoError("invalid-input", "Invalid configuration value", {
       detail:
-        `"${origin.file}" must name at least one Traefik entryPoint, such as "web" or ` +
-        `"web,websecure": routers attached to none are attached to all of them`,
+        `"${origin.file}" must name at least one Traefik entryPoint, such as "web", or both ` +
+        `with "--${origin.flag} web --${origin.flag} websecure": routers attached to none are ` +
+        `attached to all of them`,
     });
   }
   return names;

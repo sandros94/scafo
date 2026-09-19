@@ -53,6 +53,7 @@ import {
   readSelectorFlags,
 } from "../_applications.ts";
 import { createRegistry } from "../_bootstrap.ts";
+import { configFlags, flagList } from "../_flags.ts";
 import { resolveOperatorHome } from "../_home.ts";
 import { nodeBaseUrl, operatorSigner } from "../_node.ts";
 import { OPERATOR_KEY_FORMS, operatorFlags, resolveOperator } from "../_operator.ts";
@@ -118,7 +119,9 @@ const selectorArgs: ArgsDef = {
   ...targetArgs,
   set: {
     type: "string",
-    description: "Labels a node must carry to serve it (region=eu-west-1,tier=fast)",
+    multiple: true,
+    valueHint: "key=value",
+    description: "Label a node must carry to serve it; one pair per flag",
   },
   clear: { type: "boolean", description: "Let it run on every node again" },
 };
@@ -308,7 +311,7 @@ async function runUnretire(flags: Record<string, unknown>): Promise<void> {
 async function runSelector(flags: Record<string, unknown>): Promise<void> {
   const name = target(flags);
   /* Read before anything is contacted, so a malformed label costs no request. */
-  const wanted = readSelectorFlags({ set: text(flags.set), clear: flags.clear === true });
+  const wanted = readSelectorFlags({ set: flagList(flags.set), clear: flags.clear === true });
   const ops = await opsFor(flags);
 
   console.log(describeSelectorChange(name, await ops.setSelector(name, wanted)));
@@ -391,7 +394,7 @@ async function opsFor(flags: Record<string, unknown>): Promise<ApplicationOps> {
 
   const config = await loadDaemonConfig({
     configPath: text(flags.config),
-    flags: stringFlags(flags),
+    flags: configFlags(flags),
     env: process.env,
     readFile: readTextFile,
   });
@@ -440,13 +443,4 @@ function text(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed === "" ? undefined : trimmed;
-}
-
-/** The declared flags that were actually given; anything else the parser adds is not configuration. */
-function stringFlags(flags: Record<string, unknown>): Record<string, string | undefined> {
-  const given: Record<string, string | undefined> = {};
-  for (const [name, value] of Object.entries(flags)) {
-    if (typeof value === "string") given[name] = value;
-  }
-  return given;
 }

@@ -17,7 +17,7 @@ import { setNodeSelector, setReplicas } from "../core/registry/placement.ts";
 import { deleteApplication } from "../core/registry/reaper.ts";
 import { retireApplication, unretireApplication } from "../core/registry/retirement.ts";
 import type { ApplicationRecord, NodeSelector, ReplicaCount } from "../core/types/registry.ts";
-import { parseLabels } from "../core/utils/labels.ts";
+import { parseLabelEntries } from "../core/utils/labels.ts";
 import { assertSlug } from "../core/utils/slug.ts";
 import { type NodeCallOptions, type NodeOptions, nodeRequest } from "./_node.ts";
 
@@ -326,8 +326,8 @@ export function describeRetirement(name: string, application: ApplicationRecord)
 
 /** The two ways `scafo app selector` can be told what to do. */
 export interface SelectorFlags {
-  /** Labels written `k=v,k2=v2`, or undefined when `--set` was not given. */
-  set: string | undefined;
+  /** One `k=v` pair per `--set`, and empty when the flag was not given. */
+  set: string[];
   /** Whether `--clear` was given. */
   clear: boolean;
 }
@@ -343,17 +343,17 @@ export interface SelectorFlags {
  * application across a fleet without anyone asking it to.
  */
 export function readSelectorFlags(flags: SelectorFlags): NodeSelector | null {
-  if (flags.set !== undefined && flags.clear) {
+  if (flags.set.length > 0 && flags.clear) {
     throw new ScafoError("invalid-input", "Conflicting arguments", {
-      detail: `--set "${flags.set}" and --clear ask for opposite things; pass one of them`,
+      detail: `--set "${flags.set.join('" --set "')}" and --clear ask for opposite things; pass one of them`,
     });
   }
   if (flags.clear) return null;
-  if (flags.set !== undefined) return parseLabels(flags.set, "--set");
+  if (flags.set.length > 0) return parseLabelEntries(flags.set, "--set");
 
   throw new ScafoError("invalid-input", "Missing required argument", {
     detail:
-      `pass --set "key=value,key2=value2" to choose which nodes may serve it, ` +
+      `pass --set key=value, once per label, to choose which nodes may serve it, ` +
       `or --clear to let it run on every node again`,
   });
 }

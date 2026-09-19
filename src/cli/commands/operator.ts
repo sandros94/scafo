@@ -21,6 +21,7 @@ import { ScafoError } from "../../core/error.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
 import { assertNodeId } from "../../core/registry/paths.ts";
 import { createRegistry } from "../_bootstrap.ts";
+import { configFlags } from "../_flags.ts";
 import { resolveOperatorHome } from "../_home.ts";
 import {
   generateOperatorKey,
@@ -98,9 +99,11 @@ const enrollArgs: ArgsDef = {
   role: { type: "string", description: "Tier to admit it at: admin|operator" },
   apps: {
     type: "string",
+    multiple: true,
+    valueHint: "application",
     description:
-      `Applications the key may name, comma-separated, "shop-*" for a prefix, or "*" for ` +
-      `every application; required for an operator-tier key (wire path only)`,
+      `Application the key may name, "shop-*" for a prefix, or "*" for every application; ` +
+      `repeat the flag for several, and required for an operator-tier key (wire path only)`,
   },
   node: { type: "string", description: "Node to reach, instead of the remote's first endpoint" },
 };
@@ -357,7 +360,7 @@ async function remoteName(home: string, flags: Record<string, unknown>): Promise
 async function bucketRegistry(flags: Record<string, unknown>): Promise<RegistryContext> {
   const config = await loadDaemonConfig({
     configPath: text(flags.config),
-    flags: stringFlags(flags),
+    flags: configFlags(flags),
     env: process.env,
     readFile: readTextFile,
   });
@@ -377,13 +380,4 @@ function text(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed === "" ? undefined : trimmed;
-}
-
-/** The declared flags that were actually given; anything else the parser adds is not configuration. */
-function stringFlags(flags: Record<string, unknown>): Record<string, string | undefined> {
-  const given: Record<string, string | undefined> = {};
-  for (const [name, value] of Object.entries(flags)) {
-    if (typeof value === "string") given[name] = value;
-  }
-  return given;
 }

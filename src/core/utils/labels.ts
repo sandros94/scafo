@@ -64,19 +64,21 @@ export function assertLabels(
 }
 
 /**
- * Reads labels written as text — a command-line flag, an environment variable —
- * into the record the registry stores: `"k=v,k2=v2"`.
+ * Reads labels written one whole `key=value` pair at a time — an occurrence of a
+ * repeated flag, an entry of an environment variable's list — into the record
+ * the registry stores.
  *
- * Blank entries are skipped, so a trailing comma is a typo that costs nothing.
- * A DUPLICATE KEY is refused rather than resolved: both "the first wins" and
- * "the last wins" are defensible, which is exactly why neither should be guessed
- * at on the operator's behalf. Anything unusable is `ScafoError("invalid-input")`
- * naming `field`, so a typo never becomes a placement decision.
+ * Blank entries are skipped, so a trailing separator is a typo that costs
+ * nothing. A DUPLICATE KEY is refused rather than resolved: both "the first
+ * wins" and "the last wins" are defensible, which is exactly why neither should
+ * be guessed at on the operator's behalf. Anything unusable is
+ * `ScafoError("invalid-input")` naming `field`, so a typo never becomes a
+ * placement decision.
  */
-export function parseLabels(text: string, field: string): Record<string, string> {
+export function parseLabelEntries(entries: string[], field: string): Record<string, string> {
   const labels: Record<string, string> = {};
 
-  for (const entry of text.split(",")) {
+  for (const entry of entries) {
     const pair = entry.trim();
     if (pair === "") continue;
 
@@ -109,9 +111,9 @@ export function parseLabels(text: string, field: string): Record<string, string>
 }
 
 /**
- * Labels as one line of text, keys sorted, in the same `k=v,k2=v2` spelling
- * {@link parseLabels} reads. What a refusal or a terminal names them with, so an
- * operator can copy what they are shown straight back into a flag.
+ * Labels as one line of text, keys sorted, written `k=v,k2=v2`. What a refusal
+ * or a terminal names them with, and the spelling an environment variable
+ * carries them in.
  */
 export function formatLabels(labels: Record<string, string>): string {
   return Object.keys(labels)

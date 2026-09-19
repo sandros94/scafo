@@ -421,20 +421,20 @@ describe.each([
 });
 
 describe("what --set and --clear are read as", () => {
-  it("reads the labels of --set", () => {
-    expect(readSelectorFlags({ set: "tier=fast,region=eu-west-1", clear: false })).toEqual({
+  it("reads one label per --set, and every occurrence of it", () => {
+    expect(readSelectorFlags({ set: ["tier=fast", "region=eu-west-1"], clear: false })).toEqual({
       tier: "fast",
       region: "eu-west-1",
     });
   });
 
   it("reads --clear as the null that lifts the constraint", () => {
-    expect(readSelectorFlags({ set: undefined, clear: true })).toBeNull();
+    expect(readSelectorFlags({ set: [], clear: true })).toBeNull();
   });
 
   it("refuses both at once, which say opposite things", async () => {
     const error = await rejectsWith(
-      () => Promise.resolve(readSelectorFlags({ set: "tier=fast", clear: true })),
+      () => Promise.resolve(readSelectorFlags({ set: ["tier=fast"], clear: true })),
       "invalid-input",
     );
 
@@ -443,7 +443,7 @@ describe("what --set and --clear are read as", () => {
 
   it("refuses NEITHER rather than reading it as a clear", async () => {
     const error = await rejectsWith(
-      () => Promise.resolve(readSelectorFlags({ set: undefined, clear: false })),
+      () => Promise.resolve(readSelectorFlags({ set: [], clear: false })),
       "invalid-input",
     );
 
@@ -453,7 +453,7 @@ describe("what --set and --clear are read as", () => {
 
   it("refuses labels it cannot read, before any node is troubled with them", async () => {
     const error = await rejectsWith(
-      () => Promise.resolve(readSelectorFlags({ set: "tier", clear: false })),
+      () => Promise.resolve(readSelectorFlags({ set: ["tier"], clear: false })),
       "invalid-input",
     );
 

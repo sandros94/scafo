@@ -27,6 +27,7 @@ import {
   parseHostPort,
 } from "../../daemon/config.ts";
 import { API_HEALTH_PATH } from "../../drivers/ingress/traefik.ts";
+import { configFlags } from "../_flags.ts";
 import { describeUnexpected, readTextFile, reportFailure } from "../_utils.ts";
 
 /**
@@ -76,7 +77,7 @@ export const health: CommandDef = defineCommand({
 async function runHealth(flags: Record<string, unknown>): Promise<void> {
   const config = await loadDaemonConfig({
     configPath: typeof flags.config === "string" ? flags.config : undefined,
-    flags: stringFlags(flags),
+    flags: configFlags(flags),
     env: process.env,
     readFile: readTextFile,
   });
@@ -140,13 +141,4 @@ export async function probeHealth(url: string, opts?: ProbeOptions): Promise<Dae
     version: typeof health.version === "string" ? health.version : "unknown",
     node: typeof health.node === "string" ? health.node : "unknown",
   };
-}
-
-/** The declared flags that were actually given; anything else the parser adds is not configuration. */
-function stringFlags(flags: Record<string, unknown>): Record<string, string | undefined> {
-  const given: Record<string, string | undefined> = {};
-  for (const [name, value] of Object.entries(flags)) {
-    if (typeof value === "string") given[name] = value;
-  }
-  return given;
 }

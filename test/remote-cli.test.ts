@@ -343,23 +343,32 @@ function inline(file: PortableOperator): string {
   return INLINE_PREFIX + toBase64(new TextEncoder().encode(JSON.stringify(file)));
 }
 
-describe("the endpoints one --endpoint value may carry", () => {
-  it("splits a comma-separated value into every endpoint it names", async () => {
+describe("the endpoints --endpoint names", () => {
+  it("keeps every occurrence of the flag as one whole endpoint", async () => {
     const { flagList } = await import("../src/cli/_flags.ts");
-    expect(flagList("http://a:7400,http://b:7400")).toEqual(["http://a:7400", "http://b:7400"]);
-  });
-
-  it("trims around the commas and drops empty entries", async () => {
-    const { flagList } = await import("../src/cli/_flags.ts");
-    expect(flagList(" http://a:7400 , ,http://b:7400,")).toEqual([
+    expect(flagList(["http://a:7400", "http://b:7400"])).toEqual([
       "http://a:7400",
       "http://b:7400",
     ]);
   });
 
-  it("keeps a single plain value as the one-entry list it is", async () => {
+  it("splits nothing: a comma inside a value stays in it", async () => {
+    const { flagList } = await import("../src/cli/_flags.ts");
+    expect(flagList(["http://a:7400,http://b:7400"])).toEqual(["http://a:7400,http://b:7400"]);
+  });
+
+  it("trims each value and drops the empty ones", async () => {
+    const { flagList } = await import("../src/cli/_flags.ts");
+    expect(flagList([" http://a:7400 ", "  ", "http://b:7400"])).toEqual([
+      "http://a:7400",
+      "http://b:7400",
+    ]);
+  });
+
+  it("keeps a plain string as the one value it is", async () => {
     const { flagList } = await import("../src/cli/_flags.ts");
     expect(flagList("http://a:7400")).toEqual(["http://a:7400"]);
+    expect(flagList(undefined)).toEqual([]);
   });
 });
 

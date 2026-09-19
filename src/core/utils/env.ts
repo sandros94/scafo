@@ -79,24 +79,24 @@ export function assertEnvVars(
 }
 
 /**
- * Reads variables written as text — a command-line flag, an environment
- * variable — into the record a process is handed: `"NAME=value,NAME2=value2"`.
+ * Reads variables written one whole `NAME=value` pair at a time — an occurrence
+ * of a repeated flag, an entry of an environment variable's list — into the
+ * record a process is handed.
  *
- * A VALUE MAY NOT CONTAIN A COMMA in this form: the separator wins, and a value
- * that needs one belongs in a config file, which carries the same record as an
- * object and has no such limit. Everything after the FIRST `=` is the value, so
- * `NAME=a=b` is `a=b`, and surrounding spacing is dropped on both halves.
+ * Everything after the FIRST `=` is the value, so `NAME=a=b` is `a=b`, and
+ * surrounding spacing is dropped on both halves. A value is whatever the entry
+ * holds, commas included.
  *
- * Blank entries are skipped, so a trailing comma costs nothing. A DUPLICATE NAME
- * is refused rather than resolved, as it is for labels: both "the first wins" and
- * "the last wins" are defensible, which is why neither is guessed at on the
- * operator's behalf. Text that names nothing at all is refused too — it was
- * written for a reason, and the reason was not "no variables".
+ * Blank entries are skipped, so a trailing separator costs nothing. A DUPLICATE
+ * NAME is refused rather than resolved, as it is for labels: both "the first
+ * wins" and "the last wins" are defensible, which is why neither is guessed at
+ * on the operator's behalf. A list that names nothing at all is refused too — it
+ * was written for a reason, and the reason was not "no variables".
  */
-export function parseEnvVars(text: string, field: string): Record<string, string> {
+export function parseEnvVarEntries(entries: string[], field: string): Record<string, string> {
   const vars: Record<string, string> = {};
 
-  for (const entry of text.split(",")) {
+  for (const entry of entries) {
     const pair = entry.trim();
     if (pair === "") continue;
 
