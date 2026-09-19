@@ -109,6 +109,18 @@ export const sailArgs: ArgsDef = {
       "written here may hold anything, commas included",
   },
   "port-range-start": { type: "string", description: "First port runtime processes use" },
+  "port-range-end": {
+    type: "string",
+    description:
+      "Last port runtime processes use; with --network host these are the HOST's ports, so " +
+      "fit the range to the machine (24998)",
+  },
+  "port-quarantine-ms": {
+    type: "string",
+    description:
+      "How long a port released on this node is kept from a different application, in " +
+      "milliseconds, so nothing still routing there reaches another application (600000)",
+  },
   "bind-host": { type: "string", description: "Address runtime processes bind their listeners to" },
   "registry-resync-ms": {
     type: "string",
@@ -379,6 +391,14 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
 
   const driver = createCelldDriver({
     binPath: celldBin,
+    /* The same directory this node's identity and ingress token live in: what a
+       supervised process works out of has to come back with the node. */
+    stateDir: nodeStateDir(config),
+    /* Where the ports each application holds are kept and probed: the range is
+       this node's by convention only, and on a host network it is the host's. */
+    portRange: { start: config.runtime.portRangeStart, end: config.runtime.portRangeEnd },
+    portQuarantineMs: config.runtime.portQuarantineMs,
+    bindHost: config.runtime.bindHost,
     ...(config.runtime.celldEnv === undefined ? {} : { operatorEnv: config.runtime.celldEnv }),
   });
   const reconciler = createReconciler(daemon, driver, {

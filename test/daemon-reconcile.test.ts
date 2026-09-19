@@ -4,17 +4,25 @@ import { createApplication } from "../src/core/registry/applications.ts";
 import { createDeployment } from "../src/core/registry/deployments.ts";
 import { acquireLease } from "../src/core/registry/lease.ts";
 import { getNode, registerNode } from "../src/core/registry/nodes.ts";
-import { nodeKey } from "../src/core/registry/paths.ts";
+import { applicationKey, nodeKey } from "../src/core/registry/paths.ts";
+import { retireApplication } from "../src/core/registry/retirement.ts";
+import { ScafoError } from "../src/core/error.ts";
 import { writePlacement } from "../src/core/registry/placement.ts";
 import type { NodeRecord } from "../src/core/types/registry.ts";
-import type { RuntimeDriver, RuntimeSpecInput } from "../src/core/types/runtime.ts";
+import type { PortPair } from "../src/core/placement/ports.ts";
+import type {
+  RuntimeDriver,
+  RuntimePorts,
+  RuntimeProcess,
+  RuntimeSpecInput,
+} from "../src/core/types/runtime.ts";
 import type { ProcessSpec, ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import type { RoutingAttribution } from "../src/daemon/access-counters.ts";
 import type { DaemonContext } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { createHeartbeat } from "../src/daemon/heartbeat.ts";
 import { createReconciler } from "../src/daemon/reconcile.ts";
-import { hintingStore } from "../src/core/registry/changes.ts";
+import { hintingStore, readChangeHint } from "../src/core/registry/changes.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith } from "./_helpers.ts";
 
@@ -27,15 +35,10 @@ const CELLD_VERSION = "0.5.0";
 describe("application-owned reconciliation", () => {
   it("starts one process and routes it as soon as the supervisor reports it running", async () => {
     const world = await seededWorld();
-    expect(await world.reconciler.runOnce()).toEqual([
-      {
-        type: "start",
-        application: APP,
-        ports: { public: 42_000, internal: 42_001 },
-      },
-    ]);
+    expect(await world.reconciler.runOnce()).toEqual([{ type: "start", application: APP }]);
     expect(world.supervisor.started).toHaveLength(1);
-    expect(world.events).toEqual(["spec", "start", "ingress:1"]);
+    /* The directories the process works out of are made before it runs. */
+    expect(world.events).toEqual(["spec", `prepare:${APP}`, "start", "ingress:1"]);
     expect(world.reconciler.status().processes[0]).toMatchObject({ application: APP });
   });
 
@@ -156,6 +159,93 @@ describe("application-owned reconciliation", () => {
   });
 });
 
+describe("a node that comes back after it died", () => {
+  it("never routes an application's host to a port another application now holds", async () => {
+    /* Two applications that arrived over time, so the ports they hold are not
+       the ports a single pass would hand out in name order. */
+    const world = await seededWorld();
+    const heartbeat = await attachHeartbeat(world);
+    await world.reconciler.runOnce();
+
+    const lease = await acquireLease(world.daemon.registry, "coordinator");
+    if (lease === null) throw new Error("lease unavailable");
+    await createApplication(world.daemon.registry, { name: "blog" });
+    await createDeployment(world.daemon.registry, "blog", { version: VERSION_ONE });
+    await recordRevision(world.daemon.registry, "blog", VERSION_ONE);
+    await writePlacement(world.daemon.registry, "blog", ["node-a"], lease);
+    await world.reconciler.runOnce();
+    await heartbeat.beat();
+
+    const before = portsOf(world.reconciler.status().processes);
+    expect(Object.keys(before).sort()).toEqual(["blog", APP]);
+
+    /* The machine dies and comes back: the same registry, the same node record
+       — still saying what it served before — and no process at all. */
+    const events: string[] = [];
+    const revived: DaemonContext = { ...world.daemon, supervisor: fakeSupervisor(events) };
+    const reconciler = createReconciler(revived, fakeDriver(events, world.book), {
+      baseEnv: { PATH: "/bin" },
+    });
+    revived.reconciler = reconciler;
+    await reconciler.runOnce();
+
+    const after = portsOf(reconciler.status().processes);
+    const routed = Object.fromEntries(
+      (reconciler.fleetRouting()?.routes ?? []).flatMap((route) =>
+        route.upstreams
+          .filter((upstream) => upstream.node === "node-a")
+          .map((upstream) => [route.application, Number(upstream.address.split(":").at(-1))]),
+      ),
+    );
+
+    /* Whatever this node's routing says about one of its own applications is the
+       port that application's process is really on — a host proxied to anything
+       else is answered by whichever application holds that port. */
+    for (const [application, port] of Object.entries(routed)) {
+      expect(port, `${application} is routed to a port it does not hold`).toBe(after[application]);
+    }
+    /* And an application keeps the port it had: every peer still routes there. */
+    expect(after).toEqual(before);
+  });
+});
+
+describe("an application whose ports something else has taken", () => {
+  it("comes back on a new pair, says so once, and the fleet is told where it is", async () => {
+    /* A foreign process bound one of the ports while the application was
+       stopped. Starting it there for ever is an outage; the node moves it. */
+    const world = await seededWorld();
+    const heartbeat = await attachHeartbeat(world);
+    await world.reconciler.runOnce();
+    await heartbeat.beat();
+    const before = portsOf(world.reconciler.status().processes);
+
+    world.supervisor.exited(APP);
+    world.driver.replaceNext.add(APP);
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((line: unknown) => {
+      lines.push(String(line));
+    });
+    try {
+      await world.reconciler.runOnce();
+    } finally {
+      spy.mockRestore();
+    }
+    await heartbeat.beat();
+
+    const after = portsOf(world.reconciler.status().processes);
+    expect(after[APP]).not.toBe(before[APP]);
+    expect(world.reconciler.status().failures).toEqual([]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain(APP);
+    expect(lines[0]).toContain(String(before[APP]));
+    expect(lines[0]).toContain(String(after[APP]));
+    /* And the fleet routes to where it is now, not where it was. */
+    expect((await getNode(world.daemon.registry, "node-a")).serving).toEqual({
+      [APP]: { port: after[APP] as number },
+    });
+  });
+});
+
 describe("what a node tells the fleet it serves", () => {
   it("says nothing until it has looked at its own processes", async () => {
     const world = await seededWorld();
@@ -206,6 +296,41 @@ describe("what a node tells the fleet it serves", () => {
     expect(beats).toBe(1);
   });
 
+  it("mints the change token for what it serves only once the beat has landed", async () => {
+    /* A token that beats the record to the bucket sends every node to read the
+       record as it WAS, and nothing sends them back: the route then waits for
+       the node-refresh timer instead of the next pass. */
+    const world = await seededWorld();
+    let landed = false;
+    let release: () => void = () => {};
+    const held = new Promise<void>((settle) => {
+      release = settle;
+    });
+    world.daemon.heartbeat = {
+      start() {},
+      stop() {},
+      beat: async () => {
+        await held;
+        landed = true;
+      },
+      status: () => ({ lastBeatAt: null, lastFailure: null }),
+    };
+
+    await world.reconciler.runOnce();
+    const before = await readChangeHint(world.daemon.registry);
+
+    /* The beat is still in flight: nothing has been said yet. */
+    await new Promise((settle) => setTimeout(settle, 20));
+    expect(landed).toBe(false);
+    expect(await readChangeHint(world.daemon.registry)).toBe(before);
+
+    release();
+    await vi.waitFor(async () => {
+      expect(landed).toBe(true);
+      expect(await readChangeHint(world.daemon.registry)).not.toBe(before);
+    });
+  });
+
   it("runs one more beat for a call that arrived while a beat was in flight", async () => {
     const world = await seededWorld();
     const heartbeat = await attachHeartbeat(world);
@@ -224,6 +349,129 @@ describe("what a node tells the fleet it serves", () => {
 
     /* Three calls, two beats: the second and third had the same thing to say. */
     expect(writes).toBe(2);
+  });
+});
+
+describe("the local state a node holds for an application", () => {
+  it("outlives every stop but the one the registry made final", async () => {
+    /* A process stops for many reasons — retirement, blocking, reassignment, a
+       drain, a restart — and every one of them is a state the application can
+       come back from, with a follower disk that may hold writes a peer already
+       acknowledged. Only a deletion is not. */
+    const world = await seededWorld();
+    await world.reconciler.runOnce();
+    expect(await world.driver.heldLocalState()).toEqual([APP]);
+
+    await retireApplication(world.daemon.registry, APP);
+    await world.reconciler.runOnce();
+
+    expect(world.supervisor.stopped).toEqual([APP]);
+    expect(await world.driver.heldLocalState()).toEqual([APP]);
+    expect(world.driver.removed).toEqual([]);
+  });
+
+  it("goes on the pass that reads the deletion, once the process it fed has stopped", async () => {
+    const world = await seededWorld();
+    await world.reconciler.runOnce();
+
+    await world.daemon.registry.store.del(applicationKey(APP));
+    await world.reconciler.runOnce();
+
+    expect(world.supervisor.stopped).toEqual([APP]);
+    expect(world.driver.removed).toEqual([APP]);
+    expect(await world.driver.heldLocalState()).toEqual([]);
+  });
+
+  it("stays while a process for it is still up, however gone the application is", async () => {
+    /* The stop failed, so the process is still there with those files open and
+       still answering peers out of them. The pass that gets it stopped is the
+       first one that may take the directory. */
+    const world = await seededWorld();
+    await world.reconciler.runOnce();
+    await world.daemon.registry.store.del(applicationKey(APP));
+    world.supervisor.stopFailures = 1;
+
+    await world.reconciler.runOnce();
+    expect(world.reconciler.status().processes[0]).toMatchObject({ teardownPending: true });
+    expect(world.driver.removed).toEqual([]);
+    expect(await world.driver.heldLocalState()).toEqual([APP]);
+
+    await world.reconciler.runOnce();
+    expect(world.driver.removed).toEqual([APP]);
+  });
+
+  it("is kept by a pass that could not read the registry", async () => {
+    /* A registry that could not be read is never "every application was
+       deleted": the pass reports the read and touches nothing local. */
+    const world = await seededWorld();
+    await world.reconciler.runOnce();
+    await world.daemon.registry.store.del(applicationKey(APP));
+    world.supervisor.stopFailures = 1;
+    await world.reconciler.runOnce();
+
+    world.daemon.registry.store.get = (): Promise<never> =>
+      Promise.reject(new ScafoError("store-unavailable", "The bucket is not answering"));
+    await world.reconciler.runOnce();
+
+    expect(world.driver.removed).toEqual([]);
+    expect(await world.driver.heldLocalState()).toEqual([APP]);
+    expect(world.reconciler.status().failures).toMatchObject([{ code: "store-unavailable" }]);
+  });
+
+  it("is reported as a failure of the pass when it will not go, and tried again", async () => {
+    const world = await seededWorld();
+    await world.reconciler.runOnce();
+    await world.daemon.registry.store.del(applicationKey(APP));
+
+    world.driver.removeFails = true;
+    await world.reconciler.runOnce();
+    expect(world.reconciler.status().failures).toMatchObject([{ action: "discard", subject: APP }]);
+
+    world.driver.removeFails = false;
+    await world.reconciler.runOnce();
+    expect(world.driver.removed).toEqual([APP]);
+    expect(world.reconciler.status().failures).toEqual([]);
+  });
+});
+
+describe("a process that will not start yet", () => {
+  it("is started again on the very next pass, with nothing held against it", async () => {
+    /* What a restarted process meets is its predecessor's own lease, which the
+       runtime waits out with a retry ladder of its own and may exhaust once.
+       The node's answer is the plain one: the exit is read, the id is freed,
+       and the next pass starts it again at the interval every pass runs at. */
+    const world = await seededWorld();
+    await world.reconciler.runOnce();
+    world.supervisor.exited(APP);
+
+    expect(await world.reconciler.runOnce()).toEqual([{ type: "start", application: APP }]);
+    expect(world.supervisor.started).toHaveLength(2);
+    expect(world.reconciler.status().failures).toEqual([]);
+    expect(world.reconciler.status().processes).toMatchObject([{ application: APP }]);
+  });
+
+  it("keeps the directories its predecessor left for it to recover from", async () => {
+    const world = await seededWorld();
+    await world.reconciler.runOnce();
+    world.supervisor.exited(APP);
+
+    await world.reconciler.runOnce();
+
+    expect(world.driver.removed).toEqual([]);
+    expect(await world.driver.heldLocalState()).toEqual([APP]);
+  });
+
+  it("reports a spawn that failed, and clears it on the pass that succeeds", async () => {
+    const world = await seededWorld();
+    world.supervisor.startFailures = 1;
+
+    await world.reconciler.runOnce();
+    expect(world.reconciler.status().failures).toMatchObject([{ action: "start", subject: APP }]);
+
+    await world.reconciler.runOnce();
+    expect(world.events.filter((event) => event === "start")).toHaveLength(2);
+    expect(world.supervisor.started).toHaveLength(1);
+    expect(world.reconciler.status().failures).toEqual([]);
   });
 });
 
@@ -384,7 +632,9 @@ async function seededWorld() {
 
   const events: string[] = [];
   const supervisor = fakeSupervisor(events);
-  const driver = fakeDriver(events);
+  /* The node's disk, kept apart from the driver so a revived node reads it. */
+  const book = new Map<string, PortPair>();
+  const driver = fakeDriver(events, book);
   const daemon: DaemonContext = {
     config: config(),
     nodeId: "node-a",
@@ -407,13 +657,15 @@ async function seededWorld() {
   };
   const reconciler = createReconciler(daemon, driver, { baseEnv: { PATH: "/bin" } });
   daemon.reconciler = reconciler;
-  return { daemon, reconciler, supervisor, driver, events };
+  return { daemon, reconciler, supervisor, driver, events, book };
 }
 
 interface FakeSupervisor extends Supervisor {
   started: ProcessSpec[];
   stopped: string[];
   stopFailures: number;
+  /** Spawns refused before any run, as a command that cannot be executed is. */
+  startFailures: number;
   startBarrier?: { entered: () => void; wait: Promise<void> };
   /** Records `id` as a process that ended without the supervisor asking. */
   exited: (id: string) => void;
@@ -425,8 +677,13 @@ function fakeSupervisor(events: string[]): FakeSupervisor {
     started: [],
     stopped: [],
     stopFailures: 0,
+    startFailures: 0,
     async start(spec) {
       events.push("start");
+      if (supervisor.startFailures > 0) {
+        supervisor.startFailures--;
+        throw new Error("the process could not be spawned");
+      }
       supervisor.started.push(spec);
       const barrier = supervisor.startBarrier;
       supervisor.startBarrier = undefined;
@@ -471,22 +728,72 @@ function fakeSupervisor(events: string[]): FakeSupervisor {
 
 interface FakeDriver extends RuntimeDriver {
   inputs: RuntimeSpecInput[];
+  /** The ports each application holds here, as a state directory keeps them. */
+  book: Map<string, PortPair>;
+  /** Applications whose next pair is re-chosen, as an unusable one is. */
+  replaceNext: Set<string>;
   /** Applications asked to adopt their new deployment, in the order they were. */
   reloaded: string[];
   /** Made to fail every reload, as a listener that is gone does. */
   reloadFails: boolean;
+  /** Applications this node holds a local directory for. */
+  held: Set<string>;
+  /** Applications whose directory was removed, in the order they were. */
+  removed: string[];
+  /** Made to fail every removal, as a directory that will not go does. */
+  removeFails: boolean;
 }
 
-function fakeDriver(events: string[]): FakeDriver {
+/**
+ * `book` stands in for the state directory: it is handed to the driver rather
+ * than made by it, so a driver built for a node that came back reads what the
+ * node before it wrote, the way a kept volume does.
+ */
+function fakeDriver(events: string[], book: Map<string, PortPair>): FakeDriver {
+  /* Handed out in the order applications first ask, which is what makes the
+     ports of two applications that arrived over time not the ports one pass
+     would give them in name order. */
+  let next = 42_000;
   return {
     stopGraceMs: 30_000,
+    book,
+    replaceNext: new Set<string>(),
     inputs: [],
     reloaded: [],
     reloadFails: false,
+    held: new Set<string>(),
+    removed: [],
+    removeFails: false,
     processSpec(input) {
       events.push("spec");
       this.inputs.push(input);
       return { id: input.application.name, command: "celld", args: [], env: {} };
+    },
+    ports(application): Promise<RuntimePorts> {
+      const kept = this.book.get(application);
+      if (kept !== undefined && !this.replaceNext.has(application)) {
+        return Promise.resolve({ ports: kept });
+      }
+      this.replaceNext.delete(application);
+      const ports = { public: next, internal: next + 1 };
+      next += 2;
+      this.book.set(application, ports);
+      return Promise.resolve(kept === undefined ? { ports } : { ports, replaced: kept });
+    },
+    prepareLocalState(application): Promise<void> {
+      events.push(`prepare:${application}`);
+      this.held.add(application);
+      return Promise.resolve();
+    },
+    heldLocalState(): Promise<string[]> {
+      return Promise.resolve([...this.held]);
+    },
+    removeLocalState(application): Promise<void> {
+      if (this.removeFails) return Promise.reject(new Error("the directory will not go"));
+      this.removed.push(application);
+      this.held.delete(application);
+      this.book.delete(application);
+      return Promise.resolve();
     },
     reload(input): Promise<void> {
       this.reloaded.push(input.application);
@@ -512,9 +819,16 @@ function config(): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
+      portRangeEnd: 42_998,
+      portQuarantineMs: 600_000,
       bindHost: "127.0.0.1",
     },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },
   };
+}
+
+/** The public port each application's process holds. */
+function portsOf(processes: RuntimeProcess[]): Record<string, number> {
+  return Object.fromEntries(processes.map((process) => [process.application, process.port]));
 }

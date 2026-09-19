@@ -226,8 +226,8 @@ export interface QueueWait {
   sleep?: (ms: number) => Promise<void>;
   /** Injectable for tests; defaults to `Date.now`. */
   nowMs?: () => number;
-  /** Injectable for tests; defaults to `Math.random`. */
-  jitter?: () => number;
+  /** Injectable for tests; defaults to the secure source the backoff draws from. */
+  jitter?: (windowMs: number) => number;
   /** Where the two lines about waiting go; defaults to stdout. */
   log?: (line: string) => void;
 }

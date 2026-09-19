@@ -100,8 +100,21 @@ describe("renewLease", () => {
     expect(Date.parse(renewed.lease.acquiredAt)).toBeGreaterThan(
       Date.parse(first.lease.acquiredAt),
     );
-    await expect(verifyLease(ctx, first)).resolves.toBe(false);
+    /* A renewal is the SAME tenancy going on: work that was handed the lease
+       before it — a deletion walking a large application — still holds it, and
+       refusing it would fail every deletion that outlasts a coordinator tick. */
+    await expect(verifyLease(ctx, first)).resolves.toBe(true);
     await expect(verifyLease(ctx, renewed)).resolves.toBe(true);
+  });
+
+  it("is no longer held once the same node has taken it again at a new fence", async () => {
+    const { ctx } = ctxWith(new MemoryCasStore());
+    const first = await held(acquireLease(ctx, "node-a", { ttlMs: TTL_MS }), "node-a");
+    const again = await held(acquireLease(ctx, "node-a", { ttlMs: TTL_MS }), "node-a");
+
+    expect(again.lease.fence).toBe(first.lease.fence + 1);
+    await expect(verifyLease(ctx, first)).resolves.toBe(false);
+    await expect(verifyLease(ctx, again)).resolves.toBe(true);
   });
 
   it("holds a lease whose acquisition landed before the store failed to say so", async () => {

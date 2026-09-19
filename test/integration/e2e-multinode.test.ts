@@ -8,7 +8,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -94,6 +94,12 @@ const FAST_LABEL = "tier=fast";
 /** Deployed through a node excluded from its placement selector. */
 const AWAITED = "app-awaited";
 
+/**
+ * Counted up on both nodes, then carried through a SIGKILL of both while the
+ * bucket was frozen. It is deployed last and nothing else touches it.
+ */
+const DURABLE = "app-durable";
+
 /** Deployed to both nodes, retired out of service, then force-deleted. */
 const SUNSET = "app-sunset";
 /** Claimed for {@link SUNSET}, so its deletion has a claim to release too. */
@@ -122,6 +128,28 @@ const POLL_MS = 500;
 /** Covers liveness expiry, reassignment, reconcile, and process start after a node dies. */
 const REASSIGN_DEADLINE_MS = 240_000;
 const REASSIGN_STEP_TIMEOUT_MS = 300_000;
+/**
+ * How long the durability case gives the warm-up counts to reach the bucket
+ * before it freezes the bucket.
+ *
+ * A WAIT AND NOT AN ASSERTION, because nothing the fleet publishes says "the
+ * bucket has this row now" — an upload is what the runtime does after it has
+ * already answered. It only has to be long enough that the write taken while
+ * the bucket is frozen is the ONLY one whose fate is in question.
+ */
+const BUCKET_UPLOAD_SETTLE_MS = 6_000;
+/**
+ * How long the bucket stays frozen.
+ *
+ * SHORT ON PURPOSE: a runtime process renews its own node lease against the
+ * bucket every few seconds and fences itself after ten without it, so a longer
+ * freeze would stop the processes for a reason that has nothing to do with what
+ * this case is about. Everything inside the window is one HTTP GET and two
+ * container kills.
+ */
+const FROZEN_BUDGET_MS = 8_000;
+/** How long the bucket must have been taking writes before the nodes come back. */
+const STORE_AWAKE_WINDOW_MS = 20_000;
 /** Draining reassignment must finish before the liveness-expiry bound. */
 const GRACEFUL_DRAIN_BUDGET_MS = 60_000;
 
@@ -136,11 +164,28 @@ const GRACEFUL_DRAIN_BUDGET_MS = 60_000;
    default so that the failover case waits seconds rather than minutes. */
 const LEASE_TTL_MS = 15_000;
 
+/**
+ * Where a node keeps what it must remember between boots, inside its container.
+ *
+ * A HOST DIRECTORY IS MOUNTED HERE, because the runtime work directories live
+ * under it: a write is acknowledged once a peer holds it on the follower disk
+ * kept there, before the bucket has it, and a node recovers it at boot from what
+ * its predecessor of the same name left. A state directory that only existed
+ * inside the container would make the durability case prove nothing about a
+ * deployment where the container is re-created.
+ */
+const STATE_DIR = "/var/lib/scafo";
+
+/** Mode the mounted directory is given, so the image's uid 10001 may write it. */
+const STATE_DIR_MODE = 0o777;
+
 /** One node's ingress, daemon, and host-facing ports. */
 interface Node {
   id: string;
   ingress: StartedTestContainer;
   daemon: StartedTestContainer;
+  /** The host directory mounted at {@link STATE_DIR}; it outlives the container. */
+  stateDir: string;
   /** Address the other containers reach this pair at. */
   bridgeAddress: string;
   httpPort: number;
@@ -213,6 +258,29 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       await node.ingress.stop().catch(() => {});
     }
     await store?.stop().catch(() => {});
+    /* The node wrote these as uid 10001 into directories only it may enter, so
+       they are removed from inside a container that may enter them. */
+    for (const node of nodes) {
+      await run(
+        "docker",
+        [
+          "run",
+          "--rm",
+          "--user",
+          "0",
+          "-v",
+          `${node.stateDir}:/state`,
+          "--entrypoint",
+          "sh",
+          NODE_IMAGE,
+          "-c",
+          "rm -rf /state/..?* /state/.[!.]* /state/*",
+        ],
+        REPO_ROOT,
+        { PATH: env.PATH ?? "" },
+      ).catch(() => {});
+      await rm(node.stateDir, { recursive: true, force: true }).catch(() => {});
+    }
     for (const dir of tmpDirs) await rm(dir, { recursive: true, force: true });
 
     console.log(`\n[e2e-multinode] raw observations\n${JSON.stringify(observed, null, 2)}`);
@@ -835,7 +903,346 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
     },
     REASSIGN_STEP_TIMEOUT_MS,
   );
+
+  /*
+   * LAST, AND ON AN APPLICATION OF ITS OWN. It kills both nodes at once and
+   * freezes the bucket under them, which is not a state any case before it
+   * would survive being run in.
+   */
+  it(
+    "gives back the write it acknowledged while the bucket was frozen, after both nodes were killed",
+    async () => {
+      const both = await bothNodesRunning();
+      expectCleanExit(
+        await runCli(
+          deployArgs(
+            await stageApp("v1"),
+            DURABLE,
+            /* Its own name as a variable: every other application of the suite
+             answers `/` with the fixture's default, so an answer for this host
+             says WHICH application's process produced it. */
+            ["--replicas", "all", "--var", `GREETING:${DURABLE}`],
+            both[0],
+          ),
+          {},
+        ),
+      );
+      for (const node of both) await untilServes(node, hostOf(DURABLE), "v1");
+      /* The counter's cell belongs to whichever node activates it first. It is
+         activated on the SECOND node, and every request below goes through the
+         first: the acknowledged write then exists on the asking node's follower
+         disk only, and after the restart the cell has to come back through a
+         node that never owned it — the harder of the two recoveries. */
+      await untilCellAnswers(both[1]);
+      await untilCellAnswers(both[0]);
+
+      /* The two halves of what makes a restart recoverable, read off the
+         process that is running: the name it will come back under, and the
+         directories it is working out of. */
+      const environs: Record<string, Record<string, string>> = {};
+      for (const node of both) environs[node.id] = await celldEnvironOn(node, DURABLE);
+      for (const node of both) {
+        expect(environs[node.id], node.id).toMatchObject({
+          CELLD_NODE: node.id,
+          CELLD_WATCH: `${STATE_DIR}/celld/${DURABLE}/work`,
+          CELLD_ASSET_CACHE_DIR: `${STATE_DIR}/celld/${DURABLE}/assets`,
+        });
+      }
+
+      /* The ports every application of this suite holds on every node, read
+         off the nodes themselves rather than assumed: a port that changed
+         hands across a restart is a host answered by another application's
+         process, whatever the routing then says. */
+      const portsBefore: Record<string, Record<string, string>> = {};
+      for (const node of both) portsBefore[node.id] = await portsOn(node);
+      for (const node of both) {
+        expect(Object.keys(portsBefore[node.id] ?? {}), node.id).toContain(DURABLE);
+      }
+
+      const warmUp: number[] = [];
+      for (let round = 0; round < 2; round++) {
+        for (const node of both) warmUp.push(await countOnce(node));
+      }
+      for (let i = 1; i < warmUp.length; i++) expect(warmUp[i]).toBe((warmUp[i - 1] as number) + 1);
+
+      /* The work directory is the follower disk; a fleet that has taken writes
+         has put something in it. */
+      const held: Record<string, number> = {};
+      for (const node of both) {
+        held[node.id] = await workDirEntriesOn(node, DURABLE);
+        expect(held[node.id], `${node.id} wrote nothing under ${STATE_DIR}`).toBeGreaterThan(0);
+      }
+
+      /* Long enough that the only write whose fate is in question is the one
+         taken while the bucket is frozen. */
+      await delay(BUCKET_UPLOAD_SETTLE_MS);
+
+      /* The route to the counter's cell is resolved from the bucket when the
+         node taking the request does not already hold it, and this case is
+         about the WRITE rather than about that lookup: `/peek` resolves it
+         here, where the bucket still answers, and writes nothing. */
+      await untilCellAnswers(both[0]);
+
+      const frozenAt = Date.now();
+      expectCleanExit(await docker(["pause", store.getId()]));
+      let acknowledged: number;
+      try {
+        acknowledged = await countOnce(both[0]);
+        expectCleanExit(
+          await docker(["kill", "-s", "KILL", ...both.map((node) => node.daemon.getId())]),
+        );
+        for (const node of both) node.running = false;
+      } finally {
+        expectCleanExit(await docker(["unpause", store.getId()]));
+      }
+      const frozenMs = Date.now() - frozenAt;
+      await untilStoreTakesWrites();
+
+      expect(acknowledged).toBe((warmUp.at(-1) as number) + 1);
+      /* A runtime process fences itself ten seconds after it last reached the
+         bucket, so a longer freeze would be testing something else. */
+      expect(frozenMs, "the bucket was frozen for too long to be this case").toBeLessThan(
+        FROZEN_BUDGET_MS,
+      );
+
+      const restartedAt = Date.now();
+      for (const node of both) {
+        expectCleanExit(await docker(["start", node.daemon.getId()]));
+        node.running = true;
+      }
+      for (const node of both) {
+        await until(`${node.id} to answer health again`, REASSIGN_DEADLINE_MS, async () => {
+          const answer = await httpGet(node.apiPort, "/.well-known/scafo/health", {});
+          return answer.status === 200 ? answer : null;
+        });
+      }
+      /* Every application comes back on the ports it had, so the `serving` the
+         node record still carries from before the kill is CORRECT: nothing had
+         to be re-announced for a peer or an ingress to route rightly. */
+      for (const node of both) {
+        const kept = portsBefore[node.id] ?? {};
+        const back = await until(
+          `${node.id} to run its applications again`,
+          REASSIGN_DEADLINE_MS,
+          async () => {
+            const now = await portsOn(node);
+            return Object.keys(kept).every((application) => application in now) ? now : null;
+          },
+        );
+        for (const [application, pair] of Object.entries(kept)) {
+          expect(back[application], `${node.id} moved ${application} across the restart`).toBe(
+            pair,
+          );
+        }
+      }
+
+      const misdelivered: string[] = [];
+      const serving = await until(
+        `${DURABLE} to be served again by a node that has its cell`,
+        REASSIGN_DEADLINE_MS,
+        async () => {
+          for (const node of both) {
+            /* Asked who is answering before it is asked for the number: a host
+               answered by another application's process would hand back THAT
+               application's counter, and no recovery could be judged by it. */
+            const front = await httpGet(node.httpPort, "/", { host: hostOf(DURABLE) });
+            if (front.status !== 200) continue;
+            if (!front.body.includes(`"greeting":"${DURABLE}"`)) {
+              misdelivered.push(`${node.id}: ${front.body}`);
+              continue;
+            }
+            const answer = await httpGet(node.httpPort, "/peek", { host: hostOf(DURABLE) });
+            if (answer.status === 200 && typeof countOf(answer.body) === "number") return node;
+          }
+          return null;
+        },
+      );
+      const recoveredMs = Date.now() - restartedAt;
+
+      /* The whole case, in one number: the next write the fleet takes follows
+         the one it acknowledged, rather than repeating it. */
+      const next = await countOnce(serving);
+
+      observed.durability = {
+        application: DURABLE,
+        portsBefore: JSON.stringify(portsBefore),
+        warmUp,
+        acknowledgedWhileFrozen: acknowledged,
+        frozenMs,
+        killed: both.map((node) => node.id),
+        restarted: both.map((node) => node.id),
+        recoveredMs,
+        servedBy: serving.id,
+        next,
+        workDirEntriesBefore: held,
+        celldEnv: environs,
+      };
+      console.log(
+        `e2e: acknowledged n=${String(acknowledged)} with the bucket frozen; after both nodes ` +
+          `were killed and restarted the next count was n=${String(next)}`,
+      );
+
+      if (misdelivered.length > 0) {
+        console.log(
+          `e2e: ${String(misdelivered.length)} answers for ${hostOf(DURABLE)} came from ANOTHER ` +
+            `application after the restart, e.g. ${misdelivered[0] ?? ""}`,
+        );
+      }
+      if (next !== acknowledged + 1) {
+        /* What the runtime said about its own recovery is the only account of
+           why a write is missing, and the containers are gone once this fails. */
+        for (const node of both) {
+          const logs = await docker(["logs", node.daemon.getId()]);
+          const told = logs.output
+            .split("\n")
+            .filter((line) =>
+              /node_log|recover|predecessor|fenc|bounded loss|discard|WARN|ERROR|Counter|cell|restor|activat|epoch|404|NoSuchKey/i.test(
+                line,
+              ),
+            )
+            .slice(-120)
+            .join("\n");
+          console.log(`e2e: ${node.id} on its own recovery:\n${told}`);
+        }
+        /* Whether the missing state is gone or only elsewhere: both nodes asked
+           again, half a minute on, without writing. */
+        await delay(30_000);
+        for (const node of both) {
+          const later = await httpGet(node.httpPort, "/peek", { host: hostOf(DURABLE) });
+          console.log(`e2e: ${node.id} peeks ${later.body} thirty seconds later`);
+        }
+        const keys = await registry.store.list(`fleets/${DURABLE}/`);
+        console.log(
+          `e2e: bucket holds ${String(keys.length)} keys for ${DURABLE}:\n${keys.slice(0, 80).join("\n")}`,
+        );
+      }
+      expect(next, "an acknowledged write was lost across the restart").toBe(acknowledged + 1);
+      expect(misdelivered, "a host was answered by another application's process").toEqual([]);
+    },
+    REASSIGN_STEP_TIMEOUT_MS,
+  );
 });
+
+/**
+ * Every node of this suite up and answering. Cases before this one deliberately
+ * stop nodes and leave them stopped; this one needs both.
+ */
+async function bothNodesRunning(): Promise<Node[]> {
+  for (const node of nodes) {
+    if (node.running) continue;
+    expectCleanExit(await docker(["start", node.daemon.getId()]));
+    node.running = true;
+  }
+  for (const node of nodes) {
+    await until(`${node.id} to answer health`, REASSIGN_DEADLINE_MS, async () => {
+      const answer = await httpGet(node.apiPort, "/.well-known/scafo/health", {});
+      return answer.status === 200 ? answer : null;
+    });
+  }
+  return nodes;
+}
+
+/**
+ * Waits until the bucket has taken writes without interruption for
+ * {@link STORE_AWAKE_WINDOW_MS}.
+ *
+ * SeaweedFS answers its S3 port throughout a `docker pause`, but its master
+ * evicts the volume server whose heartbeat went stale while it was frozen and
+ * then refuses writes with "no available server" until it registers again —
+ * seconds AFTER the unpause, so one write that succeeds is not the store being
+ * back. That is the store recovering, not the fleet, and a node restarted into
+ * it fails for a reason this case is not about.
+ */
+async function untilStoreTakesWrites(): Promise<void> {
+  const key = "_e2e-store-awake";
+  let since: number | null = null;
+
+  await until("the bucket to take writes again", DEADLINE_MS, async () => {
+    try {
+      await registry.store.put(key, "awake");
+      since ??= Date.now();
+    } catch (error) {
+      since = null;
+      throw error;
+    }
+    return Date.now() - since >= STORE_AWAKE_WINDOW_MS ? true : null;
+  });
+  await registry.store.del(key).catch(() => {});
+}
+
+/** One `/count`, which is one write; the number it answered with. */
+async function countOnce(node: Node): Promise<number> {
+  const answer = await httpGet(node.httpPort, "/count", { host: hostOf(DURABLE) });
+  expectStatus(answer, 200);
+  const n = countOf(answer.body);
+  if (n === null) throw new Error(`${node.id} answered /count with ${answer.body}`);
+  return n;
+}
+
+/** Waits until the counter's cell answers, WITHOUT counting: see the fixture's `/peek`. */
+async function untilCellAnswers(node: Node): Promise<void> {
+  await until(`${node.id} to answer for the counter cell`, DEADLINE_MS, async () => {
+    const answer = await httpGet(node.httpPort, "/peek", { host: hostOf(DURABLE) });
+    return answer.status === 200 && typeof countOf(answer.body) === "number" ? answer : null;
+  });
+}
+
+/**
+ * The ports each application is served on by `node`, as the node itself reports
+ * them: `"<public>/<internal>"` per application name.
+ */
+async function portsOn(node: Node): Promise<Record<string, string>> {
+  const processes = (await stateOf(node)).reconcile?.processes ?? [];
+  return Object.fromEntries(
+    processes.map((entry) => [
+      entry.application,
+      `${String(entry.port)}/${String(entry.internalPort)}`,
+    ]),
+  );
+}
+
+/** The environment of the runtime process `node` runs for `application`. */
+async function celldEnvironOn(node: Node, application: string): Promise<Record<string, string>> {
+  const process = (await stateOf(node)).processes.find((entry) => runs(entry, application));
+  if (process?.pid === undefined) {
+    throw new Error(`${node.id} runs no process for ${application}`);
+  }
+
+  /* Read off the RUNNING process rather than off a spec: a variable the node
+     derived but never handed over would read the same in a spec. */
+  const read = await docker([
+    "exec",
+    node.daemon.getId(),
+    "cat",
+    `/proc/${String(process.pid)}/environ`,
+  ]);
+  expectCleanExit(read);
+
+  const environ: Record<string, string> = {};
+  for (const entry of read.output.split("\0")) {
+    const at = entry.indexOf("=");
+    if (at > 0) environ[entry.slice(0, at)] = entry.slice(at + 1);
+  }
+  return environ;
+}
+
+/** How many entries the work directory of one application holds on `node`. */
+async function workDirEntriesOn(node: Node, application: string): Promise<number> {
+  const listed = await docker([
+    "exec",
+    node.daemon.getId(),
+    "ls",
+    "-A",
+    `${STATE_DIR}/celld/${application}/work`,
+  ]);
+  expectCleanExit(listed);
+  return listed.output.split("\n").filter((line) => line.trim() !== "").length;
+}
+
+/** One docker command, run the way every other step of this suite runs one. */
+function docker(args: string[]): Promise<CommandResult> {
+  return run("docker", args, REPO_ROOT, { PATH: env.PATH ?? "" });
+}
 
 /**
  * Starts one Traefik and the daemon that shares its network namespace.
@@ -864,9 +1271,16 @@ async function startNode(id: string, labels?: string): Promise<Node> {
   const bridgeAddress = ingress.getIpAddress(BRIDGE_NETWORK);
   const log: string[] = [];
 
+  const stateDir = await mkdtemp(join(tmpdir(), `scafo-e2e-state-${id}-`));
+  /* Written from inside the container by uid 10001, which owns nothing here. */
+  await chmod(stateDir, STATE_DIR_MODE);
+
   const daemon = await new GenericContainer(NODE_IMAGE)
     .withNetworkMode(`container:${ingress.getId()}`)
-    .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "ro" }])
+    .withBindMounts([
+      { source: REPO_ROOT, target: "/work", mode: "ro" },
+      { source: stateDir, target: STATE_DIR, mode: "rw" },
+    ])
     .withWorkingDir("/work")
     .withEnvironment({
       SCAFO_S3_ENDPOINT: storeFromContainers,
@@ -877,7 +1291,7 @@ async function startNode(id: string, labels?: string): Promise<Node> {
       SCAFO_S3_REGION: REGION,
       SCAFO_NODE_ID: id,
       SCAFO_TRANSPORT: "none",
-      SCAFO_STATE_DIR: `/var/lib/scafo-${id}`,
+      SCAFO_STATE_DIR: STATE_DIR,
       SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
       SCAFO_INGRESS_TOKEN: INGRESS_TOKEN,
       /* What the peers dial: the fleet document's upstreams are this address. */
@@ -900,6 +1314,7 @@ async function startNode(id: string, labels?: string): Promise<Node> {
     id,
     ingress,
     daemon,
+    stateDir,
     bridgeAddress,
     httpPort: ingress.getMappedPort(TRAEFIK_HTTP_PORT),
     apiPort: ingress.getMappedPort(NODE_PORT),

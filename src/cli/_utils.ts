@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { CommandDef } from "citty";
 import { isScafoError } from "../core/error.ts";
+import { PRIVATE_DIR_MODE } from "../drivers/_private-dir.ts";
 
 /** Directory a node run by root keeps its state in. */
 export const SYSTEM_STATE_DIR: string = "/var/lib/scafo";
@@ -13,7 +14,7 @@ export const SYSTEM_STATE_DIR: string = "/var/lib/scafo";
 export const SECRET_FILE_MODE: number = 0o600;
 
 /** Mode a state directory scafo created itself is given. */
-export const STATE_DIR_MODE: number = 0o700;
+export const STATE_DIR_MODE: number = PRIVATE_DIR_MODE;
 
 /** Writes key material with owner-only permissions; applies file mode after
     writing and changes directory mode only when it created the directory. */

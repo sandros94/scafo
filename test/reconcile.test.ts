@@ -1,37 +1,26 @@
 /* Runtime reconcile contract. */
 
 import { describe, expect, it } from "vitest";
-import {
-  planReconcile,
-  type PortView,
-  type ReconcileAction,
-} from "../src/core/placement/reconcile.ts";
+import { planReconcile, type ReconcileAction } from "../src/core/placement/reconcile.ts";
 import type { ApplicationRecord } from "../src/core/types/registry.ts";
 import type { RuntimeProcess } from "../src/core/types/runtime.ts";
 
-const PORT_START = 42_000;
 const RUNNING_PORT = 43_000;
 const CREATED_AT = "2026-01-01T00:00:00.000Z";
 
 describe("an application with nothing running", () => {
-  it("starts one application-owned process", () => {
-    const ports = countingPorts();
-    expect(planReconcile({ desired: [desired("shop", 1)], actual: [], ports })).toEqual([
-      {
-        type: "start",
-        application: "shop",
-        ports: { public: PORT_START, internal: PORT_START + 1 },
-      },
+  it("starts one application-owned process, naming it and no ports", () => {
+    /* The ports belong to the application and are read where they are kept,
+       which is beside its local state and not in a plan. */
+    expect(planReconcile({ desired: [desired("shop", 1)], actual: [] })).toEqual([
+      { type: "start", application: "shop" },
     ]);
-    expect(ports.calls).toBe(1);
   });
 
   it("starts nothing for an application that has never been deployed", () => {
     const never: ApplicationRecord = { ...desired("shop", 1), deployment: null };
-    const ports = countingPorts();
 
-    expect(planReconcile({ desired: [never], actual: [], ports })).toEqual([]);
-    expect(ports.calls).toBe(0);
+    expect(planReconcile({ desired: [never], actual: [] })).toEqual([]);
   });
 });
 
@@ -41,7 +30,6 @@ describe("runtime-owned deployment lifecycle", () => {
       planReconcile({
         desired: [desired("shop", 2)],
         actual: [runtimeProcess("shop")],
-        ports: countingPorts(),
       }),
     ).toEqual([]);
   });
@@ -52,7 +40,6 @@ describe("runtime-owned deployment lifecycle", () => {
       planReconcile({
         desired: [desired("shop", 2)],
         actual: [running],
-        ports: countingPorts(),
       }),
     ).toEqual([
       {
@@ -70,7 +57,6 @@ describe("placement removal", () => {
       planReconcile({
         desired: [],
         actual: [runtimeProcess("shop")],
-        ports: countingPorts(),
       }),
     ).toEqual([
       {
@@ -85,7 +71,6 @@ describe("placement removal", () => {
     const plan = planReconcile({
       desired: [desired("shop", 1)],
       actual: [runtimeProcess("archive")],
-      ports: countingPorts(),
     });
     expect(plan.map((action) => action.type)).toEqual(["start", "stop"]);
   });
@@ -94,7 +79,6 @@ describe("placement removal", () => {
     const plan = planReconcile({
       desired: [desired("zulu-new", 1), desired("alpha-new", 1)],
       actual: [runtimeProcess("zulu"), runtimeProcess("alpha")],
-      ports: countingPorts(),
     });
     expect(plan.map(subject)).toEqual(["alpha-new", "zulu-new", "alpha", "zulu"]);
   });
@@ -103,30 +87,11 @@ describe("placement removal", () => {
     const plan = planReconcile({
       desired: [desired("shop", 1), desired("shop-preview", 1), desired("shop2", 1)],
       actual: [runtimeProcess("shop"), runtimeProcess("shop-preview"), runtimeProcess("shop2")],
-      ports: countingPorts(),
     });
 
     expect(plan).toEqual([]);
   });
 });
-
-interface CountingPorts extends PortView {
-  calls: number;
-}
-
-function countingPorts(): CountingPorts {
-  let next = PORT_START;
-  const ports: CountingPorts = {
-    calls: 0,
-    nextPorts() {
-      ports.calls++;
-      const pair = { public: next, internal: next + 1 };
-      next += 2;
-      return pair;
-    },
-  };
-  return ports;
-}
 
 function desired(name: string, revision: number): ApplicationRecord {
   return {

@@ -331,6 +331,8 @@ function daemonConfig(nodeId: string): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
+      portRangeEnd: 42_998,
+      portQuarantineMs: 600_000,
       bindHost: "127.0.0.1",
     },
     observability: { enabled: false },

@@ -63,7 +63,7 @@ The tunnel addresses share one `/24`; the id is the node id placement records an
 
 Per host, `roll.sh` writes the two environment files and the Caddyfile template, installs [`roll-node.sh`](roll-node.sh) as `/usr/local/bin/scafo-roll`, and runs it. That script stops the previous roll, mints a WireGuard keypair with the host's own `wg` — the image carries neither `wg` nor key material — brings the interface up from `scafo wg init`, starts the node, waits for the image's healthcheck to report `healthy`, renders the Caddyfile and starts Caddy. Afterwards `roll.sh` runs `scafo wg peers` on every host and `wg syncconf`s the result, so the hosts rolled first pick up the ones rolled last.
 
-**A roll is destructive on the hosts it touches.** It removes the containers, `/var/lib/scafo` and `/etc/wireguard/wg0.conf`, so the node comes back with a new tunnel keypair under the same id. The registry, the applications' deployments and the certificates are in the bucket and survive it; anything else on those hosts does not.
+**A roll is destructive on the hosts it touches.** It removes the containers, the tunnel keypair in `/var/lib/scafo` and `/etc/wireguard/wg0.conf`, so the node comes back with a new tunnel keypair under the same id. The rest of `/var/lib/scafo` stays where it is, because each runtime process keeps its work directory there and that directory can hold writes a peer has already acknowledged and the bucket has not got yet; a host that loses it comes back having lost them. The registry, the applications' deployments and the certificates are in the bucket and survive a roll either way; anything else on those hosts does not.
 
 ## Verify
 

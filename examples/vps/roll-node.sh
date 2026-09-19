@@ -14,7 +14,13 @@ LOGS=/var/log/scafo-ingress
 echo "== stop the previous roll"
 docker rm -f scafo-node scafo-caddy >/dev/null 2>&1 || true
 wg-quick down wg0 >/dev/null 2>&1 || true
-rm -rf "$STATE" /etc/wireguard/wg0.conf
+# The tunnel material is the only thing a roll mints again. THE REST OF THE
+# STATE DIRECTORY STAYS: each supervised runtime process keeps its work
+# directory under it, and that directory is the local half of the fleet's
+# durability — a write is acknowledged once a peer holds it there, before the
+# bucket has it, and the process recovers it at boot from the directory its
+# predecessor of the same node name left. Removing it loses those writes.
+rm -f "$STATE/wg-private.key" "$STATE/wg-public.key" /etc/wireguard/wg0.conf
 # The image runs as uid 10001 and both directories are written from inside it.
 install -d -m 0700 "$STATE" && chown 10001:10001 "$STATE"
 install -d -m 0755 "$LOGS" && chown 10001:10001 "$LOGS"

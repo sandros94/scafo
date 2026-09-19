@@ -147,10 +147,19 @@ export async function releaseLease(ctx: RegistryContext, handle: LeaseHandle): P
   }
 }
 
-/** True while `handle` is still the lease's current version. */
+/**
+ * True while the TENANCY `handle` names still holds the lease: the same node, at
+ * the same fence, and not run out.
+ *
+ * A renewal rewrites the record and keeps the tenancy, so work that was handed
+ * the lease before one — a deletion walking a large application — goes on
+ * holding it; judged by the record's version instead, anything outlasting a
+ * coordinator tick would be refused by the very node carrying it out. Taking
+ * the lease — by another node once it has run out, or by this one again — moves
+ * the fence, and that is what ends a tenancy.
+ */
 export async function verifyLease(ctx: RegistryContext, handle: LeaseHandle): Promise<boolean> {
-  const current = await readJson<CoordinatorLease>(ctx, coordinatorKey());
-  return current !== null && current.etag === handle.etag;
+  return (await stillHeld(ctx, handle)) !== null;
 }
 
 function leaseLost(handle: LeaseHandle, cause: unknown): ScafoError {

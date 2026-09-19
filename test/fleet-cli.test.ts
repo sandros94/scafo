@@ -212,7 +212,13 @@ function daemonConfig(): DaemonConfig {
     },
     node: { id: NODE_ID, listen: "127.0.0.1:7400" },
     platformDomains: ["apps.test"],
-    runtime: { binPath: "celld", portRangeStart: 42_000, bindHost: "127.0.0.1" },
+    runtime: {
+      binPath: "celld",
+      portRangeStart: 42_000,
+      portRangeEnd: 42_998,
+      portQuarantineMs: 600_000,
+      bindHost: "127.0.0.1",
+    },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },
   };

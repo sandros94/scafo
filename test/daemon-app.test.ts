@@ -195,7 +195,7 @@ describe("GET /v1/state, which names applications throughout", () => {
     lastRunAt: "2026-01-01T00:00:05.000Z",
     running: false,
     lastActions: [
-      { type: "start", application: APPLICATION, ports: { public: 42_000, internal: 42_001 } },
+      { type: "start", application: APPLICATION },
       { type: "stop", application: OTHER_APPLICATION, reason: "no longer placed here" },
     ],
     failures: [
@@ -663,6 +663,8 @@ function daemonConfig(): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
+      portRangeEnd: 42_998,
+      portQuarantineMs: 600_000,
       bindHost: "127.0.0.1",
     },
     observability: { enabled: false },

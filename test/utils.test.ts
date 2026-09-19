@@ -197,7 +197,7 @@ describe("withRetry", () => {
         return Promise.resolve("ok");
       },
       {
-        jitter: () => 0.5,
+        jitter: (windowMs: number) => Math.floor(windowMs * 0.5),
         sleep: (ms) => {
           delays.push(ms);
           return nap();
@@ -221,7 +221,7 @@ describe("withRetry", () => {
             calls++;
             return Promise.reject(new ScafoError("cas-conflict", "conflict"));
           },
-          { attempts: 5, baseMs: 10_000, jitter: () => 1, sleep: nap },
+          { attempts: 5, baseMs: 10_000, jitter: (windowMs: number) => windowMs, sleep: nap },
         ),
       "cas-conflict",
     );
@@ -299,7 +299,7 @@ describe("withRetry", () => {
             attempts: 4,
             baseMs: 100,
             maxMs: 150,
-            jitter: () => 1,
+            jitter: (windowMs: number) => windowMs,
             sleep: (ms) => {
               delays.push(ms);
               return nap();

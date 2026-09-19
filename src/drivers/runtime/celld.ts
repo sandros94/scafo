@@ -1,11 +1,26 @@
 /* Materializes one application-owned Celld process and its start-time config. */
 
 import { execFile } from "node:child_process";
+import { readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
+import { join } from "node:path";
 import { promisify } from "node:util";
+import { secureRandomNumber } from "unsecure/random";
 import { ScafoError } from "../../core/error.ts";
+import {
+  assertPortRange,
+  choosePorts,
+  DEFAULT_PORT_QUARANTINE_MS,
+  DEFAULT_PORT_RANGE_START,
+  defaultPortRangeEnd,
+  type PortPair,
+  type PortRange,
+} from "../../core/placement/ports.ts";
 import { fleetPrefix } from "../../core/registry/paths.ts";
-import type { RuntimeDriver, RuntimeSpecInput } from "../../core/types/runtime.ts";
+import type { RuntimeDriver, RuntimePorts, RuntimeSpecInput } from "../../core/types/runtime.ts";
 import type { ProcessSpec } from "../../core/types/supervisor.ts";
+import { assertSlug, isSlug } from "../../core/utils/slug.ts";
+import { ensurePrivateDir, PRIVATE_FILE_MODE } from "../_private-dir.ts";
 
 /** Command run when the caller does not name one. */
 export const DEFAULT_CELLD_BIN: string = "celld";
@@ -57,20 +72,148 @@ export const OPERATOR_RESERVED_ENV: string[] = [
   "CELLD_ADVERTISE",
   /* Derived from ingress topology, not application input. */
   "CELLD_TRUST_FORWARDED_HEADERS",
+  /* The node's own identity and the private directories it keeps per
+     application; see {@link celldStateDirs}. */
+  "CELLD_NODE",
+  "CELLD_WATCH",
+  "CELLD_ASSET_CACHE_DIR",
 ];
 
+/** Directory of the node's state every supervised process's own lives under. */
+const STATE_SUBDIR = "celld";
+
+/** Local work directory: the process's SQLite and its follower disk. */
+const WORK_SUBDIR = "work";
+
+/** Where one process caches the static assets it downloads. */
+const ASSETS_SUBDIR = "assets";
+
+/** File holding the two ports one application holds on this node. */
+const PORTS_FILE = "ports.json";
+
+/**
+ * File holding the ports released here and when, beside the per-application
+ * directories rather than inside one: what it records is exactly the pairs whose
+ * directory is gone. Its name is no application name, so it is never mistaken
+ * for one.
+ */
+const RELEASED_FILE = ".released.json";
+
+/**
+ * The private directories one application's process on this node works out of.
+ *
+ * DERIVED, NEVER CONFIGURED, and under the node's own state directory rather
+ * than under a temporary one, because of what they hold.
+ *
+ * The WORK directory is the local half of the fleet's durability. A write is
+ * acknowledged once a peer has it on the follower disk kept here, before the
+ * bucket has it; a node recovers those writes at boot by taking over the log its
+ * predecessor of the same name left, and it serves its own retained follower
+ * disk to the peers doing the same. A directory that is new on every start
+ * leaves those acknowledged writes nowhere, and the fleet comes back reporting a
+ * bounded loss instead of the last write. Upstream's own default is
+ * `$TMPDIR/celld-<pid>`, which is a different directory on every start of every
+ * process — so this is set, and set somewhere that outlives the machine's boot
+ * and the container's life.
+ *
+ * The ASSET CACHE is separated per application for a plainer reason: upstream
+ * defaults it to one directory under `$TMPDIR` shared by every Celld process on
+ * the machine, and the processes of a node are several tenants' at once.
+ *
+ * The application name is one path segment, which its slug rule already
+ * guarantees; it is asserted here because this is where a name becomes a path.
+ */
+export function celldStateDirs(
+  stateDir: string,
+  application: string,
+): { root: string; work: string; assets: string } {
+  assertSlug(application);
+  const root = join(stateDir, STATE_SUBDIR, application);
+  return { root, work: join(root, WORK_SUBDIR), assets: join(root, ASSETS_SUBDIR) };
+}
+
 export interface CelldDriverOptions {
+  /**
+   * Where this node keeps what it has to remember between boots. Every
+   * supervised process's own directories live under it; see
+   * {@link celldStateDirs} for what that costs when it does not survive.
+   */
+  stateDir: string;
   /** Executable to run; resolved against `PATH` unless it is a path. */
   binPath?: string;
   /** Base variables for every process. Driver-derived values override conflicts. */
   operatorEnv?: Record<string, string>;
+  /**
+   * Ports this node draws its pairs from. Defaults to the documented range.
+   *
+   * WORTH SIZING ON A HOST-NETWORK DEPLOYMENT: a node that shares the host's
+   * network namespace draws from the HOST's port space, where the machine's own
+   * services live, so an operator fits the range to the machine.
+   */
+  portRange?: PortRange;
+  /** How long a released pair is kept from another application. */
+  portQuarantineMs?: number;
+  /** Address ports are probed on; the address processes bind their listeners to. */
+  bindHost?: string;
+  /** Randomness a port choice draws on. Injected so a test can fix the choice. */
+  random?: (min: number, max: number, ignore: Set<number>) => number;
+  /** Whether a port can be bound on `host` now. Injected so a test binds nothing. */
+  isFree?: (port: number, host: string) => Promise<boolean>;
+  /** Milliseconds since the epoch, as the quarantine ages its entries by. */
+  now?: () => number;
 }
 
-/** Builds the Celld runtime driver; validates its shutdown timeout. */
+/** Builds the Celld runtime driver; validates its shutdown timeout and port range. */
 export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
   const binPath = opts.binPath ?? DEFAULT_CELLD_BIN;
+  const stateDir = opts.stateDir;
   const operatorEnv = opts.operatorEnv === undefined ? undefined : { ...opts.operatorEnv };
   const shutdownTotalMs = parseShutdownTotalMs(operatorEnv?.CELLD_SHUTDOWN_TOTAL_MS);
+  const portRange = opts.portRange ?? {
+    start: DEFAULT_PORT_RANGE_START,
+    end: defaultPortRangeEnd(DEFAULT_PORT_RANGE_START),
+  };
+  assertPortRange(portRange);
+  const quarantineMs = opts.portQuarantineMs ?? DEFAULT_PORT_QUARANTINE_MS;
+  const bindHost = opts.bindHost ?? DEFAULT_BIND_HOST;
+  const random = opts.random ?? secureRandomNumber;
+  const now = opts.now ?? Date.now;
+  const probe = opts.isFree ?? bindableNow;
+  const isFree = (port: number): Promise<boolean> => probe(port, bindHost);
+
+  /** Ports every OTHER application of this node holds, read off their files. */
+  async function heldPorts(except: string): Promise<Set<number>> {
+    const held = new Set<number>();
+    for (const application of await heldApplications(stateDir)) {
+      if (application === except) continue;
+      const pair = await readPortsFile(portsPath(stateDir, application));
+      if (pair === null) continue;
+      held.add(pair.public);
+      held.add(pair.internal);
+    }
+    return held;
+  }
+
+  /** The quarantine as it stands now, with everything that has aged out dropped. */
+  async function readQuarantine(): Promise<ReleasedPort[]> {
+    const released = await readReleasedFile(releasedPath(stateDir));
+    const floor = now() - quarantineMs;
+    return released.filter((entry) => entry.at > floor);
+  }
+
+  /** Puts both halves of `pair` under quarantine, pruning what has aged out. */
+  async function release(pair: PortPair): Promise<void> {
+    const at = now();
+    const kept = (await readQuarantine()).filter(
+      (entry) => entry.port !== pair.public && entry.port !== pair.internal,
+    );
+    kept.push({ port: pair.public, at }, { port: pair.internal, at });
+    await ensurePrivateDir(join(stateDir, STATE_SUBDIR));
+    await writePrivateJson(releasedPath(stateDir), {
+      v: 1,
+      released: kept.map((entry) => ({ port: entry.port, at: new Date(entry.at).toISOString() })),
+    });
+  }
 
   return {
     stopGraceMs: shutdownTotalMs + STOP_HEADROOM_MS,
@@ -100,8 +243,55 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
           "--advertise",
           `${input.node.advertiseHost}:${String(input.ports.internal)}`,
         ],
-        env: processEnv(input, operatorEnv),
+        env: processEnv(input, celldStateDirs(stateDir, input.application.name), operatorEnv),
       };
+    },
+
+    async prepareLocalState(application: string): Promise<void> {
+      const dirs = celldStateDirs(stateDir, application);
+      await ensurePrivateDir(dirs.work);
+      await ensurePrivateDir(dirs.assets);
+    },
+
+    async ports(application: string): Promise<RuntimePorts> {
+      const path = portsPath(stateDir, application);
+      const held = await heldPorts(application);
+      const kept = await readPortsFile(path);
+
+      /* Held first, and probed second: a pair another application of this node
+         has taken over is not this one's however free the sockets look, and a
+         pair a foreign process is listening on cannot be started on at all. */
+      if (
+        kept !== null &&
+        !held.has(kept.public) &&
+        !held.has(kept.internal) &&
+        (await isFree(kept.public)) &&
+        (await isFree(kept.internal))
+      ) {
+        return { ports: kept };
+      }
+
+      const quarantined = (await readQuarantine()).map((entry) => entry.port);
+      const ports = await choosePorts({ range: portRange, held, quarantined, isFree, random });
+      await ensurePrivateDir(celldStateDirs(stateDir, application).root);
+      await writePrivateJson(path, { v: 1, public: ports.public, internal: ports.internal });
+      /* The pair being left behind is quarantined too: until every peer and
+         ingress has re-read the routing they still send this application's
+         traffic there, and a second application on it would answer that. */
+      if (kept !== null) await release(kept);
+      return kept === null ? { ports } : { ports, replaced: kept };
+    },
+
+    async heldLocalState(): Promise<string[]> {
+      return await heldApplications(stateDir);
+    },
+
+    async removeLocalState(application: string): Promise<void> {
+      const kept = await readPortsFile(portsPath(stateDir, application));
+      await rm(celldStateDirs(stateDir, application).root, { recursive: true, force: true });
+      /* After the directory, so a release recorded for an application still
+         holding its file cannot outlive a removal that failed half way. */
+      if (kept !== null) await release(kept);
     },
 
     async reload(input): Promise<void> {
@@ -120,6 +310,121 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
       await response.text();
     },
   };
+}
+
+/** One quarantined port and the moment it was released, in epoch milliseconds. */
+interface ReleasedPort {
+  port: number;
+  at: number;
+}
+
+/** Where one application's ports are kept. */
+function portsPath(stateDir: string, application: string): string {
+  return join(celldStateDirs(stateDir, application).root, PORTS_FILE);
+}
+
+/** Where the ports released on this node are kept. */
+function releasedPath(stateDir: string): string {
+  return join(stateDir, STATE_SUBDIR, RELEASED_FILE);
+}
+
+/** Applications this node holds a directory for; anything else under it is not ours. */
+async function heldApplications(stateDir: string): Promise<string[]> {
+  let entries;
+  try {
+    entries = await readdir(join(stateDir, STATE_SUBDIR), { withFileTypes: true });
+  } catch (error) {
+    /* Nothing has run on this node yet, which is not a failure of the pass
+       asking. Anything else is, and is raised. */
+    if ((error as { code?: string }).code === "ENOENT") return [];
+    throw error;
+  }
+  return entries
+    .filter((entry) => entry.isDirectory() && isSlug(entry.name))
+    .map((entry) => entry.name);
+}
+
+/**
+ * The pair a file names, or `null` when there is none to read.
+ *
+ * A FILE THAT DOES NOT SAY A PAIR IS NO PAIR. It is absent, truncated by a
+ * machine that lost power mid-write, or something else entirely; in every one of
+ * those cases the honest answer is that this node does not know what ports the
+ * application had, and the caller chooses a new pair and writes it down. The
+ * alternative — refusing to start the application until somebody deletes a
+ * file — trades a moved port for an outage.
+ */
+async function readPortsFile(path: string): Promise<PortPair | null> {
+  const parsed = await readJsonFile(path);
+  if (parsed === null) return null;
+  const record = parsed as { public?: unknown; internal?: unknown };
+  if (!isPort(record.public) || !isPort(record.internal)) return null;
+  if (record.public === record.internal) return null;
+  return { public: record.public, internal: record.internal };
+}
+
+/** The quarantine a file names; an unreadable one quarantines nothing. */
+async function readReleasedFile(path: string): Promise<ReleasedPort[]> {
+  const parsed = await readJsonFile(path);
+  const entries = (parsed as { released?: unknown } | null)?.released;
+  if (!Array.isArray(entries)) return [];
+
+  const released: ReleasedPort[] = [];
+  for (const entry of entries as { port?: unknown; at?: unknown }[]) {
+    const at = typeof entry.at === "string" ? Date.parse(entry.at) : Number.NaN;
+    if (!isPort(entry.port) || Number.isNaN(at)) continue;
+    released.push({ port: entry.port, at });
+  }
+  return released;
+}
+
+async function readJsonFile(path: string): Promise<unknown> {
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch {
+    return null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Writes JSON where a reader only ever sees a whole document: into a temporary
+ * file beside the target, then renamed over it, which is atomic within a
+ * directory. A node that loses power mid-write comes back to the previous
+ * document or to none, never to half of one.
+ */
+async function writePrivateJson(path: string, value: unknown): Promise<void> {
+  const temporary = `${path}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(value)}\n`, { mode: PRIVATE_FILE_MODE });
+  await rename(temporary, path);
+}
+
+function isPort(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 65_535;
+}
+
+/**
+ * Whether `port` can be bound on `host` at this instant: the only answer worth
+ * having, because the range is this node's by convention and anything at all on
+ * the machine may be listening in it.
+ *
+ * Bound exclusively, so a port another process is sharing through
+ * `SO_REUSEPORT` reads as taken rather than as free, and closed again at once.
+ */
+async function bindableNow(port: number, host: string): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    const server = createServer();
+    server.once("error", () => resolve(false));
+    server.listen({ host, port, exclusive: true }, () => {
+      server.close(() => resolve(true));
+    });
+  });
 }
 
 /**
@@ -216,6 +521,7 @@ export function compareVersions(a: string, b: string): number {
 /** Environment of one runtime process, in the order the parts override each other. */
 function processEnv(
   input: RuntimeSpecInput,
+  dirs: { work: string; assets: string },
   operatorEnv?: Record<string, string>,
 ): Record<string, string> {
   /* Base environment, then node configuration; the driver derives the rest last,
@@ -228,6 +534,13 @@ function processEnv(
 
   /* The node ingress terminates TLS and supplies forwarded headers. */
   env.CELLD_TRUST_FORWARDED_HEADERS = "1";
+
+  /* The identity this process comes back under, and the directories it comes
+     back to: what makes an acknowledged write recoverable. See
+     `RuntimeNodeInput.id` and {@link celldStateDirs}. */
+  env.CELLD_NODE = input.node.id;
+  env.CELLD_WATCH = dirs.work;
+  env.CELLD_ASSET_CACHE_DIR = dirs.assets;
 
   return env;
 }

@@ -5,6 +5,7 @@
  * together.
  */
 
+import type { PortPair } from "../placement/ports.ts";
 import type { ApplicationRecord } from "./registry.ts";
 import type { ProcessSpec } from "./supervisor.ts";
 
@@ -22,6 +23,19 @@ export interface RuntimeProcess {
 
 /** The bucket a runtime process reads its fleet from, and how peers reach this node. */
 export interface RuntimeNodeInput {
+  /**
+   * This Scafo node's registry id, which is also the name its runtime processes
+   * are known by inside their own fleets.
+   *
+   * A NAME THAT SURVIVES A RESTART IS HALF OF DURABILITY. A runtime that
+   * acknowledges a write once a peer holds it recovers that write at boot by
+   * taking over the log of the PREDECESSOR OF THAT NAME. A process starting
+   * under a name nothing wrote before has no predecessor to recover, so the
+   * acknowledged write is simply not there — and there is one process per
+   * application per node, so the node's own id is a name unique in the fleet and
+   * the same one every time this machine comes back.
+   */
+  id: string;
   endpoint: string;
   region: string;
   bucket: string;
@@ -50,7 +64,7 @@ export interface RuntimeNodeInput {
 /** Everything one runtime process is materialized from. */
 export interface RuntimeSpecInput {
   application: ApplicationRecord;
-  ports: { public: number; internal: number };
+  ports: PortPair;
   node: RuntimeNodeInput;
   /**
    * Environment the process starts from, before the driver adds its own settings.
@@ -73,6 +87,17 @@ export interface RuntimeReloadInput {
   port: number;
 }
 
+/** The ports an application is to be started on, and what they replaced. */
+export interface RuntimePorts {
+  ports: PortPair;
+  /**
+   * The pair this one replaced, set only when the pair the application held here
+   * could not be used again — something foreign was listening on it. The caller
+   * says so in one line of the log; nothing else depends on it.
+   */
+  replaced?: PortPair;
+}
+
 /** Runs one application's Celld process on a node. */
 export interface RuntimeDriver {
   /**
@@ -83,6 +108,55 @@ export interface RuntimeDriver {
   readonly stopGraceMs: number;
   /** Materializes the spec that runs one application on this node. */
   processSpec(input: RuntimeSpecInput): ProcessSpec;
+  /**
+   * Creates the private local directories one application's process works out
+   * of, before it is started. Creating them twice is not an error: a process
+   * that comes back finds the directories its predecessor left.
+   */
+  prepareLocalState(application: string): Promise<void>;
+  /**
+   * The two ports `application` is served on by this node, chosen once and kept
+   * beside the rest of its local state.
+   *
+   * A PORT BELONGS TO AN APPLICATION FOR AS LONG AS THIS NODE KNOWS IT. Celld
+   * ignores the `Host` header, so whichever process holds a port answers
+   * everything sent there: were an application's ports to change hands while a
+   * peer or an ingress still routed to them, one application's requests would be
+   * answered by another application's process. So the pair is persisted on the
+   * first start and handed back unchanged on every later one — after a process
+   * exit, a daemon restart, a container re-created on the same state volume —
+   * and released only when the application's local state is removed, which is
+   * the one event that means this node will not serve it again.
+   *
+   * The pair is probed before it is handed back. A port a foreign process took
+   * while the application was stopped must not wedge it, so a new pair is chosen
+   * and persisted instead and {@link RuntimePorts.replaced} names the old one.
+   *
+   * Throws `ScafoError("placement-unavailable")` when the configured range has
+   * fewer than two ports left on this node.
+   */
+  ports(application: string): Promise<RuntimePorts>;
+  /**
+   * Applications this node is holding local state for, whether or not one of
+   * them is running. Anything under the directory this driver owns that is no
+   * application name at all is not reported: it is not this driver's.
+   */
+  heldLocalState(): Promise<string[]>;
+  /**
+   * Removes everything this node holds locally for `application`, and answers
+   * without complaint when there is nothing there.
+   *
+   * ONLY FOR AN APPLICATION THAT IS GONE FROM THE REGISTRY, and never while a
+   * process for it runs here. The directory is a follower disk: it can hold
+   * writes a peer acknowledged and the bucket has not got yet, and every other
+   * reason a process stops — retirement, blocking, reassignment, a drain, a
+   * daemon restart — is one the application may come back from.
+   *
+   * This is also where the application's ports are released, into a quarantine
+   * that keeps them from a different application until nothing out there can
+   * still be routing to them.
+   */
+  removeLocalState(application: string): Promise<void>;
   /**
    * Asks a process of this node to adopt the fleet's current deployment NOW,
    * instead of when its own poll comes round.

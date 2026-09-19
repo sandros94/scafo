@@ -2,7 +2,6 @@
 
 import { describeError } from "../core/error.ts";
 import { renderFleetRouting } from "../core/placement/fleet-routes.ts";
-import { createPortAllocator } from "../core/placement/ports.ts";
 import { planReconcile, type ReconcileAction } from "../core/placement/reconcile.ts";
 import { sameServing, servingOf } from "../core/placement/serving.ts";
 import { deploymentRevision } from "../core/registry/_revision.ts";
@@ -218,8 +217,18 @@ export function createReconciler(
     const serving = servingOf(executor.currentProcesses());
     if (sameServing(serving, announced)) return;
     announced = serving;
-    void daemon.heartbeat?.beat();
-    void view.hint();
+    /* The token is minted only once the beat has LANDED. Minted beside it, the
+       token usually wins the race — it is one blind write against a
+       read-modify-write — and every node that looks because of it, this one
+       included, reads the record as it was and takes the change as seen. Nothing
+       mints another, and the route waits for the node-refresh timer instead. A
+       beat that failed is hinted all the same: the timer beat that follows it
+       carries the same news, and a spare look costs a listing. */
+    const beaten = daemon.heartbeat?.beat() ?? Promise.resolve();
+    void beaten.then(
+      () => view.hint(),
+      () => view.hint(),
+    );
   }
 
   /**
@@ -262,14 +271,7 @@ export function createReconciler(
       /* Taken before anything is started, so a process this pass creates is told
          apart from one that was already serving something older. */
       const before = new Set(actual.map((entry) => entry.application));
-      plan = planReconcile({
-        desired,
-        actual,
-        ports: createPortAllocator({
-          taken: actual.flatMap((process) => [process.port, process.internalPort]),
-          start: daemon.config.runtime.portRangeStart,
-        }),
-      });
+      plan = planReconcile({ desired, actual });
 
       await executor.execute(plan, desired, pending, abort.signal);
 
@@ -282,6 +284,14 @@ export function createReconciler(
         /* After execution, so a process this pass started is not asked to adopt
            what it has just booted onto. */
         adopt(desired, before);
+        /* Inside the same try as the read that names the applications, so a
+           pass that could not read the registry never gets this far: what it
+           holds locally for an application it failed to read about is not
+           state left over from a deletion. */
+        await executor.discardLocalState(
+          new Set(snapshot.applications.map((record) => record.name)),
+          pending,
+        );
       }
     } catch (error) {
       /* A registry read failure must not be interpreted as every application removed. */

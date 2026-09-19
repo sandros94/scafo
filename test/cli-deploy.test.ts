@@ -284,7 +284,7 @@ describe("waiting for a place in the node's deploy queue", () => {
           return Promise.resolve();
         },
         /* No randomness: what is measured is the formula, not the draw. */
-        jitter: () => 1,
+        jitter: (windowMs: number) => windowMs,
         log: (line: string) => lines.push(line),
         ...overrides,
       },

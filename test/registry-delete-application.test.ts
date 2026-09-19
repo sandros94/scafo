@@ -21,6 +21,7 @@ import {
   getTrustPolicy,
   type LeaseHandle,
   readPlacement,
+  renewLease,
   retireApplication,
   setTrustPolicy,
   writePlacement,
@@ -36,7 +37,10 @@ import {
   placementKey,
   trustKey,
 } from "../src/core/registry/paths.ts";
-import type { TrustPolicy } from "../src/core/types/registry.ts";
+import { readJson } from "../src/core/registry/cas.ts";
+import type { RegistryContext } from "../src/core/registry/context.ts";
+import { coordinatorKey } from "../src/core/registry/paths.ts";
+import type { CoordinatorLease, TrustPolicy } from "../src/core/types/registry.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, FaultStore, invariants, type ManualClock, rejectsWith } from "./_helpers.ts";
 
@@ -111,6 +115,21 @@ beforeEach(async () => {
 });
 
 describe("deleteApplication", () => {
+  it("is carried through with the lease it was handed, whatever renews it meanwhile", async () => {
+    /* The coordinator renews on its own timer while a deletion it was handed the
+       lease for is still walking the application. A renewal is the same tenancy
+       going on, and the deletion must not be refused by the node carrying it
+       out. */
+    const handed = lease;
+    await renewLease(clock.ctx, lease);
+    await renewLease(clock.ctx, await held(clock.ctx));
+
+    const result = await deleteApplication(clock.ctx, APPLICATION, handed);
+
+    expect(result.deleted.length).toBeGreaterThan(0);
+    await rejectsWith(() => getApplication(clock.ctx, APPLICATION), "not-found");
+  });
+
   it("refuses one that is not retired, and deletes nothing at all", async () => {
     const deletesBefore = store.dels;
 
@@ -282,3 +301,10 @@ describe("deleteApplication", () => {
     await invariants(store);
   });
 });
+
+/** The lease as the store holds it now, as a handle the holder could renew. */
+async function held(ctx: RegistryContext): Promise<LeaseHandle> {
+  const found = await readJson<CoordinatorLease>(ctx, coordinatorKey());
+  if (found === null) throw new Error("nobody holds the lease");
+  return { lease: found.value, etag: found.etag };
+}

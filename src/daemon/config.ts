@@ -3,7 +3,12 @@
 import { ScafoError } from "../core/error.ts";
 import { assertPositiveSafeInteger } from "../core/utils/number.ts";
 import { DEFAULT_ARCHIVE_ENTRIES, DEFAULT_ARTIFACT_BYTES } from "../core/types/deploy.ts";
-import { DEFAULT_PORT_RANGE_START } from "../core/placement/ports.ts";
+import {
+  assertPortRange,
+  DEFAULT_PORT_QUARANTINE_MS,
+  DEFAULT_PORT_RANGE_START,
+  defaultPortRangeEnd,
+} from "../core/placement/ports.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
 import { DEFAULT_LEASE_TTL_MS } from "../core/registry/lease.ts";
 import {
@@ -182,6 +187,19 @@ export interface RuntimeConfig {
   binPath: string;
   /** First port of the range runtime processes are given pairs from. */
   portRangeStart: number;
+  /**
+   * Last port of that range, both ends included.
+   *
+   * Worth sizing on a node that shares the host's network namespace, where these
+   * ports are the HOST's and the machine's own services live among them.
+   */
+  portRangeEnd: number;
+  /**
+   * How long a port released here is kept from a different application, so a
+   * peer or an ingress still routing to it cannot reach another application's
+   * process.
+   */
+  portQuarantineMs: number;
   /** Runtime listener address. Non-loopback requires an explicit transport. */
   bindHost: string;
   /** Variables for every runtime process. Driver-derived names are rejected. */
@@ -311,7 +329,12 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
     platformDomains: resolvePlatformDomains(sources),
     runtime: {
       binPath: resolve("celldBin", sources) ?? DEFAULT_RUNTIME_BIN,
-      portRangeStart: resolvePort("portRangeStart", sources, DEFAULT_PORT_RANGE_START),
+      ...resolvePortRange(sources),
+      portQuarantineMs: resolvePositiveSafeInteger(
+        "portQuarantineMs",
+        sources,
+        DEFAULT_PORT_QUARANTINE_MS,
+      ),
       bindHost: resolveBindHost(sources) ?? defaultBindHost(transport, tunnelHost),
       ...(celldEnv === undefined ? {} : { celldEnv }),
     },
@@ -462,6 +485,16 @@ const ORIGINS = {
     flag: "port-range-start",
     env: ["SCAFO_PORT_RANGE_START"],
     file: "runtime.portRangeStart",
+  },
+  portRangeEnd: {
+    flag: "port-range-end",
+    env: ["SCAFO_PORT_RANGE_END"],
+    file: "runtime.portRangeEnd",
+  },
+  portQuarantineMs: {
+    flag: "port-quarantine-ms",
+    env: ["SCAFO_PORT_QUARANTINE_MS"],
+    file: "runtime.portQuarantineMs",
   },
   bindHost: { flag: "bind-host", env: ["SCAFO_BIND_HOST"], file: "runtime.bindHost" },
   registryResyncMs: {
@@ -643,6 +676,24 @@ function resolvePort(setting: Setting, sources: Sources, fallback: number): numb
     });
   }
   return value;
+}
+
+/**
+ * The range this node draws port pairs from.
+ *
+ * The end defaults to a span from whatever start was configured, never past the
+ * last port there is, so an operator who moves only the start still gets a
+ * usable range. Both ends are then weighed together: a range that cannot hold
+ * two ports places nothing.
+ */
+function resolvePortRange(sources: Sources): { portRangeStart: number; portRangeEnd: number } {
+  const start = resolvePort("portRangeStart", sources, DEFAULT_PORT_RANGE_START);
+  const end = resolvePort("portRangeEnd", sources, defaultPortRangeEnd(start));
+  assertPortRange(
+    { start, end },
+    { start: ORIGINS.portRangeStart.file, end: ORIGINS.portRangeEnd.file },
+  );
+  return { portRangeStart: start, portRangeEnd: end };
 }
 
 function resolvePositiveSafeInteger(setting: Setting, sources: Sources, fallback: number): number {
@@ -842,8 +893,9 @@ function resolveCelldEnv(sources: Sources): Record<string, string> | undefined {
     throw new ScafoError("invalid-input", "Reserved environment variable", {
       detail:
         `"${origin.file}" sets "${name}", which the runtime driver writes itself from this ` +
-        `node's configuration and from the listeners its processes bind — a value set here ` +
-        `would be overwritten. Drop it from the Celld policy`,
+        `node's configuration, from the listeners its processes bind and from the private ` +
+        `directories it keeps for them — a value set here would be overwritten. Drop it from ` +
+        `the Celld policy`,
     });
   }
   return Object.keys(vars).length === 0 ? undefined : vars;

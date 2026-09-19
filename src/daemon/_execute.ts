@@ -1,6 +1,8 @@
 /* Internal: carrying out one reconcile plan against this node. */
 
 import { describeError, isScafoError, ScafoError } from "../core/error.ts";
+import { planLocalStateRemoval } from "../core/placement/local-state.ts";
+import type { PortPair } from "../core/placement/ports.ts";
 import type { ReconcileAction } from "../core/placement/reconcile.ts";
 import { findVersionSkew, versionSkewError } from "../core/placement/version-skew.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
@@ -15,7 +17,8 @@ const UNKNOWN_PORT = 0;
 
 export interface ReconcileFailure {
   at: string;
-  action?: ReconcileAction["type"];
+  /** What the pass was doing. `discard` is removing a gone application's local state. */
+  action?: ReconcileAction["type"] | "discard";
   subject?: string;
   code?: ScafoError["code"];
   detail: string;
@@ -38,6 +41,16 @@ export interface Executor {
     signal?: AbortSignal,
   ): Promise<void>;
   currentProcesses(): RuntimeProcess[];
+  /**
+   * Removes what this node still holds locally for applications the registry no
+   * longer has, leaving every other reason a process stopped alone.
+   *
+   * `registered` comes from a registry read that SUCCEEDED and from nothing
+   * else: a pass whose read failed never calls this, because a registry that
+   * could not be read is not an installation with no applications in it. What
+   * cannot be removed is one failure of the pass, retried by the next.
+   */
+  discardLocalState(registered: ReadonlySet<string>, pending: ReconcileFailure[]): Promise<void>;
 }
 
 export function createExecutor(deps: ExecutorDeps): Executor {
@@ -77,14 +90,25 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       return;
     }
 
-    const spec = driver.processSpec(runtimeInput(entry, action.ports));
+    /* The ports this application holds here, read off its own local state. A
+       pair it cannot be started on any more is replaced rather than retried, so
+       a foreign listener on a port cannot wedge an application indefinitely. */
+    const held = await driver.ports(application);
+    if (held.replaced !== undefined) {
+      console.error(
+        `scafo: "${application}" no longer holds ${pairText(held.replaced)} on this node ` +
+          `(something else is listening there) and now holds ${pairText(held.ports)}`,
+      );
+    }
+
+    const spec = driver.processSpec(runtimeInput(entry, held.ports));
     if (spec.id !== application) {
       throw new ScafoError("invalid-input", "Runtime process id does not match the application");
     }
     const started: RuntimeProcess = {
       application,
-      port: action.ports.public,
-      internalPort: action.ports.internal,
+      port: held.ports.public,
+      internalPort: held.ports.internal,
     };
 
     let processStarted = false;
@@ -109,6 +133,10 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     const cancel = (): void => void stopStarted();
     signal?.addEventListener("abort", cancel, { once: true });
     try {
+      /* Before the process, because the process works out of them: a run that
+         had to create its own would be one that started somewhere else. */
+      await driver.prepareLocalState(application);
+      signal?.throwIfAborted();
       await daemon.supervisor.start(spec);
       processStarted = true;
       signal?.throwIfAborted();
@@ -133,14 +161,12 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     }
   }
 
-  function runtimeInput(
-    entry: ApplicationRecord,
-    ports: { public: number; internal: number },
-  ): RuntimeSpecInput {
+  function runtimeInput(entry: ApplicationRecord, ports: PortPair): RuntimeSpecInput {
     return {
       application: entry,
       ports,
       node: {
+        id: daemon.nodeId,
         endpoint: daemon.config.bucket.endpoint,
         region: daemon.config.bucket.region,
         bucket: daemon.config.bucket.bucket,
@@ -152,6 +178,37 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       },
       baseEnv,
     };
+  }
+
+  function currentProcesses(): RuntimeProcess[] {
+    const processes: RuntimeProcess[] = [];
+    for (const status of daemon.supervisor.list()) {
+      if (status.state !== "running") {
+        /* The exit is read here and nowhere else, so this is the pass that
+           owes the supervisor the word that it may drop the id. */
+        quarantined.delete(status.id);
+        known.delete(status.id);
+        daemon.supervisor.forget(status.id);
+        continue;
+      }
+      const bookkept = known.get(status.id);
+      if (bookkept !== undefined) {
+        processes.push(
+          quarantined.has(status.id) ? { ...bookkept, teardownPending: true } : bookkept,
+        );
+        continue;
+      }
+      /* A supervised id that is no application name is not one of ours. */
+      if (!isSlug(status.id)) continue;
+      const adopted: RuntimeProcess = {
+        application: status.id,
+        port: UNKNOWN_PORT,
+        internalPort: UNKNOWN_PORT,
+      };
+      known.set(status.id, adopted);
+      processes.push(adopted);
+    }
+    return processes;
   }
 
   return {
@@ -173,42 +230,37 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       }
     },
 
-    currentProcesses(): RuntimeProcess[] {
-      const processes: RuntimeProcess[] = [];
-      for (const status of daemon.supervisor.list()) {
-        if (status.state !== "running") {
-          /* The exit is read here and nowhere else, so this is the pass that
-             owes the supervisor the word that it may drop the id. */
-          quarantined.delete(status.id);
-          known.delete(status.id);
-          daemon.supervisor.forget(status.id);
-          continue;
-        }
-        const bookkept = known.get(status.id);
-        if (bookkept !== undefined) {
-          processes.push(
-            quarantined.has(status.id) ? { ...bookkept, teardownPending: true } : bookkept,
-          );
-          continue;
-        }
-        /* A supervised id that is no application name is not one of ours. */
-        if (!isSlug(status.id)) continue;
-        const adopted: RuntimeProcess = {
-          application: status.id,
-          port: UNKNOWN_PORT,
-          internalPort: UNKNOWN_PORT,
-        };
-        known.set(status.id, adopted);
-        processes.push(adopted);
+    async discardLocalState(registered, pending): Promise<void> {
+      let held: string[];
+      try {
+        held = await driver.heldLocalState();
+      } catch (error) {
+        pending.push(failureOf(error, { action: "discard" }));
+        return;
       }
-      return processes;
+
+      const running = new Set(currentProcesses().map((entry) => entry.application));
+      for (const application of planLocalStateRemoval({ held, registered, running })) {
+        try {
+          await driver.removeLocalState(application);
+        } catch (error) {
+          pending.push(failureOf(error, { action: "discard", subject: application }));
+        }
+      }
     },
+
+    currentProcesses,
   };
+}
+
+/** A pair as one line of a log names it: the public port, then the internal one. */
+function pairText(pair: PortPair): string {
+  return `${String(pair.public)}/${String(pair.internal)}`;
 }
 
 export function failureOf(
   error: unknown,
-  about: { action?: ReconcileAction["type"]; subject?: string },
+  about: { action?: ReconcileFailure["action"]; subject?: string },
 ): ReconcileFailure {
   return {
     at: new Date().toISOString(),

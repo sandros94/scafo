@@ -4,6 +4,11 @@
  */
 
 import { describe, expect, it } from "vitest";
+import {
+  DEFAULT_PORT_QUARANTINE_MS,
+  DEFAULT_PORT_RANGE_START,
+  defaultPortRangeEnd,
+} from "../src/core/placement/ports.ts";
 import { DEFAULT_LEASE_TTL_MS } from "../src/core/registry/lease.ts";
 import {
   DEFAULT_NODE_REFRESH_INTERVAL_MS,
@@ -879,6 +884,94 @@ describe("how often a node looks at the registry, and what it does while it coor
   });
 });
 
+describe("the ports a node gives its runtime processes", () => {
+  it("draws from the documented range and quarantines a released pair for ten minutes", async () => {
+    const config = await loadDaemonConfig({ env: REQUIRED_ENV });
+
+    expect(config.runtime.portRangeStart).toBe(DEFAULT_PORT_RANGE_START);
+    expect(config.runtime.portRangeEnd).toBe(defaultPortRangeEnd(DEFAULT_PORT_RANGE_START));
+    expect(config.runtime.portQuarantineMs).toBe(DEFAULT_PORT_QUARANTINE_MS);
+  });
+
+  it("spans the same number of ports from wherever the start was moved to", async () => {
+    const config = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_PORT_RANGE_START: "30000" },
+    });
+
+    expect(config.runtime.portRangeEnd).toBe(30_998);
+  });
+
+  it.each([
+    ["runtime.portRangeEnd", "SCAFO_PORT_RANGE_END", "port-range-end", 43_500, 44_000, 44_500],
+    [
+      "runtime.portQuarantineMs",
+      "SCAFO_PORT_QUARANTINE_MS",
+      "port-quarantine-ms",
+      1000,
+      2000,
+      3000,
+    ],
+  ] as const)(
+    "takes %s from flag, environment, or file in that order",
+    async (path, variable, flag, inFile, inEnv, onFlag) => {
+      const key = path.split(".")[1] as string;
+      const read = fileAt(CONFIG_PATH, JSON.stringify({ runtime: { [key]: inFile } }));
+
+      const fromFile = await loadDaemonConfig({
+        configPath: CONFIG_PATH,
+        readFile: read,
+        env: REQUIRED_ENV,
+      });
+      const fromEnv = await loadDaemonConfig({
+        configPath: CONFIG_PATH,
+        readFile: read,
+        env: { ...REQUIRED_ENV, [variable]: String(inEnv) },
+      });
+      const fromFlag = await loadDaemonConfig({
+        configPath: CONFIG_PATH,
+        readFile: read,
+        env: { ...REQUIRED_ENV, [variable]: String(inEnv) },
+        flags: { [flag]: String(onFlag) },
+      });
+
+      const read_ = (config: DaemonConfig): unknown =>
+        (config.runtime as unknown as Record<string, unknown>)[key];
+      expect([read_(fromFile), read_(fromEnv), read_(fromFlag)]).toEqual([inFile, inEnv, onFlag]);
+    },
+  );
+
+  it("refuses a range that reaches below the unprivileged ports", async () => {
+    const error = await rejectsWith(
+      () => loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_PORT_RANGE_START: "80" } }),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("runtime.portRangeStart");
+  });
+
+  it("refuses a range that cannot hold two ports", async () => {
+    for (const end of ["24000", "23000"]) {
+      const error = await rejectsWith(
+        () => loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_PORT_RANGE_END: end } }),
+        "invalid-input",
+      );
+
+      expect(error.detail, end).toContain("runtime.portRangeEnd");
+    }
+  });
+
+  it("refuses a quarantine that is not a positive whole number", async () => {
+    for (const written of ["0", "-1", "1.5", "NaN", "later"]) {
+      const error = await rejectsWith(
+        () => loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_PORT_QUARANTINE_MS: written } }),
+        "invalid-input",
+      );
+
+      expect(error.detail, written).toContain("runtime.portQuarantineMs");
+    }
+  });
+});
+
 describe("the variables an operator hands every runtime process", () => {
   it("reads the comma syntax a flag and an environment variable carry", async () => {
     const config = await loadDaemonConfig({
@@ -950,7 +1043,17 @@ describe("the variables an operator hands every runtime process", () => {
   });
 
   it("REFUSES a name the runtime driver writes itself, naming the variable", async () => {
-    for (const name of ["AWS_REGION", "CELLD_ADDR"]) {
+    for (const name of [
+      "AWS_REGION",
+      "CELLD_ADDR",
+      /* Derived per process from this node's id and its state directory: what
+         makes an acknowledged write recoverable is that scafo, and not an
+         operator, decides the name a process comes back under and the
+         directory it comes back to. */
+      "CELLD_NODE",
+      "CELLD_WATCH",
+      "CELLD_ASSET_CACHE_DIR",
+    ]) {
       const error = await rejectsWith(
         () => loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_CELLD_ENV: `${name}=1` } }),
         "invalid-input",
@@ -990,7 +1093,7 @@ describe("the variables an operator hands every runtime process", () => {
     });
   });
 
-  it.each(["AWS_ACCESS_KEY_ID", "CELLD_TRUST_FORWARDED_HEADERS"])(
+  it.each(["AWS_ACCESS_KEY_ID", "CELLD_TRUST_FORWARDED_HEADERS", "CELLD_WATCH"])(
     "refuses reserved %s written in the config file",
     async (name) => {
       const error = await rejectsWith(

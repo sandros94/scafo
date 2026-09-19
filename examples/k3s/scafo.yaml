@@ -141,6 +141,12 @@ spec:
               memory: "512Mi"
             limits:
               memory: "2Gi"
+  # A claim per pod, kept when the StatefulSet is scaled down or deleted, and
+  # never an emptyDir: each runtime process keeps its work directory here, a
+  # write is acknowledged once a peer holds it there before the bucket has it,
+  # and the pod recovers it at boot from what its predecessor of the same name
+  # left. K3s' default StorageClass is node-local, so a pod whose node is gone
+  # stays Pending until that node is back rather than restarting empty.
   volumeClaimTemplates:
     - metadata:
         name: state

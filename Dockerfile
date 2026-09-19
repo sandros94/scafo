@@ -67,7 +67,8 @@ COPY --from=build /app/dist ./dist
 # The daemon reads the package version at runtime.
 COPY package.json ./
 
-# Persist the node identity in a private, non-login user's home directory.
+# The node identity, the ingress token and the work directory of every runtime
+# process this node supervises, in a private, non-login user's home directory.
 RUN groupadd --gid 10001 scafo \
   && useradd --uid 10001 --gid scafo --home-dir /var/lib/scafo \
   --shell /usr/sbin/nologin scafo \

@@ -14,7 +14,16 @@ const ROOT = "_scafo";
  */
 export const ID_RE: RegExp = /^[a-f\d]{8,64}$/;
 
-/** Node ids double as celld session ids, which may contain underscores. */
+/**
+ * Node ids double as celld session ids, which may contain underscores.
+ *
+ * DELIBERATELY NARROWER than the names Celld admits — ASCII alphanumerics,
+ * `_`, `-` and `.`, up to 128 bytes, and neither `.` nor `..` — so that every id
+ * this accepts is a name a supervised process may be started under. That
+ * containment is what `test/node-name.test.ts` proves, against the rule mirrored
+ * from the release this build runs.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/logic/peer.rs#L18-L25 (v0.5.0)
+ */
 export const NODE_ID_RE: RegExp = /^[a-z\d_-]{1,128}$/;
 
 /** Throws `ScafoError("invalid-slug")` when `id` is not a content id. */

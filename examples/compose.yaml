@@ -58,5 +58,11 @@ services:
       - ingress-log:/var/log/scafo-ingress
 
 volumes:
+  # The node's identity, its ingress token, and the work directory of every
+  # runtime process it supervises. It must outlive the container being
+  # RE-CREATED, not only restarted: a write is acknowledged once a peer holds
+  # it on the follower disk kept here, before the bucket has it, and a process
+  # recovers it at boot from what its predecessor of the same node name left.
+  # Removing this volume loses writes this fleet has already acknowledged.
   state:
   ingress-log:

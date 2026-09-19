@@ -31,9 +31,10 @@ import {
   DEFAULT_REGISTRY_RESYNC_MS,
 } from "../../src/core/registry/view.ts";
 import { trustOperator } from "../../src/core/registry/operators.ts";
+import type { PortPair } from "../../src/core/placement/ports.ts";
 import type { RegistryContext } from "../../src/core/registry/context.ts";
 import type { DeployRunner, StagedArtifact } from "../../src/core/types/deploy.ts";
-import type { RuntimeDriver } from "../../src/core/types/runtime.ts";
+import type { RuntimeDriver, RuntimePorts } from "../../src/core/types/runtime.ts";
 import type { CasStore } from "../../src/core/types/store.ts";
 import type { NodeServing } from "../../src/core/types/registry.ts";
 import type { ProcessSpec, ProcessStatus, Supervisor } from "../../src/core/types/supervisor.ts";
@@ -599,7 +600,7 @@ export async function deployBurst(world: ScaleWorld, opts: BurstOptions): Promis
       await tick();
     },
     /* No randomness: two runs of a profile must produce the same numbers. */
-    jitter: () => 0.5,
+    jitter: (windowMs: number) => Math.floor(windowMs * 0.5),
     log: (): void => {},
   };
 
@@ -1033,8 +1034,26 @@ function idleSupervisor(): Supervisor {
 
 /** A runtime driver that builds a process spec and runs nothing. */
 function specOnlyDriver(): RuntimeDriver {
+  /* The ports each application holds here, as the real driver keeps them on
+     disk: chosen once and handed back unchanged on every later start. */
+  const held = new Map<string, PortPair>();
+  let next = PORT_RANGE_START;
+
   return {
     stopGraceMs: 30_000,
+    ports: (application): Promise<RuntimePorts> => {
+      let ports = held.get(application);
+      if (ports === undefined) {
+        ports = { public: next, internal: next + 1 };
+        next += 2;
+        held.set(application, ports);
+      }
+      return Promise.resolve({ ports });
+    },
+    /* No process runs, so no directory is made and none is ever held. */
+    prepareLocalState: (): Promise<void> => Promise.resolve(),
+    heldLocalState: (): Promise<string[]> => Promise.resolve([]),
+    removeLocalState: (): Promise<void> => Promise.resolve(),
     processSpec: (input) => ({
       id: input.application.name,
       command: "celld",
@@ -1074,7 +1093,13 @@ function daemonConfig(nodeId: string): DaemonConfig {
     },
     node: { id: nodeId, listen: "127.0.0.1:7400", advertise: "10.0.0.1:7400" },
     platformDomains: [PLATFORM_DOMAIN],
-    runtime: { binPath: "celld", portRangeStart: PORT_RANGE_START, bindHost: "127.0.0.1" },
+    runtime: {
+      binPath: "celld",
+      portRangeStart: PORT_RANGE_START,
+      portRangeEnd: PORT_RANGE_START + 998,
+      portQuarantineMs: 600_000,
+      bindHost: "127.0.0.1",
+    },
     observability: { enabled: false },
     api: { public: true, jsonBytes: 65_536 },
   };
