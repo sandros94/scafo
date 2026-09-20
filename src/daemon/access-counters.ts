@@ -1,9 +1,11 @@
 /* Monotonic in-memory per-application ingress access-log counters. Built only
    with an ingress log; observation flushing persists snapshots. */
 
-import { platformApplication } from "../core/placement/hosts.ts";
-import type { RouteClaim } from "../core/placement/routes.ts";
-import type { IngressRoute } from "../core/types/ingress.ts";
+import {
+  createHostIndex,
+  type HostApplication,
+  type HostIndex,
+} from "../core/placement/host-bindings.ts";
 import { parseAccessLogLine } from "../core/utils/access-log.ts";
 
 /** Shared millisecond histogram upper bounds; fixed for fleet-wide aggregation. */
@@ -47,18 +49,17 @@ export interface IngressCountersSnapshot {
   buckets: IngressBucket[];
 }
 
-/** Current served routes plus durable custom-domain claims for attribution. */
-export interface RoutingAttribution {
-  routes: IngressRoute[];
-  claims: RouteClaim[];
-}
-
 /** Where an ingress's access log is turned into what each application was served. */
 export interface IngressCounters {
   /** Counts one line; malformed input increments `malformed` and does not throw. */
   ingest(line: string): void;
-  /** Replaces routing attribution after reconciliation. */
-  observeRouting(routing: RoutingAttribution): void;
+  /**
+   * Replaces what a host is read as, from the applications the node's registry
+   * view holds — EVERY application of the installation, whether or not this node
+   * serves one. The lookup is rebuilt only when the view moved, so a pass that
+   * changed nothing costs a walk of the records and no more.
+   */
+  observeApplications(applications: readonly HostApplication[]): void;
   /** Non-consuming monotonic snapshot; callers derive windows by subtraction. */
   snapshot(): IngressCountersSnapshot;
 }
@@ -70,22 +71,27 @@ export interface IngressCountersOptions {
   now?: () => Date;
 }
 
-/** Creates ingress counters. Attribute current routing first, then platform
-    host grammar; all other hosts use {@link UNATTRIBUTED}. */
+/**
+ * Creates ingress counters.
+ *
+ * A host is read as whoever the fleet's routing would answer it with — the same
+ * three rules, out of the same core enumeration, so a counter and a route can
+ * never disagree about whose host is whose. Anything no rule names is counted
+ * under {@link UNATTRIBUTED}.
+ */
 export function createIngressCounters(opts: IngressCountersOptions): IngressCounters {
   const now = opts.now ?? ((): Date => new Date());
   const since = now().toISOString();
   const domains = [...opts.platformDomains];
 
-  let routing = new Map<string, string>();
+  /* Before a pass has handed anything over, the platform grammar is all there
+     is to go on — which is what it was before one, too. */
+  let observed: readonly HostApplication[] = [];
+  let index: HostIndex = createHostIndex({ platformDomains: domains, applications: observed });
   const buckets = new Map<string, IngressBucket>();
   let lines = 0;
   let malformed = 0;
   let unattributed = 0;
-
-  const attribute = (host: string): string | null => {
-    return routing.get(host) ?? platformApplication(host, domains);
-  };
 
   return {
     ingest(line: string): void {
@@ -97,7 +103,7 @@ export function createIngressCounters(opts: IngressCountersOptions): IngressCoun
         return;
       }
 
-      const target = attribute(request.host);
+      const target = index.resolve(request.host);
       if (target === null) unattributed++;
 
       const bucket = bucketFor(buckets, target ?? UNATTRIBUTED);
@@ -107,12 +113,15 @@ export function createIngressCounters(opts: IngressCountersOptions): IngressCoun
       bucket.durations[durationBand(request.durationMs)]++;
     },
 
-    observeRouting(input: RoutingAttribution): void {
-      const next = new Map<string, string>();
-      /* Routes override claims because they represent the request target. */
-      for (const claim of input.claims) next.set(claim.host, claim.application);
-      for (const route of input.routes) next.set(route.host, route.backend.application);
-      routing = next;
+    observeApplications(applications: readonly HostApplication[]): void {
+      /* The view hands out the records it holds, so a pass that read nothing new
+         hands over the very objects of the last one: identity is what says the
+         index still stands, and rebuilding it is what a change costs. */
+      if (applications.length === observed.length) {
+        if (applications.every((record, at) => record === observed[at])) return;
+      }
+      observed = [...applications];
+      index = createHostIndex({ platformDomains: domains, applications: observed });
     },
 
     snapshot(): IngressCountersSnapshot {

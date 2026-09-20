@@ -2,8 +2,12 @@
    and fleet-owned labels require admin. */
 
 import type { H3, H3Event, Middleware } from "h3";
-import { ScafoError } from "../core/error.ts";
-import { canReachApplication, type TrustedOperator } from "../core/registry/operators.ts";
+import { isScafoError, ScafoError } from "../core/error.ts";
+import {
+  canGrantScope,
+  canReachApplication,
+  type TrustedOperator,
+} from "../core/registry/operators.ts";
 import {
   blockApplication,
   getApplication,
@@ -11,9 +15,19 @@ import {
   setApplicationLabels,
   unblockApplication,
 } from "../core/registry/applications.ts";
+import {
+  type ClaimDomainOptions,
+  claimDomain,
+  describeDomainConflict,
+  domainConflict,
+  releaseApplicationDomain,
+} from "../core/registry/domains.ts";
 import { setNodeSelector, setReplicas } from "../core/registry/placement.ts";
 import { retireApplication, unretireApplication } from "../core/registry/retirement.ts";
+import { assertClaimableHost } from "../core/placement/hosts.ts";
+import { hostUnder } from "../core/placement/routes.ts";
 import type { ApplicationRecord } from "../core/types/registry.ts";
+import { normalizeCustomDomain } from "../core/utils/host.ts";
 import { assertSlug } from "../core/utils/slug.ts";
 import type { DaemonContext } from "./app.ts";
 import { deleteApplicationRequest } from "./_delete.ts";
@@ -41,6 +55,18 @@ export interface ApplicationResult {
 /** Body of `DELETE /v1/applications/:name`: the store keys it removed. */
 export interface ApplicationDeleted {
   deleted: string[];
+}
+
+/** Body of both domain routes: the application, and the host they acted on. */
+export interface ApplicationDomain extends ApplicationResult {
+  /** The host as the registry holds it, which is the lowercased one. */
+  host: string;
+  /**
+   * Where the application answers under this installation's own domains, which
+   * is what a custom host is pointed at. Empty when the installation serves no
+   * platform domain.
+   */
+  platformHosts: string[];
 }
 
 /** The two boundaries the application routes stand behind. */
@@ -183,6 +209,43 @@ export function registerApplicationRoutes(
     peered,
   );
 
+  /* A custom domain is one claim per host for the whole installation, and an
+     OPERATOR's to make: this group is behind the operator guard, so the workload
+     token a deploy pipeline holds never reaches it — a pipeline publishes an
+     application, it does not decide what the fleet answers on. `?wildcard=1`
+     claims the one label below the host as well, and asks for more of the key
+     that makes it: see {@link claimOptions}. */
+  app.post(
+    `${APPLICATIONS_PATH}/:name/domains/:host`,
+    async (event): Promise<ApplicationDomain> => {
+      const [caller, name] = scopedTarget(event);
+      const host = claimedHost(event, daemon);
+      const claim = claimOptions(event, caller, name);
+
+      try {
+        await claimDomain(daemon.registry, host, name, claim);
+      } catch (error) {
+        throw await heldElsewhere(daemon, caller, name, host, claim, error);
+      }
+      return domainAnswer(daemon, await getApplication(daemon.registry, name), host);
+    },
+    guarded,
+  );
+
+  /* Releasing is the same authority, and it stays open while an application is
+     blocked: a host is the operator's to take back whatever state it is in. */
+  app.delete(
+    `${APPLICATIONS_PATH}/:name/domains/:host`,
+    async (event): Promise<ApplicationDomain> => {
+      const [, name] = scopedTarget(event);
+      const host = normalizeCustomDomain(event.context.params?.host ?? "");
+
+      await releaseApplicationDomain(daemon.registry, host, name);
+      return domainAnswer(daemon, await getApplication(daemon.registry, name), host);
+    },
+    guarded,
+  );
+
   /* Deletion is coordinator-gated and transparently forwarded. `force=1` skips
      the retirement-grace check. */
   app.delete(
@@ -197,6 +260,88 @@ export function registerApplicationRoutes(
 }
 
 /* ---------------------------------------------------------------- internals */
+
+/**
+ * The host a claim was asked for: checked against the rule a claimed host
+ * follows, and then against this installation's own domains.
+ *
+ * THE SECOND HALF IS THE DAEMON'S because only it knows them. Every host under a
+ * platform domain is rendered from an application's name, so one claimed there
+ * could only shadow a host the fleet already answers on.
+ */
+function claimedHost(event: H3Event, daemon: DaemonContext): string {
+  const host = normalizeCustomDomain(event.context.params?.host ?? "");
+  assertClaimableHost(host, daemon.config.platformDomains);
+  return host;
+}
+
+/**
+ * What the claim asks for beyond the host, and whether this caller may ask it.
+ *
+ * `?wildcard=1` claims the one label below the host too, where every name is
+ * either the application itself or one of its `<name>-<env>` environments. So it
+ * takes a key that reaches THOSE as well: the same coverage rule enrolment
+ * measures a requested scope by, asked here about `<name>-*`.
+ */
+function claimOptions(
+  event: H3Event,
+  caller: TrustedOperator,
+  application: string,
+): ClaimDomainOptions {
+  if (event.url.searchParams.get("wildcard") !== "1") return {};
+
+  if (!canGrantScope(caller, [`${application}-*`])) {
+    throw new ScafoError("auth-scope", "Beyond this key's applications", {
+      detail:
+        `"${caller.id}" reaches "${application}", and claiming a host with its subdomains ` +
+        `also decides what "${application}-<env>" answers on: ask an admin of this fleet for a ` +
+        `key scoped to "${application}-*", or claim the host on its own`,
+    });
+  }
+  return { wildcard: true };
+}
+
+/** What both domain routes answer with: the record, the host, and where it points. */
+function domainAnswer(
+  daemon: DaemonContext,
+  application: ApplicationRecord,
+  host: string,
+): ApplicationDomain {
+  const platformHosts = daemon.config.platformDomains
+    .map((domain) => hostUnder(domain, application.name))
+    .filter((named): named is string => named !== null);
+  return { application, host, platformHosts };
+}
+
+/**
+ * A `reference-held` refusal worded for whoever is reading it.
+ *
+ * The holder is named only to a caller whose scope reaches it; to anyone else it
+ * is "another application", because an operator scoped to one tenant must not be
+ * able to read off which of a fleet's applications holds a host by asking for
+ * it. Anything that is not that refusal passes through untouched.
+ */
+async function heldElsewhere(
+  daemon: DaemonContext,
+  caller: TrustedOperator,
+  application: string,
+  host: string,
+  claim: ClaimDomainOptions,
+  error: unknown,
+): Promise<unknown> {
+  if (!isScafoError(error) || error.code !== "reference-held") return error;
+
+  const conflict = await domainConflict(daemon.registry, host, application, claim);
+  if (conflict === null || canReachApplication(caller, conflict.application)) return error;
+
+  /* The same sentence the registry wrote, with the holder's name taken out of
+     it: which host stands in the way is the caller's own business, and which
+     application holds it is not. */
+  return new ScafoError("reference-held", error.message, {
+    detail: describeDomainConflict(host, conflict, "another application of this installation"),
+    cause: error,
+  });
+}
 
 /** Removes fleet-owned labels for a tenant view; blocked state remains visible. */
 function tenantView(application: ApplicationRecord): ApplicationRecord {

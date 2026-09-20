@@ -21,6 +21,18 @@
  * a plan — so that a platform built over scafo can tag an application machine to
  * machine and read it back through the API it already talks to.
  *
+ * DOMAIN IS THE ONE VERB THAT REACHES OUTSIDE THE INSTALLATION. An application
+ * is always served at its name under every platform domain; claiming a host of
+ * your own adds to that, first claim wins for the whole installation, and it is
+ * an operator's to make rather than a deploy's — a pipeline publishes an
+ * application, it does not decide what the fleet answers on. Scafo asks for no
+ * proof of ownership and gates nothing on DNS: one installation is one trust
+ * domain, and a certificate is never issued for a name that does not point here
+ * anyway. What `add` does say is whether it points here yet. `--wildcard` claims
+ * the one label below the host as well: `<env>.<host>` answers from the
+ * `<name>-<env>` this installation already serves at its platform host, and
+ * every other subdomain from the application itself.
+ *
  * RETIRE AND DELETE are two commands rather than one because they are two
  * decisions. Retirement stops an application being served and is reversible for
  * as long as its grace runs; deletion is the one act nothing in the registry can
@@ -42,6 +54,7 @@ import {
   type ApplicationApi,
   applicationApi,
   type ApplicationOps,
+  describeDomains,
   describeReplicasChange,
   describeRetirement,
   describeSelectorChange,
@@ -53,11 +66,23 @@ import {
   readSelectorFlags,
 } from "../_applications.ts";
 import { createRegistry } from "../_bootstrap.ts";
+import {
+  checkDomainDns,
+  describeDnsPending,
+  describeDnsSettled,
+  describeDomainClaim,
+  describeDomainRelease,
+  describeWildcardCertificates,
+  describeWildcardDnsPending,
+  describeWildcardDnsSettled,
+  wildcardProbeHost,
+} from "../_domains.ts";
 import { configFlags, flagList } from "../_flags.ts";
 import { resolveOperatorHome } from "../_home.ts";
 import { nodeBaseUrl, operatorSigner } from "../_node.ts";
 import { OPERATOR_KEY_FORMS, operatorFlags, resolveOperator } from "../_operator.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
+import { warn } from "../_warn.ts";
 
 /* Which installation this invocation reaches, and with what. */
 const remoteArgs: ArgsDef = {
@@ -135,6 +160,31 @@ const replicasArgs: ArgsDef = {
   },
 };
 
+const domainHostArgs: ArgsDef = {
+  ...targetArgs,
+  host: {
+    type: "positional",
+    required: true,
+    description: "The host itself, fully qualified: shop.example.com",
+  },
+  json: { type: "boolean", description: "Print what was done as JSON instead of a summary" },
+};
+
+const domainAddArgs: ArgsDef = {
+  ...domainHostArgs,
+  wildcard: {
+    type: "boolean",
+    description:
+      "Claim every name one label under the host too: <env>.<host> answers from <name>-<env>, " +
+      "and any other subdomain from the application itself",
+  },
+};
+
+const domainListArgs: ArgsDef = {
+  ...targetArgs,
+  json: { type: "boolean", description: "Print the hosts as JSON instead of a list" },
+};
+
 const list: CommandDef = defineCommand({
   meta: {
     name: "list",
@@ -201,6 +251,33 @@ const replicas: CommandDef = defineCommand({
   run: guarded(runReplicas),
 });
 
+const domain: CommandDef = defineCommand({
+  meta: {
+    name: "domain",
+    description: "The custom hosts an application answers on, beside its platform host",
+  },
+  subCommands: {
+    add: defineCommand({
+      meta: {
+        name: "add",
+        description: "Claim a host for an application; the first claim of the installation wins",
+      },
+      args: domainAddArgs,
+      run: guarded(runDomainAdd),
+    }),
+    remove: defineCommand({
+      meta: { name: "remove", description: "Drop a host this application holds" },
+      args: domainHostArgs,
+      run: guarded(runDomainRemove),
+    }),
+    list: defineCommand({
+      meta: { name: "list", description: "The hosts claimed for an application" },
+      args: domainListArgs,
+      run: guarded(runDomainList),
+    }),
+  },
+});
+
 const remove: CommandDef = defineCommand({
   meta: { name: "delete", description: "Delete a retired or forced application" },
   args: deleteArgs,
@@ -222,6 +299,7 @@ export const app: CommandDef = defineCommand({
     unretire,
     selector,
     replicas,
+    domain,
     delete: remove,
   },
 });
@@ -325,6 +403,93 @@ async function runReplicas(flags: Record<string, unknown>): Promise<void> {
   console.log(describeReplicasChange(name, await ops.setReplicas(name, count)));
 }
 
+async function runDomainAdd(flags: Record<string, unknown>): Promise<void> {
+  const name = target(flags);
+  const host = required(flags, "host");
+  const ops = await opsFor(flags);
+
+  const change = await ops.addDomain(name, host, { wildcard: flags.wildcard === true });
+  /* Read back from the record rather than from the flag: what is reported is
+     what the installation holds, and re-running a plain `add` over a wildcard
+     claim leaves the wildcard exactly where it was. */
+  const covered = (change.application.wildcardDomains ?? []).includes(change.host);
+
+  /* Asked only once the claim is written, and never able to undo it: DNS is the
+     operator's next step rather than a condition of this one. The wildcard
+     record is a second question with a second answer, asked under a label
+     nothing is ever deployed at. */
+  const dns = await checkDomainDns({ host: change.host, platformHosts: change.platformHosts });
+  const wildcardDns = covered
+    ? await checkDomainDns({
+        host: wildcardProbeHost(change.host),
+        platformHosts: change.platformHosts,
+      })
+    : undefined;
+
+  if (flags.json === true) {
+    console.log(
+      JSON.stringify(
+        { ...change, dns, ...(wildcardDns === undefined ? {} : { wildcardDns }) },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  console.log(describeDomainClaim(change, ops.via));
+  if (dns === "ok") console.log(describeDnsSettled(change.host));
+  else warn(describeDnsPending(change.host, change.platformHosts));
+
+  if (!covered) return;
+  if (wildcardDns === "ok") console.log(describeWildcardDnsSettled(change.host));
+  else warn(describeWildcardDnsPending(change.host, change.platformHosts));
+  warn(describeWildcardCertificates(change.host));
+}
+
+async function runDomainRemove(flags: Record<string, unknown>): Promise<void> {
+  const name = target(flags);
+  const host = required(flags, "host");
+  const ops = await opsFor(flags);
+
+  const change = await ops.removeDomain(name, host);
+  console.log(
+    flags.json === true ? JSON.stringify(change, null, 2) : describeDomainRelease(change, ops.via),
+  );
+}
+
+async function runDomainList(flags: Record<string, unknown>): Promise<void> {
+  const name = target(flags);
+  const ops = await opsFor(flags);
+  const application = await ops.show(name);
+
+  if (flags.json === true) {
+    console.log(
+      JSON.stringify(
+        {
+          application: name,
+          domains: application.domains,
+          wildcardDomains: application.wildcardDomains ?? [],
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  if (application.domains.length === 0) {
+    console.log(
+      `scafo: "${name}" holds no custom domain; "scafo app domain add <host> --name ${name}" ` +
+        `claims one, and it is served at its platform host either way`,
+    );
+    return;
+  }
+  console.log(
+    `scafo: "${name}" holds ${String(application.domains.length)} custom ` +
+      `domain${application.domains.length === 1 ? "" : "s"}`,
+  );
+  for (const host of describeDomains(application)) console.log(`  ${host}`);
+}
+
 async function runDelete(flags: Record<string, unknown>): Promise<void> {
   const name = target(flags);
   const force = flags.force === true;
@@ -398,7 +563,9 @@ async function opsFor(flags: Record<string, unknown>): Promise<ApplicationOps> {
     env: process.env,
     readFile: readTextFile,
   });
-  return directOps(createRegistry(config));
+  /* The same domains a node would hold a claim against: without a node to ask,
+     this configuration is where the installation's own hosts are written down. */
+  return directOps(createRegistry(config), { platformDomains: config.platformDomains });
 }
 
 /** A block the node reports as still standing is a failure rather than a success line. */

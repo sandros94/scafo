@@ -11,15 +11,12 @@ import {
   type IngressCounters,
   UNATTRIBUTED,
 } from "../src/daemon/access-counters.ts";
-import { recordRouting } from "../src/daemon/_ingress.ts";
-import type { DaemonContext } from "../src/daemon/app.ts";
-import { API_DENIED_PREFIXES } from "../src/core/placement/routes.ts";
-import type { IngressRoute } from "../src/core/types/ingress.ts";
-import type { ApplicationRecord } from "../src/core/types/registry.ts";
-import type { RuntimeProcess } from "../src/core/types/runtime.ts";
+import type { HostApplication } from "../src/core/placement/host-bindings.ts";
 import { CLOCK_START_MS } from "./_helpers.ts";
 
 const DOMAINS = ["apps.test", "preview.test"];
+/** The custom host the wildcard cases are claimed on. */
+const BASE = "shop.example.com";
 
 describe("what a host is counted as", () => {
   it("reads an application's name off the host grammar alone", () => {
@@ -36,59 +33,36 @@ describe("what a host is counted as", () => {
     ]);
   });
 
-  it("takes a custom domain from the routing, which is the only thing that knows", () => {
+  it("takes a custom domain from the application that claimed it", () => {
     const counters = counting();
-    counters.observeRouting({
-      routes: [route("shop.example.com", "shop")],
-      claims: [{ host: "shop.example.com", application: "shop" }],
-    });
+    counters.observeApplications([application("shop", [BASE])]);
 
-    counters.ingest(line({ host: "shop.example.com" }));
+    counters.ingest(line({ host: BASE }));
 
     expect(named(counters)).toEqual([{ application: "shop", requests: 1 }]);
     expect(counters.snapshot().unattributed).toBe(0);
   });
 
   it("keeps an inactive application's custom domain attributable, because the claim outlives the route", () => {
-    /* Nothing is ready, so the routing carries no route for it at all; the claim
-       is what an application's record says regardless. */
+    /* Nothing is serving it anywhere, which is a statement about processes; the
+       claim is what the application's own record says regardless. */
     const counters = counting();
-    counters.observeRouting({
-      routes: [],
-      claims: [{ host: "shop.example.com", application: "shop" }],
-    });
+    counters.observeApplications([application("shop", [BASE])]);
 
-    counters.ingest(line({ host: "shop.example.com" }));
+    counters.ingest(line({ host: BASE }));
 
     expect(named(counters)).toEqual([{ application: "shop", requests: 1 }]);
   });
 
-  it("lets the routing win over the platform-host grammar", () => {
+  it("stops attributing a host the registry has stopped naming", () => {
     const counters = counting();
-    counters.observeRouting({
-      routes: [route("shop.apps.test", "shop-preview")],
-      claims: [],
-    });
-
-    counters.ingest(line({ host: "shop.apps.test" }));
-
-    /* Read off the grammar alone this is "shop"; the published routing is the
-       authority for what the request actually reached. */
-    expect(named(counters)).toEqual([{ application: "shop-preview", requests: 1 }]);
-  });
-
-  it("stops attributing a host the routing has stopped naming", () => {
-    const counters = counting();
-    counters.observeRouting({
-      routes: [],
-      claims: [{ host: "shop.example.com", application: "shop" }],
-    });
-    counters.ingest(line({ host: "shop.example.com" }));
+    counters.observeApplications([application("shop", [BASE])]);
+    counters.ingest(line({ host: BASE }));
 
     /* The application was deleted, or its domain released: the next pass states
-       the routing whole, and a stale entry would go on crediting it. */
-    counters.observeRouting({ routes: [], claims: [] });
-    counters.ingest(line({ host: "shop.example.com" }));
+       the registry whole, and a stale entry would go on crediting it. */
+    counters.observeApplications([]);
+    counters.ingest(line({ host: BASE }));
 
     const snapshot = counters.snapshot();
     expect(snapshot.unattributed).toBe(1);
@@ -124,6 +98,80 @@ describe("what a host is counted as", () => {
 
     expect(counters.snapshot().unattributed).toBe(1);
     expect(named(counters)).toEqual([{ application: UNATTRIBUTED, requests: 1 }]);
+  });
+});
+
+describe("what a wildcard claim is counted as", () => {
+  /* THE NODE COUNTING SERVES NEITHER OF THESE. Attribution reads the registry
+     view, which holds every application of the installation, so a host answered
+     by a process on some other node is still counted as whose it is. */
+  const applications = [
+    covering(application("shop", [BASE]), [BASE]),
+    application("shop-preview"),
+    application("blog"),
+  ];
+
+  it("counts the base, an environment and the catch-all as the routing would answer them", () => {
+    const counters = counting();
+    counters.observeApplications(applications);
+
+    /* Rule 1: the base itself. Rule 2: the environment one label under it.
+       Rule 3: every other name one label under it. */
+    counters.ingest(line({ host: BASE }));
+    counters.ingest(line({ host: `preview.${BASE}` }));
+    counters.ingest(line({ host: `staging.${BASE}` }));
+    counters.ingest(line({ host: `blog.${BASE}` }));
+
+    expect(counters.snapshot().unattributed).toBe(0);
+    expect(named(counters)).toEqual([
+      { application: "shop", requests: 3 },
+      { application: "shop-preview", requests: 1 },
+    ]);
+  });
+
+  it("counts a name two labels under the base as nobody's", () => {
+    const counters = counting();
+    counters.observeApplications(applications);
+
+    counters.ingest(line({ host: `a.preview.${BASE}` }));
+
+    expect(counters.snapshot().unattributed).toBe(1);
+  });
+
+  it("counts an environment the installation has no application for as the holder's", () => {
+    const counters = counting();
+    counters.observeApplications([covering(application("shop", [BASE]), [BASE])]);
+
+    counters.ingest(line({ host: `preview.${BASE}` }));
+
+    expect(named(counters)).toEqual([{ application: "shop", requests: 1 }]);
+  });
+
+  it("leaves an installation that claimed no wildcard counting exactly as before", () => {
+    const counters = counting();
+    counters.observeApplications([application("shop", [BASE]), application("shop-preview")]);
+
+    counters.ingest(line({ host: BASE }));
+    counters.ingest(line({ host: `preview.${BASE}` }));
+
+    const snapshot = counters.snapshot();
+    expect(snapshot.unattributed).toBe(1);
+    expect(named(counters)).toEqual([
+      { application: UNATTRIBUTED, requests: 1 },
+      { application: "shop", requests: 1 },
+    ]);
+  });
+
+  it("lets an exact claim under the base win over the wildcard enclosing it", () => {
+    const counters = counting();
+    counters.observeApplications([
+      covering(application("shop", [BASE]), [BASE]),
+      application("blog", [`blog.${BASE}`]),
+    ]);
+
+    counters.ingest(line({ host: `blog.${BASE}` }));
+
+    expect(named(counters)).toEqual([{ application: "blog", requests: 1 }]);
   });
 });
 
@@ -262,62 +310,6 @@ describe("the snapshot", () => {
   });
 });
 
-describe("what the reconcile pass hands over", () => {
-  it("attributes off the same routing the node renders for itself", () => {
-    /* The attribution is not a second reading of what serves an application —
-       it is the routing itself, read where it is rendered. A second reading
-       would drift from what traffic actually reaches. */
-    const counters = counting();
-    const daemon = daemonWith(counters, true);
-
-    const routing = recordRouting(daemon, {
-      desired: [application("shop", ["shop.example.com"])],
-      processes: [process_("shop", 9101)],
-    });
-
-    /* Exactly the hosts the pass rendered, each read as the application the
-       ingress reading them will send them to. */
-    expect(routing.routes.map((entry) => entry.host)).toContain("shop.example.com");
-
-    for (const host of ["shop.apps.test", "shop.preview.test", "shop.example.com"]) {
-      counters.ingest(line({ host }));
-    }
-
-    expect(counters.snapshot().unattributed).toBe(0);
-    expect(named(counters)).toEqual([{ application: "shop", requests: 3 }]);
-  });
-
-  it("publishes the platform apexes as the fleet's API, or not at all", () => {
-    /* The one thing `api.public` does to the routing, at the seam that reads it:
-       the apexes are named with the daemon's own port, or the routing carries no
-       `api` at all and is what scafo rendered before the apex answered. */
-    for (const isPublic of [true, false]) {
-      const routing = recordRouting(daemonWith(undefined, isPublic), {
-        desired: [],
-        processes: [],
-      });
-
-      expect(routing.api, String(isPublic)).toEqual(
-        isPublic
-          ? { port: 7400, hosts: [...DOMAINS].sort(), denied: API_DENIED_PREFIXES }
-          : undefined,
-      );
-    }
-  });
-});
-
-/** Just enough daemon for the routing seam: the domains, the port, and the switch. */
-function daemonWith(counters: IngressCounters | undefined, apiPublic: boolean): DaemonContext {
-  return {
-    config: {
-      platformDomains: DOMAINS,
-      node: { listen: "127.0.0.1:7400" },
-      api: { public: apiPublic, jsonBytes: 65_536 },
-    },
-    ...(counters === undefined ? {} : { ingressCounters: counters }),
-  } as unknown as DaemonContext;
-}
-
 function counting(): IngressCounters {
   return createIngressCounters({
     platformDomains: DOMAINS,
@@ -338,24 +330,14 @@ function line(over: { host: string; status?: number; size?: number; durationMs?:
   });
 }
 
-function route(host: string, application: string): IngressRoute {
-  return { host, backend: { application, port: 9101 } };
+/** An application as attribution reads one: its name and the hosts claimed for it. */
+function application(name: string, domains: string[] = []): HostApplication {
+  return { name, domains };
 }
 
-/** An application record carrying only what the routing is rendered from. */
-function application(name: string, domains: string[]): ApplicationRecord {
-  return {
-    v: 1,
-    name,
-    deployment: { revision: 1, deployedAt: new Date(CLOCK_START_MS).toISOString() },
-    domains,
-    createdAt: new Date(CLOCK_START_MS).toISOString(),
-  };
-}
-
-/** A supervised process, which is the only kind the routing ever names. */
-function process_(application: string, port: number): RuntimeProcess {
-  return { application, port, internalPort: port + 1 };
+/** The same record with some of its hosts claimed WITH their subdomains. */
+function covering(record: HostApplication, hosts: string[]): HostApplication {
+  return { ...record, wildcardDomains: hosts };
 }
 
 /** Each bucket as the application it names and what it counted, for a case that only wants that. */

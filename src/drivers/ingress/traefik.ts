@@ -2,7 +2,7 @@
    Operator routers remain in other providers; updates apply on Traefik's poll. */
 
 import type { FleetRouting, FleetUpstream } from "../../core/types/ingress.ts";
-import { assertHost } from "../../core/utils/host.ts";
+import { assertHost, wildcardBase } from "../../core/utils/host.ts";
 
 /** Default entry point; omission would attach routes to every entry point. */
 export const DEFAULT_ENTRY_POINT: string = "web";
@@ -14,9 +14,22 @@ export const TRAEFIK_KEY_PREFIX: string = "scafo_";
 export const TRAEFIK_API_PREFIX: string = `${TRAEFIK_KEY_PREFIX}api_`;
 export const TRAEFIK_API_DENY_PREFIX: string = `${TRAEFIK_KEY_PREFIX}apideny_`;
 
+/** Namespace for what a claim made WITH its subdomains covers. */
+export const TRAEFIK_WILDCARD_PREFIX: string = `${TRAEFIK_KEY_PREFIX}wild_`;
+
 /** Explicit priorities keep denied API paths ahead of the API route. */
 export const API_PRIORITY: number = 2;
 export const API_DENY_PRIORITY: number = 3;
+
+/**
+ * The lowest priority this document writes, so every exact `Host` router wins.
+ *
+ * Traefik's default priority is the LENGTH of the rule, which would put a long
+ * `HostRegexp` ahead of a short `Host` — precisely backwards for a fallback.
+ * One is below every rule there is, including the API routes, which are explicit
+ * for the same reason.
+ */
+export const WILDCARD_PRIORITY: number = 1;
 
 /** Traefik's internal no-op backend makes denial routes active without dialing. */
 export const NOOP_SERVICE: string = "noop@internal";
@@ -94,7 +107,10 @@ export interface TraefikRenderOptions {
  * Renders the fleet's routing as Traefik dynamic configuration.
  *
  * Every host becomes a router and a service over the upstreams answering on
- * it, each checked at its health path. With a preferred node, that node's
+ * it, each checked at its health path. A `*.base` entry becomes a `HostRegexp`
+ * router for exactly one label under that base, at a priority below every exact
+ * `Host` router, so a name somebody claimed exactly always wins over the
+ * wildcard that encloses it. With a preferred node, that node's
  * upstreams are used while healthy and the others only when they are not — a
  * `failover` service, which is what "prefer" means and what a weighting would
  * not do. Without one, requests are spread over every upstream.
@@ -111,21 +127,27 @@ export function renderTraefikConfig(
   const services: Record<string, TraefikService> = {};
 
   for (const route of [...routing.routes].sort((a, b) => compare(a.host, b.host))) {
+    const base = wildcardBase(route.host);
     /* Hosts are embedded in rule syntax, so validate again at this boundary. */
-    assertHost(route.host);
+    assertHost(base ?? route.host);
 
-    const key = traefikKey(route.host);
+    const key = base === null ? traefikKey(route.host) : traefikWildcardKey(base);
     routers[key] = {
-      rule: `Host(\`${route.host}\`)`,
+      /* One label under the base and no more, which is what the claim covers. */
+      rule:
+        base === null ? `Host(\`${route.host}\`)` : `HostRegexp(\`^[^.]+\\.${escaped(base)}$\`)`,
       service: key,
       entryPoints: [...entryPoints],
       middlewares: [RETRY_MIDDLEWARE],
+      ...(base === null ? {} : { priority: WILDCARD_PRIORITY }),
     };
     Object.assign(
       services,
       servicesOf(key, route.upstreams, opts?.prefer, {
         path: APP_HEALTH_PATH,
-        hostname: route.host,
+        /* The health check asks one upstream, so it carries a real name: the
+           base itself, never the pattern that stands for every name under it. */
+        hostname: base ?? route.host,
       }),
     );
   }
@@ -177,6 +199,11 @@ export function traefikKey(host: string): string {
   return `${TRAEFIK_KEY_PREFIX}${host}`;
 }
 
+/** The router and service name a base's covered subdomains are written under. */
+export function traefikWildcardKey(base: string): string {
+  return `${TRAEFIK_WILDCARD_PREFIX}${base}`;
+}
+
 /** The router and service name the API at one platform apex is written under. */
 export function traefikApiKey(domain: string): string {
   return `${TRAEFIK_API_PREFIX}${domain}`;
@@ -224,6 +251,11 @@ function balancer(
       },
     },
   };
+}
+
+/** A host inside a Go regexp: only its dots mean anything there. */
+function escaped(host: string): string {
+  return host.replaceAll(".", "\\.");
 }
 
 /** Matches a denied path and its subtree, not a similarly prefixed path. */

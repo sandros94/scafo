@@ -10,7 +10,7 @@ import { findApplication } from "../core/registry/applications.ts";
 import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import type { RegistryView } from "../core/registry/view.ts";
-import { checkDomain } from "../core/registry/domains.ts";
+import { claimedApplication } from "../core/registry/domains.ts";
 import { isLeaseExpired } from "../core/registry/lease.ts";
 import {
   abandonedDeploy,
@@ -97,7 +97,7 @@ export interface DaemonContext {
   fetchFn?: typeof fetch;
   /** Optional observability seam. Its absence avoids event-object allocation. */
   observability?: Observability;
-  /** Optional ingress counters, updated with routing after reconciliation. */
+  /** Optional ingress counters, told what the registry holds by each pass. */
   ingressCounters?: IngressCounters;
   /**
    * The formats this node renders the fleet's routing in for an ingress that
@@ -116,6 +116,7 @@ export interface DaemonContext {
    they are declared beside the routes that answer with them. */
 export type {
   ApplicationDeleted,
+  ApplicationDomain,
   ApplicationResult,
   ApplicationsResult,
 } from "./_application-routes.ts";
@@ -384,9 +385,25 @@ async function servesHost(daemon: DaemonContext, host: string): Promise<boolean>
     return named !== null && servesApplication(await findApplication(daemon.registry, named));
   }
 
-  const claim = await checkDomain(daemon.registry, host);
-  if (claim === null) return false;
-  return servesApplication(await findApplication(daemon.registry, claim.application));
+  /*
+   * A CLAIM APPROVES THE NAMES IT CAN NAME, AND NO OTHERS. An exact claim
+   * approves its host; a claim made with its subdomains approves the base, and
+   * one label under it only where that label names an application of this
+   * installation — `<holder>-<label>`, deployed and serving.
+   *
+   * It deliberately does NOT approve an arbitrary name under a wildcard base,
+   * although the routing answers one from the holder's process. On-demand
+   * issuance per unknown subdomain would let anyone burn the certificate
+   * authority's weekly issuance limit for the customer's own domain by asking
+   * for random names, and it is asked over the open internet by whoever sends
+   * the first request. Those names are served over HTTPS where the ingress
+   * already holds a certificate covering them — a wildcard certificate the
+   * operator obtains through DNS-01 — which is a decision the operator makes
+   * once, with the registrar, rather than one a stranger's request makes here.
+   */
+  const named = await claimedApplication(daemon.registry, host);
+  if (named === null) return false;
+  return servesApplication(await findApplication(daemon.registry, named));
 }
 
 /** Whether an application owns a currently serviceable public host. */

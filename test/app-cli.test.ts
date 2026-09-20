@@ -3,14 +3,14 @@
  *
  * The admin verbs — list, show, block, unblock, label — go through a NODE on the
  * authority of an operator key. The rest also write straight into the bucket
- * when no node is named, so retire, unretire, selector, replicas and delete are
- * exercised over both.
+ * when no node is named, so retire, unretire, selector, replicas, the domain
+ * claims and delete are exercised over both.
  */
 
 import { type ArgsDef, type CommandDef, parseArgs } from "citty";
 import { generateJWK } from "unjwt/jwk";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type ApplicationApi,
   applicationApi,
@@ -23,9 +23,24 @@ import {
   formatApplication,
   formatApplicationTable,
   nodeOps,
+  describeDomains,
   readLabelArgs,
   readSelectorFlags,
+  WILDCARD_MARK,
 } from "../src/cli/_applications.ts";
+import { resolveApplication } from "../src/cli/_application.ts";
+import {
+  checkDomainDns,
+  describeDnsPending,
+  describeDnsSettled,
+  describeDomainClaim,
+  describeWildcardCertificates,
+  describeWildcardDnsPending,
+  describeWildcardDnsSettled,
+  type HostResolver,
+  wildcardProbeHost,
+} from "../src/cli/_domains.ts";
+import { warn } from "../src/cli/_warn.ts";
 import { app as appCommand } from "../src/cli/commands/app.ts";
 import { signNodeToken } from "../src/core/auth/index.ts";
 import { recordRevision } from "../src/core/registry/_revision.ts";
@@ -68,6 +83,11 @@ const THEIRS = "zenith";
 /** `--name acme --env preview` addresses this one, and it is already on its way out. */
 const PREVIEW = "acme-preview";
 
+/** The platform domain the fixture's node serves, and two hosts outside it. */
+const PLATFORM_DOMAIN = "apps.test";
+const HOST = "shop.example.com";
+const OTHER_HOST = "www.example.com";
+
 const VERSION = "b1b1b1b1";
 const OTHER_VERSION = "b2b2b2b2";
 
@@ -85,6 +105,8 @@ let asAdmin: ApplicationApi;
 let asTenant: ApplicationApi;
 /** One node for the whole test: a second app would be a second coordinator. */
 let daemonOps: ApplicationOps;
+/** The same node, signed for by the admin key an operator would hold. */
+let operatorOps: ApplicationOps;
 
 beforeEach(async () => {
   clock = ctxWith(new MemoryCasStore());
@@ -113,6 +135,7 @@ beforeEach(async () => {
 
   const served = buildApp();
   daemonOps = buildNodeOps(served);
+  operatorOps = buildNodeOps(served, { id: ADMIN_ID, keys: admin });
   asAdmin = reach(served, ADMIN_ID, admin);
   asTenant = reach(served, TENANT_ID, tenant);
 });
@@ -461,6 +484,310 @@ describe("what --set and --clear are read as", () => {
   });
 });
 
+describe.each([
+  ["through a node daemon", (): ApplicationOps => throughNodeAsOperator()],
+  ["straight through the bucket", (): ApplicationOps => throughBucket()],
+])("claiming a custom domain %s", (_name, build) => {
+  it("claims the host, mirrors it, and names where it already answers", async () => {
+    const change = await build().addDomain(MINE, HOST);
+
+    expect(change.host).toBe(HOST);
+    expect(change.application.domains).toEqual([HOST]);
+    expect(change.platformHosts).toEqual([`${MINE}.${PLATFORM_DOMAIN}`]);
+    expect((await getApplication(clock.ctx, MINE)).domains).toEqual([HOST]);
+  });
+
+  it("takes the host as DNS reads it, and claiming it twice changes nothing", async () => {
+    await build().addDomain(MINE, "Shop.Example.COM");
+    const again = await build().addDomain(MINE, HOST);
+
+    expect(again.application.domains).toEqual([HOST]);
+  });
+
+  it("releases it again, and leaves the application every other host it has", async () => {
+    await build().addDomain(MINE, HOST);
+    await build().addDomain(MINE, OTHER_HOST);
+
+    const change = await build().removeDomain(MINE, HOST);
+
+    expect(change.application.domains).toEqual([OTHER_HOST]);
+    expect((await build().show(MINE)).domains).toEqual([OTHER_HOST]);
+  });
+
+  it("refuses to release a host another application holds", async () => {
+    await build().addDomain(THEIRS, HOST);
+
+    expect((await rejectionOf(() => build().removeDomain(MINE, HOST))).code).toBe("not-found");
+    expect((await getApplication(clock.ctx, THEIRS)).domains).toEqual([HOST]);
+  });
+
+  it("refuses a host of the installation's own domains, which name applications", async () => {
+    const error = await rejectsWith(
+      () => build().addDomain(MINE, `${MINE}.${PLATFORM_DOMAIN}`),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain(PLATFORM_DOMAIN);
+    expect((await getApplication(clock.ctx, MINE)).domains).toEqual([]);
+  });
+
+  it("refuses a host that is not one before anything is written", async () => {
+    await rejectsWith(() => build().addDomain(MINE, "https://shop.example.com"), "invalid-input");
+
+    expect((await getApplication(clock.ctx, MINE)).domains).toEqual([]);
+  });
+
+  it("gives a host claimed elsewhere to the one that claimed it first", async () => {
+    await build().addDomain(THEIRS, HOST);
+
+    const error = await rejectsWith(() => build().addDomain(MINE, HOST), "reference-held");
+
+    expect(error.status).toBe(409);
+    expect((await getApplication(clock.ctx, MINE)).domains).toEqual([]);
+  });
+
+  it("reports an application that is not there rather than inventing one", async () => {
+    expect((await rejectionOf(() => build().addDomain("ghost", HOST))).code).toBe("not-found");
+  });
+
+  it("claims it with the one label below it when asked, and mirrors that too", async () => {
+    const change = await build().addDomain(MINE, HOST, { wildcard: true });
+
+    expect(change.application.domains).toEqual([HOST]);
+    expect(change.application.wildcardDomains).toEqual([HOST]);
+  });
+
+  it("upgrades a plain claim and never quietly undoes one", async () => {
+    await build().addDomain(MINE, HOST);
+    expect((await build().show(MINE)).wildcardDomains).toBeUndefined();
+
+    await build().addDomain(MINE, HOST, { wildcard: true });
+    /* The flag is absent here exactly as it is when nobody passes `--wildcard`. */
+    const again = await build().addDomain(MINE, HOST, {});
+
+    expect(again.application.wildcardDomains).toEqual([HOST]);
+  });
+
+  it("releases the whole claim, subdomains and all", async () => {
+    await build().addDomain(MINE, HOST, { wildcard: true });
+
+    const change = await build().removeDomain(MINE, HOST);
+
+    expect(change.application.domains).toEqual([]);
+    expect(change.application.wildcardDomains).toBeUndefined();
+  });
+});
+
+describe("what the domain commands are declared as", () => {
+  it("takes the host as a positional and addresses <name>-<env> like every sibling", () => {
+    const flags = parseArgs(
+      [HOST, "--name", MINE, "--env", "preview"],
+      domainCommand("add").args as never,
+    ) as Record<string, unknown>;
+
+    expect(flags.host).toBe(HOST);
+    expect(resolveApplication({ name: flags.name as string, env: flags.env as string })).toBe(
+      PREVIEW,
+    );
+  });
+
+  it("offers --json on all three, and the bucket flags the other setters take", () => {
+    for (const name of ["add", "remove", "list"]) {
+      const args = domainCommand(name).args;
+      expect(args, name).toHaveProperty("json");
+      expect(args, name).toHaveProperty("node");
+      expect(args, name).toHaveProperty("endpoint");
+    }
+  });
+
+  it("offers --wildcard on `add` alone, and reads it as a boolean", () => {
+    /* Not on `remove`, which drops the claim whole either way, and not on
+       `list`, which reports what the record says. */
+    expect(domainCommand("add").args).toHaveProperty("wildcard");
+    expect(domainCommand("remove").args).not.toHaveProperty("wildcard");
+    expect(domainCommand("list").args).not.toHaveProperty("wildcard");
+
+    const flags = parseArgs(
+      [HOST, "--name", MINE, "--wildcard"],
+      domainCommand("add").args as never,
+    ) as Record<string, unknown>;
+    expect(flags.wildcard).toBe(true);
+    /* Nobody types a `*`: the flag is the whole of how one is asked for. */
+    expect(flags.host).toBe(HOST);
+  });
+
+  it("carries the whole change in the JSON a claim answers with", async () => {
+    const change = await throughBucket().addDomain(MINE, HOST);
+    const dns = await checkDomainDns({
+      host: change.host,
+      platformHosts: change.platformHosts,
+      resolve: fixedResolver({ [HOST]: ["203.0.113.9"] }),
+    });
+
+    /* What `--json` prints: the record, the host, where it points, and what DNS
+       says right now — never prose an operator would have to parse. */
+    expect(JSON.parse(JSON.stringify({ ...change, dns }))).toEqual({
+      application: await getApplication(clock.ctx, MINE),
+      host: HOST,
+      platformHosts: [`${MINE}.${PLATFORM_DOMAIN}`],
+      dns: "unknown",
+    });
+  });
+
+  it("asks a second question for a wildcard, and prints the answer beside the first", async () => {
+    const change = await throughBucket().addDomain(MINE, HOST, { wildcard: true });
+    const platformHosts = change.platformHosts;
+    /* A label nothing is ever deployed at: what resolves there is the `*` record
+       and nothing else. */
+    const resolve = fixedResolver({
+      [HOST]: ["203.0.113.9"],
+      [wildcardProbeHost(HOST)]: ["203.0.113.9"],
+      [platformHosts[0] as string]: ["203.0.113.9"],
+    });
+
+    const dns = await checkDomainDns({ host: change.host, platformHosts, resolve });
+    const wildcardDns = await checkDomainDns({
+      host: wildcardProbeHost(change.host),
+      platformHosts,
+      resolve,
+    });
+
+    expect(wildcardProbeHost(HOST)).toBe(`scafo-dns-check.${HOST}`);
+    expect(JSON.parse(JSON.stringify({ ...change, dns, wildcardDns }))).toEqual({
+      application: await getApplication(clock.ctx, MINE),
+      host: HOST,
+      platformHosts,
+      dns: "ok",
+      wildcardDns: "ok",
+    });
+
+    /* The record is missing where nothing answers for the probe label, and the
+       host's own answer is untouched by it. */
+    const without = fixedResolver({
+      [HOST]: ["203.0.113.9"],
+      [platformHosts[0] as string]: ["203.0.113.9"],
+    });
+    await expect(
+      checkDomainDns({ host: wildcardProbeHost(HOST), platformHosts, resolve: without }),
+    ).resolves.toBe("unknown");
+    await expect(checkDomainDns({ host: HOST, platformHosts, resolve: without })).resolves.toBe(
+      "ok",
+    );
+  });
+
+  it("says what a wildcard claim still needs of DNS and of the ingress", () => {
+    const platformHosts = [`${MINE}.${PLATFORM_DOMAIN}`];
+    const pending = describeWildcardDnsPending(HOST, platformHosts);
+
+    expect(pending).toContain(`"*.${HOST}"`);
+    expect(pending).toContain(`CNAME to "${platformHosts[0] as string}"`);
+    expect(describeWildcardDnsPending(HOST, [])).not.toContain("CNAME");
+    expect(describeWildcardDnsSettled(HOST)).toContain(`"*.${HOST}"`);
+
+    /* And the half DNS cannot fix: an arbitrary subdomain gets no certificate
+       of its own, so the ingress has to hold one that covers them. */
+    const certificates = describeWildcardCertificates(HOST);
+    expect(certificates).toContain(`"*.${HOST}"`);
+    expect(certificates).toContain("DNS-01");
+  });
+
+  it("marks a wildcard claim wherever a host is printed, and never as a `*`", async () => {
+    await throughBucket().addDomain(MINE, HOST, { wildcard: true });
+    await throughBucket().addDomain(MINE, OTHER_HOST);
+    const application = await getApplication(clock.ctx, MINE);
+
+    expect(describeDomains(application)).toEqual([`${HOST} ${WILDCARD_MARK}`, OTHER_HOST]);
+    const shown = formatApplication(application);
+    expect(shown).toContain(`${HOST} ${WILDCARD_MARK}`);
+    expect(shown).not.toContain(`*.${HOST}`);
+  });
+
+  it("says in one line what a claim did, and whether it covers the names under it", async () => {
+    const plain = await throughBucket().addDomain(MINE, OTHER_HOST);
+    expect(describeDomainClaim(plain, "the registry bucket")).not.toContain("one label under");
+
+    const covering = await throughBucket().addDomain(MINE, HOST, { wildcard: true });
+    const line = describeDomainClaim(covering, "the registry bucket");
+    expect(line).toContain(`"<env>.${HOST}"`);
+    expect(line).toContain(`"${MINE}-<env>"`);
+  });
+});
+
+describe("what DNS says about a host that was just claimed", () => {
+  const platformHosts = [`${MINE}.${PLATFORM_DOMAIN}`];
+
+  it("is ok when the claimed host already resolves where the application answers", async () => {
+    const outcome = await checkDomainDns({
+      host: HOST,
+      platformHosts,
+      resolve: fixedResolver({
+        [HOST]: ["2001:db8::5", "203.0.113.9"],
+        [platformHosts[0] as string]: ["203.0.113.9"],
+      }),
+    });
+
+    expect(outcome).toBe("ok");
+    expect(describeDnsSettled(HOST)).toContain(HOST);
+  });
+
+  it("is pending when it resolves somewhere else entirely", async () => {
+    const outcome = await checkDomainDns({
+      host: HOST,
+      platformHosts,
+      resolve: fixedResolver({
+        [HOST]: ["198.51.100.2"],
+        [platformHosts[0] as string]: ["203.0.113.9"],
+      }),
+    });
+
+    expect(outcome).toBe("pending");
+  });
+
+  it("is unknown when the resolver says nothing, and never fails the claim", async () => {
+    const nxdomain = await checkDomainDns({
+      host: HOST,
+      platformHosts,
+      resolve: () => Promise.reject(new Error("queryA ENOTFOUND")),
+    });
+    const silent = await checkDomainDns({
+      host: HOST,
+      platformHosts,
+      resolve: (host) => (host === HOST ? Promise.resolve(["203.0.113.9"]) : Promise.resolve([])),
+    });
+    const late = await checkDomainDns({
+      host: HOST,
+      platformHosts,
+      budgetMs: 5,
+      resolve: () => new Promise<string[]>(() => {}),
+    });
+
+    expect([nxdomain, silent, late]).toEqual(["unknown", "unknown", "unknown"]);
+  });
+
+  it("says what is still to do, through the channel one switch silences", () => {
+    const pending = describeDnsPending(HOST, platformHosts);
+    expect(pending).toContain(HOST);
+    expect(pending).toContain(`CNAME to "${platformHosts[0] as string}"`);
+    expect(pending).toContain("certificate");
+
+    const lines: string[] = [];
+    vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      lines.push(args.map(String).join(" "));
+    });
+    warn(pending);
+    vi.stubEnv("SCAFO_SILENCE_WARNINGS", "1");
+    warn(pending);
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+
+    expect(lines).toEqual([`scafo: warning: ${pending}`]);
+  });
+
+  it("says nothing about a CNAME when the installation serves no platform domain", () => {
+    expect(describeDnsPending(HOST, [])).not.toContain("CNAME");
+  });
+});
+
 describe("deleting through a node daemon", () => {
   it("refuses a long-lived application, relaying the grace the node named", async () => {
     const error = await rejectsWith(() => throughNode().delete(MINE), "invalid-input");
@@ -594,7 +921,32 @@ function throughNode(): ApplicationOps {
 
 /** The CLI writing into the bucket itself, with no node in the picture. */
 function throughBucket(): ApplicationOps {
-  return directOps(clock.ctx);
+  return directOps(clock.ctx, { platformDomains: [PLATFORM_DOMAIN] });
+}
+
+/**
+ * The same node, reached with an OPERATOR key rather than a node token: what an
+ * operator's own `scafo app` really signs with, and what the routes an operator
+ * alone may call answer to.
+ */
+function throughNodeAsOperator(): ApplicationOps {
+  return operatorOps;
+}
+
+/** A resolver that answers from a table, and NXDOMAINs anything not in it. */
+function fixedResolver(table: Record<string, string[]>): HostResolver {
+  return (host) => {
+    const found = table[host];
+    return found === undefined
+      ? Promise.reject(new Error(`queryA ENOTFOUND ${host}`))
+      : Promise.resolve(found);
+  };
+}
+
+/** One of the three commands under `scafo app domain`. */
+function domainCommand(name: string): CommandDef & { args: ArgsDef } {
+  const group = subCommand("domain");
+  return (group.subCommands as Record<string, CommandDef>)[name] as CommandDef & { args: ArgsDef };
 }
 
 /** What `scafo app show --json` prints, read back. */
@@ -619,10 +971,13 @@ function buildApp(): ReturnType<typeof createNodeApp> {
 }
 
 /** The per-application commands as a node token reaches them, over the real app. */
-function buildNodeOps(served: ReturnType<typeof createNodeApp>): ApplicationOps {
+function buildNodeOps(
+  served: ReturnType<typeof createNodeApp>,
+  as?: { id: string; keys: Keypair },
+): ApplicationOps {
   return nodeOps({
     url: NODE_URL,
-    authorize: () => signNodeToken(node.privateKey, NODE_ID),
+    authorize: () => signNodeToken(as?.keys.privateKey ?? node.privateKey, as?.id ?? NODE_ID),
     fetchFn: async (input, init) => {
       const url = urlOf(input);
       called.push(url);
@@ -697,7 +1052,7 @@ function daemonConfig(): DaemonConfig {
       secretKey: "secret",
     },
     node: { id: NODE_ID, listen: "127.0.0.1:7400" },
-    platformDomains: ["apps.test"],
+    platformDomains: [PLATFORM_DOMAIN],
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,

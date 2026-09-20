@@ -169,6 +169,13 @@ export interface ApplicationRecord {
   /** Deployment notice; `null` until the first successful deploy. Never names a version. */
   deployment: DeploymentRevision | null;
   domains: string[];
+  /**
+   * The subset of {@link ApplicationRecord.domains} claimed WITH the single
+   * label below them, mirrored here so that the routing render — which reads
+   * application records and nothing else on every pass — knows which host is a
+   * wildcard without reading one claim record.
+   */
+  wildcardDomains?: string[];
   /** Replica count; omitted resolves to every live node that may serve it. */
   replicas?: ReplicaCount;
   /** Eligible-node selector; `"all"` replicas means all matching live nodes. */
@@ -258,6 +265,12 @@ export interface DomainClaim {
   v: 1;
   application: string;
   claimedAt: string;
+  /**
+   * Set when the claim covers the single label below the host as well as the
+   * host itself. Absent is an exact claim, which is every claim made before
+   * anyone asked for a wildcard: the field is additive and the record stays `v: 1`.
+   */
+  wildcard?: true;
 }
 
 /**

@@ -9,6 +9,9 @@ export const HOST_LABEL_RE: RegExp = /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/;
 /** DNS name limit, counting the dots between labels. */
 export const HOST_MAX_LENGTH: number = 253;
 
+/** DNS label limit, which is also the length an application's name is held to. */
+export const HOST_LABEL_MAX_LENGTH: number = 63;
+
 /**
  * Lowercase DNS name of one or more dot-separated labels. Single-label names are
  * allowed so internal hosts work; a trailing dot is not.
@@ -16,6 +19,115 @@ export const HOST_MAX_LENGTH: number = 253;
 export function isHost(s: string): boolean {
   if (s.length === 0 || s.length > HOST_MAX_LENGTH) return false;
   return s.split(".").every((label) => HOST_LABEL_RE.test(label));
+}
+
+/**
+ * A host an application may claim, lowercased and checked against the rule a
+ * claim is held to.
+ *
+ * LOWERCASING IS THE ONLY NORMALISATION. DNS is case-insensitive, so
+ * `Shop.Example.COM` and `shop.example.com` are one name and the registry keeps
+ * one spelling of it; everything else is refused rather than repaired, with
+ * `invalid-input` naming the rule that failed — an operator who pasted a URL, a
+ * port or a wildcard needs to read which part of it is not a host.
+ *
+ * It is stricter than {@link isHost}, which admits the single-label names an
+ * internal listener carries: a claimed host is FULLY QUALIFIED, and its last
+ * label is not all digits, so an IPv4 literal — a name no certificate authority
+ * issues for — is never taken for one. `xn--` punycode labels are ordinary
+ * labels and pass.
+ */
+export function normalizeCustomDomain(host: string): string {
+  const name = host.toLowerCase();
+
+  if (name === "") throw badHost(host, "it is empty");
+  if (name.includes("://") || name.includes("/")) {
+    throw badHost(host, "a host carries no scheme and no path");
+  }
+  if (name.includes("*")) throw badHost(host, "a host carries no wildcard");
+  if (name.includes(":")) {
+    throw badHost(host, "a host carries no port, and an IPv6 literal is not one");
+  }
+  if (name.endsWith(".")) throw badHost(host, "a host carries no trailing dot");
+  if (name.length > HOST_MAX_LENGTH) {
+    throw badHost(
+      host,
+      `it is ${String(name.length)} characters, past the ${String(HOST_MAX_LENGTH)} a DNS name may be`,
+    );
+  }
+
+  const labels = name.split(".");
+  if (labels.some((label) => label === "")) throw badHost(host, "it holds an empty label");
+  if (labels.length < 2) {
+    throw badHost(host, "it must be fully qualified: at least two dot-separated labels");
+  }
+  for (const label of labels) {
+    if (label.length > HOST_LABEL_MAX_LENGTH) {
+      throw badHost(
+        host,
+        `its label "${label}" is past the ${String(HOST_LABEL_MAX_LENGTH)} characters a label may be`,
+      );
+    }
+    if (!/^[a-z\d-]+$/.test(label)) {
+      throw badHost(
+        host,
+        `its label "${label}" holds something other than letters, digits and hyphens`,
+      );
+    }
+    if (label.startsWith("-") || label.endsWith("-")) {
+      throw badHost(host, `its label "${label}" starts or ends with a hyphen`);
+    }
+  }
+  if (/^\d+$/.test(labels[labels.length - 1] as string)) {
+    throw badHost(host, "its last label is all digits, so it names an address rather than a host");
+  }
+
+  return name;
+}
+
+/**
+ * How a routing document writes "one label below this base": `*.shop.example`.
+ *
+ * NOBODY EVER TYPES IT. A wildcard is asked for as `--wildcard` on the base and
+ * stored as a flag on the base's claim; this spelling exists only in the
+ * document an ingress reads, where a key has to name the set rather than a host.
+ * A consumer looks a request host up exactly first and, failing that, replaces
+ * the host's first label with `*` and looks that up once.
+ */
+export function wildcardHost(base: string): string {
+  return `*.${base}`;
+}
+
+/** The base a `*.BASE` routing key names, or null when the host is not one. */
+export function wildcardBase(host: string): string | null {
+  return host.startsWith("*.") ? host.slice(2) : null;
+}
+
+/** A host read as one label under a base that is itself a claimable host. */
+export interface HostUnderBase {
+  /** The first label, which is what names a family member: `preview`. */
+  label: string;
+  /** Everything below it, fully qualified: `shop.example.com`. */
+  base: string;
+}
+
+/**
+ * Splits `preview.shop.example.com` into `preview` and `shop.example.com`, or
+ * answers null when the name is not one label under a fully qualified base.
+ *
+ * A WILDCARD COVERS EXACTLY ONE LABEL, as a TLS wildcard does, so this is also
+ * the whole of the wildcard-matching rule: `a.b.shop.example.com` splits into
+ * `a` and `b.shop.example.com`, which is a different base and matches only a
+ * claim on that name.
+ */
+export function splitHostLabel(host: string): HostUnderBase | null {
+  const dot = host.indexOf(".");
+  if (dot < 1) return null;
+
+  const label = host.slice(0, dot);
+  const base = host.slice(dot + 1);
+  if (!base.includes(".") || !HOST_LABEL_RE.test(label)) return null;
+  return { label, base };
 }
 
 /** Writes `host:port`, bracketing an IPv6 literal the way a URL authority does. */
@@ -80,6 +192,13 @@ export function parseInterfaceAddress(value: string): InterfaceAddress | null {
   const hostPrefix = isIpv4(host) ? 32 : isIpv6(host) ? 128 : 0;
   if (hostPrefix === 0 || prefix > hostPrefix) return null;
   return { host, prefix, hostPrefix };
+}
+
+/** Names the rule a claimed host broke; the detail is what an operator reads. */
+function badHost(host: string, why: string): ScafoError {
+  return new ScafoError("invalid-input", "Invalid host", {
+    detail: `"${host}" is no host to claim: ${why}`,
+  });
 }
 
 /** Throws `ScafoError("invalid-slug")` when `s` is not a valid host. */

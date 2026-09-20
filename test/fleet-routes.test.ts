@@ -4,6 +4,8 @@ import { API_DENIED_PREFIXES } from "../src/core/placement/routes.ts";
 import type { ApplicationRecord, NodeRecord, NodeServing } from "../src/core/types/registry.ts";
 
 const NAME = "shop";
+/** The custom host the wildcard cases are claimed on. */
+const BASE = "shop.example.com";
 const NOW = new Date("2026-01-01T00:01:00.000Z");
 const FRESH = "2026-01-01T00:00:50.000Z";
 const STALE = "2025-12-31T23:00:00.000Z";
@@ -95,6 +97,98 @@ describe("fleet routing", () => {
     ]);
   });
 
+  it("renders the four rules a claim made with its subdomains stands for", () => {
+    const routing = renderFleetRouting({
+      platformDomains: ["apps.test"],
+      applications: [
+        covering(application(NAME, [BASE]), [BASE]),
+        application("shop-preview"),
+        /* Not of the family, so its name under the base means nothing here. */
+        application("blog"),
+      ],
+      nodes: [
+        node("node-a", "10.83.0.1", {
+          "shop": { port: 42_000 },
+          "shop-preview": { port: 42_002 },
+          "blog": { port: 42_004 },
+        }),
+      ],
+      now: NOW,
+    });
+
+    expect(
+      routing.routes.map((route) => ({ host: route.host, application: route.application })),
+    ).toEqual([
+      /* Rule 3: everything one label under the base that nothing else names. */
+      { host: `*.${BASE}`, application: NAME },
+      { host: "blog.apps.test", application: "blog" },
+      /* Rule 2: the environment's own name under the base. */
+      { host: `preview.${BASE}`, application: "shop-preview" },
+      { host: "shop-preview.apps.test", application: "shop-preview" },
+      { host: "shop.apps.test", application: NAME },
+      /* Rule 1: the base itself. */
+      { host: BASE, application: NAME },
+    ]);
+    /* Rule 4: two labels under the base is nobody's, and no key matches it. */
+    expect(routing.routes.map((route) => route.host)).not.toContain(`*.preview.${BASE}`);
+  });
+
+  it("lets an exact claim under the base win over the wildcard that encloses it", () => {
+    const routing = renderFleetRouting({
+      platformDomains: ["apps.test"],
+      applications: [
+        covering(application(NAME, [BASE]), [BASE]),
+        /* The family member holds the same host exactly; the claim decides. */
+        application("shop-preview", [`preview.${BASE}`]),
+      ],
+      nodes: [
+        node("node-a", "10.83.0.1", {
+          "shop": { port: 42_000 },
+          "shop-preview": { port: 42_002 },
+        }),
+      ],
+      now: NOW,
+    });
+
+    expect(routing.routes.find((route) => route.host === `preview.${BASE}`)).toMatchObject({
+      application: "shop-preview",
+      upstreams: [{ node: "node-a", address: "10.83.0.1:42002" }],
+    });
+  });
+
+  it("falls back to the holder for an environment that is not being served", () => {
+    const routing = renderFleetRouting({
+      platformDomains: ["apps.test"],
+      applications: [covering(application(NAME, [BASE]), [BASE]), application("shop-preview")],
+      nodes: [node("node-a", "10.83.0.1", { shop: { port: 42_000 } })],
+      now: NOW,
+    });
+
+    /* Nothing serves `shop-preview`, so no exact entry is written for it and a
+       request for that name falls to the one `*.` key, which is the holder. */
+    expect(routing.routes.map((route) => route.host)).toEqual([
+      `*.${BASE}`,
+      "shop.apps.test",
+      BASE,
+    ]);
+  });
+
+  it("writes nothing of a wildcard whose holder is not being served", () => {
+    const routing = renderFleetRouting({
+      platformDomains: ["apps.test"],
+      applications: [covering(application(NAME, [BASE]), [BASE]), application("shop-preview")],
+      nodes: [node("node-a", "10.83.0.1", { "shop-preview": { port: 42_002 } })],
+      now: NOW,
+    });
+
+    /* The environment still answers at the name the base gives it: that entry
+       stands on its own upstreams rather than on the holder's. */
+    expect(routing.routes.map((route) => route.host)).toEqual([
+      `preview.${BASE}`,
+      "shop-preview.apps.test",
+    ]);
+  });
+
   it("publishes the API at every free apex through every live node, when asked", () => {
     const routing = renderFleetRouting({
       platformDomains: ["apps.test", "shop.apps.test"],
@@ -154,6 +248,11 @@ function application(name: string, domains: string[] = []): ApplicationRecord {
     domains,
     createdAt: "2026-01-01T00:00:00.000Z",
   };
+}
+
+/** The same record with some of its hosts claimed WITH their subdomains. */
+function covering(record: ApplicationRecord, hosts: string[]): ApplicationRecord {
+  return { ...record, wildcardDomains: hosts };
 }
 
 function node(id: string, internal: string, serving?: NodeServing): NodeRecord {

@@ -12,7 +12,6 @@ import type { ApplicationRecord, NodeServing } from "../core/types/registry.ts";
 import type { RuntimeDriver, RuntimeProcess } from "../core/types/runtime.ts";
 import { desiredFrom, type PlacementView } from "./_desired.ts";
 import { createExecutor, failureOf, type ReconcileFailure } from "./_execute.ts";
-import { recordRouting } from "./_ingress.ts";
 import { runtimeDialHost } from "./config.ts";
 import { registryView } from "./_view.ts";
 import type { DaemonContext } from "./app.ts";
@@ -267,6 +266,12 @@ export function createReconciler(
         now: nowDate(registry),
         api: daemon.config.api.public,
       });
+      /* WHOSE HOST IS WHOSE COMES FROM THE REGISTRY, not from what this node
+         runs: a host is read as whoever the routing above would answer it with,
+         which for an application placed on another node is still an answer. The
+         whole snapshot rather than the fleet's servable set, because a claim
+         outlives the deployment that was serving it. */
+      daemon.ingressCounters?.observeApplications(snapshot.applications);
       const actual = executor.currentProcesses();
       /* Taken before anything is started, so a process this pass creates is told
          apart from one that was already serving something older. */
@@ -276,11 +281,6 @@ export function createReconciler(
       await executor.execute(plan, desired, pending, abort.signal);
 
       if (!abort.signal.aborted) {
-        /* Attribute traffic from the actual post-execution process state. Nothing
-           leaves the node here — what an ingress reads is `fleetRouting` above,
-           which it polls for itself — so there is no call to fail and nothing to
-           record a failure against. */
-        recordRouting(daemon, { desired, processes: executor.currentProcesses() });
         /* After execution, so a process this pass started is not asked to adopt
            what it has just booted onto. */
         adopt(desired, before);

@@ -4,7 +4,8 @@ import type { FleetApiRouting, FleetRoute, FleetRouting, FleetUpstream } from ".
 import type { ApplicationRecord, NodeRecord } from "../types/registry.ts";
 import { formatHostPort } from "../utils/host.ts";
 import { isNodeLive } from "../registry/nodes.ts";
-import { API_DENIED_PREFIXES, hostUnder } from "./routes.ts";
+import { hostBindings } from "./host-bindings.ts";
+import { API_DENIED_PREFIXES } from "./routes.ts";
 
 export interface RenderFleetRoutingInput {
   /** Apex domains the platform serves wildcard subdomains under. */
@@ -38,39 +39,43 @@ export interface RenderFleetRoutingInput {
  * and one that stopped beating may be gone in a way no health check reports
  * quickly — a black-holed address times out, it does not refuse.
  *
- * First writer wins between route classes: application hosts, then claims, in
- * code-unit order, so a claim can never shadow a platform host.
+ * WHICH HOST IS WHOSE IS NOT DECIDED HERE. {@link hostBindings} states that
+ * once, in precedence order — application hosts, then claims, then what a claim
+ * made WITH its subdomains covers — and this walks it and publishes the entries
+ * something is currently answering. A host nobody serves is skipped rather than
+ * taken, so an unserved environment falls through to the wildcard that encloses
+ * it, exactly as the next binding for that host says.
  */
 export function renderFleetRouting(input: RenderFleetRoutingInput): FleetRouting {
   const live = input.nodes
     .filter((node) => isNodeLive(node, input.now, windowOf(input)))
     .sort((a, b) => compare(a.id, b.id));
 
-  const applications = [...input.applications].sort((a, b) => compare(a.name, b.name));
+  /* One walk of the bindings asks about the same application many times. */
+  const served = new Map<string, FleetUpstream[]>();
+  const upstreamsFor = (application: string): FleetUpstream[] => {
+    const held = served.get(application);
+    if (held !== undefined) return held;
 
-  const routes = new Map<string, FleetRoute>();
-  const add = (host: string | null, route: Omit<FleetRoute, "host">): void => {
-    if (host === null || routes.has(host)) return;
-    routes.set(host, { host, ...route });
+    const found = upstreamsOf(live, application);
+    served.set(application, found);
+    return found;
   };
 
-  for (const application of applications) {
-    const upstreams = upstreamsOf(live, application.name);
+  const routes = new Map<string, FleetRoute>();
+  for (const binding of hostBindings({
+    platformDomains: input.platformDomains,
+    applications: input.applications,
+  })) {
+    if (routes.has(binding.host)) continue;
+
+    const upstreams = upstreamsFor(binding.application);
     if (upstreams.length === 0) continue;
-
-    for (const domain of input.platformDomains) {
-      add(hostUnder(domain, application.name), { application: application.name, upstreams });
-    }
-  }
-
-  const claims = applications
-    .flatMap((application) =>
-      application.domains.map((host) => ({ host, application: application.name })),
-    )
-    .sort((a, b) => compare(a.host, b.host));
-  for (const claim of claims) {
-    const upstreams = upstreamsOf(live, claim.application);
-    if (upstreams.length > 0) add(claim.host, { application: claim.application, upstreams });
+    routes.set(binding.host, {
+      host: binding.host,
+      application: binding.application,
+      upstreams: [...upstreams],
+    });
   }
 
   const api = input.api === true ? apiRouting(input.platformDomains, live, routes) : undefined;

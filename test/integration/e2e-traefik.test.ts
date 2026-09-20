@@ -61,8 +61,13 @@ const BUCKET: BucketSettings = {
 };
 
 const PLATFORM_DOMAIN = "scafo.test";
+/** A host of the operator's own, outside every platform domain this node serves. */
+const CUSTOM_HOST = "shop.custom.test";
 /** The application this suite deploys, and the name its `wrangler.jsonc` carries. */
 const APPLICATION = "app";
+/** The environment a covered base's second rule resolves to an application of. */
+const ENV = "preview";
+const ENV_APPLICATION = `${APPLICATION}-${ENV}`;
 const NODE_ID = "node-e2e-traefik";
 /**
  * Supplied rather than minted: Traefik starts before the node and has to
@@ -316,6 +321,156 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       expect(Object.keys(snapshot.http?.routers ?? {}).sort()).toEqual(expected);
       observed.v1Snapshot = snapshot;
       observed.v1TraefikRouters = await scafoRouters();
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "publishes a router for a claimed custom domain, and withdraws it when it is released",
+    async () => {
+      const nodeFlags = ["--node", `http://127.0.0.1:${String(apiPort)}`, "--key", keyPath];
+
+      const added = await runCli(
+        ["app", "domain", "add", CUSTOM_HOST, "--name", APPLICATION, ...nodeFlags],
+        {},
+      );
+      observed.domainAddOutput = added.output;
+      expectCleanExit(added);
+      /* The DNS helper ran and said one of the two things it can say; which one
+         is the resolver's business rather than scafo's. */
+      expect(added.output).toContain(CUSTOM_HOST);
+      expect(added.output).toMatch(
+        new RegExp(`already resolves to this installation|CNAME to "${appHost()}"`),
+      );
+
+      const expected = [`scafo_${appHost()}`, `scafo_${CUSTOM_HOST}`, ...STANDING_ROUTERS].sort();
+      await wait("Traefik to hold the router for the claimed host", DEADLINE_MS, async () => {
+        const routers = (await scafoRouters()).sort();
+        return routers.join(",") === expected.map((name) => `${name}@http`).join(",")
+          ? routers
+          : null;
+      });
+
+      const answer = await untilServes(CUSTOM_HOST, "v1");
+      expect(JSON.parse(answer.body).url, `the url ${CUSTOM_HOST} saw`).toContain(CUSTOM_HOST);
+      observed.customDomainSnapshot = await snapshotNow();
+
+      const removed = await runCli(
+        ["app", "domain", "remove", CUSTOM_HOST, "--name", APPLICATION, ...nodeFlags],
+        {},
+      );
+      observed.domainRemoveOutput = removed.output;
+      expectCleanExit(removed);
+
+      const without = [`scafo_${appHost()}`, ...STANDING_ROUTERS].sort();
+      await wait("Traefik to withdraw the released router", DEADLINE_MS, async () => {
+        const routers = (await scafoRouters()).sort();
+        return routers.join(",") === without.map((name) => `${name}@http`).join(",")
+          ? routers
+          : null;
+      });
+      const gone = await wait(`${CUSTOM_HOST} to stop being served`, DEADLINE_MS, async () => {
+        const got = await httpGet(httpPort, "/", { host: CUSTOM_HOST });
+        return got.status === 404 ? got : null;
+      });
+      expect(gone.body).toContain("404 page not found");
+
+      /* And the host it was always served at is untouched throughout. */
+      expect(JSON.parse((await untilServes(appHost(), "v1")).body).version).toBe("v1");
+      observed.customDomain = { host: CUSTOM_HOST, servedThenReleased: true };
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "serves a claim made with its subdomains: the base, an environment, and everything else",
+    async () => {
+      const nodeFlags = ["--node", `http://127.0.0.1:${String(apiPort)}`, "--key", keyPath];
+
+      /* The environment the wildcard's second rule names, deployed as its own
+         application: `<label>.<base>` is `<application>-<label>`, the same
+         mapping `--env` gives on the command line. */
+      const deployed = await runCli([...deployArgs(await staged("preview")), "--env", ENV], {});
+      expectCleanExit(deployed);
+      expect(deployed.output, daemonLogTail()).toContain("deployed");
+
+      const added = await runCli(
+        ["app", "domain", "add", CUSTOM_HOST, "--name", APPLICATION, "--wildcard", ...nodeFlags],
+        {},
+      );
+      observed.wildcardAddOutput = added.output;
+      expectCleanExit(added);
+      expect(added.output).toContain(`"<env>.${CUSTOM_HOST}"`);
+      /* What the operator still has to do at the ingress, said once. */
+      expect(added.output).toContain("DNS-01");
+
+      /* One router for the base, one for the environment's exact host, one for
+         everything else under the base, plus each application's platform host. */
+      const expected = [
+        `scafo_${appHost()}`,
+        `scafo_${ENV_APPLICATION}.${PLATFORM_DOMAIN}`,
+        `scafo_${CUSTOM_HOST}`,
+        `scafo_${ENV}.${CUSTOM_HOST}`,
+        `scafo_wild_${CUSTOM_HOST}`,
+        ...STANDING_ROUTERS,
+      ].sort();
+      await wait("Traefik to hold the routers of a covered base", DEADLINE_MS, async () => {
+        const routers = (await scafoRouters()).sort();
+        return routers.join(",") === expected.map((name) => `${name}@http`).join(",")
+          ? routers
+          : null;
+      });
+      observed.wildcardSnapshot = await snapshotNow();
+
+      /* Rule 1: the base itself is the application. */
+      expect(JSON.parse((await untilServes(CUSTOM_HOST, "v1")).body).version).toBe("v1");
+      /* Rule 2: the environment's own label answers from its own process. */
+      const env = await untilServes(`${ENV}.${CUSTOM_HOST}`, "preview");
+      expect(JSON.parse(env.body).url).toContain(`${ENV}.${CUSTOM_HOST}`);
+      /* Rule 3: any other single label falls to the application itself. */
+      const other = await untilServes(`anything-else.${CUSTOM_HOST}`, "v1");
+      expect(JSON.parse(other.body).url).toContain(`anything-else.${CUSTOM_HOST}`);
+      /* Rule 4: one label and no more, so a deeper name is nobody's. */
+      const deep = await httpGet(httpPort, "/", { host: `a.b.${CUSTOM_HOST}` });
+      expect(deep.status).toBe(404);
+      expect(deep.body).toContain("404 page not found");
+      observed.wildcardServed = {
+        base: "v1",
+        environment: "preview",
+        other: "v1",
+        deeper: deep.status,
+      };
+
+      /* Releasing takes the whole claim, rules and all, and leaves the
+         installation exactly as the rest of this suite expects it. */
+      const removed = await runCli(
+        ["app", "domain", "remove", CUSTOM_HOST, "--name", APPLICATION, ...nodeFlags],
+        {},
+      );
+      expectCleanExit(removed);
+      const retired = await runCli(
+        ["app", "retire", "--name", APPLICATION, "--env", ENV, ...nodeFlags],
+        {},
+      );
+      expectCleanExit(retired);
+
+      const without = [`scafo_${appHost()}`, ...STANDING_ROUTERS].sort();
+      await wait("Traefik to withdraw every router the claim added", DEADLINE_MS, async () => {
+        const routers = (await scafoRouters()).sort();
+        return routers.join(",") === without.map((name) => `${name}@http`).join(",")
+          ? routers
+          : null;
+      });
+      const gone = await wait(
+        `${ENV}.${CUSTOM_HOST} to stop being served`,
+        DEADLINE_MS,
+        async () => {
+          const got = await httpGet(httpPort, "/", { host: `${ENV}.${CUSTOM_HOST}` });
+          return got.status === 404 ? got : null;
+        },
+      );
+      expect(gone.body).toContain("404 page not found");
+      expect(JSON.parse((await untilServes(appHost(), "v1")).body).version).toBe("v1");
     },
     STEP_TIMEOUT_MS,
   );

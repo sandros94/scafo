@@ -4,6 +4,7 @@
 import type { H3 } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
+import { sign as signJws } from "unjwt/jws";
 import { beforeEach, describe, expect, it } from "vitest";
 import { type DaemonContext, createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
@@ -15,6 +16,10 @@ import {
   findApplication,
   getApplication,
 } from "../src/core/registry/applications.ts";
+import { checkDomain } from "../src/core/registry/domains.ts";
+import { createDeployment } from "../src/core/registry/deployments.ts";
+import { recordRevision } from "../src/core/registry/_revision.ts";
+import { renderFleetRouting } from "../src/core/placement/fleet-routes.ts";
 import { registerNode } from "../src/core/registry/nodes.ts";
 import { type OperatorRole, trustOperator } from "../src/core/registry/operators.ts";
 import { applicationKey } from "../src/core/registry/paths.ts";
@@ -32,6 +37,10 @@ const GLOB_ID = "op-cccc3333";
 /** The tenant's own application, and the one belonging to somebody else on the fleet. */
 const MINE = "acme";
 const THEIRS = "zenith";
+
+/** The platform domain the fixture's node serves, and a host outside it. */
+const PLATFORM_DOMAIN = "apps.test";
+const HOST = "shop.example.com";
 
 /** The three names a `shop-*` key is measured against. */
 const GLOB_MATCH = "shop-preview";
@@ -57,6 +66,12 @@ interface ApplicationsBody {
 /** Body of every route that answers with one application. */
 interface ApplicationBody {
   application: ApplicationRecord;
+}
+
+/** Body of the two routes that claim and release a host. */
+interface DomainBody extends ApplicationBody {
+  host: string;
+  platformHosts: string[];
 }
 
 let clock: ManualClock;
@@ -327,6 +342,8 @@ describe("the two boundaries the route group stands behind", () => {
     ["blocking", "POST", (n) => `/v1/applications/${n}/block`],
     ["unblocking", "POST", (n) => `/v1/applications/${n}/unblock`],
     ["labelling", "POST", (n) => `/v1/applications/${n}/labels`],
+    ["claiming a domain", "POST", (n) => `/v1/applications/${n}/domains/${HOST}`],
+    ["releasing a domain", "DELETE", (n) => `/v1/applications/${n}/domains/${HOST}`],
   ];
 
   for (const [what, method, path] of operatorOnly) {
@@ -488,6 +505,314 @@ describe("POST /v1/applications/:name/replicas", () => {
   });
 });
 
+describe("the domain routes", () => {
+  it("claims a host for an admin, mirrors it, and says where it points", async () => {
+    const response = await claim(MINE, HOST, await asKey(ADMIN_ID, admin));
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as DomainBody;
+    expect(body.host).toBe(HOST);
+    expect(body.application.domains).toEqual([HOST]);
+    /* The platform hosts the claim is an addition to, which is what an operator
+       points the new name at. */
+    expect(body.platformHosts).toEqual([`${MINE}.${PLATFORM_DOMAIN}`]);
+    await expect(checkDomain(clock.ctx, HOST)).resolves.toMatchObject({ application: MINE });
+  });
+
+  it("lets a scoped OPERATOR claim and release its own application's host", async () => {
+    const claimed = await claim(MINE, HOST, await asKey(TENANT_ID, tenant));
+    expect(claimed.status).toBe(200);
+
+    const released = await release(MINE, HOST, await asKey(TENANT_ID, tenant));
+    expect(released.status).toBe(200);
+    expect(((await released.json()) as DomainBody).application.domains).toEqual([]);
+    await expect(checkDomain(clock.ctx, HOST)).resolves.toBeNull();
+  });
+
+  it("stores the host as DNS reads it, whatever casing the path carried", async () => {
+    const response = await claim(MINE, "Shop.Example.COM", await asKey(ADMIN_ID, admin));
+
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as DomainBody).host).toBe(HOST);
+    expect((await getApplication(clock.ctx, MINE)).domains).toEqual([HOST]);
+  });
+
+  it("refuses an out-of-scope OPERATOR exactly as the sibling setters do", async () => {
+    const foreign = await claim(THEIRS, HOST, await asKey(TENANT_ID, tenant));
+    const absent = await claim("no-such-application", HOST, await asKey(TENANT_ID, tenant));
+
+    expect([foreign.status, absent.status]).toEqual([403, 403]);
+    const [named, unnamed] = [await problemText(foreign), await problemText(absent)];
+    expect(named.replace(THEIRS, "X")).toBe(unnamed.replace("no-such-application", "X"));
+    await expect(checkDomain(clock.ctx, HOST)).resolves.toBeNull();
+  });
+
+  it("refuses a WORKLOAD token, which is the one thing a deploy pipeline holds", async () => {
+    /* Whatever a CI job presents, it is not an operator key of this fleet, and
+       this group stands behind the operator guard: taking a domain is never
+       something a pipeline can do with the token it deploys with. */
+    const workload = await signJws(
+      { iss: "https://issuer.test", sub: "repo:acme/shop:ref:refs/heads/main", aud: "scafo" },
+      (await generateJWK("EdDSA", { kid: "ci" })).privateKey,
+      { alg: "EdDSA" },
+    );
+
+    const response = await claim(MINE, HOST, { authorization: `Bearer ${workload}` });
+
+    expect(response.status).toBe(401);
+    await expect(checkDomain(clock.ctx, HOST)).resolves.toBeNull();
+  });
+
+  it("gives the first claim of the installation to whoever made it", async () => {
+    expect((await claim(THEIRS, HOST, await asKey(ADMIN_ID, admin))).status).toBe(200);
+
+    const response = await claim(MINE, HOST, await asKey(ADMIN_ID, admin));
+
+    expect(response.status).toBe(409);
+    const problem = (await response.json()) as { type: string; detail?: string };
+    expect(problem.type).toBe("urn:scafo:reference-held");
+    /* An admin reaches every application, so it reads which one holds it. */
+    expect(problem.detail).toContain(THEIRS);
+    expect((await getApplication(clock.ctx, MINE)).domains).toEqual([]);
+  });
+
+  it("NEVER names the holder to a caller whose key does not reach it", async () => {
+    expect((await claim(THEIRS, HOST, await asKey(ADMIN_ID, admin))).status).toBe(200);
+
+    const response = await claim(MINE, HOST, await asKey(TENANT_ID, tenant));
+    const raw = await response.text();
+
+    expect(response.status).toBe(409);
+    expect(JSON.parse(raw)).toMatchObject({ type: "urn:scafo:reference-held" });
+    expect(raw).not.toContain(THEIRS);
+    expect(raw).toContain("another application");
+  });
+
+  it("refuses a host that belongs to this installation's own domains", async () => {
+    for (const host of [`${MINE}.${PLATFORM_DOMAIN}`, PLATFORM_DOMAIN, `a.b.${PLATFORM_DOMAIN}`]) {
+      const response = await claim(MINE, host, await asKey(ADMIN_ID, admin));
+
+      expect(response.status, host).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:invalid-input" });
+    }
+    expect((await getApplication(clock.ctx, MINE)).domains).toEqual([]);
+  });
+
+  it("refuses a host that is no host at all, saying which rule it broke", async () => {
+    const response = await claim(MINE, "shop_1.example.com", await asKey(ADMIN_ID, admin));
+
+    expect(response.status).toBe(400);
+    const problem = (await response.json()) as { type: string; detail?: string };
+    expect(problem.type).toBe("urn:scafo:invalid-input");
+    expect(problem.detail).toContain("letters, digits and hyphens");
+  });
+
+  it("refuses a claim for a BLOCKED application and still lets one go", async () => {
+    await claim(MINE, HOST, await asKey(ADMIN_ID, admin));
+    await block(MINE, await asKey(ADMIN_ID, admin));
+
+    const refused = await claim(MINE, "other.example.com", await asKey(ADMIN_ID, admin));
+    expect(refused.status).toBe(409);
+    await expect(refused.json()).resolves.toMatchObject({
+      type: "urn:scafo:application-blocked",
+    });
+
+    const released = await release(MINE, HOST, await asKey(ADMIN_ID, admin));
+    expect(released.status).toBe(200);
+    await expect(checkDomain(clock.ctx, HOST)).resolves.toBeNull();
+  });
+
+  it("refuses to release a host another application holds, and leaves it there", async () => {
+    await claim(THEIRS, HOST, await asKey(ADMIN_ID, admin));
+
+    const response = await release(MINE, HOST, await asKey(ADMIN_ID, admin));
+
+    expect(response.status).toBe(404);
+    await expect(checkDomain(clock.ctx, HOST)).resolves.toMatchObject({ application: THEIRS });
+  });
+
+  it("answers not-found for an application this fleet does not hold", async () => {
+    const response = await claim("nothing", HOST, await asKey(ADMIN_ID, admin));
+
+    expect(response.status).toBe(404);
+    await expect(checkDomain(clock.ctx, HOST)).resolves.toBeNull();
+  });
+});
+
+describe("a claim made with the one label below its host", () => {
+  /** The environment of `acme` that `preview.shop.example.com` names. */
+  const FAMILY = `${MINE}-preview`;
+  const SUB = `preview.${HOST}`;
+  /** A key scoped to the application AND its environments, which `--wildcard` needs. */
+  const WIDE_ID = "op-dddd4444";
+  let wide: Keypair;
+
+  beforeEach(async () => {
+    wide = await generateJWK("EdDSA", { kid: WIDE_ID });
+    await trust(WIDE_ID, wide, "operator", [MINE, `${MINE}-*`]);
+    await createApplication(clock.ctx, { name: FAMILY });
+  });
+
+  it("records it on the claim and on the application when an admin asks", async () => {
+    const response = await claim(MINE, HOST, await asKey(ADMIN_ID, admin), { wildcard: true });
+
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as DomainBody).application.wildcardDomains).toEqual([HOST]);
+    await expect(checkDomain(clock.ctx, HOST)).resolves.toMatchObject({ wildcard: true });
+  });
+
+  it("takes a key that reaches the environments too, and refuses one that does not", async () => {
+    /* The tenant's key reaches "acme" exactly. Claiming a host WITH its
+       subdomains also decides what "acme-<env>" answers on, so it takes a key
+       enrolment would let reach those — the same coverage rule, asked here. */
+    const refused = await claim(MINE, HOST, await asKey(TENANT_ID, tenant), { wildcard: true });
+
+    expect(refused.status).toBe(403);
+    await expect(refused.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
+    await expect(checkDomain(clock.ctx, HOST)).resolves.toBeNull();
+
+    /* The same key claims the host on its own without any of that. */
+    expect((await claim(MINE, HOST, await asKey(TENANT_ID, tenant))).status).toBe(200);
+    await expect(checkDomain(clock.ctx, HOST)).resolves.not.toHaveProperty("wildcard");
+
+    const allowed = await claim(MINE, HOST, await asKey(WIDE_ID, wide), { wildcard: true });
+    expect(allowed.status).toBe(200);
+    await expect(checkDomain(clock.ctx, HOST)).resolves.toMatchObject({ wildcard: true });
+  });
+
+  it("keeps a host under it for the holder's own family, and refuses everyone else", async () => {
+    await claim(MINE, HOST, await asKey(ADMIN_ID, admin), { wildcard: true });
+
+    expect((await claim(FAMILY, SUB, await asKey(ADMIN_ID, admin))).status).toBe(200);
+
+    const refused = await claim(THEIRS, `shop.${HOST}`, await asKey(ADMIN_ID, admin));
+    expect(refused.status).toBe(409);
+    const problem = (await refused.json()) as { type: string; detail?: string };
+    expect(problem.type).toBe("urn:scafo:reference-held");
+    /* An admin reaches every application, so it reads which one encloses it. */
+    expect(problem.detail).toContain(MINE);
+    expect(problem.detail).toContain(HOST);
+  });
+
+  it("NEVER names the enclosing holder to a caller whose key does not reach it", async () => {
+    await claim(THEIRS, HOST, await asKey(ADMIN_ID, admin), { wildcard: true });
+
+    const response = await claim(MINE, SUB, await asKey(TENANT_ID, tenant));
+    const raw = await response.text();
+
+    expect(response.status).toBe(409);
+    expect(JSON.parse(raw)).toMatchObject({ type: "urn:scafo:reference-held" });
+    expect(raw).not.toContain(THEIRS);
+    /* The host that stands in the way is the caller's own business; who holds
+       it is not. */
+    expect(raw).toContain(HOST);
+    expect(raw).toContain("another application");
+  });
+
+  it("refuses the wildcard while an outsider holds a host under it, naming that host", async () => {
+    await claim(THEIRS, SUB, await asKey(ADMIN_ID, admin));
+
+    const admins = await claim(MINE, HOST, await asKey(ADMIN_ID, admin), { wildcard: true });
+    expect(admins.status).toBe(409);
+    expect(((await admins.json()) as { detail?: string }).detail).toContain(THEIRS);
+
+    const scoped = await claim(MINE, HOST, await asKey(WIDE_ID, wide), { wildcard: true });
+    const raw = await scoped.text();
+    expect(scoped.status).toBe(409);
+    expect(raw).not.toContain(THEIRS);
+    expect(raw).toContain(SUB);
+  });
+
+  describe("the certificate ask", () => {
+    beforeEach(async () => {
+      for (const name of [MINE, FAMILY]) {
+        await createDeployment(clock.ctx, name, { version: "aaaa1111" });
+        await recordRevision(clock.ctx, name, "aaaa1111");
+      }
+      await claim(MINE, HOST, await asKey(ADMIN_ID, admin), { wildcard: true });
+    });
+
+    it("approves the base and a subdomain naming a serving application, and nothing else", async () => {
+      const asked = async (host: string): Promise<number> =>
+        (await app.request(`/v1/ingress/ask?domain=${host}`)).status;
+
+      /* Rule 1 and rule 2: names this installation can name. */
+      expect(await asked(HOST)).toBe(200);
+      expect(await asked(SUB)).toBe(200);
+      /* Rule 3 is served from the holder's process and gets NO certificate of
+         its own: issuance per unknown subdomain is how a stranger would burn
+         the CA's weekly limit for somebody else's domain. */
+      expect(await asked(`anything.${HOST}`)).toBe(404);
+      /* And a wildcard covers one label, so a deeper name is nobody's. */
+      expect(await asked(`a.b.${HOST}`)).toBe(404);
+    });
+
+    it("stops approving the subdomain once its application stops being served", async () => {
+      expect((await app.request(`/v1/ingress/ask?domain=${SUB}`)).status).toBe(200);
+
+      await block(FAMILY, await asKey(ADMIN_ID, admin));
+
+      expect((await app.request(`/v1/ingress/ask?domain=${SUB}`)).status).toBe(404);
+      expect((await app.request(`/v1/ingress/ask?domain=${HOST}`)).status).toBe(200);
+    });
+  });
+});
+
+describe("what a claim changes about what the fleet answers on", () => {
+  /** A live node of the fixture, serving the application the claim is for. */
+  const serving = (): NodeRecord => ({
+    ...nodeRecord(NODE_ID, node.publicKey.x),
+    heartbeatAt: new Date(clock.nowMs()).toISOString(),
+    serving: { [MINE]: { port: 42_010 } },
+  });
+
+  beforeEach(async () => {
+    await createDeployment(clock.ctx, MINE, { version: "aaaa1111" });
+    await recordRevision(clock.ctx, MINE, "aaaa1111");
+  });
+
+  it("routes the host while it is claimed, and stops routing it once it is not", async () => {
+    await claim(MINE, HOST, await asKey(ADMIN_ID, admin));
+
+    const claimed = renderFleetRouting({
+      platformDomains: [PLATFORM_DOMAIN],
+      applications: [await getApplication(clock.ctx, MINE)],
+      nodes: [serving()],
+      now: new Date(clock.nowMs()),
+    });
+    /* The claimed host answers exactly where the platform host does: one
+       application, one set of upstreams, two names. */
+    expect(claimed.routes.map((route) => route.host)).toEqual([`${MINE}.${PLATFORM_DOMAIN}`, HOST]);
+    expect(claimed.routes.map((route) => route.upstreams)).toEqual([
+      [{ node: NODE_ID, address: "10.0.0.5:42010" }],
+      [{ node: NODE_ID, address: "10.0.0.5:42010" }],
+    ]);
+
+    await release(MINE, HOST, await asKey(ADMIN_ID, admin));
+
+    const released = renderFleetRouting({
+      platformDomains: [PLATFORM_DOMAIN],
+      applications: [await getApplication(clock.ctx, MINE)],
+      nodes: [serving()],
+      now: new Date(clock.nowMs()),
+    });
+    expect(released.routes.map((route) => route.host)).toEqual([`${MINE}.${PLATFORM_DOMAIN}`]);
+  });
+
+  it("says yes to the certificate ask while it is claimed, and no once it is released", async () => {
+    const before = await app.request(`/v1/ingress/ask?domain=${HOST}`);
+    expect(before.status).toBe(404);
+
+    await claim(MINE, HOST, await asKey(ADMIN_ID, admin));
+    const asked = await app.request(`/v1/ingress/ask?domain=${HOST}`);
+    expect(asked.status).toBe(200);
+
+    await release(MINE, HOST, await asKey(ADMIN_ID, admin));
+    const after = await app.request(`/v1/ingress/ask?domain=${HOST}`);
+    expect(after.status).toBe(404);
+  });
+});
+
 describe("DELETE /v1/applications/:name", () => {
   it("deletes on the spot when this node is the one coordinating", async () => {
     const { app: self, coordinator } = nodeApp();
@@ -606,6 +931,32 @@ async function unblock(application: string, headers: Record<string, string>): Pr
   return app.request(`/v1/applications/${application}/unblock`, { method: "POST", headers });
 }
 
+/** Claims `host` for an application, as whoever the headers name. */
+async function claim(
+  application: string,
+  host: string,
+  headers: Record<string, string>,
+  opts?: { wildcard?: boolean },
+): Promise<Response> {
+  const query = opts?.wildcard === true ? "?wildcard=1" : "";
+  return app.request(`/v1/applications/${application}/domains/${host}${query}`, {
+    method: "POST",
+    headers,
+  });
+}
+
+/** The same host, released. */
+async function release(
+  application: string,
+  host: string,
+  headers: Record<string, string>,
+): Promise<Response> {
+  return app.request(`/v1/applications/${application}/domains/${host}`, {
+    method: "DELETE",
+    headers,
+  });
+}
+
 async function show(application: string, headers: Record<string, string>): Promise<Response> {
   return app.request(`/v1/applications/${application}`, { headers });
 }
@@ -717,7 +1068,7 @@ function daemonConfig(nodeId: string): DaemonConfig {
       secretKey: "secret",
     },
     node: { id: nodeId, listen: "127.0.0.1:7400" },
-    platformDomains: ["apps.test"],
+    platformDomains: [PLATFORM_DOMAIN],
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,

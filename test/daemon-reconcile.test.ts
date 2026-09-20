@@ -17,7 +17,7 @@ import type {
   RuntimeSpecInput,
 } from "../src/core/types/runtime.ts";
 import type { ProcessSpec, ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
-import type { RoutingAttribution } from "../src/daemon/access-counters.ts";
+import type { HostApplication } from "../src/core/placement/host-bindings.ts";
 import type { DaemonContext } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { createHeartbeat } from "../src/daemon/heartbeat.ts";
@@ -38,7 +38,7 @@ describe("application-owned reconciliation", () => {
     expect(await world.reconciler.runOnce()).toEqual([{ type: "start", application: APP }]);
     expect(world.supervisor.started).toHaveLength(1);
     /* The directories the process works out of are made before it runs. */
-    expect(world.events).toEqual(["spec", `prepare:${APP}`, "start", "ingress:1"]);
+    expect(world.events).toEqual(["ingress:1", "spec", `prepare:${APP}`, "start"]);
     expect(world.reconciler.status().processes[0]).toMatchObject({ application: APP });
   });
 
@@ -641,17 +641,17 @@ async function seededWorld() {
     registry: registry.ctx,
     supervisor,
     versions: { scafo: "test", celld: CELLD_VERSION },
-    /* The one thing a pass still does with its own routing once execution is
-       over: hand it to the counters, so a host is counted as whoever the pass
-       decided it belongs to. Recording it here is what puts the routing in the
-       event order below, where the driver call used to be. */
+    /* What a pass hands the counters: the applications it read, so a host is
+       counted as whoever the registry says it belongs to — before execution,
+       because attribution is a reading of the registry rather than of what this
+       node ended up running. */
     ingressCounters: {
       ingest: () => {},
       snapshot: () => {
         throw new Error("no snapshot is taken here");
       },
-      observeRouting(routing: RoutingAttribution) {
-        events.push(`ingress:${String(routing.routes.length)}`);
+      observeApplications(applications: readonly HostApplication[]) {
+        events.push(`ingress:${String(applications.length)}`);
       },
     },
   };

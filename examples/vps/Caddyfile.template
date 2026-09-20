@@ -15,7 +15,11 @@
 
 (scafo) {
 	log {
-		output file @LOGS@/access.log
+		# Readable by the node, which runs as another user and counts requests from
+		# it: Caddy creates its log files 0600 otherwise.
+		output file @LOGS@/access.log {
+			mode 0644
+		}
 		format json
 	}
 	reverse_proxy {

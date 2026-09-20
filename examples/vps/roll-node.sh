@@ -34,8 +34,11 @@ wg pubkey <"$STATE/wg-private.key" >"$STATE/wg-public.key"
 chown 10001:10001 "$STATE"/wg-*.key
 
 echo "== pull images"
-docker pull -q "$IMAGE"
-docker pull -q "$CADDY_IMAGE"
+# An image no registry has — built here, or loaded with `docker load` — is used as
+# it stands; anything else that cannot be pulled and is not present stops the roll.
+for image in "$IMAGE" "$CADDY_IMAGE"; do
+  docker pull -q "$image" || docker image inspect "$image" >/dev/null
+done
 
 echo "== scafo wg init"
 # Publishes this node's public key and endpoint in the registry and renders an

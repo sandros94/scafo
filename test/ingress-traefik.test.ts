@@ -30,8 +30,10 @@ import {
   traefikApiDenyKey,
   traefikApiKey,
   traefikKey,
+  traefikWildcardKey,
   type TraefikDynamicConfig,
   type TraefikLoadBalancerService,
+  WILDCARD_PRIORITY,
 } from "../src/drivers/ingress/traefik.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock } from "./_helpers.ts";
@@ -41,6 +43,8 @@ const PEER = "node-b";
 const HOST = "shop.apps.test";
 const OTHER_HOST = "shop-staging.apps.test";
 const APEX = "apps.test";
+/** A host of an operator's own, claimed with the one label below it. */
+const CUSTOM = "shop.example.com";
 const TOKEN = "SdUvvcE1nlEQm4iJ4Nx6BdxUjHZ2Uzt4vPXH0cQnJKk";
 
 /** EntryPoints of an operator's own Traefik; the node is told them and nothing else. */
@@ -156,6 +160,42 @@ describe("rendering the fleet's routing", () => {
     expect(() => renderTraefikConfig(fleet([route("evil`) || Host(`admin.test", LOCAL)]))).toThrow(
       expect.objectContaining({ code: "invalid-slug" }),
     );
+  });
+
+  it("renders a covered base as one regexp router, below every exact host", () => {
+    const covered = route(`*.${CUSTOM}`, LOCAL);
+    const config = renderTraefikConfig(fleet([route(CUSTOM, LOCAL), covered]));
+    const key = traefikWildcardKey(CUSTOM);
+
+    expect(config.http?.routers[key]).toEqual({
+      /* One label and no more: `a.b.shop.example.com` matches nothing here, as
+         it matches no wildcard certificate either. Dots are escaped, or the
+         pattern would match `shopXexampleYcom` as happily. */
+      rule: "HostRegexp(`^[^.]+\\.shop\\.example\\.com$`)",
+      service: key,
+      entryPoints: [DEFAULT_ENTRY_POINT],
+      middlewares: [RETRY_MIDDLEWARE],
+      priority: WILDCARD_PRIORITY,
+    });
+    /* The health check names a host a process can answer for, never the pattern. */
+    expect(config.http?.services[key]).toEqual(
+      balancerOf([LOCAL], { path: APP_HEALTH_PATH, hostname: CUSTOM }),
+    );
+
+    /* Every exact router outranks it. Traefik's default priority is the LENGTH
+       of the rule, so each one is compared as Traefik would compare it. */
+    for (const [name, router] of Object.entries(config.http?.routers ?? {})) {
+      if (name === key) continue;
+      expect(router.priority ?? router.rule.length, `router "${name}"`).toBeGreaterThan(
+        WILDCARD_PRIORITY,
+      );
+    }
+  });
+
+  it("checks the base of a covered claim for shape, exactly as it checks a host", () => {
+    expect(() =>
+      renderTraefikConfig(fleet([route("*.evil`) || Host(`admin.test", LOCAL)])),
+    ).toThrow(expect.objectContaining({ code: "invalid-slug" }));
   });
 
   it("renders an EMPTY DOCUMENT for a fleet that answers nothing, not empty maps", () => {

@@ -10,13 +10,22 @@
  */
 
 import { ScafoError } from "../core/error.ts";
+import { assertClaimableHost } from "../core/placement/hosts.ts";
+import { hostUnder } from "../core/placement/routes.ts";
 import { describeSelector } from "../core/placement/selector.ts";
+import { getApplication } from "../core/registry/applications.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
+import {
+  type ClaimDomainOptions,
+  claimDomain,
+  releaseApplicationDomain,
+} from "../core/registry/domains.ts";
 import { acquireLease, type LeaseHandle, releaseLease } from "../core/registry/lease.ts";
 import { setNodeSelector, setReplicas } from "../core/registry/placement.ts";
 import { deleteApplication } from "../core/registry/reaper.ts";
 import { retireApplication, unretireApplication } from "../core/registry/retirement.ts";
 import type { ApplicationRecord, NodeSelector, ReplicaCount } from "../core/types/registry.ts";
+import { normalizeCustomDomain } from "../core/utils/host.ts";
 import { parseLabelEntries } from "../core/utils/labels.ts";
 import { assertSlug } from "../core/utils/slug.ts";
 import { type NodeCallOptions, type NodeOptions, nodeRequest } from "./_node.ts";
@@ -29,6 +38,16 @@ export interface DeleteOptions {
   force?: boolean;
 }
 
+/** What a claim or a release answers with, whichever way it was made. */
+export interface DomainChange {
+  /** The application as it now stands, its domains included. */
+  application: ApplicationRecord;
+  /** The host as the registry holds it: lowercased. */
+  host: string;
+  /** Where the application answers under the installation's platform domains. */
+  platformHosts: string[];
+}
+
 /** What the per-application subcommands do, whichever way they reach the installation. */
 export interface ApplicationOps {
   /** How the operator is acting, as the command's own output names it. */
@@ -39,6 +58,12 @@ export interface ApplicationOps {
   setSelector(name: string, selector: NodeSelector | null): Promise<ApplicationRecord>;
   /** How many nodes should serve it. */
   setReplicas(name: string, replicas: ReplicaCount): Promise<ApplicationRecord>;
+  /** Claims a custom host for it, installation-wide and first claim wins. */
+  addDomain(name: string, host: string, opts?: ClaimDomainOptions): Promise<DomainChange>;
+  /** Drops a host this application holds; another application's is `not-found`. */
+  removeDomain(name: string, host: string): Promise<DomainChange>;
+  /** The application as it stands, which is where the hosts it holds are listed. */
+  show(name: string): Promise<ApplicationRecord>;
   /** Answers the store keys that were removed. */
   delete(name: string, opts?: DeleteOptions): Promise<string[]>;
 }
@@ -78,6 +103,24 @@ export function nodeOps(opts: NodeOptions): ApplicationOps {
     return ((await answer.json()) as { application: ApplicationRecord }).application;
   };
 
+  /* The host is checked here rather than sent as typed: it is a path segment,
+     and one that is no host reaches a node as a request it can only answer 404
+     to — a refusal the operator cannot see anything wrong with. */
+  const domain = async (
+    name: string,
+    host: string,
+    method: string,
+    query: string = "",
+  ): Promise<DomainChange> => {
+    const claimed = normalizeCustomDomain(host);
+    const answer = await nodeRequest(
+      at(name, `/domains/${claimed}${query}`),
+      await opts.authorize(),
+      call(method),
+    );
+    return (await answer.json()) as DomainChange;
+  };
+
   return {
     via: opts.url,
     retire: (name) => post(name, "/retire"),
@@ -86,6 +129,14 @@ export function nodeOps(opts: NodeOptions): ApplicationOps {
        says nothing, because clearing a constraint must be stated. */
     setSelector: (name, selector) => post(name, "/selector", { selector }),
     setReplicas: (name, replicas) => post(name, "/replicas", { replicas }),
+    addDomain: (name, host, claim) =>
+      domain(name, host, "POST", claim?.wildcard === true ? "?wildcard=1" : ""),
+    removeDomain: (name, host) => domain(name, host, "DELETE"),
+
+    async show(name): Promise<ApplicationRecord> {
+      const answer = await nodeRequest(at(name), await opts.authorize(), call("GET"));
+      return ((await answer.json()) as { application: ApplicationRecord }).application;
+    },
 
     async delete(name, deleteOpts): Promise<string[]> {
       const query = deleteOpts?.force === true ? "?force=1" : "";
@@ -98,6 +149,13 @@ export function nodeOps(opts: NodeOptions): ApplicationOps {
 export interface DirectOptions {
   /** Id the CLI takes the lease under. Defaults to {@link CLI_NODE_ID}. */
   nodeId?: string;
+  /**
+   * The installation's platform domains, as the same configuration a node reads
+   * carries them, so a claim for a host that names an application is refused on
+   * this path too. None given refuses nothing, which is all a caller that could
+   * not know them can say.
+   */
+  platformDomains?: string[];
 }
 
 /**
@@ -123,6 +181,24 @@ export interface DirectOptions {
  */
 export function directOps(registry: RegistryContext, opts?: DirectOptions): ApplicationOps {
   const nodeId = opts?.nodeId ?? CLI_NODE_ID;
+  const platformDomains = opts?.platformDomains ?? [];
+
+  const claimable = (host: string): string => {
+    const claimed = normalizeCustomDomain(host);
+    assertClaimableHost(claimed, platformDomains);
+    return claimed;
+  };
+
+  const changed = async (name: string, host: string): Promise<DomainChange> => {
+    const application = await getApplication(registry, name);
+    return {
+      application,
+      host,
+      platformHosts: platformDomains
+        .map((domain) => hostUnder(domain, name))
+        .filter((named): named is string => named !== null),
+    };
+  };
 
   return {
     via: "the registry bucket",
@@ -130,6 +206,19 @@ export function directOps(registry: RegistryContext, opts?: DirectOptions): Appl
     unretire: (name) => unretireApplication(registry, name),
     setSelector: (name, selector) => setNodeSelector(registry, name, selector),
     setReplicas: (name, replicas) => setReplicas(registry, name, replicas),
+    show: (name) => getApplication(registry, name),
+
+    async addDomain(name, host, claim): Promise<DomainChange> {
+      const claimed = claimable(host);
+      await claimDomain(registry, claimed, name, claim ?? {});
+      return changed(name, claimed);
+    },
+
+    async removeDomain(name, host): Promise<DomainChange> {
+      const claimed = normalizeCustomDomain(host);
+      await releaseApplicationDomain(registry, claimed, name);
+      return changed(name, claimed);
+    },
 
     async delete(name, deleteOpts): Promise<string[]> {
       const lease = await takeLease(registry, nodeId, name);
@@ -290,7 +379,7 @@ export function formatApplication(application: ApplicationRecord): string {
     `  selector    ${
       application.nodeSelector === undefined ? "-" : describeSelector(application.nodeSelector)
     }`,
-    `  domains     ${application.domains.length === 0 ? "-" : application.domains.join(",")}`,
+    `  domains     ${application.domains.length === 0 ? "-" : describeDomains(application).join(",")}`,
     `  labels      ${formatLabels(application.labels ?? {})}`,
   ];
 
@@ -311,6 +400,21 @@ export function formatApplication(application: ApplicationRecord): string {
     );
   }
   return lines.join("\n");
+}
+
+/** How a wildcard claim is marked wherever a host is printed. */
+export const WILDCARD_MARK: string = "(+subdomains)";
+
+/**
+ * The application's hosts as a terminal prints them, sorted, each marked when
+ * the claim covers the label below it as well. A wildcard is never written as a
+ * `*` here, because nobody types one either.
+ */
+export function describeDomains(application: ApplicationRecord): string[] {
+  const wildcards = new Set(application.wildcardDomains ?? []);
+  return [...application.domains]
+    .sort()
+    .map((host) => (wildcards.has(host) ? `${host} ${WILDCARD_MARK}` : host));
 }
 
 /** How a retirement reads on the terminal, grace included so the next step is obvious. */

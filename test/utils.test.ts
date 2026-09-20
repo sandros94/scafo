@@ -11,7 +11,19 @@ import {
   mapConcurrent,
 } from "../src/core/utils/concurrency.ts";
 import { sha256Hex } from "../src/core/utils/hash.ts";
-import { isHost } from "../src/core/utils/host.ts";
+import {
+  HOST_MAX_LENGTH,
+  isHost,
+  normalizeCustomDomain,
+  splitHostLabel,
+  wildcardBase,
+  wildcardHost,
+} from "../src/core/utils/host.ts";
+import {
+  familyApplication,
+  familyLabel,
+  isFamilyApplication,
+} from "../src/core/placement/hosts.ts";
 import { stableStringify } from "../src/core/utils/json.ts";
 import { assertPositiveSafeInteger } from "../src/core/utils/number.ts";
 import { assertSlug, isSlug, SLUG_MAX_LENGTH } from "../src/core/utils/slug.ts";
@@ -103,6 +115,116 @@ describe("application names", () => {
   it("holds hosts to their own grammar", () => {
     expect(isHost("Example.com")).toBe(false);
     expect(isHost("example.com.")).toBe(false);
+  });
+});
+
+describe("hosts an application may claim", () => {
+  /* Accepted, and what each one is stored as. Case is the only thing repaired:
+     DNS is case-insensitive, so one name has one spelling in the registry. */
+  const accepted: Array<[written: string, stored: string]> = [
+    ["shop.example.com", "shop.example.com"],
+    ["Shop.Example.COM", "shop.example.com"],
+    ["example.com", "example.com"],
+    ["a.b.c.d.example.com", "a.b.c.d.example.com"],
+    ["shop-1.example.com", "shop-1.example.com"],
+    ["1shop.example.com", "1shop.example.com"],
+    /* Punycode is an ordinary label, and an internationalized name is the one
+       thing an operator cannot type any other way. */
+    ["xn--caf-dma.example.com", "xn--caf-dma.example.com"],
+    ["XN--CAF-DMA.example.com", "xn--caf-dma.example.com"],
+    ["9.example.com", "9.example.com"],
+    [`${"a".repeat(63)}.example.com`, `${"a".repeat(63)}.example.com`],
+  ];
+
+  for (const [written, stored] of accepted) {
+    it(`takes "${written}" as "${stored}"`, () => {
+      expect(normalizeCustomDomain(written)).toBe(stored);
+    });
+  }
+
+  /* Every refusal class, and the word the detail has to carry so whoever typed
+     it reads which rule it broke rather than "invalid". */
+  const refused: Array<[written: string, says: string]> = [
+    ["", "empty"],
+    ["https://shop.example.com", "scheme"],
+    ["shop.example.com/cart", "scheme"],
+    ["*.example.com", "wildcard"],
+    ["shop.example.com:8443", "port"],
+    ["2001:db8::1", "port"],
+    ["shop.example.com.", "trailing dot"],
+    ["localhost", "fully qualified"],
+    ["example", "fully qualified"],
+    ["shop..example.com", "empty label"],
+    [".example.com", "empty label"],
+    ["shop_1.example.com", "letters, digits and hyphens"],
+    ["shop!.example.com", "letters, digits and hyphens"],
+    ["-shop.example.com", "hyphen"],
+    ["shop-.example.com", "hyphen"],
+    ["203.0.113.7", "all digits"],
+    [`${"a".repeat(64)}.example.com`, "63 characters"],
+    [`${`${"a".repeat(60)}.`.repeat(5)}example.com`, `${String(HOST_MAX_LENGTH)} a DNS name`],
+  ];
+
+  for (const [written, says] of refused) {
+    it(`refuses "${written}" and says why`, async () => {
+      const error = await rejectsWith(
+        () => Promise.resolve(normalizeCustomDomain(written)),
+        "invalid-input",
+      );
+
+      expect(error.status).toBe(400);
+      expect(error.detail, error.detail).toContain(says);
+    });
+  }
+});
+
+describe("the one label below a host", () => {
+  it("splits a name into its first label and the base under it", () => {
+    expect(splitHostLabel("preview.shop.example.com")).toEqual({
+      label: "preview",
+      base: "shop.example.com",
+    });
+    /* One label, exactly as a TLS wildcard covers one: the deeper name splits
+       onto a DIFFERENT base, which is a claim nobody made. */
+    expect(splitHostLabel("a.b.shop.example.com")).toEqual({
+      label: "a",
+      base: "b.shop.example.com",
+    });
+  });
+
+  it("answers null where there is no base to be one label under", () => {
+    /* A base has to be fully qualified itself, or `www.example` would put a
+       claim on `example` in the way of one on a public suffix. */
+    expect(splitHostLabel("shop.example")).toBeNull();
+    expect(splitHostLabel("example")).toBeNull();
+    expect(splitHostLabel(".example.com")).toBeNull();
+    expect(splitHostLabel("sh_op.example.com")).toBeNull();
+  });
+
+  it("writes and reads the key a routing document names the set with", () => {
+    expect(wildcardHost("shop.example.com")).toBe("*.shop.example.com");
+    expect(wildcardBase("*.shop.example.com")).toBe("shop.example.com");
+    expect(wildcardBase("shop.example.com")).toBeNull();
+  });
+});
+
+describe("the family a wildcard base stands for", () => {
+  it("joins and splits the name an environment carries under its holder's base", () => {
+    expect(familyApplication("shop", "preview")).toBe("shop-preview");
+    expect(familyLabel("shop", "shop-preview")).toBe("preview");
+    /* A label may itself hold hyphens: `--env pull-request-7` is one name. */
+    expect(familyLabel("shop", "shop-pull-request-7")).toBe("pull-request-7");
+
+    expect(familyLabel("shop", "shop")).toBeNull();
+    expect(familyLabel("shop", "shopping")).toBeNull();
+    expect(familyApplication("shop", "-bad")).toBeNull();
+  });
+
+  it("counts the holder and its own environments as the family, and nothing else", () => {
+    expect(isFamilyApplication("shop", "shop")).toBe(true);
+    expect(isFamilyApplication("shop", "shop-preview")).toBe(true);
+    expect(isFamilyApplication("shop", "shopping")).toBe(false);
+    expect(isFamilyApplication("shop", "blog")).toBe(false);
   });
 });
 

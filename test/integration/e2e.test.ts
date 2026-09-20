@@ -104,6 +104,8 @@ const BUCKET_SETTINGS: BucketSettings = {
 
 const PLATFORM_DOMAIN = "scafo.test";
 const OPERATOR_HOST = "operator.test";
+/** A host of the operator's own, outside every platform domain this node serves. */
+const CUSTOM_HOST = "shop.custom.test";
 /**
  * The application the fixture's `wrangler.jsonc` names, and therefore the one a
  * deploy of that directory addresses when it passes no `--name` at all.
@@ -436,6 +438,76 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       const unknown = await httpGet(apiPort, "/v1/ingress/ask?domain=unclaimed.example.com", {});
       expect(unknown.status).toBe(404);
       observed.ask = { served: served.status, apex: apex.status, unknown: unknown.status };
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "serves the application on a custom domain an operator claims, and stops when it is released",
+    async () => {
+      const nodeFlags = ["--node", `http://127.0.0.1:${String(apiPort)}`, "--key", keyPath];
+
+      /* Nothing answers there before the claim: the host is nobody's. */
+      const before = await httpGet(caddyHttpPort, "/", { host: CUSTOM_HOST });
+      expect(before.status).toBe(404);
+      expect(before.body).toBe(NO_ROUTE);
+
+      const added = await runCli(
+        ["app", "domain", "add", CUSTOM_HOST, "--name", APPLICATION, ...nodeFlags],
+        {},
+      );
+      observed.domainAddOutput = added.output;
+      expectCleanExit(added);
+      expect(added.output).toContain(CUSTOM_HOST);
+      /* The DNS helper really ran, and said one of the two things it can say.
+         WHICH one is the resolver's business rather than scafo's — a machine
+         whose resolver answers for `.test` reads the first — and either way the
+         claim stands and the command succeeded. */
+      expect(added.output).toMatch(
+        new RegExp(`already resolves to this installation|CNAME to "${appHost()}"`),
+      );
+
+      /* Caddy pulls, so this is a poll: the routing document has to carry the
+         new host before the ingress can answer for it. */
+      const answer = await untilServes(CUSTOM_HOST, "v1");
+      expect(JSON.parse(answer.body).url, `the url ${CUSTOM_HOST} saw`).toContain(CUSTOM_HOST);
+
+      /* And the certificate ask now approves it, which is what makes on-demand
+         TLS issue for a name an operator has just pointed here. */
+      const asked = await httpGet(apiPort, `/v1/ingress/ask?domain=${CUSTOM_HOST}`, {});
+      expect(asked.status).toBe(200);
+
+      const listed = await runCli(
+        ["app", "domain", "list", "--name", APPLICATION, "--json", ...nodeFlags],
+        {},
+      );
+      expectCleanExit(listed);
+      expect(JSON.parse(listed.output)).toEqual({
+        application: APPLICATION,
+        domains: [CUSTOM_HOST],
+        wildcardDomains: [],
+      });
+
+      const removed = await runCli(
+        ["app", "domain", "remove", CUSTOM_HOST, "--name", APPLICATION, ...nodeFlags],
+        {},
+      );
+      observed.domainRemoveOutput = removed.output;
+      expectCleanExit(removed);
+
+      const gone = await until(`${CUSTOM_HOST} to stop being served`, DEADLINE_MS, async () => {
+        const got = await httpGet(caddyHttpPort, "/", { host: CUSTOM_HOST });
+        return got.status === 404 ? got : null;
+      });
+      expect(gone.body).toBe(NO_ROUTE);
+      expect((await httpGet(apiPort, `/v1/ingress/ask?domain=${CUSTOM_HOST}`, {})).status).toBe(
+        404,
+      );
+
+      /* The application keeps the host it was always served at. */
+      const kept = await untilServes(appHost(), "v1");
+      expect(JSON.parse(kept.body).version).toBe("v1");
+      observed.customDomain = { host: CUSTOM_HOST, servedThenReleased: true };
     },
     STEP_TIMEOUT_MS,
   );
@@ -815,6 +887,111 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
     },
     STEP_TIMEOUT_MS,
   );
+
+  it(
+    "serves the base and its environment when a claim is made with its subdomains",
+    async () => {
+      const nodeFlags = ["--node", `http://127.0.0.1:${String(apiPort)}`, "--key", keyPath];
+
+      const added = await runCli(
+        [
+          "app",
+          "domain",
+          "add",
+          CUSTOM_HOST,
+          "--name",
+          APPLICATION,
+          "--wildcard",
+          "--json",
+          ...nodeFlags,
+        ],
+        {},
+      );
+      expectCleanExit(added);
+      const claimed = JSON.parse(added.output) as {
+        application: { wildcardDomains?: string[] };
+        dns: string;
+        wildcardDns: string;
+      };
+      expect(claimed.application.wildcardDomains).toEqual([CUSTOM_HOST]);
+      /* Both questions were asked, and each answered with one of the three
+         things a resolver can say here. */
+      expect(["ok", "pending", "unknown"]).toContain(claimed.dns);
+      expect(["ok", "pending", "unknown"]).toContain(claimed.wildcardDns);
+      observed.wildcardClaim = claimed;
+
+      /* Rule 1: the base answers from the application itself. */
+      const base = await untilServes(CUSTOM_HOST, "v2");
+      expect(JSON.parse(base.body).url, `the url ${CUSTOM_HOST} saw`).toContain(CUSTOM_HOST);
+
+      /* Rule 2: `<env>.<base>` answers from `<application>-<env>`, which this
+         suite deployed through OIDC and which is serving v6. Both are ORDINARY
+         host entries in the routing document, so any ingress already reads them. */
+      const envHost = `${CI_ENV}.${CUSTOM_HOST}`;
+      const env = await untilServes(envHost, "v6");
+      expect(JSON.parse(env.body).url, `the url ${envHost} saw`).toContain(envHost);
+
+      /* The certificate ask approves exactly those two and nothing else: an
+         arbitrary subdomain gets no certificate of its own, and a name two
+         labels under the base is not covered at all. */
+      expect((await httpGet(apiPort, `/v1/ingress/ask?domain=${CUSTOM_HOST}`, {})).status).toBe(
+        200,
+      );
+      expect((await httpGet(apiPort, `/v1/ingress/ask?domain=${envHost}`, {})).status).toBe(200);
+      expect(
+        (await httpGet(apiPort, `/v1/ingress/ask?domain=anything.${CUSTOM_HOST}`, {})).status,
+      ).toBe(404);
+      expect((await httpGet(apiPort, `/v1/ingress/ask?domain=a.b.${CUSTOM_HOST}`, {})).status).toBe(
+        404,
+      );
+
+      const listed = await runCli(
+        ["app", "domain", "list", "--name", APPLICATION, "--json", ...nodeFlags],
+        {},
+      );
+      expectCleanExit(listed);
+      expect(JSON.parse(listed.output)).toEqual({
+        application: APPLICATION,
+        domains: [CUSTOM_HOST],
+        wildcardDomains: [CUSTOM_HOST],
+      });
+
+      const removed = await runCli(
+        ["app", "domain", "remove", CUSTOM_HOST, "--name", APPLICATION, ...nodeFlags],
+        {},
+      );
+      expectCleanExit(removed);
+      const gone = await until(`${envHost} to stop being served`, DEADLINE_MS, async () => {
+        const got = await httpGet(caddyHttpPort, "/", { host: envHost });
+        return got.status === 404 ? got : null;
+      });
+      expect(gone.body).toBe(NO_ROUTE);
+      expect(JSON.parse((await untilServes(appHost(), "v2")).body).version).toBe("v2");
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  /*
+   * Rule 3 — any other single label under the base answering from the
+   * application itself — is the one part of this that the ingress has to
+   * understand: it is published as a `*.<base>` key, which a consumer reaches
+   * only by replacing a request host's first label with `*` after an exact miss.
+   * Caddy reads the routing through the `scafo` dynamic-upstreams module, which
+   * ships from another repository: this case needs an image whose module has
+   * that lookup (`SCAFO_E2E_CADDY_IMAGE` overrides the pinned one).
+   */
+  it("serves any other subdomain from the application itself", async () => {
+    const nodeFlags = ["--node", `http://127.0.0.1:${String(apiPort)}`, "--key", keyPath];
+    await runCli(
+      ["app", "domain", "add", CUSTOM_HOST, "--name", APPLICATION, "--wildcard", ...nodeFlags],
+      {},
+    );
+
+    const other = await untilServes(`anything-else.${CUSTOM_HOST}`, "v2");
+    expect(JSON.parse(other.body).url).toContain(`anything-else.${CUSTOM_HOST}`);
+
+    await runCli(["app", "domain", "remove", CUSTOM_HOST, "--name", APPLICATION, ...nodeFlags], {});
+  });
 
   it(
     "prunes the application's old Celld deployments straight out of the bucket",
