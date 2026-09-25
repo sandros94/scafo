@@ -1,9 +1,5 @@
 {
-  "storage": {
-    "module": "scafo",
-    "endpoint": "http://127.0.0.1:7400",
-    "token": "{env.SCAFO_INGRESS_TOKEN}"
-  },
+  "storage": { "module": "scafo" },
   "logging": {
     "logs": {
       "default": { "exclude": ["http.log.access.scafo"] },
@@ -19,6 +15,16 @@
     }
   },
   "apps": {
+    "scafo": {
+      "fleets": [
+        {
+          "name": "default",
+          "endpoint": "http://127.0.0.1:7400",
+          "token": "{env.SCAFO_INGRESS_TOKEN}",
+          "prefer": "self"
+        }
+      ]
+    },
     "http": {
       "servers": {
         "scafo": {
@@ -36,12 +42,7 @@
               "handle": [
                 {
                   "handler": "reverse_proxy",
-                  "dynamic_upstreams": {
-                    "source": "scafo",
-                    "endpoint": "http://127.0.0.1:7400",
-                    "token": "{env.SCAFO_INGRESS_TOKEN}",
-                    "prefer": "self"
-                  },
+                  "dynamic_upstreams": { "source": "scafo" },
                   "load_balancing": {
                     "selection_policy": { "policy": "first" },
                     "retries": 2,

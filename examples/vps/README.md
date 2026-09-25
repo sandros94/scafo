@@ -6,9 +6,9 @@ Two or more rented machines, no orchestrator. Each host runs one Scafo node in D
 
 With `SCAFO_TRANSPORT=wireguard` the node's API, its advertised address and the address runtime processes bind all default to its tunnel address. So the node API is private without being loopback-only: the colocated Caddy reaches it over the tunnel interface, a peer's Caddy reaches that host's application processes the same way, and nothing on the public interfaces answers on port 7400.
 
-Each host's Caddy reads its certificates through its own node's `/v1/storage` and the fleet's routing from `/v1/ingress/routes` with `prefer self`, holding one ingress token and never a bucket credential. Both Caddys therefore share one certificate store in the bucket, and either can serve any host: with apex and wildcard DNS pointing at both machines, the one a request lands on serves it locally when it can and proxies to the holder over the tunnel when it cannot.
+Each host's Caddy declares its own node once, as the fleet in its global `scafo` block, and reads its certificates through that node's `/v1/storage` and the fleet's routing from `/v1/ingress/routes` with `prefer self`, holding one ingress token and never a bucket credential. Both Caddys therefore share one certificate store in the bucket, and either can serve any host: with apex and wildcard DNS pointing at both machines, the one a request lands on serves it locally when it can and proxies to the holder over the tunnel when it cannot.
 
-The platform domain and everything under it come from one DNS-01 wildcard, which is what the `-dns` image flavour is for. Custom domains an application claims are issued per name through on-demand TLS, gated by the node's `/v1/ingress/ask` endpoint — the fleet issues only for hosts it has been told about.
+The platform domain and everything under it come from one DNS-01 wildcard, which is what the `-dns` image flavour is for. Custom domains an application claims are issued per name through on-demand TLS, gated by the `scafo` permission module — Caddy issues only for hosts the fleet's routing document names.
 
 This is the multi-host recipe. For one machine use [`../compose.yaml`](../compose.yaml), or [`scripts/install.sh`](../../scripts/install.sh) for a systemd host without Docker.
 

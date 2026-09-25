@@ -420,15 +420,13 @@ EOF
 # and Caddy's own default (localhost:2019) is what the unit's ExecReload needs.
 # The readable access log supports opt-in counters.
 render_caddy_json() {
-  # Every block naming the node reads the private systemd credential copy of the
-  # ingress token, never the source file.
+  # The fleet is declared ONCE, in the "scafo" app, and it is the only place an
+  # endpoint and a token are written: the storage, the upstreams source and the
+  # on-demand permission all read it. The token is the private systemd
+  # credential copy, never the source file.
   cat <<EOF
 {
-  "storage": {
-    "module": "scafo",
-    "endpoint": "${STORAGE_ENDPOINT}",
-    "token_file": "{env.CREDENTIALS_DIRECTORY}/${INGRESS_TOKEN_NAME}"
-  },
+  "storage": { "module": "scafo" },
   "logging": {
     "logs": {
       "default": { "exclude": ["http.log.access.scafo"] },
@@ -444,30 +442,38 @@ render_caddy_json() {
     }
   },
   "apps": {
+    "scafo": {
+      "fleets": [
+        {
+          "name": "default",
+          "endpoint": "${STORAGE_ENDPOINT}",
+          "token_file": "{env.CREDENTIALS_DIRECTORY}/${INGRESS_TOKEN_NAME}",
+          "prefer": "self"
+        }
+      ]
+    },
 EOF
 
   # This ingress answers on :443 for names it only learns at request time, so
-  # every certificate is on demand — and the node, not Caddy, decides which names
-  # deserve one. Without this the server would listen and serve nothing.
+  # every certificate is on demand — and only a name the fleet's routing
+  # document names exactly gets one. Without this the server would listen and
+  # serve nothing.
   cat <<EOF
     "tls": {
       "automation": {
         "policies": [{ "on_demand": true }],
         "on_demand": {
-          "permission": {
-            "module": "http",
-            "endpoint": "${STORAGE_ENDPOINT}/v1/ingress/ask"
-          }
+          "permission": { "module": "scafo" }
         }
       }
     },
 EOF
 
-  # One catch-all route. The upstreams source polls this node, caches the routing
-  # document, and resolves the request's Host to that name's upstreams. The list
-  # is a PRIORITY, not a weighting — this node first, hence "first" rather than a
-  # balancing policy — and passive health checks step down the list when the head
-  # of it keeps failing.
+  # One catch-all route. The upstreams source resolves the request's Host from
+  # the routing document the app polls off this node. The list is a PRIORITY,
+  # not a weighting — this node first, hence "first" rather than a balancing
+  # policy — and passive health checks step down the list when the head of it
+  # keeps failing.
   cat <<EOF
     "http": {
       "servers": {
@@ -478,12 +484,7 @@ EOF
               "handle": [
                 {
                   "handler": "reverse_proxy",
-                  "dynamic_upstreams": {
-                    "source": "scafo",
-                    "endpoint": "${STORAGE_ENDPOINT}",
-                    "token_file": "{env.CREDENTIALS_DIRECTORY}/${INGRESS_TOKEN_NAME}",
-                    "prefer": "self"
-                  },
+                  "dynamic_upstreams": { "source": "scafo" },
                   "load_balancing": {
                     "selection_policy": { "policy": "first" },
                     "retries": 2,
@@ -608,9 +609,9 @@ Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=5s
 
-# Caddy's own state directory. The certificates and the ACME account are NOT
-# here — they are in the bucket, reached through the node — so this holds little
-# more than scratch. Set anyway, so nothing Caddy writes has nowhere to land.
+# Caddy's own state directory. The certificates are NOT here — they are in the
+# bucket, reached through the node — but the ACME account is: it is this
+# ingress's, not the fleet's, and losing it only means registering again.
 StateDirectory=caddy
 Environment=XDG_DATA_HOME=${CADDY_STATE_DIR}
 Environment=XDG_CONFIG_HOME=${CADDY_STATE_DIR}
@@ -696,25 +697,25 @@ explain_manual_setup() {
   say "  ${BIN_DIR}/caddy run --config ./caddy.json"
   say ''
   # A hand-run ingress reads the SOURCE token: there is no systemd credential
-  # directory to point at, so both blocks name the file the node minted.
-  say 'THAT CADDY IS scafo-caddy, and BOTH of its scafo modules have to name this'
-  say 'node — one for the TLS material, one for the routing it follows. Write'
+  # directory to point at, so the fleet names the file the node minted.
+  say 'THAT CADDY IS scafo-caddy, and its "scafo" app has to name this node,'
+  say 'once: the TLS storage and the routing it follows both read it. Write'
   say './caddy.json with:'
   say ''
-  say '  "storage": {'
-  say '    "module": "scafo",'
-  say "    \"endpoint\": \"${STORAGE_ENDPOINT}\","
-  say "    \"token_file\": \"${STATE_DIR}/${INGRESS_TOKEN_NAME}\""
-  say '  },'
+  say '  "storage": { "module": "scafo" },'
+  say '  "apps": {'
+  say '    "scafo": {'
+  say '      "fleets": [{'
+  say '        "name": "default",'
+  say "        \"endpoint\": \"${STORAGE_ENDPOINT}\","
+  say "        \"token_file\": \"${STATE_DIR}/${INGRESS_TOKEN_NAME}\","
+  say '        "prefer": "self"'
+  say '      }]'
+  say '    },'
   say ''
   say '  ... and, inside the reverse_proxy handler that answers for everything:'
   say ''
-  say '  "dynamic_upstreams": {'
-  say '    "source": "scafo",'
-  say "    \"endpoint\": \"${STORAGE_ENDPOINT}\","
-  say "    \"token_file\": \"${STATE_DIR}/${INGRESS_TOKEN_NAME}\","
-  say '    "prefer": "self"'
-  say '  }'
+  say '  "dynamic_upstreams": { "source": "scafo" }'
   say ''
   say 'The token is minted 0600 by whoever runs the node. Under systemd this'
   say 'script hands it over with LoadCredential= and nothing is loosened;'
@@ -792,7 +793,7 @@ next_steps() {
 
   printf '\nWHAT THIS INSTALL IS NOT\n\n'
   printf '  * THE INGRESS HAS NO BUCKET CREDENTIAL, AND MUST NOT GET ONE. scafo-caddy\n'
-  printf '    keeps its certificates, their keys and its ACME account in the bucket by\n'
+  printf '    keeps its certificates and their keys in the bucket by\n'
   printf '    asking THIS NODE for them over %s — a loopback URL\n' "$STORAGE_ENDPOINT"
   printf '    and a bearer token, nothing more. That is the point of it: every node in\n'
   printf '    the fleet serves the one certificate, and the most exposed process on the\n'
