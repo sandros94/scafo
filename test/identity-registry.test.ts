@@ -15,6 +15,7 @@ import type {
   CasHeaders,
   CasStore,
   StoredEntry,
+  StoredHead,
   StoredObject,
 } from "../src/core/types/store.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
@@ -206,6 +207,9 @@ class ReservationBarrierStore implements CasStore {
   }
   getBytes(key: string, opts?: { range: ByteRange }): Promise<Uint8Array | null> {
     return this.#inner.getBytes(key, opts);
+  }
+  head(key: string): Promise<StoredHead | null> {
+    return this.#inner.head(key);
   }
   async put(key: string, body: string | Uint8Array, cas?: CasHeaders): Promise<{ etag: string }> {
     if (key === identityKey(ID) && cas?.ifNoneMatch === "*") {

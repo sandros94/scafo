@@ -1,6 +1,12 @@
 import { S3Error, type S3Client } from "uns3";
 import { ScafoError } from "../../core/error.ts";
-import type { ByteRange, CasStore, StoredEntry, StoredObject } from "../../core/types/store.ts";
+import type {
+  ByteRange,
+  CasStore,
+  StoredEntry,
+  StoredHead,
+  StoredObject,
+} from "../../core/types/store.ts";
 import { withRetry } from "../../core/utils/backoff.ts";
 
 /**
@@ -69,6 +75,7 @@ export function createUns3Store(client: S3Client, opts: Uns3StoreOptions): CasSt
           key: toStoreKey(object.key),
           etag: listedEtag(object.etag, object.key),
           ...modifiedAt(object.lastModified),
+          ...sizeOf(object.size),
         });
       }
       next = nextPage(page, prefix);
@@ -91,6 +98,29 @@ export function createUns3Store(client: S3Client, opts: Uns3StoreOptions): CasSt
       /* No ETag is read here on purpose: the only bodies this answers are the
          observation flushes, which are plain puts nothing ever conditions on. */
       return new Uint8Array(await response.arrayBuffer());
+    },
+
+    async head(key: string): Promise<StoredHead | null> {
+      const objectKey = toObjectKey(key);
+      let response: Response;
+      try {
+        response = await client.head({ bucket, key: objectKey });
+      } catch (error) {
+        if (statusOf(error) === 404) return null;
+        throw error;
+      }
+
+      /* NOTHING IS DEMANDED OF THIS ANSWER. Every other read here refuses a
+         store that left an ETag out, because a write is conditioned on it; a
+         `HEAD` is asked only to find out what the store claims about a key whose
+         other reads disagree, and an answer missing a header is the finding. */
+      const etag = response.headers.get("etag");
+      const declared = response.headers.get("content-length");
+      return {
+        ...(etag === null ? {} : { etag: etag.startsWith("W/") ? etag.slice(2) : etag }),
+        ...sizeOf(declared === null ? undefined : Number(declared)),
+        ...modifiedAt(response.headers.get("last-modified") ?? undefined),
+      };
     },
 
     async put(key, body, cas): Promise<{ etag: string }> {
@@ -172,6 +202,16 @@ function modifiedAt(lastModified: string | undefined): { lastModified?: Date } {
   if (lastModified === undefined) return {};
   const at = Date.parse(lastModified);
   return Number.isFinite(at) ? { lastModified: new Date(at) } : {};
+}
+
+/**
+ * The length the store declared, or nothing when it declared none or said
+ * something that is not a count of bytes. Nothing here acts on a size; it is
+ * shown to an operator, and a made-up number would be worse than a blank.
+ */
+function sizeOf(size: number | undefined): { size?: number } {
+  if (size === undefined || !Number.isSafeInteger(size) || size < 0) return {};
+  return { size };
 }
 
 /**

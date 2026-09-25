@@ -17,7 +17,7 @@ import type { Readable } from "node:stream";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { S3Client } from "uns3";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { DaemonState } from "../../src/daemon/app.ts";
+import type { DaemonState, SupervisedProcess } from "../../src/daemon/app.ts";
 import type { OperatorKeyFile } from "../../src/cli/_operator-key.ts";
 import { signNodeToken } from "../../src/core/auth/node-token.ts";
 import {
@@ -32,6 +32,8 @@ import {
   nodeKey,
   setReplicas,
 } from "../../src/core/registry/index.ts";
+import { celldNodeLeaseKey } from "../../src/core/registry/paths.ts";
+import type { FleetRouting } from "../../src/core/types/ingress.ts";
 import type { NodeRecord } from "../../src/core/types/registry.ts";
 import type { ProcessStatus } from "../../src/core/types/supervisor.ts";
 import { createUns3Store } from "../../src/drivers/store/uns3.ts";
@@ -99,6 +101,28 @@ const AWAITED = "app-awaited";
  * bucket was frozen. It is deployed last and nothing else touches it.
  */
 const DURABLE = "app-durable";
+
+/**
+ * Deployed to both nodes, then made unable to start on ONE of them by putting a
+ * body Celld cannot use at that node's own Celld node lease.
+ *
+ * WHY THE LEASE. It is the object a Celld process must read or create before it
+ * has any authority at all, and the node name it is filed under is the scafo node
+ * id — stable across restarts, deliberately. A store that holds a body there
+ * which Celld cannot use therefore wedges that node's process on the same key,
+ * every restart, for as long as the object stands. This case is the only place
+ * the whole rule is shown against a real Celld and a real object store.
+ */
+const WEDGED = "app-wedged";
+
+/**
+ * The body put at the wedged node's lease key: JSON that stops half way.
+ *
+ * TRUNCATED RATHER THAN NONSENSE, because that is the shape a store leaves
+ * behind — a write that was cut off, or an object served short. It is not a lease
+ * by upstream's own rule (`node` and `expires_ms`) and it is not JSON either.
+ */
+const TRUNCATED_LEASE = '{"node":"node-a","expires_ms":';
 
 /** Deployed to both nodes, retired out of service, then force-deleted. */
 const SUNSET = "app-sunset";
@@ -810,6 +834,130 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
     STEP_TIMEOUT_MS,
   );
 
+  /*
+   * THE DEFECT THIS CASE EXISTS FOR. A process that can never become ready stays
+   * up for as long as it takes to give up and then exits, over and over. Judged by
+   * how long each run lasted, every one of those runs "lasted": the node stayed
+   * live, the application stayed `serving`, and the dead port stayed in the
+   * routing every ingress reads. Readiness is what tells the two apart, and this
+   * is that rule against a real Celld and a real object store.
+   */
+  it(
+    "takes an application out of the routing on the node whose process cannot become ready, and puts it back when the lease is dropped",
+    async () => {
+      const both = await bothNodesRunning();
+      expectCleanExit(
+        await runCli(deployArgs(await stageApp("v1"), WEDGED, ["--replicas", "all"]), {}),
+      );
+      for (const node of both) await untilServes(node, hostOf(WEDGED), "v1");
+
+      const broken = both[0] as Node;
+      const healthy = both.find((node) => node.id !== broken.id) as Node;
+
+      /* Both nodes answer for it, and both are named as upstreams for its host:
+         the state this case takes one node out of. */
+      const readyEverywhere = await until(
+        `both nodes to publish ${WEDGED} as ready and served`,
+        DEADLINE_MS,
+        async () => {
+          const states = await Promise.all(both.map(async (node) => stateOf(node)));
+          if (!states.every((state) => processOf(state, WEDGED)?.ready === true)) return null;
+          const records = await Promise.all(
+            both.map(async (node) => readJson<NodeRecord>(registry, nodeKey(node.id))),
+          );
+          return records.every((record) => record?.value.serving?.[WEDGED] !== undefined)
+            ? states
+            : null;
+        },
+      );
+      const brokenPort = portOf(readyEverywhere[0] as DaemonState, WEDGED);
+      /* WAITED FOR RATHER THAN ASSERTED. A node's own `serving` reaches the
+         document it renders only once its beat has landed and its registry view
+         has re-read the node records, which is a reconcile interval away. */
+      await untilBothUpstreams(healthy);
+
+      const pid = processOf(readyEverywhere[0] as DaemonState, WEDGED)?.pid;
+      if (pid === undefined) throw new Error(`${broken.id} runs no process for ${WEDGED}`);
+
+      /*
+       * The process is killed first and the lease written second: a running Celld
+       * renews its own lease every few seconds, so a body written under it would
+       * simply be overwritten by the process this case is about.
+       */
+      const leaseKey = celldNodeLeaseKey(WEDGED, broken.id);
+      const leaseBefore = await registry.store.get(leaseKey);
+      expectCleanExit(await docker(["exec", broken.daemon.getId(), "sh", "-c", `kill -9 ${pid}`]));
+      await registry.store.put(leaseKey, TRUNCATED_LEASE);
+      const wedgedAt = Date.now();
+
+      /*
+       * WHAT CELLD 0.5.0 DOES WITH IT is the question, and the answer is observed
+       * rather than assumed: it may exit and be restarted for ever, or it may
+       * overwrite the object and carry on. Whether it recovers by itself is what
+       * decides whether `scafo app lease` is needed at all on a conforming store.
+       */
+      const outcome = await until(
+        `${broken.id} to either report ${WEDGED} as failing or get it serving again`,
+        REASSIGN_DEADLINE_MS,
+        async () => {
+          const record = await readJson<NodeRecord>(registry, nodeKey(broken.id));
+          if (record?.value.failing?.[WEDGED] !== undefined) return "crash-looping" as const;
+
+          const state = await stateOf(broken);
+          const lease = await registry.store.get(leaseKey);
+          if (processOf(state, WEDGED)?.ready === true && lease?.body !== TRUNCATED_LEASE) {
+            return "recovered-on-its-own" as const;
+          }
+          return null;
+        },
+      );
+
+      const wedged: Record<string, unknown> = {
+        application: WEDGED,
+        brokenNode: broken.id,
+        healthyNode: healthy.id,
+        leaseKey,
+        leaseBefore: leaseBefore?.body ?? null,
+        wrote: TRUNCATED_LEASE,
+        outcome,
+        observedMs: Date.now() - wedgedAt,
+        celldSaid: celldLinesOn(broken, WEDGED),
+      };
+      observed.wedgedLease = wedged;
+      console.log(
+        `e2e: celld 0.5.0 on a truncated node lease at "${leaseKey}" (SeaweedFS): ${outcome}\n` +
+          String(wedged.celldSaid),
+      );
+
+      /* The healthy node is untouched in either branch: its own lease is its own
+         key, and the application keeps answering there throughout. */
+      const healthyRecord = await readJson<NodeRecord>(registry, nodeKey(healthy.id));
+      expect(healthyRecord?.value.serving?.[WEDGED], `${healthy.id} stopped serving`).toBeDefined();
+      expect(await upstreamNodes(healthy, hostOf(WEDGED))).toContain(healthy.id);
+      await untilServes(healthy, hostOf(WEDGED), "v1");
+
+      /* Each branch proves its own half — see the two functions — and BOTH end
+         with the node serving the application again, which is asserted here. */
+      wedged.conclusion =
+        outcome === "crash-looping"
+          ? await tookItOutAndTheLeaseDropPutItBack({
+              broken,
+              healthy,
+              brokenPort,
+              leaseKey,
+              note: wedged,
+            })
+          : await celldRepairedItsOwnLease({ broken, leaseKey });
+
+      const back = await readJson<NodeRecord>(registry, nodeKey(broken.id));
+      expect(back?.value.serving?.[WEDGED], `${broken.id} never published it again`).toBeDefined();
+      expect(back?.value.failing?.[WEDGED]).toBeUndefined();
+      await untilBothUpstreams(healthy);
+      await untilServes(broken, hostOf(WEDGED), "v1");
+    },
+    REASSIGN_STEP_TIMEOUT_MS,
+  );
+
   it(
     "hands coordination to the survivor when the coordinator's node dies, and keeps serving",
     async () => {
@@ -1365,6 +1513,182 @@ function appArgs(action: string, application: string, node: Node, extra: string[
     keyPath,
     ...extra,
   ];
+}
+
+/**
+ * Waits until the routing `node` renders names BOTH nodes as answering for the
+ * wedged application's host.
+ *
+ * A NODE'S OWN `serving` TAKES A MOMENT TO REACH ITS OWN DOCUMENT: the routing is
+ * rendered from the node RECORDS a pass read, so a process that has just become
+ * ready is in the document only after the beat that published it has landed and
+ * the view has re-read those records.
+ */
+async function untilBothUpstreams(node: Node): Promise<void> {
+  await until(
+    `the routing ${node.id} renders to name both nodes for ${hostOf(WEDGED)}`,
+    DEADLINE_MS,
+    async () => {
+      const named = await upstreamNodes(node, hostOf(WEDGED));
+      return named.length === 2 && named[0] === NODE_A && named[1] === NODE_B ? named : null;
+    },
+  );
+}
+
+/**
+ * Celld read the truncated lease, replaced it, and carried on: nothing had to be
+ * dropped, and what scafo reported was the transient absence it should be.
+ */
+async function celldRepairedItsOwnLease(opts: { broken: Node; leaseKey: string }): Promise<string> {
+  const lease = await registry.store.get(opts.leaseKey);
+  expect(lease?.body, "the lease Celld wrote over the truncated one").not.toBe(TRUNCATED_LEASE);
+  expect(lease?.body, "Celld left the truncated lease and still came up").toContain("expires_ms");
+
+  return (
+    `celld 0.5.0 recovered from a truncated node lease at "${opts.leaseKey}" without help, ` +
+    `so "scafo app lease drop" was not needed on this store`
+  );
+}
+
+/**
+ * Celld could not get past the lease. The node says what it cannot keep running,
+ * takes the application out of what it serves, and the routing the fleet
+ * publishes stops naming that node's port for the host — and then the operator's
+ * own `scafo app lease drop`, run as the real CLI against this bucket, is what
+ * gets the process serving again.
+ */
+async function tookItOutAndTheLeaseDropPutItBack(opts: {
+  broken: Node;
+  healthy: Node;
+  /** The port the wedged process held, which nothing may still be routed to. */
+  brokenPort: number;
+  leaseKey: string;
+  /** Raw observations this branch adds to the report. */
+  note: Record<string, unknown>;
+}): Promise<string> {
+  const { broken, healthy, note } = opts;
+
+  const failingRecord = await until(
+    `${broken.id} to drop ${WEDGED} from what it serves`,
+    DEADLINE_MS,
+    async () => {
+      const record = await readJson<NodeRecord>(registry, nodeKey(broken.id));
+      if (record === null) return null;
+      if (record.value.failing?.[WEDGED] === undefined) return null;
+      return record.value.serving?.[WEDGED] === undefined ? record.value : null;
+    },
+  );
+  expect(failingRecord.failing?.[WEDGED]?.restarts).toBeGreaterThanOrEqual(3);
+  note.failing = failingRecord.failing?.[WEDGED];
+
+  const withoutBroken = await until(
+    `the fleet routing to stop naming ${broken.id} for ${hostOf(WEDGED)}`,
+    DEADLINE_MS,
+    async () => {
+      const named = await upstreamNodes(healthy, hostOf(WEDGED));
+      return named.includes(broken.id) ? null : named;
+    },
+  );
+  expect(withoutBroken).toEqual([healthy.id]);
+
+  /* And nothing anywhere in the document routes to the port that answers nothing. */
+  const document = await routingOf(healthy);
+  const addresses = document.routes.flatMap((route) =>
+    route.upstreams.map((upstream) => upstream.address),
+  );
+  expect(
+    addresses.filter((address) => address.endsWith(`:${String(opts.brokenPort)}`)),
+    "a dead port is still routed to",
+  ).toEqual([]);
+
+  /* The operator's own hands, through the REAL CLI against this bucket. */
+  const shown = await runCli(
+    ["app", "lease", "show", "--name", WEDGED, "--node", broken.id, "--json"],
+    storeEnv(),
+  );
+  expectCleanExit(shown);
+  /* The key it diagnosed, always; WHAT it made of the body is an observation the
+     report carries rather than something this case dictates to Celld. */
+  expect(shown.output).toContain(opts.leaseKey);
+  note.leaseShow = shown.output.trim().slice(0, 1200);
+
+  const dropped = await runCli(
+    ["app", "lease", "drop", "--name", WEDGED, "--node", broken.id, "--yes"],
+    storeEnv(),
+  );
+  expectCleanExit(dropped);
+  expect(dropped.output).toContain(opts.leaseKey);
+  note.leaseDrop = dropped.output.trim().slice(0, 1200);
+
+  const droppedAt = Date.now();
+  await until(
+    `${broken.id} to get ${WEDGED} ready and published again`,
+    REASSIGN_DEADLINE_MS,
+    async () => {
+      const state = await stateOf(broken);
+      if (processOf(state, WEDGED)?.ready !== true) return null;
+      const record = await readJson<NodeRecord>(registry, nodeKey(broken.id));
+      if (record?.value.serving?.[WEDGED] === undefined) return null;
+      return record.value.failing?.[WEDGED] === undefined ? record.value : null;
+    },
+  );
+  note.recoveredAfterDropMs = Date.now() - droppedAt;
+
+  return (
+    `celld 0.5.0 could not recover from a truncated node lease at "${opts.leaseKey}" by ` +
+    `itself; "scafo app lease drop" is what got the process serving again`
+  );
+}
+
+/** One node's supervised process for an application, as `/v1/state` reports it. */
+function processOf(state: DaemonState, application: string): SupervisedProcess | undefined {
+  return state.processes.find((entry) => entry.id === application && entry.state === "running");
+}
+
+/** The public port a node's reconcile loop says it serves an application on. */
+function portOf(state: DaemonState, application: string): number {
+  const found = (state.reconcile?.processes ?? []).find(
+    (entry) => entry.application === application,
+  );
+  if (found === undefined) throw new Error(`no process for ${application}`);
+  return found.port;
+}
+
+/** The fleet's routing as one node renders it, read the way an ingress reads it. */
+async function routingOf(node: Node): Promise<FleetRouting> {
+  const answer = await httpGet(node.apiPort, "/v1/ingress/routes", {
+    authorization: `Bearer ${INGRESS_TOKEN}`,
+  });
+  if (answer.status !== 200) {
+    throw new Error(
+      `${node.id} answered the routing with ${String(answer.status)}: ${answer.body}`,
+    );
+  }
+  return JSON.parse(answer.body) as FleetRouting;
+}
+
+/** The nodes that routing names as answering for one host, in the order it names them. */
+async function upstreamNodes(node: Node, host: string): Promise<string[]> {
+  const document = await routingOf(node);
+  const route = document.routes.find((entry) => entry.host === host);
+  return (route?.upstreams ?? []).map((upstream) => upstream.node).sort();
+}
+
+/**
+ * What the wedged node's own log says about one application, which is the only
+ * account of what Celld did with the object put under it.
+ */
+function celldLinesOn(node: Node, application: string, limit: number = 40): string {
+  return node.log
+    .join("")
+    .split("\n")
+    .filter(
+      (line) =>
+        line.includes(application) ||
+        /lease|authority|node_log|fenc|expired|ERROR|WARN|panic|exited with code/i.test(line),
+    )
+    .slice(-limit)
+    .join("\n");
 }
 
 /** The nodes a state says an application was placed on, or null when it has no decision. */

@@ -14,6 +14,7 @@ import type { DaemonContext } from "../../daemon/app.ts";
 import { loadDaemonConfig } from "../../daemon/config.ts";
 import { createCoordinator } from "../../daemon/coordinator.ts";
 import { createHeartbeat } from "../../daemon/heartbeat.ts";
+import { createProcessHealth } from "../../daemon/_process-health.ts";
 import { createObservability, OBSERVED_RING_SIZE } from "../../daemon/observe.ts";
 import {
   createObserveFlusher,
@@ -203,6 +204,20 @@ export const sailArgs: ArgsDef = {
     valueHint: "name",
     description: "Traefik entryPoint the published routers attach to; repeat the flag for several",
   },
+  "traefik-cert-resolver": {
+    type: "string",
+    valueHint: "name",
+    description:
+      "Certificate resolver from Traefik's own static configuration; the published routers " +
+      "ask it for their certificates, one wildcard per base rather than one per host",
+  },
+  "ingress-acme-delegation": {
+    type: "string",
+    valueHint: "host",
+    description:
+      "Host this installation's ingress answers DNS-01 at, so whoever claims a domain " +
+      'delegates "_acme-challenge.<domain>" to it with a CNAME; scafo only says it',
+  },
 };
 
 export const sail: CommandDef = defineCommand({
@@ -272,8 +287,13 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   });
 
   const supervisor = createChildSupervisor();
+  /* What the node remembers about its own processes: the restarts, the exits and
+     the last thing each one said. The supervisor reports an exit and forgets it;
+     this is what turns a series of them into something an operator is told. */
+  const processHealth = createProcessHealth();
   supervisor.onExit((status) => {
     /* Reporting only: deciding what to do about it belongs to the reconcile loop. */
+    processHealth.exited(status);
     console.error(`scafo: process "${status.id}" exited with code ${String(status.exitCode)}`);
   });
 
@@ -282,6 +302,7 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
     nodeId: state.id,
     registry,
     supervisor,
+    processHealth,
     versions,
     /* Kept for the node tokens this node will sign for calls to its peers. */
     signingKey: state.privateKey,
@@ -328,8 +349,14 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
      of the fleet reads the fleet's routing from whichever node answers, and the
      entryPoints are the one thing about it a node has to be told. */
   const entryPoints = config.ingress?.entryPoints ?? [DEFAULT_ENTRY_POINT];
+  const certResolver = config.ingress?.traefikCertResolver;
   daemon.ingressFormats = {
-    traefik: (routing, { prefer }) => renderTraefikConfig(routing, { entryPoints, prefer }),
+    traefik: (routing, { prefer }) =>
+      renderTraefikConfig(routing, {
+        entryPoints,
+        prefer,
+        ...(certResolver === undefined ? {} : { certResolver }),
+      }),
   };
 
   /* Said once, at boot, because nothing else on this node ever will: an ingress
@@ -341,7 +368,12 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
     `scafo: this node serves the fleet's routing at /v1/ingress/routes (Caddy's ` +
       `"dynamic scafo") and /v1/ingress/routes/traefik?prefer=self (Traefik's http provider) ` +
       `on ${config.node.listen}, behind the ingress token; point your ingress there. Traefik ` +
-      `routers attach to entryPoint(s) ${entryPoints.join(", ")}`,
+      `routers attach to entryPoint(s) ${entryPoints.join(", ")}` +
+      /* The resolver is Traefik's own, so the node says which name it wrote
+         rather than anything about what that name does. */
+      (certResolver === undefined
+        ? ""
+        : `, and ask the "${certResolver}" certificate resolver for their certificates`),
   );
 
   /* What a colocated ingress keeps its certificates, its account key and its

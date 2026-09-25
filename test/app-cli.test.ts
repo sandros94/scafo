@@ -26,10 +26,13 @@ import {
   describeDomains,
   readLabelArgs,
   readSelectorFlags,
+  type ApplicationView,
   WILDCARD_MARK,
 } from "../src/cli/_applications.ts";
 import { resolveApplication } from "../src/cli/_application.ts";
 import {
+  acmeChallengeHost,
+  checkAcmeDelegation,
   checkDomainDns,
   describeDnsPending,
   describeDnsSettled,
@@ -37,6 +40,7 @@ import {
   describeWildcardCertificates,
   describeWildcardDnsPending,
   describeWildcardDnsSettled,
+  describeWildcardIssuance,
   type HostResolver,
   wildcardProbeHost,
 } from "../src/cli/_domains.ts";
@@ -53,11 +57,13 @@ import {
   DEFAULT_RETIREMENT_GRACE_MS,
   getApplication,
   readJson,
+  heartbeatNode,
   registerNode,
   retireApplication,
 } from "../src/core/registry/index.ts";
 import { type OperatorRole, trustOperator } from "../src/core/registry/operators.ts";
 import type { ApplicationRecord, CoordinatorLease } from "../src/core/types/registry.ts";
+import { isHost } from "../src/core/utils/host.ts";
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { createNodeApp } from "../src/daemon/app.ts";
@@ -183,7 +189,8 @@ describe("scafo app show", () => {
   it("names the state, the deployment, the placement and the labels", async () => {
     await asAdmin.setLabels(MINE, { tenant: "acme" });
 
-    const shown = formatApplication(await asAdmin.show(MINE));
+    const seen = await asAdmin.show(MINE);
+    const shown = formatApplication(seen.application, seen.serving);
 
     expect(shown).toContain(`application "${MINE}"`);
     expect(shown).toContain("serving");
@@ -197,7 +204,7 @@ describe("scafo app show", () => {
   });
 
   it("prints the way back out of a retirement and out of a block", async () => {
-    const retired = formatApplication(await asAdmin.show(PREVIEW));
+    const retired = formatApplication((await asAdmin.show(PREVIEW)).application);
 
     expect(retired).toContain("Retired at");
     expect(retired).toContain(`scafo app unretire --name`);
@@ -208,18 +215,69 @@ describe("scafo app show", () => {
     expect(blocked).toContain(`scafo app unblock --name ${MINE}`);
   });
 
-  it("answers --json with the record itself rather than a rendering of it", async () => {
-    const record = await asAdmin.show(MINE);
+  it("answers --json with the record and what the fleet says, rather than a rendering", async () => {
+    const view = await asAdmin.show(MINE);
 
-    expect(showJson(record)).toEqual(record);
+    expect(showJson(view)).toEqual(view);
+    expect(view.application.name).toBe(MINE);
+    /* The fleet's own word about it travels with the record: an application
+       failing on one node is a fact a script must be able to read too. */
+    expect(view.serving).toEqual({ nodes: 0, serving: 0, failing: [] });
     /* Declared, because the rendering above is only reachable through the flag. */
     expect(subCommand("show").args).toHaveProperty("json");
+  });
+
+  /*
+   * The incident: two nodes serving the application, one restarting its process
+   * every fifteen seconds, and every scafo surface calling it plainly "serving".
+   */
+  it("stops claiming plain serving while a live node reports the application failing", async () => {
+    await heartbeatNode(clock.ctx, NODE_ID, {
+      serving: {},
+      failing: {
+        [MINE]: {
+          since: "2026-01-01T00:00:00.000Z",
+          restarts: 6,
+          lastError: "Error: node authority was not established before wake scan",
+        },
+      },
+    });
+    await registerNode(clock.ctx, {
+      v: 1,
+      id: "node-b",
+      publicKey: { kty: "OKP", crv: "Ed25519", x: "x-node-b" },
+      addresses: { internal: "10.0.0.5", apiPort: 7400 },
+    });
+    await heartbeatNode(clock.ctx, "node-b", { serving: { [MINE]: { port: 24_000 } } });
+
+    const view = await asAdmin.show(MINE);
+
+    expect(view.serving).toEqual({
+      nodes: 2,
+      serving: 1,
+      failing: [
+        {
+          node: NODE_ID,
+          since: "2026-01-01T00:00:00.000Z",
+          restarts: 6,
+          lastError: "Error: node authority was not established before wake scan",
+        },
+      ],
+    });
+
+    const shown = formatApplication(view.application, view.serving);
+    expect(shown).toContain("state       serving on 1 of 2 nodes");
+    expect(shown).toContain("Failing on 1 of 2 nodes");
+    expect(shown).toContain(`${NODE_ID}  6 restarts since 2026-01-01T00:00:00.000Z`);
+    expect(shown).toContain("node authority was not established before wake scan");
+    /* Scafo reports and never repairs: the line says whose words those are. */
+    expect(shown).toContain("never repairs the runtime's own state");
   });
 
   it("shows a scoped key its own application without the fleet's labels", async () => {
     await asAdmin.setLabels(MINE, { account: "acct-4417" });
 
-    const seen = await asTenant.show(MINE);
+    const seen = (await asTenant.show(MINE)).application;
 
     expect(seen).not.toHaveProperty("labels");
     expect(formatApplication(seen)).not.toContain("acct-4417");
@@ -788,6 +846,143 @@ describe("what DNS says about a host that was just claimed", () => {
   });
 });
 
+describe("whether the challenge for a covered base is delegated to the ingress", () => {
+  const DELEGATION = "acme.scafo.test";
+  const CHALLENGE = `_acme-challenge.${HOST}`;
+
+  it("asks under the label a certificate authority reads, which is no host of ours", () => {
+    /* Its first label starts with an underscore, so it is not a name anything
+       here could be claimed, routed or served at — and never has to be. */
+    expect(acmeChallengeHost(HOST)).toBe(CHALLENGE);
+    expect(isHost(CHALLENGE)).toBe(false);
+  });
+
+  it("is ok when the record already names where this installation answers", async () => {
+    const outcome = await checkAcmeDelegation({
+      host: HOST,
+      delegation: DELEGATION,
+      resolveCname: fixedResolver({ [CHALLENGE]: [DELEGATION] }),
+    });
+
+    expect(outcome).toBe("ok");
+  });
+
+  it("reads one name through two spellings of it: case, and the root's dot", async () => {
+    const outcome = await checkAcmeDelegation({
+      host: HOST,
+      delegation: DELEGATION,
+      resolveCname: fixedResolver({ [CHALLENGE]: [`${DELEGATION.toUpperCase()}.`] }),
+    });
+
+    expect(outcome).toBe("ok");
+  });
+
+  it("is pending when the record points at something else entirely", async () => {
+    const outcome = await checkAcmeDelegation({
+      host: HOST,
+      delegation: DELEGATION,
+      resolveCname: fixedResolver({ [CHALLENGE]: ["acme.somebody-else.test"] }),
+    });
+
+    expect(outcome).toBe("pending");
+  });
+
+  it("is unknown when the resolver says nothing, and never fails the claim", async () => {
+    const nxdomain = await checkAcmeDelegation({
+      host: HOST,
+      delegation: DELEGATION,
+      resolveCname: fixedResolver({}),
+    });
+    const silent = await checkAcmeDelegation({
+      host: HOST,
+      delegation: DELEGATION,
+      resolveCname: () => Promise.resolve([]),
+    });
+    const late = await checkAcmeDelegation({
+      host: HOST,
+      delegation: DELEGATION,
+      budgetMs: 5,
+      resolveCname: () => new Promise<string[]>(() => {}),
+    });
+
+    expect([nxdomain, silent, late]).toEqual(["unknown", "unknown", "unknown"]);
+  });
+
+  it("REPLACES the standing warning with the record to create, once there is one", () => {
+    const standing = describeWildcardIssuance(HOST, undefined, undefined);
+    const pending = describeWildcardIssuance(HOST, DELEGATION, "pending");
+    const unknown = describeWildcardIssuance(HOST, DELEGATION, "unknown");
+
+    /* Without a delegation, the sentence an operator read before this existed. */
+    expect(standing).toEqual({ text: describeWildcardCertificates(HOST), settled: false });
+
+    /* With one, the exact record instead of the advice to arrange DNS-01 somehow. */
+    for (const notice of [pending, unknown]) {
+      expect(notice.settled).toBe(false);
+      expect(notice.text).toContain(`"${CHALLENGE} CNAME ${DELEGATION}"`);
+      expect(notice.text).toContain(`"*.${HOST}"`);
+      expect(notice.text).not.toBe(standing.text);
+    }
+  });
+
+  it("acknowledges a delegation already in place rather than warning about it", () => {
+    const settled = describeWildcardIssuance(HOST, DELEGATION, "ok");
+
+    expect(settled.settled).toBe(true);
+    expect(settled.text).toContain(CHALLENGE);
+    expect(settled.text).toContain(DELEGATION);
+  });
+
+  it("goes out through the channel one switch silences, and never as a failure", () => {
+    const notice = describeWildcardIssuance(HOST, DELEGATION, "pending");
+    const lines: string[] = [];
+    vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      lines.push(args.map(String).join(" "));
+    });
+
+    warn(notice.text);
+    vi.stubEnv("SCAFO_SILENCE_WARNINGS", "1");
+    warn(notice.text);
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+
+    expect(lines).toEqual([`scafo: warning: ${notice.text}`]);
+  });
+
+  it("carries the third answer in the JSON a covered claim prints", async () => {
+    const ops = directOps(clock.ctx, {
+      platformDomains: [PLATFORM_DOMAIN],
+      acmeDelegation: DELEGATION,
+    });
+    const change = await ops.addDomain(MINE, HOST, { wildcard: true });
+    const acmeDns = await checkAcmeDelegation({
+      host: change.host,
+      delegation: DELEGATION,
+      resolveCname: fixedResolver({ [CHALLENGE]: [DELEGATION] }),
+    });
+
+    /* The bucket-direct path reads the delegation from the same configuration a
+       node would have answered with, so `--json` says the same thing either way. */
+    expect(JSON.parse(JSON.stringify({ ...change, dns: "unknown", acmeDns }))).toEqual({
+      application: await getApplication(clock.ctx, MINE),
+      host: HOST,
+      platformHosts: [`${MINE}.${PLATFORM_DOMAIN}`],
+      acmeDelegation: DELEGATION,
+      dns: "unknown",
+      acmeDns: "ok",
+    });
+  });
+
+  it("says nothing of a delegation where the installation names none", async () => {
+    const change = await throughBucket().addDomain(MINE, HOST, { wildcard: true });
+
+    expect(change).not.toHaveProperty("acmeDelegation");
+    expect(describeWildcardIssuance(change.host, change.acmeDelegation, undefined).text).toBe(
+      describeWildcardCertificates(HOST),
+    );
+  });
+});
+
 describe("deleting through a node daemon", () => {
   it("refuses a long-lived application, relaying the grace the node named", async () => {
     const error = await rejectsWith(() => throughNode().delete(MINE), "invalid-input");
@@ -950,8 +1145,8 @@ function domainCommand(name: string): CommandDef & { args: ArgsDef } {
 }
 
 /** What `scafo app show --json` prints, read back. */
-function showJson(record: ApplicationRecord): unknown {
-  return JSON.parse(JSON.stringify(record, null, 2));
+function showJson(view: ApplicationView): unknown {
+  return JSON.parse(JSON.stringify(view, null, 2));
 }
 
 function subCommand(name: string): CommandDef & { args: ArgsDef } {

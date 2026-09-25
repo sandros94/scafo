@@ -11,11 +11,14 @@
  * name here.
  */
 
-import { lookup } from "node:dns/promises";
+import { lookup, resolveCname } from "node:dns/promises";
 import type { DomainChange } from "./_applications.ts";
 
 /** How the helper asks DNS. Injected, so a test never touches the network. */
 export type HostResolver = (host: string) => Promise<string[]>;
+
+/** The same, for the one question addresses cannot answer: who owns the challenge. */
+export type CnameResolver = (host: string) => Promise<string[]>;
 
 /**
  * What DNS said about a host that was just claimed:
@@ -94,6 +97,64 @@ export const systemResolver: HostResolver = async (host) => {
   return found.map((entry) => entry.address);
 };
 
+/** The label a certificate authority reads a DNS-01 answer from. */
+export const ACME_CHALLENGE_LABEL: string = "_acme-challenge";
+
+/**
+ * Where the DNS-01 answer for `base` is looked for.
+ *
+ * NOT A HOST BY SCAFO'S OWN RULE — its first label starts with an underscore,
+ * which no claimable host may — and it never needs to be one: nothing is ever
+ * claimed, routed or served here, and the only thing that reads it is a
+ * certificate authority.
+ */
+export function acmeChallengeHost(base: string): string {
+  return `${ACME_CHALLENGE_LABEL}.${base}`;
+}
+
+export interface AcmeDelegationOptions {
+  /** The claimed base a wildcard certificate is wanted for. */
+  host: string;
+  /** The one name this installation's ingress answers DNS-01 at. */
+  delegation: string;
+  /** Defaults to the machine's own resolver. */
+  resolveCname?: CnameResolver;
+  /** Defaults to {@link DNS_BUDGET_MS}. */
+  budgetMs?: number;
+}
+
+/**
+ * Whether `_acme-challenge.<host>` is already delegated to the name this
+ * installation's ingress solves DNS-01 at:
+ * - `ok`: a CNAME there names it.
+ * - `pending`: a CNAME there names something else.
+ * - `unknown`: no CNAME, no resolver, or no answer in time.
+ *
+ * A CNAME and nothing else, because that is the whole of the record being
+ * asked about: an address would say where the name points, and the question is
+ * who gets to answer a challenge for it. Compared without case and without a
+ * trailing dot, which are two spellings of one name rather than two names.
+ */
+export async function checkAcmeDelegation(opts: AcmeDelegationOptions): Promise<DnsOutcome> {
+  const resolve = opts.resolveCname ?? systemCnameResolver;
+  const budgetMs = opts.budgetMs ?? DNS_BUDGET_MS;
+
+  let records: string[];
+  try {
+    records = await withBudget(resolve(acmeChallengeHost(opts.host)), budgetMs);
+  } catch {
+    /* NXDOMAIN, SERVFAIL, no resolver, no answer in time: nothing confirmed. */
+    return "unknown";
+  }
+  if (records.length === 0) return "unknown";
+
+  const wanted = dnsName(opts.delegation);
+  return records.some((record) => dnsName(record) === wanted) ? "ok" : "pending";
+}
+
+/** The machine's own resolver, asked for CNAMEs and nothing else. */
+export const systemCnameResolver: CnameResolver = (host) => resolveCname(host);
+
 /** How a claim reads on the terminal: the host, the application, and what happens next. */
 export function describeDomainClaim(change: DomainChange, via: string): string {
   const name = change.application.name;
@@ -123,6 +184,50 @@ export function describeWildcardCertificates(host: string): string {
     `approves on-demand issuance for "${host}" and for a subdomain naming an application, and ` +
     `never for an arbitrary one, so obtain the wildcard certificate through DNS-01 at the ingress`
   );
+}
+
+/** One line about a claim, and whether it is an acknowledgement or a warning. */
+export interface IssuanceNotice {
+  text: string;
+  /** True for something already done, false for something still to do. */
+  settled: boolean;
+}
+
+/**
+ * The last thing a covered claim says: how the wildcard certificate gets
+ * issued.
+ *
+ * ONE SENTENCE, AND WHICH ONE DEPENDS ON WHAT THE INSTALLATION CAN OFFER. With
+ * a delegation name, the operator has a record to create and the ingress does
+ * the rest, so the concrete instruction REPLACES the standing warning — which
+ * only exists to say that somebody has to arrange DNS-01 somehow. Without one,
+ * scafo knows nothing more than that, and says exactly what it said before.
+ */
+export function describeWildcardIssuance(
+  host: string,
+  delegation: string | undefined,
+  acmeDns: DnsOutcome | undefined,
+): IssuanceNotice {
+  if (delegation === undefined) {
+    return { text: describeWildcardCertificates(host), settled: false };
+  }
+  if (acmeDns === "ok") {
+    return {
+      text:
+        `scafo: "${acmeChallengeHost(host)}" is delegated to "${delegation}", so this ` +
+        `installation's ingress obtains the "*.${host}" certificate itself`,
+      settled: true,
+    };
+  }
+  return {
+    text:
+      `create the DNS record "${acmeChallengeHost(host)} CNAME ${delegation}", which lets this ` +
+      `installation's ingress answer the DNS-01 challenge for "*.${host}" and hold one ` +
+      `certificate for every name under it; until it exists, a subdomain that is not an ` +
+      `application of this installation is served over HTTPS only where the ingress already ` +
+      `holds that certificate`,
+    settled: false,
+  };
 }
 
 /** The wildcard record that is still to be created, in the same words a host's is. */
@@ -169,6 +274,12 @@ export function describeDnsPending(host: string, platformHosts: string[]): strin
 }
 
 /* ---------------------------------------------------------------- internals */
+
+/** One spelling of a DNS name: lowercased, and without the root's trailing dot. */
+function dnsName(name: string): string {
+  const trimmed = name.trim().toLowerCase();
+  return trimmed.endsWith(".") ? trimmed.slice(0, -1) : trimmed;
+}
 
 /** Rejects once `budgetMs` has passed, and never holds the process open for it. */
 async function withBudget<T>(work: Promise<T>, budgetMs: number): Promise<T> {

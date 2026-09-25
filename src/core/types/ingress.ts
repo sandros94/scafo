@@ -91,6 +91,19 @@ export interface FleetRouting {
   v: 1;
   /** Sorted by host. */
   routes: FleetRoute[];
+  /**
+   * The bases this installation wants a `*.BASE` certificate for, sorted and
+   * without repeats: every platform domain, and the base of every wildcard
+   * route this document publishes. Absent when there are none.
+   *
+   * WHAT AN INGRESS ISSUES FOR, not what it routes — the routes above already
+   * say that. One certificate per base covers the base itself and every name one
+   * label under it, which is the whole of what {@link FleetRoute.host} can name,
+   * so an ingress that reads this asks a certificate authority once per base
+   * instead of once per host. A consumer that ignores it behaves as it did
+   * before the field existed.
+   */
+  wildcards?: string[];
   /** Absent when the rendering node does not publish the API. */
   api?: FleetApiRouting;
 }

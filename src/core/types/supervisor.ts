@@ -22,7 +22,24 @@ export interface ProcessStatus {
   pid?: number;
   /** Set once the process has exited; `null` when a signal ended it. */
   exitCode?: number | null;
+  /** The signal that ended it, when one did. */
+  exitSignal?: string;
   startedAt: string;
+  /**
+   * The last lines this process wrote to its standard error, oldest first,
+   * bounded and with terminal escapes taken off.
+   *
+   * WHY A SUPERVISOR CARRIES THIS AT ALL: a process that exits over and over
+   * says why on the way out, and by the time an operator asks, the daemon's log
+   * holds that reason interleaved with every other process on the machine and
+   * scrolled past. This is the same text, attributed to the process that wrote
+   * it and still there after it is gone.
+   *
+   * NEVER PARSED, by anything. It is quoted to an operator as the process wrote
+   * it: a supervisor that read meanings out of a runtime's log lines would be
+   * one that breaks when the runtime rewords them.
+   */
+  lastError?: string[];
 }
 
 export interface StopOptions {

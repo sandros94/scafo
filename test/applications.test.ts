@@ -122,6 +122,7 @@ describe("listing applications", () => {
     const recording: CasStore = {
       get: (key) => inner.get(key),
       getBytes: (key, opts) => inner.getBytes(key, opts),
+      head: (key) => inner.head(key),
       put: (key, body, cas) => inner.put(key, body, cas),
       del: (key) => inner.del(key),
       list: async (prefix) => {
@@ -354,6 +355,7 @@ describe("deployment revision", () => {
     clock.ctx.store = {
       get: (key) => inner.get(key),
       getBytes: (key, opts) => inner.getBytes(key, opts),
+      head: (key) => inner.head(key),
       put: async (key, body, cas) => {
         if (
           collide &&

@@ -139,10 +139,44 @@ export interface NodeRecord {
    * serves is not routed to.
    */
   serving?: NodeServing;
+  /**
+   * The applications this node is placed on and cannot keep running: one entry
+   * per process that is being restarted over and over, refreshed with the
+   * heartbeat and ABSENT while nothing is failing.
+   *
+   * IT IS HERE SO THAT NOBODY HAS TO ASK THE FAILING NODE. A node whose process
+   * for an application exits every few seconds still answers its own API, still
+   * heartbeats, and — until this existed — still looked exactly like a node
+   * serving that application: the ingress routed around the dead port on its own
+   * health checks and every scafo surface said the application was fine. A
+   * record that says so is what makes `scafo fleet nodes` and `scafo app show`
+   * able to report it straight out of the bucket.
+   *
+   * Never the whole story: the exits, the timings and the full stderr tail stay
+   * on the node that has them, behind `GET /v1/state`.
+   */
+  failing?: NodeFailing;
 }
 
 /** Applications a node serves, by name, and where each one listens. */
 export type NodeServing = Record<string, { port: number }>;
+
+/** What a node reports about an application whose process it cannot keep up. */
+export interface NodeFailure {
+  /** When the run of exits behind it began, ISO-8601. */
+  since: string;
+  /** How many times the process has exited inside the node's crash-loop window. */
+  restarts: number;
+  /**
+   * The first line of what the process last wrote to stderr, truncated.
+   * QUOTED, NEVER PARSED: it is the runtime's own words, carried so an operator
+   * reads them without logging into the machine.
+   */
+  lastError?: string;
+}
+
+/** Applications a node cannot keep running, by name. */
+export type NodeFailing = Record<string, NodeFailure>;
 
 /** What a node is running: this build's own version, and the Celld it started. */
 export interface NodeVersions {

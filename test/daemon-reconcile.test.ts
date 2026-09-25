@@ -20,7 +20,12 @@ import type { ProcessSpec, ProcessStatus, Supervisor } from "../src/core/types/s
 import type { HostApplication } from "../src/core/placement/host-bindings.ts";
 import type { DaemonContext } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
+import {
+  RESTART_BACKOFF_BASE_MS,
+  RESTART_BACKOFF_MAX_MS,
+} from "../src/core/placement/process-health.ts";
 import { createHeartbeat } from "../src/daemon/heartbeat.ts";
+import { createProcessHealth } from "../src/daemon/_process-health.ts";
 import { createReconciler } from "../src/daemon/reconcile.ts";
 import { hintingStore, readChangeHint } from "../src/core/registry/changes.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
@@ -156,6 +161,200 @@ describe("application-owned reconciliation", () => {
     await world.reconciler.runOnce();
     expect(world.supervisor.stopped).toEqual([APP]);
     expect(world.reconciler.status().processes).toEqual([]);
+  });
+});
+
+/*
+ * The incident, twice over. A process exited every fifteen seconds on one node
+ * while the node record went on publishing it as served and the ingress routed
+ * to its dead port — and, once that was reported, a process that stayed UP for
+ * about a minute each time without ever becoming ready, which every uptime rule
+ * called a success.
+ */
+describe("a process the node cannot get serving", () => {
+  /** A tracker on the test's own clock, with the wait fixed at the top of each window. */
+  function clocked(clock: { ms: number }, opts: { jitterTop?: boolean } = {}) {
+    return createProcessHealth({
+      now: () => new Date(clock.ms),
+      jitter: opts.jitterTop === true ? (windowMs) => windowMs - 1 : () => 0,
+      log: () => {},
+    });
+  }
+
+  it("publishes nothing until the process answers, and publishes it on the pass that sees it", async () => {
+    const world = await seededWorld();
+    const health = clocked({ ms: Date.parse("2026-09-20T12:00:00.000Z") });
+    world.daemon.processHealth = health;
+    const heartbeat = await attachHeartbeat(world);
+    /* Spawned, and not up: exactly the first moments of every process. */
+    world.driver.readyApps.clear();
+
+    await world.reconciler.runOnce();
+    await heartbeat.beat();
+    expect(world.reconciler.status().processes.map((entry) => entry.application)).toEqual([APP]);
+    expect(world.driver.probed, "one loopback question per not-ready process").toEqual([
+      `${APP}:42000`,
+    ]);
+    expect(
+      (await getNode(world.daemon.registry, "node-a")).serving,
+      "a port nothing is listening on is not a route",
+    ).toEqual({});
+
+    /* It comes up. The pass that sees it is the pass that publishes it. */
+    world.driver.readyApps.add(APP);
+    await world.reconciler.runOnce();
+    await heartbeat.beat();
+
+    expect((await getNode(world.daemon.registry, "node-a")).serving).toEqual({
+      [APP]: { port: 42_000 },
+    });
+    /* And never asked again: a ready run is trusted until it exits. */
+    world.driver.probed.length = 0;
+    await world.reconciler.runOnce();
+    expect(world.driver.probed).toEqual([]);
+  });
+
+  it("takes a probe that fails outright for a process that is not serving yet", async () => {
+    const world = await seededWorld();
+    world.daemon.processHealth = clocked({ ms: Date.parse("2026-09-20T12:00:00.000Z") });
+    const heartbeat = await attachHeartbeat(world);
+    world.driver.readyThrows = true;
+
+    await world.reconciler.runOnce();
+    await heartbeat.beat();
+
+    expect(world.reconciler.status().failures, "a probe is not a failure of the pass").toEqual([]);
+    expect((await getNode(world.daemon.registry, "node-a")).serving).toEqual({});
+  });
+
+  it("stops publishing it as served, says so in the record, and waits longer each try", async () => {
+    const world = await seededWorld();
+    const clock = { ms: Date.parse("2026-09-20T12:00:00.000Z") };
+    const health = clocked(clock, { jitterTop: true });
+    world.daemon.processHealth = health;
+    const heartbeat = await attachHeartbeat(world);
+    /* A process that can never become ready, whatever it does with its minute. */
+    world.driver.readyApps.clear();
+
+    /* Three starts, each staying up sixty-five seconds and answering nothing,
+       which is a crash loop — and between them the wait, which doubles. */
+    for (let i = 0; i < 3; i++) {
+      await world.reconciler.runOnce();
+      clock.ms += 65_000;
+      world.supervisor.exited(APP);
+      health.exited({
+        id: APP,
+        state: "exited",
+        exitCode: 1,
+        startedAt: new Date(clock.ms).toISOString(),
+        lastError: ["Error: node lease could not be read"],
+      });
+      clock.ms += RESTART_BACKOFF_BASE_MS * 2 ** i;
+    }
+    await world.reconciler.runOnce();
+    await heartbeat.beat();
+
+    const record = await getNode(world.daemon.registry, "node-a");
+    expect(record.serving, "a port that answers nothing is not a route").toEqual({});
+    expect(record.failing?.[APP]).toMatchObject({
+      restarts: 3,
+      lastError: "Error: node lease could not be read",
+    });
+
+    /* And the restart itself is backed off rather than tried every pass. */
+    const startsBefore = world.supervisor.started.length;
+    clock.ms += 1;
+    world.supervisor.exited(APP);
+    health.exited({ id: APP, state: "exited", exitCode: 1, startedAt: "2026-09-20T12:00:00.000Z" });
+    await world.reconciler.runOnce();
+
+    expect(world.supervisor.started.length, "a start straight after an exit is held").toBe(
+      startsBefore,
+    );
+    clock.ms += RESTART_BACKOFF_MAX_MS;
+    await world.reconciler.runOnce();
+    expect(world.supervisor.started.length).toBe(startsBefore + 1);
+  });
+
+  /* An hour of the real cycle: a minute up, an exit, a wait that grows to its
+     cap. Nothing about it ever reads as recovered. */
+  it("stays crash-looping for an hour of never-ready cycles, at the backoff's cap", async () => {
+    const world = await seededWorld();
+    const clock = { ms: Date.parse("2026-09-20T12:00:00.000Z") };
+    const health = clocked(clock, { jitterTop: true });
+    world.daemon.processHealth = health;
+    const heartbeat = await attachHeartbeat(world);
+    world.driver.readyApps.clear();
+
+    const started = clock.ms;
+    const waits: number[] = [];
+    while (clock.ms - started < 60 * 60_000) {
+      await world.reconciler.runOnce();
+      clock.ms += 65_000;
+      world.supervisor.exited(APP);
+      health.exited({
+        id: APP,
+        state: "exited",
+        exitCode: 1,
+        startedAt: "2026-09-20T12:00:00.000Z",
+      });
+      /* The wait the node itself drew, honoured rather than assumed. */
+      const retryAt = Date.parse(health.views()[APP]?.retryAt ?? "");
+      waits.push(retryAt - clock.ms);
+      clock.ms = retryAt;
+    }
+    await world.reconciler.runOnce();
+    await heartbeat.beat();
+
+    expect(waits.length).toBeGreaterThan(30);
+    expect([...health.crashLooping()]).toEqual([APP]);
+    expect(health.views()[APP]).toMatchObject({ health: "crash-looping", ready: false });
+    expect(health.views()[APP]?.restarts).toBe(waits.length);
+    /* The wait grew to its ceiling and stayed there rather than resetting. */
+    expect(waits[0]).toBe(RESTART_BACKOFF_BASE_MS - 1);
+    expect(waits.at(-1)).toBe(RESTART_BACKOFF_MAX_MS - 1);
+
+    const record = await getNode(world.daemon.registry, "node-a");
+    expect(record.serving).toEqual({});
+    expect(record.failing?.[APP]).toBeDefined();
+  });
+
+  it("publishes it as served again once the process answers, and says so once", async () => {
+    const world = await seededWorld();
+    const clock = { ms: Date.parse("2026-09-20T12:00:00.000Z") };
+    const said: string[] = [];
+    const health = createProcessHealth({
+      now: () => new Date(clock.ms),
+      jitter: () => 0,
+      log: (line) => said.push(line),
+    });
+    world.daemon.processHealth = health;
+    const heartbeat = await attachHeartbeat(world);
+    world.driver.readyApps.clear();
+
+    for (let i = 0; i < 3; i++) {
+      await world.reconciler.runOnce();
+      clock.ms += 65_000;
+      world.supervisor.exited(APP);
+      health.exited({
+        id: APP,
+        state: "exited",
+        exitCode: 1,
+        startedAt: "2026-09-20T12:00:00.000Z",
+      });
+    }
+    await world.reconciler.runOnce();
+    expect(said.filter((line) => line.includes("crash-looping"))).toHaveLength(1);
+
+    /* It comes back and ANSWERS, which is what recovery is. */
+    world.driver.readyApps.add(APP);
+    await world.reconciler.runOnce();
+    await heartbeat.beat();
+
+    const record = await getNode(world.daemon.registry, "node-a");
+    expect(record.serving?.[APP]).toBeDefined();
+    expect(record.failing).toBeUndefined();
+    expect(said.filter((line) => line.includes("is answering again"))).toHaveLength(1);
   });
 });
 
@@ -640,6 +839,9 @@ async function seededWorld() {
     nodeId: "node-a",
     registry: registry.ctx,
     supervisor,
+    /* Every real node keeps one, and it is what says which processes have
+       answered for themselves — which is what may be published as served. */
+    processHealth: createProcessHealth({ log: () => {} }),
     versions: { scafo: "test", celld: CELLD_VERSION },
     /* What a pass hands the counters: the applications it read, so a host is
        counted as whoever the registry says it belongs to — before execution,
@@ -742,6 +944,16 @@ interface FakeDriver extends RuntimeDriver {
   removed: string[];
   /** Made to fail every removal, as a directory that will not go does. */
   removeFails: boolean;
+  /**
+   * Applications whose process answers its health endpoint. Empty stands for a
+   * runtime that has been spawned and is not up yet, which is every process's
+   * first moments and a wedged one's whole life.
+   */
+  readyApps: Set<string>;
+  /** Every readiness question asked, in order, as `<application>:<port>`. */
+  probed: string[];
+  /** Made to raise on every probe, as a dial that fails outright does. */
+  readyThrows: boolean;
 }
 
 /**
@@ -764,6 +976,11 @@ function fakeDriver(events: string[], book: Map<string, PortPair>): FakeDriver {
     held: new Set<string>(),
     removed: [],
     removeFails: false,
+    /* Ready by default: a test about placement should not have to say that a
+       process it started came up, and the cases about readiness clear it. */
+    readyApps: new Set<string>(["*"]),
+    probed: [],
+    readyThrows: false,
     processSpec(input) {
       events.push("spec");
       this.inputs.push(input);
@@ -794,6 +1011,11 @@ function fakeDriver(events: string[], book: Map<string, PortPair>): FakeDriver {
       this.held.delete(application);
       this.book.delete(application);
       return Promise.resolve();
+    },
+    ready(input): Promise<boolean> {
+      this.probed.push(`${input.application}:${String(input.port)}`);
+      if (this.readyThrows) return Promise.reject(new Error("the dial itself failed"));
+      return Promise.resolve(this.readyApps.has("*") || this.readyApps.has(input.application));
     },
     reload(input): Promise<void> {
       this.reloaded.push(input.application);

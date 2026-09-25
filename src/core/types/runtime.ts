@@ -87,6 +87,19 @@ export interface RuntimeReloadInput {
   port: number;
 }
 
+/** Where one running process of this node is asked whether it is serving yet. */
+export interface RuntimeReadyInput {
+  /** The application the process serves; it is also the process's supervisor id. */
+  application: string;
+  /** Host the process's PUBLIC listener was bound on, as this node dials it. */
+  host: string;
+  /**
+   * Port of that public listener — the very port the fleet's routing would name.
+   * Asking anywhere else would answer a question nobody has.
+   */
+  port: number;
+}
+
 /** The ports an application is to be started on, and what they replaced. */
 export interface RuntimePorts {
   ports: PortPair;
@@ -157,6 +170,24 @@ export interface RuntimeDriver {
    * still be routing to them.
    */
   removeLocalState(application: string): Promise<void>;
+  /**
+   * Asks one process of this node whether it is serving yet, and answers what it
+   * said: `true` for a process that answered its own health endpoint, `false` for
+   * one that refused, answered otherwise, or did not answer in time.
+   *
+   * WHAT MAKES A PROCESS PUBLISHABLE. A spawned process holds a port before
+   * anything is listening on it, and one that can never become ready holds it
+   * forever; until this answers `true`, the node does not name the application in
+   * the `serving` every ingress routes by. It is asked once per pass of a process
+   * that has not answered yet and NEVER AGAIN once one has — readiness is not
+   * liveness, and a run that answered is trusted until it exits.
+   *
+   * Never throws for a process that is simply not up: a refused connection, a
+   * timeout and an error status are all `false`, because the caller does the same
+   * thing with each of them. It is bounded by the driver to a fraction of a
+   * reconcile interval, so a pass never waits on a wedged listener.
+   */
+  ready(input: RuntimeReadyInput): Promise<boolean>;
   /**
    * Asks a process of this node to adopt the fleet's current deployment NOW,
    * instead of when its own poll comes round.

@@ -26,6 +26,9 @@ import { setNodeSelector, setReplicas } from "../core/registry/placement.ts";
 import { retireApplication, unretireApplication } from "../core/registry/retirement.ts";
 import { assertClaimableHost } from "../core/placement/hosts.ts";
 import { hostUnder } from "../core/placement/routes.ts";
+import { applicationServing } from "../core/placement/serving.ts";
+import { listNodeRecords } from "../core/registry/nodes.ts";
+import { nowDate } from "../core/registry/context.ts";
 import type { ApplicationRecord } from "../core/types/registry.ts";
 import { normalizeCustomDomain } from "../core/utils/host.ts";
 import { assertSlug } from "../core/utils/slug.ts";
@@ -47,9 +50,19 @@ export interface ApplicationsResult {
   scoped?: true;
 }
 
+export type { ApplicationFailure, ApplicationServing } from "../core/placement/serving.ts";
+import type { ApplicationServing } from "../core/placement/serving.ts";
+
 /** Body of every route that answers with one application, as it now stands. */
 export interface ApplicationResult {
   application: ApplicationRecord;
+  /**
+   * Where it is actually running, as the fleet's own node records say. Answered
+   * by the route that shows one application and left out by the routes that
+   * change one: what a block or a retirement did is about the record, and the
+   * fleet has not acted on it yet.
+   */
+  serving?: ApplicationServing;
 }
 
 /** Body of `DELETE /v1/applications/:name`: the store keys it removed. */
@@ -67,6 +80,12 @@ export interface ApplicationDomain extends ApplicationResult {
    * platform domain.
    */
   platformHosts: string[];
+  /**
+   * The name this installation's ingress answers DNS-01 at, when it has one:
+   * what `_acme-challenge.<host>` is delegated to so a wildcard certificate can
+   * be issued for the claim. Absent where the installation names none.
+   */
+  acmeDelegation?: string;
 }
 
 /** The two boundaries the application routes stand behind. */
@@ -113,7 +132,18 @@ export function registerApplicationRoutes(
     async (event): Promise<ApplicationResult> => {
       const [caller, name] = scopedTarget(event);
       const application = await getApplication(daemon.registry, name);
-      return { application: caller.role === "admin" ? application : tenantView(application) };
+      return {
+        application: caller.role === "admin" ? application : tenantView(application),
+        /* Straight out of the bucket, like every other operator read: an
+           operator asks about one application rarely, and the one moment this
+           matters is the one where a node is failing and must not be asked
+           about itself. */
+        serving: applicationServing(
+          name,
+          await listNodeRecords(daemon.registry),
+          nowDate(daemon.registry),
+        ),
+      };
     },
     guarded,
   );
@@ -310,7 +340,16 @@ function domainAnswer(
   const platformHosts = daemon.config.platformDomains
     .map((domain) => hostUnder(domain, application.name))
     .filter((named): named is string => named !== null);
-  return { application, host, platformHosts };
+  /* Said by whoever answers rather than looked up by whoever asks: the
+     delegation is one node's configuration, and the CLI has no other way to
+     know it when it is talking to a node. */
+  const acmeDelegation = daemon.config.ingress?.acmeDelegation;
+  return {
+    application,
+    host,
+    platformHosts,
+    ...(acmeDelegation === undefined ? {} : { acmeDelegation }),
+  };
 }
 
 /**

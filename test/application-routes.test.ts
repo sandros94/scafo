@@ -72,6 +72,7 @@ interface ApplicationBody {
 interface DomainBody extends ApplicationBody {
   host: string;
   platformHosts: string[];
+  acmeDelegation?: string;
 }
 
 let clock: ManualClock;
@@ -517,6 +518,33 @@ describe("the domain routes", () => {
        points the new name at. */
     expect(body.platformHosts).toEqual([`${MINE}.${PLATFORM_DOMAIN}`]);
     await expect(checkDomain(clock.ctx, HOST)).resolves.toMatchObject({ application: MINE });
+  });
+
+  it("says nothing of a delegation where the installation names none", async () => {
+    const response = await claim(MINE, HOST, await asKey(ADMIN_ID, admin));
+
+    /* Absent rather than empty: whoever claimed the host has nothing to point
+       `_acme-challenge` at, and the CLI says what it said before. */
+    expect((await response.json()) as DomainBody).not.toHaveProperty("acmeDelegation");
+  });
+
+  it("names where DNS-01 is answered when the installation solves it somewhere", async () => {
+    const delegation = "acme.scafo.test";
+    const scoped = nodeApp({ acmeDelegation: delegation }).app;
+
+    const claimed = await scoped.request(`/v1/applications/${MINE}/domains/${HOST}?wildcard=1`, {
+      method: "POST",
+      headers: await asKey(ADMIN_ID, admin),
+    });
+    const released = await scoped.request(`/v1/applications/${MINE}/domains/${HOST}`, {
+      method: "DELETE",
+      headers: await asKey(ADMIN_ID, admin),
+    });
+
+    /* Both routes: a release answers with the same body a claim does, and the
+       name is the node's configuration rather than anything about this host. */
+    expect(((await claimed.json()) as DomainBody).acmeDelegation).toBe(delegation);
+    expect(((await released.json()) as DomainBody).acmeDelegation).toBe(delegation);
   });
 
   it("lets a scoped OPERATOR claim and release its own application's host", async () => {
@@ -1031,10 +1059,16 @@ function nodeApp(opts?: {
   nodeId?: string;
   keys?: Keypair;
   fetchFn?: typeof fetch;
+  /** The DNS-01 name this installation is configured with, when it has one. */
+  acmeDelegation?: string;
 }): NodeUnderTest {
   const nodeId = opts?.nodeId ?? NODE_ID;
+  const config = daemonConfig(nodeId);
   const daemon: DaemonContext = {
-    config: daemonConfig(nodeId),
+    config:
+      opts?.acmeDelegation === undefined
+        ? config
+        : { ...config, ingress: { acmeDelegation: opts.acmeDelegation } },
     nodeId,
     registry: clock.ctx,
     supervisor: idleSupervisor(),

@@ -39,6 +39,14 @@
  * undo, and it is refused until either the grace has passed or the operator has
  * said `--force`.
  *
+ * LEASE IS THE ONE VERB THAT REACHES INTO CELLD'S OWN RECORDS, and it is
+ * unstable on purpose. A Celld process must read or create its node lease before
+ * it has any authority at all, and a store that holds that key while refusing to
+ * answer for it wedges every restart of the process on the same object. Scafo
+ * reports a failing process and never repairs Celld's state — except here, where
+ * an operator looks at the three reads of the key themselves and says to delete
+ * it. It goes the moment Celld recovers such a lease itself.
+ *
  * The admin verbs reach an installation through a NODE, on the authority of an
  * operator key. The rest also write straight into the bucket when no node is
  * named, which is what an installation with no node running has.
@@ -49,6 +57,7 @@ import { ScafoError } from "../../core/error.ts";
 import { parseReplicas } from "../../core/placement/replicas.ts";
 import type { ApplicationRecord } from "../../core/types/registry.ts";
 import { loadDaemonConfig } from "../../daemon/config.ts";
+import { lease } from "../_app-lease.ts";
 import { resolveApplication } from "../_application.ts";
 import {
   type ApplicationApi,
@@ -67,14 +76,15 @@ import {
 } from "../_applications.ts";
 import { createRegistry } from "../_bootstrap.ts";
 import {
+  checkAcmeDelegation,
   checkDomainDns,
   describeDnsPending,
   describeDnsSettled,
   describeDomainClaim,
   describeDomainRelease,
-  describeWildcardCertificates,
   describeWildcardDnsPending,
   describeWildcardDnsSettled,
+  describeWildcardIssuance,
   wildcardProbeHost,
 } from "../_domains.ts";
 import { configFlags, flagList } from "../_flags.ts";
@@ -300,6 +310,7 @@ export const app: CommandDef = defineCommand({
     selector,
     replicas,
     domain,
+    lease,
     delete: remove,
   },
 });
@@ -320,7 +331,11 @@ async function runShow(flags: Record<string, unknown>): Promise<void> {
   const api = await apiFor(flags);
   const found = await api.show(name);
 
-  console.log(flags.json === true ? JSON.stringify(found, null, 2) : formatApplication(found));
+  console.log(
+    flags.json === true
+      ? JSON.stringify(found, null, 2)
+      : formatApplication(found.application, found.serving),
+  );
 }
 
 async function runBlock(flags: Record<string, unknown>): Promise<void> {
@@ -425,11 +440,24 @@ async function runDomainAdd(flags: Record<string, unknown>): Promise<void> {
         platformHosts: change.platformHosts,
       })
     : undefined;
+  /* A third question, asked only where there is somewhere to delegate TO: the
+     installation names the ingress's DNS-01 host, and this says whether the
+     claim already points at it. */
+  const delegation = change.acmeDelegation;
+  const acmeDns =
+    covered && delegation !== undefined
+      ? await checkAcmeDelegation({ host: change.host, delegation })
+      : undefined;
 
   if (flags.json === true) {
     console.log(
       JSON.stringify(
-        { ...change, dns, ...(wildcardDns === undefined ? {} : { wildcardDns }) },
+        {
+          ...change,
+          dns,
+          ...(wildcardDns === undefined ? {} : { wildcardDns }),
+          ...(acmeDns === undefined ? {} : { acmeDns }),
+        },
         null,
         2,
       ),
@@ -443,7 +471,10 @@ async function runDomainAdd(flags: Record<string, unknown>): Promise<void> {
   if (!covered) return;
   if (wildcardDns === "ok") console.log(describeWildcardDnsSettled(change.host));
   else warn(describeWildcardDnsPending(change.host, change.platformHosts));
-  warn(describeWildcardCertificates(change.host));
+
+  const issuance = describeWildcardIssuance(change.host, delegation, acmeDns);
+  if (issuance.settled) console.log(issuance.text);
+  else warn(issuance.text);
 }
 
 async function runDomainRemove(flags: Record<string, unknown>): Promise<void> {
@@ -565,7 +596,11 @@ async function opsFor(flags: Record<string, unknown>): Promise<ApplicationOps> {
   });
   /* The same domains a node would hold a claim against: without a node to ask,
      this configuration is where the installation's own hosts are written down. */
-  return directOps(createRegistry(config), { platformDomains: config.platformDomains });
+  const acmeDelegation = config.ingress?.acmeDelegation;
+  return directOps(createRegistry(config), {
+    platformDomains: config.platformDomains,
+    ...(acmeDelegation === undefined ? {} : { acmeDelegation }),
+  });
 }
 
 /** A block the node reports as still standing is a failure rather than a success line. */

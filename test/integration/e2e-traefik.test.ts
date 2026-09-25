@@ -18,6 +18,7 @@ import {
   readMeta,
   type RegistryContext,
 } from "../../src/core/registry/index.ts";
+import type { FleetRouting } from "../../src/core/types/ingress.ts";
 import type { NodeRecord, OperatorRecord } from "../../src/core/types/registry.ts";
 import type { TraefikDynamicConfig } from "../../src/drivers/ingress/traefik.ts";
 import {
@@ -85,9 +86,16 @@ const INGRESS_HEADERS = { authorization: `Bearer ${INGRESS_TOKEN}` };
  */
 const STANDING_ROUTERS = [`scafo_api_${PLATFORM_DOMAIN}`, `scafo_apideny_${PLATFORM_DOMAIN}`];
 
+/** A certificate resolver of the operator's own, as Traefik's static file names one. */
+const CERT_RESOLVER = "letsencrypt";
+/** Where that operator's ingress answers DNS-01 for the domains it is delegated. */
+const ACME_DELEGATION = "acme.scafo.test";
+
 let store: StartedStore;
 let traefik: StartedTestContainer;
 let daemon: StartedTestContainer;
+/** The second node, which serves its own installation; see the case that starts it. */
+let issuer: StartedTestContainer | undefined;
 
 let httpPort: number;
 let traefikApiPort: number;
@@ -157,6 +165,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   }, SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
+    await issuer?.stop().catch(() => {});
     await daemon?.stop().catch(() => {});
     await traefik?.stop().catch(() => {});
     await store?.container.stop().catch(() => {});
@@ -602,6 +611,82 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       expect(record.retiredAt).toBeDefined();
       observed.retiredAt = record.retiredAt;
       observed.retiredSnapshot = await snapshotNow();
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "publishes the certificate every router asks for, on a node told a resolver",
+    async () => {
+      /*
+       * A NODE OF ITS OWN, IN AN INSTALLATION OF ITS OWN. The Traefik in front
+       * of this suite terminates nothing — its only entryPoint is `:80` — and a
+       * router carrying `tls` matches HTTPS and nothing else, so telling the
+       * node every other case here reads to name a resolver would withdraw the
+       * plain-HTTP product loop this suite exists to prove. The setting is
+       * therefore shown on a second daemon, against its own key prefix so the
+       * fleet above it never sees a second node: what is asserted is the
+       * document a real `scafo sail` renders from real configuration, and real
+       * issuance is proven on real machines rather than here.
+       */
+      const alone: BucketSettings = { ...BUCKET, prefix: "e2e-issuance" };
+      const port = 7401;
+      issuer = await new GenericContainer(NODE_IMAGE)
+        .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "ro" }])
+        .withWorkingDir("/work")
+        .withExposedPorts(port)
+        .withEnvironment({
+          ...storeEnv(store.fromContainers, alone),
+          SCAFO_NODE_ID: "node-e2e-issuance",
+          SCAFO_TRANSPORT: "none",
+          SCAFO_STATE_DIR: "/var/lib/scafo",
+          SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
+          SCAFO_INGRESS_TOKEN: INGRESS_TOKEN,
+          SCAFO_INGRESS_TRAEFIK_CERT_RESOLVER: CERT_RESOLVER,
+          SCAFO_INGRESS_ACME_DELEGATION: ACME_DELEGATION,
+          SCAFO_ADVERTISE: `127.0.0.1:${String(port)}`,
+          CELLD_ESBUILD: "/usr/local/bin/esbuild",
+        })
+        .withCommand(["node", "dist/cli/index.mjs", "sail", "--listen", `0.0.0.0:${String(port)}`])
+        .withWaitStrategy(Wait.forLogMessage(/listening on/))
+        .withStartupTimeout(BOOT_DEADLINE_MS)
+        .start();
+
+      const mapped = issuer.getMappedPort(port);
+      const generic = await until(
+        "the second node to know what its own fleet answers on",
+        DEADLINE_MS,
+        async () => {
+          const got = await httpGet(mapped, "/v1/ingress/routes", INGRESS_HEADERS);
+          return got.status === 200 ? got : null;
+        },
+      );
+
+      /* The document says which bases want a `*.` certificate before anything
+         is deployed at all: an ingress obtains one before it can answer the
+         first request that needs it. */
+      const routing = JSON.parse(generic.body) as FleetRouting;
+      expect(routing.wildcards).toEqual([PLATFORM_DOMAIN]);
+      observed.issuanceRouting = routing;
+
+      const rendered = await httpGet(mapped, "/v1/ingress/routes/traefik", INGRESS_HEADERS);
+      expect(rendered.status, rendered.body).toBe(200);
+      const config = JSON.parse(rendered.body) as TraefikDynamicConfig;
+
+      /* Both standing routers, denial included: one without `tls` would match
+         plain HTTP alone, so a denial that left it out would stand aside on the
+         TLS entryPoint and let `/v1/storage` through on the public apex. */
+      const expected = {
+        certResolver: CERT_RESOLVER,
+        domains: [{ main: PLATFORM_DOMAIN, sans: [`*.${PLATFORM_DOMAIN}`] }],
+      };
+      for (const name of STANDING_ROUTERS) {
+        expect(config.http?.routers[name]?.tls, name).toEqual(expected);
+      }
+      observed.issuanceSnapshot = config;
+
+      await issuer.stop().catch(() => {});
+      issuer = undefined;
     },
     STEP_TIMEOUT_MS,
   );

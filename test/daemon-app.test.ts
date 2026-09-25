@@ -44,11 +44,18 @@ const VERSION = "aaaa1111";
 /**
  * What the stand-in supervisor reports; the state route must pass it through.
  * A process is named for the application it serves, which is the id it carries.
+ * The route answers them in NAME ORDER, so a document read twice reads the same
+ * and a process the supervisor has forgotten still lands beside its neighbours.
  */
 const PROCESSES: ProcessStatus[] = [
   { id: APPLICATION, state: "running", pid: 4321, startedAt: "2026-01-01T00:00:00.000Z" },
   { id: OTHER_APPLICATION, state: "exited", exitCode: 0, startedAt: "2026-01-01T00:00:00.000Z" },
 ];
+
+/** The same processes as the route orders them. */
+const ORDERED_PROCESSES: ProcessStatus[] = [...PROCESSES].sort((a, b) =>
+  a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+);
 
 /** Every problem body a rejected caller may see, whatever was wrong with the token. */
 const AUTH_INVALID_PROBLEM = {
@@ -104,7 +111,7 @@ describe("GET /v1/state", () => {
       node: record,
       lease: null,
       coordinator: null,
-      processes: PROCESSES,
+      processes: ORDERED_PROCESSES,
       placements: [],
     });
   });
@@ -222,7 +229,9 @@ describe("GET /v1/state, which names applications throughout", () => {
 
     /* A process id IS the application it serves: the supervisor and the state
        route agree on one name for it, with nothing to parse out of either. */
-    expect(state.processes.map((process) => process.id)).toEqual([APPLICATION, OTHER_APPLICATION]);
+    expect(state.processes.map((process) => process.id)).toEqual(
+      ORDERED_PROCESSES.map((process) => process.id),
+    );
     expect(state.placements).toEqual(STATUS.placements);
     expect(state.reconcile).toEqual(STATUS);
   });

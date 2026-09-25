@@ -13,6 +13,18 @@ import { assertProcessGroups, processGroupId, stopProcessGroup } from "../_proce
 /** Time a stopped process is given between `SIGTERM` and `SIGKILL`. */
 export const DEFAULT_GRACE_MS: number = 30_000;
 
+/**
+ * How many of a process's last stderr lines are kept, and how long each one may
+ * be.
+ *
+ * SMALL ON PURPOSE. This is evidence for an operator asking why a process keeps
+ * dying, not a log: five lines is what a runtime prints as it fails, and a cap
+ * per line keeps one process that writes a megabyte-long line from sitting in
+ * this daemon's memory and in every node record that quotes it.
+ */
+export const STDERR_TAIL_LINES: number = 5;
+export const STDERR_LINE_MAX: number = 300;
+
 /** Runs daemon child processes. What it remembers, and until when, is the
     {@link Supervisor} contract; restart policy remains with the caller. */
 export function createChildSupervisor(): Supervisor {
@@ -34,9 +46,16 @@ export function createChildSupervisor(): Supervisor {
         env: spec.env,
         /* Own a group so stop reaches runtime workers too. */
         detached: true,
-        /* TODO: capture stdout/stderr per process instead of inheriting the
-           daemon's streams — output cannot be attributed to a process today. */
-        stdio: "inherit",
+        /*
+         * STDERR IS PIPED AND FORWARDED, everything else is the daemon's own
+         * stream. Piping it is what makes a process's last words attributable
+         * to it — inherited, they land in the daemon's log among every other
+         * process on the machine, and the one line that says why a process
+         * keeps dying is gone by the time anybody asks. Forwarding them on
+         * keeps the daemon's log exactly as complete as it was.
+         *   TODO: stdout is still inherited and still unattributed.
+         */
+        stdio: ["inherit", "inherit", "pipe"],
       });
 
       const leaderExit = Promise.withResolvers<number | null>();
@@ -46,11 +65,14 @@ export function createChildSupervisor(): Supervisor {
         child,
         selfInflicted: false,
         leaderExit: leaderExit.promise,
+        tail: [],
       };
       supervised.set(spec.id, entry);
+      readStderr(entry, child);
 
-      child.on("exit", (code) => {
+      child.on("exit", (code, signal) => {
         entry.child = null;
+        if (signal !== null) entry.status = { ...entry.status, exitSignal: signal };
         leaderExit.resolve(code);
         if (!entry.selfInflicted) {
           /* The kernel has already reaped the leader, so this teardown — begun in
@@ -113,11 +135,11 @@ export function createChildSupervisor(): Supervisor {
 
     status(id: string): ProcessStatus | null {
       const entry = supervised.get(id);
-      return entry === undefined ? null : { ...entry.status };
+      return entry === undefined ? null : snapshot(entry);
     },
 
     list(): ProcessStatus[] {
-      return [...supervised.values()].map((entry) => ({ ...entry.status }));
+      return [...supervised.values()].map((entry) => snapshot(entry));
     },
 
     forget(id: string): void {
@@ -143,9 +165,77 @@ export function createChildSupervisor(): Supervisor {
     const code = await entry.leaderExit;
     entry.status = { ...entry.status, state: "exited", exitCode: code };
     if (unexpected) {
-      for (const listener of listeners) listener({ ...entry.status });
+      /* The tail goes out WITH the exit, because it is the only moment anything
+         is listening: whoever restarts this process is the same caller that
+         reads why it stopped, and an id that is forgotten afterwards takes its
+         lines with it. */
+      for (const listener of listeners) listener(snapshot(entry));
     }
   }
+}
+
+/** The status as a caller sees it: what the process said, beside what it did. */
+function snapshot(entry: Supervised): ProcessStatus {
+  return {
+    ...entry.status,
+    ...(entry.tail.length === 0 ? {} : { lastError: [...entry.tail] }),
+  };
+}
+
+/**
+ * Keeps the last lines of one process's stderr, and puts every one of them on
+ * the daemon's own stderr as it arrives.
+ *
+ * LINE BY LINE AND BOUNDED, so a process that writes without newlines cannot
+ * grow this buffer: what has not ended in a newline is held as one partial
+ * line, capped like any other, and flushed when the stream closes.
+ */
+function readStderr(entry: Supervised, child: ChildProcess): void {
+  const stream = child.stderr;
+  if (stream === null) return;
+
+  stream.setEncoding("utf8");
+  let partial = "";
+  stream.on("data", (chunk: string) => {
+    /* Forwarded verbatim, escapes included: the daemon's log is what it was
+       before this was captured at all. */
+    globalThis.process?.stderr?.write(chunk);
+    const lines = (partial + chunk).split("\n");
+    partial = clamp(lines.pop() ?? "");
+    for (const line of lines) keepLine(entry, line);
+  });
+  stream.on("end", () => {
+    keepLine(entry, partial);
+    partial = "";
+  });
+  /* A stream that failed says nothing more; the process's exit is reported by
+     the exit itself, and a throw here would take the daemon down with it. */
+  stream.on("error", () => {});
+}
+
+/** Keeps one line, if it says anything, dropping the oldest to make room. */
+function keepLine(entry: Supervised, line: string): void {
+  const kept = clamp(line);
+  if (kept === "") return;
+
+  entry.tail.push(kept);
+  while (entry.tail.length > STDERR_TAIL_LINES) entry.tail.shift();
+}
+
+/**
+ * One stderr line as it is kept: terminal escapes taken off, trailing carriage
+ * return and whitespace with them, and cut to length.
+ *
+ * THE ESCAPES GO BECAUSE THIS TEXT IS REPUBLISHED — into a node record, an API
+ * document and a terminal that never saw the process — and a colour sequence
+ * meant for the daemon's own terminal is noise in all three.
+ */
+/* ESC is spelled by its code so the pattern itself carries no control character. */
+const ANSI_SEQUENCE = new RegExp(`${String.fromCodePoint(0x1b)}\\[[\\d;?]*[@-~]`, "g");
+
+function clamp(line: string): string {
+  const plain = line.replaceAll(ANSI_SEQUENCE, "").trim();
+  return plain.length > STDERR_LINE_MAX ? `${plain.slice(0, STDERR_LINE_MAX)}…` : plain;
 }
 
 interface Supervised {
@@ -159,4 +249,6 @@ interface Supervised {
   /** Resolves only once every process in the owned group is gone. Set once the
       group has been signalled, and kept even when teardown failed. */
   cleanup?: Promise<void>;
+  /** The last lines this process wrote to stderr, oldest first. */
+  tail: string[];
 }

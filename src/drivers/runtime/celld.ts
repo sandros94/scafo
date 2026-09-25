@@ -17,6 +17,9 @@ import {
   type PortRange,
 } from "../../core/placement/ports.ts";
 import { fleetPrefix } from "../../core/registry/paths.ts";
+/* The one path a Celld process answers for itself on, shared with the ingress
+   rendering that health-checks the very same port. */
+import { APP_HEALTH_PATH } from "../ingress/traefik.ts";
 import type { RuntimeDriver, RuntimePorts, RuntimeSpecInput } from "../../core/types/runtime.ts";
 import type { ProcessSpec } from "../../core/types/supervisor.ts";
 import { assertSlug, isSlug } from "../../core/utils/slug.ts";
@@ -294,6 +297,23 @@ export function createCelldDriver(opts: CelldDriverOptions): RuntimeDriver {
       if (kept !== null) await release(kept);
     },
 
+    async ready(input): Promise<boolean> {
+      const url = `http://${input.host}:${String(input.port)}${APP_HEALTH_PATH}`;
+      let response: Response;
+      try {
+        response = await fetch(url, { signal: AbortSignal.timeout(READY_TIMEOUT_MS) });
+      } catch {
+        /* A refused connection is the ordinary answer for a process that has not
+           opened its listener yet, and a timeout is one that opened it and is
+           not answering on it: neither is a failure of the pass asking. */
+        return false;
+      }
+      /* Read to completion so the connection is not left hanging on a keep-alive
+         socket this node will never speak on again. */
+      await response.text().catch(() => "");
+      return response.ok;
+    },
+
     async reload(input): Promise<void> {
       const url = `http://${input.host}:${String(input.port)}/reload`;
       const response = await fetch(url, {
@@ -440,6 +460,18 @@ async function bindableNow(port: number, host: string): Promise<boolean> {
  * documented upstream as alpha.
  */
 const RELOAD_TIMEOUT_MS = 3000;
+
+/**
+ * How long a process has to answer that it is serving before this pass takes the
+ * silence for an answer.
+ *
+ * SHORTER THAN THE RELOAD, and shorter still than the reconcile interval: the
+ * question is asked of every process that has not answered yet, on a loopback
+ * socket, and the cost of waiting is a pass that does nothing else in the
+ * meantime. A process that is up answers this in microseconds; one that is not
+ * will not answer it in two seconds either, and the next pass asks again.
+ */
+const READY_TIMEOUT_MS = 2000;
 
 /** How long `--version` may take before the binary counts as unreadable. */
 const VERSION_TIMEOUT_MS = 10_000;

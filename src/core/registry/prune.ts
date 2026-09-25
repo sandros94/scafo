@@ -30,12 +30,11 @@ import {
   DEPLOYMENT_FEATURES,
   LEGACY_MANIFEST_SCHEMA_VERSION,
   MANIFEST_SCHEMA_VERSIONS,
-  VERIFIED_CELLD_RELEASES,
   verifiedReleaseList,
 } from "./_celld-contract.ts";
+import { assertVerifiedCelldRelease } from "./_celld-gate.ts";
 import { deleteKey, readJson } from "./cas.ts";
 import type { RegistryContext } from "./context.ts";
-import { isNodeAnswering, listNodeRecords } from "./nodes.ts";
 import {
   deployBlobsPrefix,
   deployImagesPrefix,
@@ -44,6 +43,9 @@ import {
   deployPrefix,
   deployQueuesPrefix,
 } from "./paths.ts";
+
+/** The command an operator types, as every refusal and warning of it says. */
+export const PRUNE_COMMAND: string = "scafo deployment prune";
 
 /** One deployment Celld published, as the bucket still holds it. */
 export interface StoredDeployment {
@@ -136,7 +138,7 @@ interface DeployPointer {
  * carries a format marker `_celld-contract.ts` does not name.
  */
 export async function planPrune(ctx: RegistryContext, opts: PlanPruneOptions): Promise<PrunePlan> {
-  await assertVerifiedRelease(ctx, opts.now);
+  await assertVerifiedCelldRelease(ctx, { now: opts.now, command: PRUNE_COMMAND });
 
   const prefix = deployPrefix(opts.application);
   const keys = await ctx.store.list(prefix);
@@ -374,56 +376,6 @@ async function assertUnnamed(
       `a Celld pointer of "${plan.application}" now names version ` +
       `"${deployment.version}", which the plan had selected for deletion; nothing of it ` +
       `was deleted — plan the prune again`,
-  });
-}
-
-/**
- * Refuses unless every node of the installation that is still answering reports
- * a Celld release this build was verified against.
- *
- * Prune reads and deletes inside Celld's own keyspace, and a release nothing
- * here has been run against may have written it in shapes this cannot read. The
- * fleet's own records are the only thing that says which release wrote it, so
- * they are the gate — and an installation with nothing answering says nothing
- * at all, which is a refusal rather than a guess.
- */
-async function assertVerifiedRelease(ctx: RegistryContext, now: Date): Promise<void> {
-  /* Records of nodes that stopped answering are IGNORED, using the same
-     liveness rule the version-skew gate uses. Nothing ever reaps a node record,
-     so a machine retired two years ago would otherwise block every prune of the
-     installation forever on whatever it happened to be running. */
-  const answering = (await listNodeRecords(ctx)).filter((record) => isNodeAnswering(record, now));
-  if (answering.length === 0) {
-    throw releaseProblem(
-      "no node of this installation is answering, so nothing says which Celld release wrote " +
-        "this bucket",
-      "start a node, or wait for one to heartbeat, and prune again",
-    );
-  }
-
-  for (const record of answering) {
-    const celld = record.versions?.celld;
-    if (celld === undefined) {
-      throw releaseProblem(
-        `node "${record.id}" is answering and its record names no Celld version`,
-        "restart that node on a build that records what it runs",
-      );
-    }
-    if (!VERIFIED_CELLD_RELEASES.includes(celld)) {
-      throw releaseProblem(
-        `node "${record.id}" is answering on celld ${celld}`,
-        "run a scafo verified against that release",
-      );
-    }
-  }
-}
-
-/** The release refusal, in the voice of the boot-time Celld floor. */
-function releaseProblem(found: string, fix: string): ScafoError {
-  return new ScafoError("capability-missing", "Celld release is not one prune was verified on", {
-    detail:
-      `${found}; scafo deployment prune reads Celld's own bucket formats and this build was ` +
-      `verified against ${verifiedReleaseList()} only, so nothing was planned or deleted — ${fix}`,
   });
 }
 

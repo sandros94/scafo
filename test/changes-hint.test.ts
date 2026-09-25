@@ -105,6 +105,7 @@ describe("the hinting store", () => {
     const watched: CasStore = {
       get: (key) => inner.get(key),
       getBytes: (key, opts) => inner.getBytes(key, opts),
+      head: (key) => inner.head(key),
       list: (prefix) => inner.list(prefix),
       listEntries: (prefix) => inner.listEntries(prefix),
       del: (key) => inner.del(key),
@@ -130,6 +131,7 @@ describe("the hinting store", () => {
       {
         get: (key) => inner.get(key),
         getBytes: (key, opts) => inner.getBytes(key, opts),
+        head: (key) => inner.head(key),
         list: (prefix) => inner.list(prefix),
         listEntries: (prefix) => inner.listEntries(prefix),
         del: (key) => inner.del(key),

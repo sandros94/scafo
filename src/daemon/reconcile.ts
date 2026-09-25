@@ -3,12 +3,12 @@
 import { describeError } from "../core/error.ts";
 import { renderFleetRouting } from "../core/placement/fleet-routes.ts";
 import { planReconcile, type ReconcileAction } from "../core/placement/reconcile.ts";
-import { sameServing, servingOf } from "../core/placement/serving.ts";
+import { sameFailing, sameServing, servingOf } from "../core/placement/serving.ts";
 import { deploymentRevision } from "../core/registry/_revision.ts";
 import { nowDate } from "../core/registry/context.ts";
 import { countingRegistry, storeOpsOf } from "../core/registry/counting.ts";
 import type { FleetRouting } from "../core/types/ingress.ts";
-import type { ApplicationRecord, NodeServing } from "../core/types/registry.ts";
+import type { ApplicationRecord, NodeFailing, NodeServing } from "../core/types/registry.ts";
 import type { RuntimeDriver, RuntimeProcess } from "../core/types/runtime.ts";
 import { desiredFrom, type PlacementView } from "./_desired.ts";
 import { createExecutor, failureOf, type ReconcileFailure } from "./_execute.ts";
@@ -132,8 +132,10 @@ export function createReconciler(
   /* Set by the first pass that renders one, and kept across a pass that fails to
      read the registry: see {@link Reconciler.fleetRouting}. */
   let fleetRouting: FleetRouting | undefined;
-  /* What the heartbeat was last asked to tell the fleet this node serves. */
+  /* What the heartbeat was last asked to tell the fleet this node serves, and
+     what it was last asked to say it cannot keep running. */
   let announced: NodeServing | undefined;
+  let announcedFailing: NodeFailing | undefined;
   /* The deployment revision each application was on when this node last looked.
      A revision that MOVED while a process was already running is a deploy some
      other node accepted, and the process here is still serving what it adopted
@@ -199,6 +201,44 @@ export function createReconciler(
   }
 
   /**
+   * Asks every process that has not answered for itself yet whether it is
+   * serving now, and tells the health tracker about the ones that are.
+   *
+   * ONCE PER PASS, AND NEVER OF A PROCESS THAT HAS ANSWERED. A ready run is
+   * trusted until it exits, so the whole cost of this is one loopback request per
+   * STARTING process per pass — nothing for a steady node, nothing for the bucket,
+   * and no timer of its own. Becoming ready is what puts the application into
+   * this node's `serving`, so the announcement below is where the fleet hears.
+   *
+   * NEVER FAILS A PASS. Not being ready is the ordinary answer, and the driver
+   * already bounds how long each question may take.
+   */
+  async function probeReadiness(): Promise<void> {
+    const health = daemon.processHealth;
+    if (health === undefined) return;
+
+    const ready = health.readyApplications();
+    const host = runtimeDialHost(daemon.config.runtime);
+    const waiting = executor
+      .currentProcesses()
+      /* A process on its way out is not asked, and neither is one this daemon
+         adopted without knowing its ports: there is no listener to ask. */
+      .filter(
+        (process) =>
+          process.teardownPending !== true && process.port > 0 && !ready.has(process.application),
+      );
+
+    await Promise.all(
+      waiting.map(async (process) => {
+        const answered = await driver
+          .ready({ application: process.application, host, port: process.port })
+          .catch(() => false);
+        if (answered) health.ready(process.application);
+      }),
+    );
+  }
+
+  /**
    * Tells the fleet, through the heartbeat, when what this node serves has
    * changed. The heartbeat carries it on its own timer too, but a process that
    * just started is reachable now, and thirty seconds is a long time for a route
@@ -213,9 +253,19 @@ export function createReconciler(
    * of on their node-refresh timer.
    */
   function announce(): void {
-    const serving = servingOf(executor.currentProcesses());
-    if (sameServing(serving, announced)) return;
+    const health = daemon.processHealth;
+    const serving = servingOf(executor.currentProcesses(), {
+      ready: health?.readyApplications() ?? new Set<string>(),
+      ...(health === undefined ? {} : { failing: health.crashLooping() }),
+    });
+    const failing = health?.failing();
+    /* A PROCESS THAT STARTED FAILING IS A ROUTING CHANGE, so it is announced
+       exactly as one: it has just left this node's `serving`, and the ingresses
+       that pull the fleet's routing have to hear before their own health checks
+       work it out. */
+    if (sameServing(serving, announced) && sameFailing(failing, announcedFailing)) return;
     announced = serving;
+    announcedFailing = failing;
     /* The token is minted only once the beat has LANDED. Minted beside it, the
        token usually wins the race — it is one blind write against a
        read-modify-write — and every node that looks because of it, this one
@@ -297,6 +347,12 @@ export function createReconciler(
       /* A registry read failure must not be interpreted as every application removed. */
       pending.push(failureOf(error, {}));
     } finally {
+      /* BEFORE THE ANNOUNCEMENT, AND WHATEVER THE PASS DID. Readiness is a local
+         question about processes that are running either way, so even a pass whose
+         registry read failed asks it — and asking here, while the pass still holds
+         the single-flight gate, is what lets `announce` publish a process the same
+         moment it starts answering. */
+      if (!abort.signal.aborted) await probeReadiness();
       lastActions = plan;
       failures = pending;
       logFailureChanges(reported, pending);

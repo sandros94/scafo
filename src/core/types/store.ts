@@ -44,6 +44,30 @@ export interface StoredEntry {
    * as "not old enough to act on".
    */
   lastModified?: Date;
+  /**
+   * How many bytes the listing says the object holds, when it said. Nothing acts
+   * on it: it is evidence for an operator reading a listing beside a `head` and a
+   * `get` of the same key, which is the one place they can disagree.
+   */
+  size?: number;
+}
+
+/**
+ * What the store says about one object without answering its body: the metadata
+ * of a `HEAD`, or null when the store says there is no such object.
+ *
+ * EVERY FIELD IS OPTIONAL, deliberately. This is the read a diagnosis uses, and
+ * the object it is pointed at is by definition one the store is answering
+ * strangely about — a `HEAD` that came back without an ETag is itself the
+ * finding, not a failure to raise over.
+ */
+export interface StoredHead {
+  /** The ETag, in the form {@link CasStore.get} answers with, when there was one. */
+  etag?: string;
+  /** The object's length as the store declared it, when it declared one. */
+  size?: number;
+  /** When the store says it was last written, when it said something usable. */
+  lastModified?: Date;
 }
 
 /** An object body together with the ETag needed to condition the next write. */
@@ -81,6 +105,19 @@ export interface CasStore {
    * artifacts by range, so a store that cannot do this cannot serve them.
    */
   getBytes(key: string, opts?: { range: ByteRange }): Promise<Uint8Array | null>;
+  /*
+   * What the store says about a key without reading it, or null when it says
+   * there is nothing there.
+   *
+   * THE ONLY READ THAT ASKS THE STORE ABOUT AN OBJECT RATHER THAN FOR IT, and it
+   * exists because those two answers can disagree. A bucket can hold a key its
+   * listing names and its `HEAD` answers `200` for, whose `GET` is a `404` —
+   * which is exactly what wedged a Celld node lease and is what `scafo app
+   * lease` was written to diagnose. A listing is answered from the store's own
+   * index and a `get` from the body; without this third read there is no way to
+   * tell a corrupt object from a missing one, and nothing else here needs it.
+   */
+  head(key: string): Promise<StoredHead | null>;
   /*
    * MUST throw ScafoError("cas-conflict") when a condition fails (HTTP 412).
    *

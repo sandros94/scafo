@@ -40,6 +40,7 @@ import type {
   CasHeaders,
   CasStore,
   StoredEntry,
+  StoredHead,
   StoredObject,
 } from "../../src/core/types/store.ts";
 
@@ -218,6 +219,16 @@ export function meterStore(inner: CasStore): MeteringStore {
         key,
         () => inner.getBytes(key, opts),
         (found) => ({ bytes: found?.byteLength ?? 0, extraPages: 0 }),
+      );
+    },
+
+    /* A metadata read is one round trip, answered without a body. */
+    head(key: string): Promise<StoredHead | null> {
+      return measure(
+        "get",
+        key,
+        () => inner.head(key),
+        () => ({ bytes: 0, extraPages: 0 }),
       );
     },
 

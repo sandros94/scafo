@@ -32,6 +32,7 @@ describe("fleet routing", () => {
         { host: "shop.apps.test", application: NAME, upstreams },
         { host: "shop.example.com", application: NAME, upstreams },
       ],
+      wildcards: ["apps.test"],
     });
   });
 
@@ -210,6 +211,84 @@ describe("fleet routing", () => {
       renderFleetRouting({ platformDomains: ["apps.test"], applications: [], nodes: [], now: NOW })
         .api,
     ).toBeUndefined();
+  });
+
+  it("asks for a wildcard per platform domain whether anything is deployed or not", () => {
+    /* Sorted, and stated before the first deploy: an ingress obtains the
+       certificate before it can answer the first request that needs it. */
+    const routing = renderFleetRouting({
+      platformDomains: ["edge.example.com", "apps.test"],
+      applications: [],
+      nodes: [],
+      now: NOW,
+    });
+
+    expect(routing.wildcards).toEqual(["apps.test", "edge.example.com"]);
+    expect(routing.routes).toEqual([]);
+  });
+
+  it("adds the base of every wildcard route it published, sorted and without repeats", () => {
+    const other = "blog.example.com";
+    const routing = renderFleetRouting({
+      platformDomains: ["apps.test"],
+      applications: [
+        covering(application(NAME, [BASE]), [BASE]),
+        covering(application("blog", [other]), [other]),
+        /* Claimed without its subdomains: its own name and nothing under it,
+           so no wildcard is wanted for it. */
+        application("shop-preview", [`plain.${BASE}`]),
+      ],
+      nodes: [
+        node("node-a", "10.83.0.1", {
+          "shop": { port: 42_000 },
+          "blog": { port: 42_002 },
+          "shop-preview": { port: 42_004 },
+        }),
+      ],
+      now: NOW,
+    });
+
+    expect(routing.wildcards).toEqual(["apps.test", other, BASE]);
+    /* Exactly the bases the document wrote a `*.` key for, and the platform. */
+    expect(routing.routes.filter((route) => route.host.startsWith("*.")).length).toBe(2);
+  });
+
+  it("wants no certificate for a base whose wildcard route it did not publish", () => {
+    const routing = renderFleetRouting({
+      platformDomains: ["apps.test"],
+      applications: [covering(application(NAME, [BASE]), [BASE]), application("shop-preview")],
+      /* The holder is served nowhere, so the `*.` key is not published — and a
+         certificate for a base nothing answers under is a certificate for
+         nothing. The environment's own entry stands on its own upstreams. */
+      nodes: [node("node-a", "10.83.0.1", { "shop-preview": { port: 42_002 } })],
+      now: NOW,
+    });
+
+    expect(routing.wildcards).toEqual(["apps.test"]);
+  });
+
+  it("omits the field entirely where nothing wants a wildcard at all", () => {
+    const routing = renderFleetRouting({
+      platformDomains: [],
+      applications: [application(NAME, [BASE])],
+      nodes: [node("node-a", "10.83.0.1", { shop: { port: 42_000 } })],
+      now: NOW,
+    });
+
+    expect(routing.routes.map((route) => route.host)).toEqual([BASE]);
+    expect(routing.wildcards).toBeUndefined();
+    expect(Object.hasOwn(routing, "wildcards")).toBe(false);
+  });
+
+  it("keeps the wildcards it stated when one node is put first", () => {
+    const routing = renderFleetRouting({
+      platformDomains: ["apps.test"],
+      applications: [covering(application(NAME, [BASE]), [BASE])],
+      nodes: [node("node-a", "10.83.0.1", { shop: { port: 42_000 } })],
+      now: NOW,
+    });
+
+    expect(preferNode(routing, "node-a").wildcards).toEqual(["apps.test", BASE]);
   });
 
   it("puts one node first on every route when preferred, keeping the rest in order", () => {

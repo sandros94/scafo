@@ -158,6 +158,7 @@ function countingStore(inner: CasStore): CountedStore {
       return inner.get(key);
     },
     getBytes: (key, opts) => inner.getBytes(key, opts),
+    head: (key) => inner.head(key),
     put(key, body, cas): Promise<{ etag: string }> {
       counts.put++;
       return inner.put(key, body, cas);

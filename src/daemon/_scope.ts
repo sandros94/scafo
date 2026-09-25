@@ -31,6 +31,9 @@ export function scopedState(caller: TrustedOperator | null, state: DaemonState):
   const reconcile = state.reconcile;
   return {
     ...state,
+    /* The node record carries the last thing another tenant's runtime wrote to
+       its stderr, which is text this key has no business reading. */
+    node: scopedNode(state.node, reaches),
     coordinator: scopedCoordinator(state.coordinator, reaches),
     processes: state.processes.filter((entry) => reaches(entry.id)),
     placements: state.placements.filter((entry) => reaches(entry.application)),
@@ -51,6 +54,28 @@ export function scopedState(caller: TrustedOperator | null, state: DaemonState):
 }
 
 /* ---------------------------------------------------------------- internals */
+
+/**
+ * Keeps out of the node record what this key may not read: the applications it
+ * cannot reach, and above all the runtime output quoted beside them.
+ *
+ * `serving` is left as it is, and deliberately: it is a name and a port, it is
+ * what every node of the installation publishes to every other, and narrowing
+ * it here would change a document peers already read. `failing` is different in
+ * kind — it quotes another tenant's process.
+ */
+function scopedNode(
+  node: DaemonState["node"],
+  reaches: (application: string | undefined) => boolean,
+): DaemonState["node"] {
+  if (node === null || node.failing === undefined) return node;
+
+  const { failing: all, ...rest } = node;
+  const failing = Object.fromEntries(
+    Object.entries(all).filter(([application]) => reaches(application)),
+  );
+  return { ...rest, ...(Object.keys(failing).length === 0 ? {} : { failing }) };
+}
 
 /** Filters coordinator failures while preserving absent-versus-empty semantics. */
 function scopedCoordinator(

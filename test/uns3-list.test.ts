@@ -111,8 +111,18 @@ describe("listing what the store said about each object", () => {
     const entries = await createUns3Store(client, { bucket: "b", prefix: "p" }).listEntries("");
 
     expect(entries).toEqual([
-      { key: "a.json", etag: `"e-p/a.json"`, lastModified: new Date("2026-01-01T00:00:00.000Z") },
-      { key: "b.json", etag: `"e-p/b.json"`, lastModified: new Date("2026-01-02T03:04:05.000Z") },
+      {
+        key: "a.json",
+        etag: `"e-p/a.json"`,
+        lastModified: new Date("2026-01-01T00:00:00.000Z"),
+        size: 0,
+      },
+      {
+        key: "b.json",
+        etag: `"e-p/b.json"`,
+        lastModified: new Date("2026-01-02T03:04:05.000Z"),
+        size: 0,
+      },
     ]);
   });
 
@@ -122,8 +132,8 @@ describe("listing what the store said about each object", () => {
     const entries = await createUns3Store(client, { bucket: "b", prefix: "p" }).listEntries("");
 
     expect(entries).toEqual([
-      { key: "a.json", etag: `"e-p/a.json"` },
-      { key: "b.json", etag: `"e-p/b.json"` },
+      { key: "a.json", etag: `"e-p/a.json"`, size: 0 },
+      { key: "b.json", etag: `"e-p/b.json"`, size: 0 },
     ]);
   });
 

@@ -30,12 +30,25 @@ async function links(): Promise<Array<{ ref: string; path: string; whole: string
 }
 
 describe("the permalinks the contract is read from", () => {
-  it("names upstream at all, in every one of the files prune depends on", async () => {
+  it("names upstream at all, in every one of the files the pinned commands depend on", async () => {
     const found = await links();
 
     expect(found.length).toBeGreaterThan(20);
     expect(new Set(found.map((link) => link.path.split("#")[0]))).toEqual(
-      new Set(["crates/celld/protocol.rs", "crates/celld/deploy.rs", "crates/celld/container.rs"]),
+      new Set([
+        /* What `scafo deployment prune` reads: the deployment layout. */
+        "crates/celld/protocol.rs",
+        "crates/celld/deploy.rs",
+        "crates/celld/container.rs",
+        /* What `scafo app lease` reads: the node lease, its key, its name rule,
+           the liveness rule it is judged by, and the failure it wedges on. */
+        "crates/celld/ownership_store.rs",
+        "crates/celld/node_log.rs",
+        "crates/celld/main.rs",
+        "crates/logic/peer.rs",
+        "crates/logic/drain.rs",
+        "crates/logic/dead_node_reconciliation.rs",
+      ]),
     );
   });
 

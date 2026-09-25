@@ -12,6 +12,7 @@ function withGetBytes(inner: MemoryCasStore, getBytes: CasStore["getBytes"]): Ca
   return {
     get: (key) => inner.get(key),
     getBytes,
+    head: (key) => inner.head(key),
     put: (key, body, cas) => inner.put(key, body, cas),
     del: (key) => inner.del(key),
     list: (prefix) => inner.list(prefix),

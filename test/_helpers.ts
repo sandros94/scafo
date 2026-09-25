@@ -23,6 +23,7 @@ import type {
   CasHeaders,
   CasStore,
   StoredEntry,
+  StoredHead,
   StoredObject,
 } from "../src/core/types/store.ts";
 import { SLUG_MAX_LENGTH } from "../src/core/utils/slug.ts";
@@ -160,6 +161,12 @@ export class FaultStore implements CasStore {
     return this.#inner.getBytes(key, opts);
   }
 
+  head(key: string): Promise<StoredHead | null> {
+    this.gets++;
+    this.readKeys.push(key);
+    return this.#inner.head(key);
+  }
+
   async put(key: string, body: string, cas?: CasHeaders): Promise<{ etag: string }> {
     await this.onBeforePut?.(key);
     this.#spend();
@@ -245,9 +252,13 @@ export class ObservingStore implements CasStore {
   }
 
   /* Not instrumented: the delays and faults above are about the registry's own
-     reads, and nothing observed here reads an object as bytes. */
+     reads, and nothing observed here reads an object as bytes or metadata. */
   getBytes(key: string, opts?: { range: ByteRange }): Promise<Uint8Array | null> {
     return this.#inner.getBytes(key, opts);
+  }
+
+  head(key: string): Promise<StoredHead | null> {
+    return this.#inner.head(key);
   }
 
   put(key: string, body: string, cas?: CasHeaders): Promise<{ etag: string }> {

@@ -96,6 +96,24 @@ describe("the node settings scafo sail takes a list of", () => {
   });
 });
 
+/* Not lists, but the same rule about a flag reaching the loader under the one
+   spelling the argument definitions declare. */
+describe("what scafo sail is told about certificates", () => {
+  it("names the Traefik certificate resolver and the DNS-01 delegation", async () => {
+    const config = await sailConfig([
+      "--traefik-cert-resolver",
+      "letsencrypt",
+      "--ingress-acme-delegation",
+      "acme.example.com",
+    ]);
+
+    expect(config.ingress).toEqual({
+      traefikCertResolver: "letsencrypt",
+      acmeDelegation: "acme.example.com",
+    });
+  });
+});
+
 describe("the placement a deploy states", () => {
   it("takes one label per --node-selector", () => {
     const parsed = parseArgs(

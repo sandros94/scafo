@@ -13,6 +13,7 @@ import {
   createApplication,
   createDeployment,
   getApplication,
+  heartbeatNode,
   registerNode,
 } from "../src/core/registry/index.ts";
 import { getOperator, listOperators } from "../src/core/registry/operators.ts";
@@ -143,6 +144,24 @@ describe("an operator scoped to one application cannot touch another", () => {
     await call(pathIn(THEIRS, "/retire"), TENANT_ID, tenant, { method: "POST" });
 
     expect((await getApplication(clock.ctx, THEIRS)).retiredAt).toBeUndefined();
+  });
+
+  /* The node record quotes what a failing runtime wrote to its own stderr, and
+     that text belongs to the tenant whose application wrote it. */
+  it("is told its own application is failing, and never reads the neighbour's words", async () => {
+    await heartbeatNode(clock.ctx, NODE_ID, {
+      failing: {
+        [MINE]: { since: "2026-01-01T00:00:00.000Z", restarts: 4, lastError: "mine: wedged" },
+        [THEIRS]: { since: "2026-01-01T00:00:00.000Z", restarts: 9, lastError: "theirs: secret" },
+      },
+    });
+
+    const state = (await (
+      await call("/v1/state", TENANT_ID, tenant, { method: "GET" })
+    ).json()) as { node: { failing?: Record<string, unknown> } };
+
+    expect(Object.keys(state.node.failing ?? {})).toEqual([MINE]);
+    expect(JSON.stringify(state)).not.toContain("theirs: secret");
   });
 
   it("keeps a warm scoped key scoped after its record is revoked within the auth TTL", async () => {

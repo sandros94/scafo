@@ -165,6 +165,25 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
       expect(Math.abs((at ?? 0) - wroteAt)).toBeLessThan(60_000);
     });
 
+    it("answers a HEAD for a key it lists, and nothing for one it does not", async () => {
+      /* The third read, and the only one that asks the store ABOUT an object
+         rather than for it. `scafo app lease` exists because those answers can
+         disagree — a key listed and HEAD-able whose GET is a 404 — and it can
+         only report the disagreement against a store that answers this at all. */
+      const run = randomHex(4);
+      const key = `v1/head-${run}/a.json`;
+      const written = await store.put(key, `{"n":1}`);
+
+      const head = await store.head(key);
+
+      expect(head, "the store answered no HEAD for a key it had just written").not.toBeNull();
+      expect(head?.etag).toBe(written.etag);
+      expect(head?.size).toBe(7);
+      expect(Math.abs((head?.lastModified?.getTime() ?? 0) - Date.now())).toBeLessThan(60_000);
+
+      await expect(store.head(`v1/head-${run}/missing.json`)).resolves.toBeNull();
+    });
+
     it("lists the same ETag a read answers with, and moves it only on a rewrite", async () => {
       /* The whole of change detection rests on this: a pass holding a listing and
          a cache of ETags reads only the keys whose ETag moved. A store that

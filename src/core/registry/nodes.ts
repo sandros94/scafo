@@ -1,5 +1,6 @@
 import { ScafoError } from "../error.ts";
-import type { NodeRecord, NodeServing } from "../types/registry.ts";
+import type { NodeFailing, NodeRecord, NodeServing } from "../types/registry.ts";
+import { type ConcurrencyGate, DEFAULT_CONCURRENCY, mapConcurrent } from "../utils/concurrency.ts";
 import { deepEqual, isCasConflict, namesFromKeys } from "./_shared.ts";
 import { writeChangeHint } from "./changes.ts";
 import { createJson, readJson, requireJson, updateJson } from "./cas.ts";
@@ -107,14 +108,25 @@ export async function listNodes(ctx: RegistryContext): Promise<string[]> {
   return namesFromKeys(await ctx.store.list(prefix), prefix);
 }
 
-/** Node records in id order; records deleted after listing are omitted. */
-export async function listNodeRecords(ctx: RegistryContext): Promise<NodeRecord[]> {
-  const records: NodeRecord[] = [];
-  for (const id of await listNodes(ctx)) {
-    const found = await readJson<NodeRecord>(ctx, nodeKey(id));
-    if (found !== null) records.push(found.value);
-  }
-  return records;
+/**
+ * Node records in id order; records deleted after listing are omitted.
+ *
+ * READ WITH BOUNDED CONCURRENCY rather than one after another: every caller of
+ * this — the release gate, the version-skew check, an operator asking about the
+ * fleet — pays a full round trip per machine, and a serial loop makes that the
+ * fleet's size times the bucket's latency.
+ */
+export async function listNodeRecords(
+  ctx: RegistryContext,
+  opts?: { concurrency?: number | ConcurrencyGate },
+): Promise<NodeRecord[]> {
+  const ids = await listNodes(ctx);
+  const found = await mapConcurrent(ids, opts?.concurrency ?? DEFAULT_CONCURRENCY, (id) =>
+    readJson<NodeRecord>(ctx, nodeKey(id)),
+  );
+  return found
+    .filter((record): record is NonNullable<typeof record> => record !== null)
+    .map((record) => record.value);
 }
 
 export interface HeartbeatInput {
@@ -124,11 +136,19 @@ export interface HeartbeatInput {
    * node's processes has no business changing where the fleet routes.
    */
   serving?: NodeServing;
+  /**
+   * The applications this node cannot keep running, as of this beat. A beat
+   * that says what the node serves says this too, in the same breath and from
+   * the same look at its processes — so an EMPTY map is meaningful and clears
+   * the record, where leaving the field out keeps what the record said.
+   */
+  failing?: NodeFailing;
 }
 
 /**
- * Stamps `heartbeatAt`, and `serving` when the caller says what the node serves.
- * Nothing else is touched, and a heartbeat cannot create a node record.
+ * Stamps `heartbeatAt`, and `serving` and `failing` when the caller says what
+ * the node's processes are doing. Nothing else is touched, and a heartbeat
+ * cannot create a node record.
  */
 export async function heartbeatNode(
   ctx: RegistryContext,
@@ -137,11 +157,25 @@ export async function heartbeatNode(
 ): Promise<string> {
   const at = nowIso(ctx);
   const serving = input?.serving;
-  await updateJson<NodeRecord>(ctx, nodeKey(id), (current) => ({
-    ...current,
-    heartbeatAt: at,
-    ...(serving === undefined ? {} : { serving }),
-  }));
+  const failing = input?.failing;
+  await updateJson<NodeRecord>(ctx, nodeKey(id), (current) => {
+    const { failing: held, ...rest } = current;
+    return {
+      ...rest,
+      heartbeatAt: at,
+      ...(serving === undefined ? {} : { serving }),
+      /* An empty map is the node saying nothing is failing any more, and the
+         field goes rather than being written as `{}`: absence is what every
+         reader already means by "nothing wrong here". */
+      ...(failing === undefined
+        ? held === undefined
+          ? {}
+          : { failing: held }
+        : Object.keys(failing).length === 0
+          ? {}
+          : { failing }),
+    };
+  });
   return at;
 }
 

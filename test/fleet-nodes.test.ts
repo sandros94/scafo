@@ -63,6 +63,59 @@ describe("what the listing reads", () => {
     expect(listing[0]?.drainingAt).toBeTypeOf("string");
   });
 
+  /*
+   * The incident this exists for: a node whose process for one application
+   * exited every fifteen seconds still heartbeat, still answered, still served
+   * everything else — and read as plainly "live" here while a tenant's traffic
+   * was being dropped.
+   */
+  it("says degraded for a live node that cannot keep an application running", async () => {
+    const clock = ctxWith(new MemoryCasStore());
+    await register(clock, "node-a", {});
+    await heartbeatNode(clock.ctx, "node-a", {
+      serving: { blog: { port: 24_000 } },
+      failing: {
+        shop: { since: "2026-01-01T00:00:00.000Z", restarts: 5, lastError: "Error: wedged" },
+      },
+    });
+
+    const listing = await listFleetNodes(clock.ctx, { now: new Date(clock.nowMs()) });
+
+    expect(listing[0]?.state).toBe("degraded");
+    expect(listing[0]?.failing).toEqual({
+      shop: { since: "2026-01-01T00:00:00.000Z", restarts: 5, lastError: "Error: wedged" },
+    });
+  });
+
+  it("goes back to live once the node takes the word back", async () => {
+    const clock = ctxWith(new MemoryCasStore());
+    await register(clock, "node-a", {});
+    await heartbeatNode(clock.ctx, "node-a", {
+      failing: { shop: { since: "2026-01-01T00:00:00.000Z", restarts: 5 } },
+    });
+    /* An empty map is the node saying it recovered; the field goes with it. */
+    await heartbeatNode(clock.ctx, "node-a", { serving: {}, failing: {} });
+
+    const listing = await listFleetNodes(clock.ctx, { now: new Date(clock.nowMs()) });
+
+    expect(listing[0]?.state).toBe("live");
+    expect(listing[0]?.failing).toBeUndefined();
+  });
+
+  it("keeps saying what it said when a beat carries no word about failures", async () => {
+    const clock = ctxWith(new MemoryCasStore());
+    await register(clock, "node-a", {});
+    await heartbeatNode(clock.ctx, "node-a", {
+      failing: { shop: { since: "2026-01-01T00:00:00.000Z", restarts: 5 } },
+    });
+    /* A plain liveness beat has not looked at the node's processes. */
+    await heartbeatNode(clock.ctx, "node-a");
+
+    expect((await listFleetNodes(clock.ctx, { now: new Date(clock.nowMs()) }))[0]?.state).toBe(
+      "degraded",
+    );
+  });
+
   it("is NOT live when nothing in the record says when the node was last seen", async () => {
     const clock = ctxWith(new MemoryCasStore());
     await register(clock, "node-a", {});
@@ -98,6 +151,29 @@ describe("what the listing prints", () => {
     /* Nothing here was written by a daemon that records versions. */
     expect(printed).toContain("celld: unreported on 2 nodes");
     expect(printed).toContain("scafo: unreported on 2 nodes");
+  });
+
+  it("counts a degraded node in and names what it cannot keep running", async () => {
+    const clock = ctxWith(new MemoryCasStore());
+    await register(clock, "node-a", {});
+    await heartbeatNode(clock.ctx, "node-a", {
+      failing: {
+        shop: {
+          since: "2026-09-20T11:59:00.000Z",
+          restarts: 5,
+          lastError: "Error: node authority was not established before wake scan",
+        },
+      },
+    });
+    const now = new Date(clock.nowMs());
+
+    const printed = formatNodeTable(await listFleetNodes(clock.ctx, { now }), now);
+
+    /* Still live for placement, and said to be degraded in the same breath. */
+    expect(printed).toContain("1 node, 1 live, 1 degraded");
+    expect(printed).toContain("node-a cannot keep 1 application running:");
+    expect(printed).toContain("shop  5 restarts since 2026-09-20T11:59:00.000Z");
+    expect(printed).toContain("node authority was not established before wake scan");
   });
 
   it("says what each machine runs, and rolls the fleet up by binary", async () => {

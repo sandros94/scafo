@@ -18,6 +18,7 @@ import {
   executePrune,
   type KeptDeployment,
   planPrune,
+  PRUNE_COMMAND,
   type PrunePlan,
   type StoredDeployment,
 } from "../../core/registry/prune.ts";
@@ -74,9 +75,6 @@ const pruneArgs: ArgsDef = {
   },
   "dry-run": { type: "boolean", description: "Print what would go, and delete nothing" },
 };
-
-/** The command an operator types, as the warning names it. */
-const PRUNE_COMMAND = "scafo deployment prune";
 
 /** Why `scafo deployment prune` may change under the operator who scripted it. */
 export const PRUNE_UNSTABLE_WHY: string =

@@ -211,6 +211,136 @@ describe("rendering the fleet's routing", () => {
   });
 });
 
+describe("the certificates the published routers ask for", () => {
+  /** A resolver of the operator's own, defined in Traefik's static configuration. */
+  const RESOLVER = "letsencrypt";
+  /** The environment answering one label under the covered base. */
+  const ENV_HOST = `preview.${CUSTOM}`;
+
+  /** The whole fleet a covered claim renders as, and the bases it wants certificates for. */
+  const COVERED: FleetRouting = {
+    ...fleet(
+      [
+        route(HOST, LOCAL),
+        route(CUSTOM, LOCAL),
+        route(ENV_HOST, LOCAL),
+        route(`*.${CUSTOM}`, LOCAL),
+      ],
+      apiAt(LOCAL),
+    ),
+    wildcards: [APEX, CUSTOM],
+  };
+
+  it("says nothing whatever about TLS when no resolver was named", () => {
+    /* Byte for byte: an operator who configures certificates elsewhere must get
+       the document they had before this existed, not one that merely parses the
+       same. */
+    const before = renderTraefikConfig(COVERED, { entryPoints: ENTRY_POINTS });
+
+    expect(JSON.stringify(before)).toBe(
+      JSON.stringify(
+        renderTraefikConfig(
+          { v: 1, routes: COVERED.routes, api: COVERED.api },
+          {
+            entryPoints: ENTRY_POINTS,
+          },
+        ),
+      ),
+    );
+    for (const [key, router] of Object.entries(before.http?.routers ?? {})) {
+      expect(router.tls, `router "${key}"`).toBeUndefined();
+    }
+  });
+
+  it("gives every router of a covered base the one wildcard certificate", () => {
+    const config = renderTraefikConfig(COVERED, {
+      entryPoints: ENTRY_POINTS,
+      certResolver: RESOLVER,
+    });
+
+    /* One subject per router, and the SAME subject for every host under the
+       base: the base itself, its environment, the catch-all no name can be read
+       out of, and the platform host under the other base. */
+    const wildcardOf = (base: string): unknown => ({
+      certResolver: RESOLVER,
+      domains: [{ main: base, sans: [`*.${base}`] }],
+    });
+    expect(config.http?.routers[traefikKey(CUSTOM)]?.tls).toEqual(wildcardOf(CUSTOM));
+    expect(config.http?.routers[traefikKey(ENV_HOST)]?.tls).toEqual(wildcardOf(CUSTOM));
+    expect(config.http?.routers[traefikWildcardKey(CUSTOM)]?.tls).toEqual(wildcardOf(CUSTOM));
+    expect(config.http?.routers[traefikKey(HOST)]?.tls).toEqual(wildcardOf(APEX));
+  });
+
+  it("covers the fleet's API and its denial with the same certificate, never one each", () => {
+    const config = renderTraefikConfig(COVERED, {
+      entryPoints: ENTRY_POINTS,
+      certResolver: RESOLVER,
+    });
+
+    /* The denial above all: a router with no `tls` matches plain HTTP only, so
+       a denial that left it out would stand aside on the TLS entryPoint and let
+       `/v1/storage` through on the one public name it guards. */
+    const expected = {
+      certResolver: RESOLVER,
+      domains: [{ main: APEX, sans: [`*.${APEX}`] }],
+    };
+    expect(config.http?.routers[traefikApiKey(APEX)]?.tls).toEqual(expected);
+    expect(config.http?.routers[traefikApiDenyKey(APEX)]?.tls).toEqual(expected);
+  });
+
+  it("names the resolver alone for a host claimed without its subdomains", () => {
+    const plain = "blog.example.org";
+    const config = renderTraefikConfig(
+      { ...fleet([route(plain, LOCAL)]), wildcards: [APEX] },
+      { entryPoints: ENTRY_POINTS, certResolver: RESOLVER },
+    );
+
+    /* No `domains`: Traefik reads the subject off the `Host` rule, which is the
+       one name it would be issued for anyway. */
+    expect(config.http?.routers[traefikKey(plain)]?.tls).toEqual({ certResolver: RESOLVER });
+  });
+
+  it("writes one subject per router however many hosts share the base", () => {
+    const config = renderTraefikConfig(COVERED, {
+      entryPoints: ENTRY_POINTS,
+      certResolver: RESOLVER,
+    });
+
+    for (const [key, router] of Object.entries(config.http?.routers ?? {})) {
+      expect(router.tls?.certResolver, `router "${key}"`).toBe(RESOLVER);
+      expect(router.tls?.domains?.length ?? 1, `router "${key}"`).toBe(1);
+    }
+    /* And the bases named across the whole document are the ones the routing
+       asked for, each written once per router that needs it and never twice. */
+    const mains = Object.values(config.http?.routers ?? {}).flatMap((router) =>
+      (router.tls?.domains ?? []).map((domain) => domain.main),
+    );
+    expect([...new Set(mains)].sort()).toEqual([APEX, CUSTOM]);
+  });
+
+  it("leaves a wildcard router without a subject when the document names no base", () => {
+    /* A document from a node that does not state `wildcards` — an older one, or
+       one whose base is not covered. Traefik can read no name out of a regexp,
+       so this router gets no certificate; what it must never do is claim the
+       certificate of the base ABOVE it, which covers one label and not two. */
+    const config = renderTraefikConfig(fleet([route(`*.${CUSTOM}`, LOCAL)]), {
+      certResolver: RESOLVER,
+    });
+
+    expect(config.http?.routers[traefikWildcardKey(CUSTOM)]?.tls).toEqual({
+      certResolver: RESOLVER,
+    });
+  });
+
+  it("renders the same document twice, keys and all", () => {
+    const opts = { entryPoints: ENTRY_POINTS, certResolver: RESOLVER };
+
+    expect(JSON.stringify(renderTraefikConfig(COVERED, opts))).toBe(
+      JSON.stringify(renderTraefikConfig(COVERED, opts)),
+    );
+  });
+});
+
 describe("preferring the node the ingress sits beside", () => {
   it("uses the preferred node while it is healthy, and the others only when it is not", () => {
     const config = renderTraefikConfig(fleet([route(HOST, REMOTE, LOCAL)]), { prefer: NODE_ID });

@@ -4,6 +4,7 @@ import type {
   CasHeaders,
   CasStore,
   StoredEntry,
+  StoredHead,
   StoredObject,
 } from "../../core/types/store.ts";
 
@@ -58,6 +59,17 @@ export class MemoryCasStore implements CasStore {
     );
   }
 
+  /** Metadata only, the way a bucket answers a `HEAD`; null when absent. */
+  head(key: string): Promise<StoredHead | null> {
+    const found = this.#objects.get(key);
+    if (found === undefined) return Promise.resolve(null);
+    return Promise.resolve({
+      etag: found.etag,
+      size: sizeOf(found.body),
+      lastModified: found.modified,
+    });
+  }
+
   /* async so conflicts surface as rejections, matching the S3 driver. */
   async put(key: string, body: string | Uint8Array, cas?: CasHeaders): Promise<{ etag: string }> {
     const current = this.#objects.get(key);
@@ -100,6 +112,7 @@ export class MemoryCasStore implements CasStore {
            usable `ifMatch` and compares equal to a read of the same key. */
         etag: object.etag,
         lastModified: object.modified,
+        size: sizeOf(object.body),
       }))
       .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
     return Promise.resolve(entries);
@@ -113,6 +126,11 @@ export class MemoryCasStore implements CasStore {
 
 export function createMemoryStore(opts: MemoryStoreOptions = {}): MemoryCasStore {
   return new MemoryCasStore(opts);
+}
+
+/** Bytes an object holds, which is what a bucket reports rather than its length in characters. */
+function sizeOf(body: string | Uint8Array): number {
+  return typeof body === "string" ? new TextEncoder().encode(body).byteLength : body.byteLength;
 }
 
 function conflict(key: string, detail: string): ScafoError {

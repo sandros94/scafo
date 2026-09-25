@@ -160,6 +160,24 @@ export interface IngressConfig {
   token?: [string, ...string[]];
   /** Traefik entry points; never empty because omission attaches to all of them. */
   entryPoints?: string[];
+  /**
+   * The ONE name this installation's ingress solves DNS-01 at, so somebody who
+   * claims a host with its subdomains delegates the challenge to it:
+   * `_acme-challenge.<base> CNAME <this>`.
+   *
+   * SCAFO DOES NOTHING WITH IT BUT SAY IT. Issuance is the ingress's, and this
+   * is the sentence an operator would otherwise have to write down somewhere:
+   * the claim routes answer with it, and `scafo app domain add --wildcard`
+   * checks the record and names the one to create.
+   */
+  acmeDelegation?: string;
+  /**
+   * Name of a certificate resolver the operator defined in Traefik's STATIC
+   * configuration. Set, the published routers ask it for their certificates —
+   * one wildcard per base rather than one certificate per host. Absent, the
+   * document says nothing about TLS and the operator's own configuration does.
+   */
+  traefikCertResolver?: string;
 }
 
 /**
@@ -578,6 +596,16 @@ const ORIGINS = {
     env: ["SCAFO_TRAEFIK_ENTRYPOINTS"],
     file: "ingress.entryPoints",
   },
+  ingressAcmeDelegation: {
+    flag: "ingress-acme-delegation",
+    env: ["SCAFO_INGRESS_ACME_DELEGATION"],
+    file: "ingress.acmeDelegation",
+  },
+  traefikCertResolver: {
+    flag: "traefik-cert-resolver",
+    env: ["SCAFO_INGRESS_TRAEFIK_CERT_RESOLVER"],
+    file: "ingress.traefikCertResolver",
+  },
   /* `SCAFO_STORAGE_TOKEN` is the name this had when the token only guarded storage. */
   ingressToken: {
     flag: "ingress-token",
@@ -961,9 +989,57 @@ function resolvePlatformDomains(sources: Sources): string[] {
 function resolveIngress(sources: Sources): IngressConfig | undefined {
   const entryPoints = resolveEntryPoints(sources);
   const token = resolveIngressTokens(sources);
+  const acmeDelegation = resolveAcmeDelegation(sources);
+  const traefikCertResolver = resolveCertResolver(sources);
 
-  if (entryPoints === undefined) return token === undefined ? undefined : { token };
-  return { ...(token === undefined ? {} : { token }), entryPoints };
+  const ingress: IngressConfig = {
+    ...(token === undefined ? {} : { token }),
+    ...(entryPoints === undefined ? {} : { entryPoints }),
+    ...(acmeDelegation === undefined ? {} : { acmeDelegation }),
+    ...(traefikCertResolver === undefined ? {} : { traefikCertResolver }),
+  };
+  return Object.keys(ingress).length === 0 ? undefined : ingress;
+}
+
+/** Resolves the DNS-01 name customers delegate to; anything but a host is refused. */
+function resolveAcmeDelegation(sources: Sources): string | undefined {
+  const origin: Origin = ORIGINS.ingressAcmeDelegation;
+  const written = resolve("ingressAcmeDelegation", sources);
+  if (written === undefined) return undefined;
+
+  if (!isHost(written)) {
+    throw new ScafoError("invalid-input", "Invalid configuration value", {
+      detail:
+        `"${origin.file}" (--${origin.flag}, or ${origin.env.join(" or ")}) must be the one host ` +
+        `this installation's ingress answers DNS-01 at, such as "acme.example.com", so a claimed ` +
+        `base delegates "_acme-challenge.<base>" to it with a CNAME; got ` +
+        `${JSON.stringify(written)}`,
+    });
+  }
+  return written;
+}
+
+/**
+ * A certificate resolver is named, never described: what it does lives in
+ * Traefik's static configuration, which scafo neither reads nor writes.
+ */
+const CERT_RESOLVER_RE = /^[A-Za-z\d_-]{1,64}$/;
+
+/** Resolves the Traefik certificate resolver the published routers name. */
+function resolveCertResolver(sources: Sources): string | undefined {
+  const origin: Origin = ORIGINS.traefikCertResolver;
+  const written = resolve("traefikCertResolver", sources);
+  if (written === undefined) return undefined;
+
+  if (!CERT_RESOLVER_RE.test(written)) {
+    throw new ScafoError("invalid-input", "Invalid configuration value", {
+      detail:
+        `"${origin.file}" (--${origin.flag}, or ${origin.env.join(" or ")}) must name a ` +
+        `certificate resolver of Traefik's own static configuration — up to 64 letters, digits, ` +
+        `hyphens and underscores, such as "letsencrypt" — got ${JSON.stringify(written)}`,
+    });
+  }
+  return written;
 }
 
 /** Resolves Traefik entry points from a repeated flag, comma text or JSON. Empty

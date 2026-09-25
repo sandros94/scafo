@@ -143,6 +143,7 @@ export function hintingStore(inner: CasStore, opts?: HintingStoreOptions): CasSt
   return {
     get: (key) => inner.get(key),
     getBytes: (key, getOpts) => inner.getBytes(key, getOpts),
+    head: (key) => inner.head(key),
     list: (prefix) => inner.list(prefix),
     listEntries: (prefix) => inner.listEntries(prefix),
 

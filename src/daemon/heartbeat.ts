@@ -37,10 +37,12 @@ export interface HeartbeatOptions {
  * Builds a heartbeat loop. Failures are recorded and retried within liveness
  * tolerance.
  *
- * Each beat also publishes what the node serves, read off the reconcile loop —
- * but only once that loop has run: before its first pass the node has not
- * looked at its own processes, and a record saying "nothing" would pull every
- * route to this node for the seconds until it does.
+ * Each beat also publishes what the node serves — the processes that have
+ * answered for themselves — and what it cannot keep running, read off the
+ * reconcile loop and this node's health tracker, but only once that loop has run:
+ * before its first pass the node has not looked at its own processes, and a
+ * record saying "nothing" would pull every route to this node for the seconds
+ * until it does.
  */
 export function createHeartbeat(daemon: DaemonContext, opts?: HeartbeatOptions): Heartbeat {
   const intervalMs = opts?.intervalMs ?? NODE_HEARTBEAT_INTERVAL_MS;
@@ -53,13 +55,26 @@ export function createHeartbeat(daemon: DaemonContext, opts?: HeartbeatOptions):
 
   async function once(): Promise<void> {
     try {
+      const health = daemon.processHealth;
       const reconcile = daemon.reconciler?.status();
       lastBeatAt = await heartbeatNode(
         daemon.registry,
         daemon.nodeId,
         reconcile === undefined || reconcile.lastRunAt === null
           ? undefined
-          : { serving: servingOf(reconcile.processes) },
+          : {
+              serving: servingOf(reconcile.processes, {
+                /* What answers, not what runs: a node with no health tracker
+                   vouches for nothing and therefore publishes nothing. */
+                ready: health?.readyApplications() ?? new Set<string>(),
+                ...(health === undefined ? {} : { failing: health.crashLooping() }),
+              }),
+              /* Said on every beat that says what is served, and said as `{}`
+                 when nothing is failing: the two are one look at this node's
+                 processes, and a node that recovered has to be able to take the
+                 word back. */
+              ...(health === undefined ? {} : { failing: health.failing() ?? {} }),
+            },
       );
       lastFailure = null;
     } catch (error) {

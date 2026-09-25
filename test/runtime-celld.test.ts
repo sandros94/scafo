@@ -1,4 +1,6 @@
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createServer, type RequestListener, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -414,6 +416,96 @@ describe("a pair this node released", () => {
     clock += 60_001;
     expect((await revived.ports("blog")).ports.public).toBeGreaterThanOrEqual(51_000);
   });
+});
+
+/*
+ * The one question that decides whether a process is published: has it answered
+ * for itself? It is asked over a real socket, because what the defect turned on
+ * was a port that was open in a node's bookkeeping and closed on the machine.
+ */
+describe("asking a process whether it is serving", () => {
+  const servers: Server[] = [];
+
+  afterEach(async () => {
+    for (const server of servers.splice(0)) {
+      await new Promise<void>((settle) => server.close(() => settle()));
+    }
+  });
+
+  /** A listener on loopback that answers every request with `handle`. */
+  async function listening(handle: RequestListener): Promise<number> {
+    const server = createServer(handle);
+    servers.push(server);
+    await new Promise<void>((settle) => server.listen(0, "127.0.0.1", () => settle()));
+    return (server.address() as AddressInfo).port;
+  }
+
+  /** The port nothing is listening on, so a dial to it is refused at once. */
+  async function closedPort(): Promise<number> {
+    const server = createServer();
+    await new Promise<void>((settle) => server.listen(0, "127.0.0.1", () => settle()));
+    const { port } = server.address() as AddressInfo;
+    await new Promise<void>((settle) => server.close(() => settle()));
+    return port;
+  }
+
+  it("asks the public port for the health path a Celld process answers on", async () => {
+    const asked: Array<{ url: string | undefined; host: string | undefined }> = [];
+    const port = await listening((request, response) => {
+      asked.push({ url: request.url, host: request.headers.host });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end('{"ok":true}');
+    });
+    const driver = createCelldDriver(driverOptions());
+
+    expect(await driver.ready({ application: "shop", host: "127.0.0.1", port })).toBe(true);
+    expect(asked).toEqual([
+      { url: "/.well-known/celld/health", host: `127.0.0.1:${String(port)}` },
+    ]);
+  });
+
+  it("takes any 2xx for an answer and nothing else", async () => {
+    const driver = createCelldDriver(driverOptions());
+    const statuses: Array<[number, boolean]> = [
+      [200, true],
+      [204, true],
+      [404, false],
+      [500, false],
+      [503, false],
+    ];
+
+    for (const [status, ready] of statuses) {
+      const port = await listening((_request, response) => {
+        response.writeHead(status);
+        response.end();
+      });
+      expect(
+        await driver.ready({ application: "shop", host: "127.0.0.1", port }),
+        `HTTP ${String(status)}`,
+      ).toBe(ready);
+    }
+  });
+
+  /* The whole point: a spawned process holds its port before anything listens. */
+  it("answers no for a refused connection rather than raising", async () => {
+    const driver = createCelldDriver(driverOptions());
+
+    expect(
+      await driver.ready({ application: "shop", host: "127.0.0.1", port: await closedPort() }),
+    ).toBe(false);
+  });
+
+  it("answers no for a listener that accepts and never replies, within its own bound", async () => {
+    const driver = createCelldDriver(driverOptions());
+    const port = await listening(() => {
+      /* Accepted, and left hanging: the shape of a process that is up and stuck. */
+    });
+
+    const started = Date.now();
+    expect(await driver.ready({ application: "shop", host: "127.0.0.1", port })).toBe(false);
+    /* Bounded well inside a reconcile interval, so a pass never waits on it. */
+    expect(Date.now() - started).toBeLessThan(4000);
+  }, 10_000);
 });
 
 function specInput(overrides?: Partial<RuntimeSpecInput>): RuntimeSpecInput {

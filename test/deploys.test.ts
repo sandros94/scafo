@@ -1664,6 +1664,7 @@ function watchingDeployRecords(inner: CasStore, states: string[]): CasStore {
   return {
     get: (key) => inner.get(key),
     getBytes: (key, opts) => inner.getBytes(key, opts),
+    head: (key) => inner.head(key),
     put: (key, body, cas) => {
       if (key.startsWith(deploysPrefix(APPLICATION)) && typeof body === "string") {
         states.push((JSON.parse(body) as DeployRecord).state);

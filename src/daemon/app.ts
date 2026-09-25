@@ -33,6 +33,7 @@ import type {
   NodeVersions,
 } from "../core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../core/types/supervisor.ts";
+import type { ProcessHealthTracker, ProcessHealthView } from "./_process-health.ts";
 import { isHost } from "../core/utils/host.ts";
 import { assertSlug } from "../core/utils/slug.ts";
 import type { AssignmentFailure } from "./_assign.ts";
@@ -72,6 +73,13 @@ export interface DaemonContext {
    */
   view?: RegistryView;
   supervisor: Supervisor;
+  /**
+   * What this node knows about the processes it supervises: how often each has
+   * exited, when it last did, and what it said on the way out. Absent on a node
+   * that supervises nothing, and every surface that reads it treats that as
+   * "nothing to report" rather than "everything is fine".
+   */
+  processHealth?: ProcessHealthTracker;
   /**
    * The binaries this daemon booted with, and what its node record reports. The
    * Scafo half is what `GET /.well-known/scafo/health` answers with, and the
@@ -140,6 +148,33 @@ export interface CoordinatorView {
   unplaced?: AssignmentFailure[];
 }
 
+/**
+ * One supervised process as `GET /v1/state` reports it: what the supervisor
+ * holds, and what this node's health tracker has watched it do.
+ *
+ * The health half is absent only for a process the tracker has never been told
+ * about — one adopted by a daemon that restarted under it — and a reader takes
+ * that for "not known" rather than for "healthy".
+ */
+export interface SupervisedProcess extends ProcessStatus {
+  /** The word every surface reports this process with. */
+  health?: ProcessHealthView["health"];
+  /**
+   * Whether the run now going has answered its own health endpoint. Only a ready
+   * process is in the node record's `serving`, so this is what says WHY an
+   * application a node is running is not being routed to it.
+   */
+  ready?: boolean;
+  /** When it answered, ISO-8601; absent for a process that has not. */
+  readyAt?: string;
+  /** Exits in a row with no run between them that served. */
+  restarts?: number;
+  /** The last exit, when there has been one. */
+  lastExit?: ProcessHealthView["lastExit"];
+  /** When a start is being held back, until when. */
+  retryAt?: string;
+}
+
 /** Body of `GET /v1/state`: what this node believes about itself right now. */
 export interface DaemonState {
   /** This node's registry record; null until it has registered. */
@@ -148,7 +183,7 @@ export interface DaemonState {
   lease: CoordinatorLease | null;
   /** Effective coordinator election result; expired lease records produce null. */
   coordinator: CoordinatorView | null;
-  processes: ProcessStatus[];
+  processes: SupervisedProcess[];
   /** Placement views. Missing placement is pending, never implicit assignment. */
   placements: PlacementView[];
   /** Last pass of the reconcile loop; absent on a node that runs no loop. */
@@ -209,7 +244,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
         node: node?.value ?? null,
         lease: lease?.value ?? null,
         coordinator: coordinatorView(daemon, lease?.value ?? null),
-        processes: daemon.supervisor.list(),
+        processes: supervisedProcesses(daemon),
         /* Reuse reconciliation's placement snapshot. */
         placements: reconcile?.placements ?? [],
         ...(reconcile === undefined ? {} : { reconcile }),
@@ -328,6 +363,52 @@ export function createNodeApp(daemon: DaemonContext): H3 {
  * not moved for a whole liveness window, which is the only case where the
  * question can have a different answer. Nothing is written: a poll is a read.
  */
+/**
+ * The supervisor's own list, each entry carrying what the health tracker has
+ * watched that process do.
+ *
+ * A PROCESS THE TRACKER KNOWS AND THE SUPERVISOR DOES NOT IS STILL REPORTED: a
+ * crash-looping process spends most of its life exited and waiting for its next
+ * start, and a document that listed only what is running this instant would show
+ * nothing at all for exactly the application somebody is asking about.
+ */
+function supervisedProcesses(daemon: DaemonContext): SupervisedProcess[] {
+  const views = daemon.processHealth?.views() ?? {};
+  const processes: SupervisedProcess[] = daemon.supervisor.list().map((status) => ({
+    ...status,
+    ...healthOf(views[status.id]),
+  }));
+
+  const listed = new Set(processes.map((process) => process.id));
+  for (const [application, view] of Object.entries(views)) {
+    if (listed.has(application)) continue;
+    processes.push({
+      id: application,
+      state: "exited",
+      startedAt: view.startedAt ?? view.lastExit?.at ?? "",
+      ...(view.lastError === undefined ? {} : { lastError: view.lastError }),
+      ...healthOf(view),
+    });
+  }
+  return processes.sort((a, b) => (a.id === b.id ? 0 : a.id < b.id ? -1 : 1));
+}
+
+/** The health half of one process's entry, or nothing when it is not tracked. */
+function healthOf(view: ProcessHealthView | undefined): Partial<SupervisedProcess> {
+  if (view === undefined) return {};
+  return {
+    health: view.health,
+    ready: view.ready,
+    ...(view.readyAt === undefined ? {} : { readyAt: view.readyAt }),
+    restarts: view.restarts,
+    ...(view.lastExit === undefined ? {} : { lastExit: view.lastExit }),
+    ...(view.retryAt === undefined ? {} : { retryAt: view.retryAt }),
+    /* The tracker's tail outlives the supervisor id, so it is what a caller
+       reads once the process it came from has been forgotten. */
+    ...(view.lastError === undefined ? {} : { lastError: view.lastError }),
+  };
+}
+
 async function judgeAbandoned(daemon: DaemonContext, record: DeployRecord): Promise<DeployRecord> {
   const now = nowDate(daemon.registry);
   if (!isDeployIdle(record, now) || isDeployTerminal(record.state)) return record;

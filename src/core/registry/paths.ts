@@ -3,6 +3,7 @@
 import { ScafoError } from "../error.ts";
 import { assertHost } from "../utils/host.ts";
 import { assertSlug, isSlug } from "../utils/slug.ts";
+import { CELLD_NODE_NAME_RE } from "./_celld-contract.ts";
 
 /** Prefix all registry documents live under. */
 const ROOT = "_scafo";
@@ -442,6 +443,54 @@ export function deployImagesPrefix(application: string): string {
  */
 export function deployQueuesPrefix(application: string): string {
   return `${deployPrefix(application)}queues/`;
+}
+
+/**
+ * Prefix Celld files one application fleet's node leases under: one
+ * `<node>.json` per Celld node, the record a process must read or create before
+ * it has any authority at all.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/node_log.rs#L496-L498 (v0.5.0)
+ *
+ * Only `scafo app lease` reads or deletes under this prefix, one key at a time
+ * and only on an operator's word: a node's lease is the fence its peers judge it
+ * by, and nothing automatic here may touch one.
+ */
+export function celldNodesPrefix(application: string): string {
+  return `${fleetPrefix(application)}/nodes/`;
+}
+
+/**
+ * One node's lease key within an application's fleet.
+ *
+ * The name is validated against CELLD's rule rather than scafo's, because what
+ * may be addressed here is whatever Celld has actually filed: scafo starts every
+ * process under a node id of its own, but a fleet that once ran unsupervised
+ * carries leases under names Celld chose, and a lease that cannot be named
+ * cannot be dropped. Throws `ScafoError("invalid-slug")` otherwise — the charset
+ * is the fence that keeps a name from carrying a path segment out of the prefix.
+ */
+export function celldNodeLeaseKey(application: string, node: string): string {
+  if (!CELLD_NODE_NAME_RE.test(node)) {
+    throw new ScafoError("invalid-slug", "Invalid Celld node name", {
+      detail:
+        `"${node}" must be 1-128 ASCII alphanumerics, underscores, hyphens or dots, and ` +
+        `neither "." nor ".."`,
+    });
+  }
+  return `${celldNodesPrefix(application)}${node}.json`;
+}
+
+/**
+ * The Celld node a key under {@link celldNodesPrefix} names, or null when the
+ * key is no node lease: anything else that turns up under the prefix is left
+ * alone, exactly as prune leaves what it cannot read as a deployment.
+ */
+export function parseCelldNodeLeaseKey(application: string, key: string): string | null {
+  const prefix = celldNodesPrefix(application);
+  if (!key.startsWith(prefix) || !key.endsWith(".json")) return null;
+
+  const node = key.slice(prefix.length, -".json".length);
+  return CELLD_NODE_NAME_RE.test(node) ? node : null;
 }
 
 /**

@@ -3,19 +3,20 @@
  * This implementation will be superseded once upstream provides a native approach.
  *    TRACKED IN: https://github.com/denoland/celld/issues/181
  *
- * `scafo deployment prune` is the one place scafo reads and deletes inside
- * Celld's own keyspace, and Celld is alpha: it changes these formats between
- * releases. Everything prune pins itself to lives here, each constant beside a
- * permalink to the upstream lines it mirrors, pinned to the commit of a tag so
- * the link says what the code said rather than what `main` says today.
+ * `scafo deployment prune` and `scafo app lease` are the two places scafo reads
+ * and deletes inside Celld's own keyspace, and Celld is alpha: it changes these
+ * formats between releases. Everything they pin themselves to lives here, each
+ * constant beside a permalink to the upstream lines it mirrors, pinned to the
+ * commit of a tag so the link says what the code said rather than what `main`
+ * says today.
  *
  * ADDING A RELEASE, in this order: run the end-to-end prune case against a
  * bucket that release wrote; re-check every permalinked site below and in
- * `prune.ts` and `paths.ts` against the new tag; then add the release here,
- * together with any marker value the new tag introduced, permalinked to it.
- * KEEP THE OLD VALUES AND THE OLD LINKS — an installation is upgraded one
- * machine at a time, and a fleet still on the older release is still writing
- * what that release wrote.
+ * `prune.ts`, `celld-lease.ts` and `paths.ts` against the new tag; then add the
+ * release here, together with any marker value the new tag introduced,
+ * permalinked to it. KEEP THE OLD VALUES AND THE OLD LINKS — an installation is
+ * upgraded one machine at a time, and a fleet still on the older release is
+ * still writing what that release wrote.
  *
  * THE LAYOUT these markers live in, as one `celld deploy` writes it:
  *   `deploy/<script>/<version>/`
@@ -114,6 +115,51 @@ export const DEPLOYMENT_FEATURES: readonly string[] = [
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L2426-L2427 (v0.5.0)
  */
 export const ASSET_INDEX_SCHEMA_VERSION: number = 1;
+
+/**
+ * THE NODE LEASE, the one record a Celld process must be able to replace before
+ * it has any authority at all: `fleets/<application>/nodes/<node>.json`, filed
+ * under the node's own name, which for a scafo installation is the scafo node id
+ * and is therefore the SAME KEY on every restart of that machine.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/ownership_store.rs#L932 (v0.5.0)
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/node_log.rs#L496-L498 (v0.5.0)
+ *
+ * A process that can neither read nor create it never establishes authority and
+ * exits, over and over, on the same key:
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/main.rs#L4561 (v0.5.0)
+ *
+ * THE MINIMAL SHAPE below is what upstream REQUIRES of that object's JSON —
+ * `node` and `expires_ms`, every other field carrying a serde default — so it is
+ * also the whole of what says whether a body found there is a node lease at all.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/ownership_store.rs#L32-L67 (v0.5.0)
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/ownership_store.rs#L179-L197 (v0.5.0)
+ */
+export interface CelldNodeLease {
+  /**
+   * The node the lease is held BY, which upstream's own reaper requires to equal
+   * the node the key is filed UNDER before it will collect the record.
+   *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/logic/dead_node_reconciliation.rs#L36-L44 (v0.5.0)
+   */
+  node: string;
+  /**
+   * When the lease runs out, in epoch milliseconds of wall time. The liveness
+   * rule is `expires_ms > now_ms` and it is upstream's everywhere: membership,
+   * rebalancing, draining and the dead-node reaper all read it that way.
+   *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/logic/drain.rs#L34-L37 (v0.5.0)
+   *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/logic/dead_node_reconciliation.rs#L36-L44 (v0.5.0)
+   */
+  expires_ms: number;
+}
+
+/**
+ * A node name Celld admits, and so the only kind of name a lease key carries:
+ * one to 128 bytes of ASCII alphanumerics, `_`, `-` and `.`, and never `.` or
+ * `..`. WIDER THAN `NODE_ID_RE` in `paths.ts`, on purpose — scafo only ever writes its
+ * own node ids here, but a lease left behind by a Celld that named itself is
+ * still a lease an operator must be able to name and drop.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/logic/peer.rs#L14-L25 (v0.5.0)
+ */
+export const CELLD_NODE_NAME_RE: RegExp = /^(?!\.{1,2}$)[A-Za-z\d_.-]{1,128}$/;
 
 /** The verified releases as a refusal names them. */
 export function verifiedReleaseList(): string {

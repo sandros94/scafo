@@ -36,6 +36,13 @@ describe("what the in-memory store lists about an object", () => {
     expect(after[0]?.etag).not.toBe(first.etag);
   });
 
+  it("says how many bytes an object holds, which is what an operator reads beside a HEAD", async () => {
+    const store = new MemoryCasStore();
+    await store.put("k/a.json", `{"n":1}`);
+
+    expect((await store.listEntries("k/"))[0]?.size).toBe(7);
+  });
+
   it("conditions a write on an ETag it listed and nothing else", async () => {
     const store = new MemoryCasStore();
     await store.put("k/a.json", `{"n":1}`);
@@ -47,5 +54,23 @@ describe("what the in-memory store lists about an object", () => {
     await expect(store.put("k/a.json", `{"n":3}`, { ifMatch: listed })).rejects.toMatchObject({
       code: "cas-conflict",
     });
+  });
+});
+
+describe("what the in-memory store says about an object without reading it", () => {
+  it("answers a HEAD with the same ETag, size and time the listing carries", async () => {
+    const store = new MemoryCasStore();
+    const written = await store.put("k/a.json", `{"n":1}`);
+
+    const head = await store.head("k/a.json");
+    const listed = (await store.listEntries("k/"))[0];
+
+    expect(head?.etag).toBe(written.etag);
+    expect(head?.size).toBe(listed?.size);
+    expect(head?.lastModified).toEqual(listed?.lastModified);
+  });
+
+  it("answers nothing for a key that does not exist", async () => {
+    await expect(new MemoryCasStore().head("k/gone.json")).resolves.toBeNull();
   });
 });

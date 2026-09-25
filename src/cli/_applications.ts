@@ -12,6 +12,7 @@
 import { ScafoError } from "../core/error.ts";
 import { assertClaimableHost } from "../core/placement/hosts.ts";
 import { hostUnder } from "../core/placement/routes.ts";
+import type { ApplicationServing } from "../core/placement/serving.ts";
 import { describeSelector } from "../core/placement/selector.ts";
 import { getApplication } from "../core/registry/applications.ts";
 import type { RegistryContext } from "../core/registry/context.ts";
@@ -46,6 +47,12 @@ export interface DomainChange {
   host: string;
   /** Where the application answers under the installation's platform domains. */
   platformHosts: string[];
+  /**
+   * The host this installation's ingress answers DNS-01 at, when it names one:
+   * where `_acme-challenge.<host>` is pointed so a wildcard certificate for the
+   * claim can be issued. Absent where the installation names none.
+   */
+  acmeDelegation?: string;
 }
 
 /** What the per-application subcommands do, whichever way they reach the installation. */
@@ -156,6 +163,12 @@ export interface DirectOptions {
    * not know them can say.
    */
   platformDomains?: string[];
+  /**
+   * The installation's DNS-01 delegation name, read from the same configuration
+   * — so a claim made straight into the bucket reads the same sentence a node
+   * would have answered with.
+   */
+  acmeDelegation?: string;
 }
 
 /**
@@ -197,6 +210,7 @@ export function directOps(registry: RegistryContext, opts?: DirectOptions): Appl
       platformHosts: platformDomains
         .map((domain) => hostUnder(domain, name))
         .filter((named): named is string => named !== null),
+      ...(opts?.acmeDelegation === undefined ? {} : { acmeDelegation: opts.acmeDelegation }),
     };
   };
 
@@ -245,12 +259,23 @@ export interface ApplicationListing {
   scoped?: true;
 }
 
+/**
+ * One application as `scafo app show` reads it: the record, and what the
+ * fleet's own node records say is happening to it.
+ */
+export interface ApplicationView {
+  application: ApplicationRecord;
+  /** Where it is really running. Absent from a node too old to report it. */
+  serving?: ApplicationServing;
+}
+
 /** The admin-only half of the application surface, signed for by one key. */
 export interface ApplicationApi {
   /** Where these calls go, for whatever reports what was done and to whom. */
   via: string;
   list(): Promise<ApplicationListing>;
-  show(name: string): Promise<ApplicationRecord>;
+  /** The record and, beside it, how much of the fleet is actually serving it. */
+  show(name: string): Promise<ApplicationView>;
   block(name: string): Promise<ApplicationRecord>;
   unblock(name: string): Promise<ApplicationRecord>;
   setLabels(name: string, labels: Record<string, string>): Promise<ApplicationRecord>;
@@ -280,10 +305,13 @@ export function applicationApi(opts: NodeOptions): ApplicationApi {
       };
     },
 
-    async show(name): Promise<ApplicationRecord> {
+    async show(name): Promise<ApplicationView> {
       assertSlug(name);
-      const answer = await request(at(`/${name}`), opts, call("GET"));
-      return (answer as { application: ApplicationRecord }).application;
+      const answer = (await request(at(`/${name}`), opts, call("GET"))) as ApplicationView;
+      return {
+        application: answer.application,
+        ...(answer.serving === undefined ? {} : { serving: answer.serving }),
+      };
     },
 
     block: (name) => verb(name, "block"),
@@ -363,12 +391,15 @@ export function formatApplicationTable(listing: ApplicationListing): string {
 }
 
 /** One application as `scafo app show` prints it. */
-export function formatApplication(application: ApplicationRecord): string {
+export function formatApplication(
+  application: ApplicationRecord,
+  serving?: ApplicationServing,
+): string {
   const deployment = application.deployment;
   const lines = [
     `scafo: application "${application.name}"`,
     ``,
-    `  state       ${stateOf(application)}`,
+    `  state       ${stateOf(application, serving)}`,
     `  created     ${application.createdAt}`,
     `  deployment  ${
       deployment === null
@@ -399,7 +430,36 @@ export function formatApplication(application: ApplicationRecord): string {
       `  puts it all back on the next pass of every node.`,
     );
   }
+  lines.push(...describeFailingNodes(serving));
   return lines.join("\n");
+}
+
+/**
+ * The nodes that hold this application and cannot keep it running, one line
+ * each, with the last thing its process said there.
+ *
+ * SAID IN THE APPLICATION'S OWN SUMMARY, because this is where somebody looks
+ * when a tenant says the site is up and down: without it, an application served
+ * by two nodes out of three and crash-looping on the third reads exactly like
+ * one that is fine.
+ */
+function describeFailingNodes(serving: ApplicationServing | undefined): string[] {
+  if (serving === undefined || serving.failing.length === 0) return [];
+
+  const lines = [
+    ``,
+    `  Failing on ${String(serving.failing.length)} of ${String(serving.nodes)} ` +
+      `node${serving.nodes === 1 ? "" : "s"}. Scafo keeps restarting the process and`,
+    `  never repairs the runtime's own state; the last words are the runtime's:`,
+  ];
+  for (const failure of serving.failing) {
+    lines.push(
+      `    ${failure.node}  ${String(failure.restarts)} restart` +
+        `${failure.restarts === 1 ? "" : "s"} since ${failure.since}` +
+        (failure.lastError === undefined ? "" : `: ${failure.lastError}`),
+    );
+  }
+  return lines;
 }
 
 /** How a wildcard claim is marked wherever a host is printed. */
@@ -494,9 +554,19 @@ export function describeReplicasChange(name: string, application: ApplicationRec
 
 /* ---------------------------------------------------------------- internals */
 
-function stateOf(application: ApplicationRecord): string {
+/**
+ * The one word — or the one phrase — for what is happening to an application.
+ *
+ * A PLAIN "serving" IS A CLAIM, and it is only made when nothing contradicts
+ * it. A live node reporting the application as failing is exactly such a
+ * contradiction, so the state says how much of the fleet is really answering
+ * for it and the lines beneath say which node is not.
+ */
+function stateOf(application: ApplicationRecord, serving?: ApplicationServing): string {
   if (application.blocked === true) return "blocked";
-  return application.retiredAt === undefined ? "serving" : "retired";
+  if (application.retiredAt !== undefined) return "retired";
+  if (serving === undefined || serving.failing.length === 0) return "serving";
+  return `serving on ${String(serving.serving)} of ${String(serving.nodes)} nodes`;
 }
 
 function formatLabels(labels: Record<string, string>): string {

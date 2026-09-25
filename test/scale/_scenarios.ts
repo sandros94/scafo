@@ -46,6 +46,7 @@ import type { DaemonConfig } from "../../src/daemon/config.ts";
 import { DEFAULT_QUEUE_TIMEOUT_MS } from "../../src/daemon/_deploy-scheduler.ts";
 import { createDeployService, type DeployStatus } from "../../src/daemon/deploys.ts";
 import { createHeartbeat } from "../../src/daemon/heartbeat.ts";
+import { createProcessHealth } from "../../src/daemon/_process-health.ts";
 import {
   createReconciler,
   DEFAULT_RECONCILE_INTERVAL_MS,
@@ -754,6 +755,9 @@ export function daemonFor(world: ScaleWorld, id?: string): DaemonContext {
     nodeId,
     registry: world.registry,
     supervisor: idleSupervisor(),
+    /* What every real node keeps, and what decides which of its processes may be
+       published as served: without one a node vouches for nothing. */
+    processHealth: createProcessHealth({ log: () => {} }),
     versions: { scafo: "0.0.0-scale", celld: MIN_CELLD_VERSION },
   };
 }
@@ -1060,6 +1064,9 @@ function specOnlyDriver(): RuntimeDriver {
       args: [],
       env: {},
     }),
+    /* No real listener is dialled, and the question costs the bucket nothing:
+       every process this driver stands for answers at once. */
+    ready: (): Promise<boolean> => Promise.resolve(true),
     /* Nothing is running, so nothing is ever asked to adopt. */
     reload: (): Promise<void> => Promise.resolve(),
   };

@@ -16,7 +16,12 @@
 
 import type { RegistryContext } from "../core/registry/context.ts";
 import { isNodeLive, listNodeRecords, NODE_LIVENESS_WINDOW_MS } from "../core/registry/nodes.ts";
-import type { FreezeRecord, NodeRecord, NodeVersions } from "../core/types/registry.ts";
+import type {
+  FreezeRecord,
+  NodeFailing,
+  NodeRecord,
+  NodeVersions,
+} from "../core/types/registry.ts";
 import { formatLabels } from "../core/utils/labels.ts";
 import { compareVersions } from "../drivers/runtime/celld.ts";
 import { describeFreezeLine } from "./_fleet.ts";
@@ -27,8 +32,16 @@ import { describeFreezeLine } from "./_fleet.ts";
  * `draining` is its own state rather than a flavour of `lost` because the two
  * mean opposite things about the operator's day: a draining node said it was
  * leaving and is doing so in order, while a lost one stopped saying anything.
+ *
+ * `degraded` is a LIVE node that cannot keep one of its applications running.
+ * It is said here rather than left to the application's own listing because of
+ * what the failure looks like from outside: the machine answers, it heartbeats,
+ * it is a placement candidate and it is serving everything else — and the one
+ * application whose process exits every few seconds is invisible in every one
+ * of those facts. A node that says `live` while it is dropping a tenant's
+ * traffic is the sentence this state exists to stop being printed.
  */
-export type NodeState = "live" | "draining" | "lost";
+export type NodeState = "live" | "degraded" | "draining" | "lost";
 
 /** One node as this listing reads it. */
 export interface NodeListing {
@@ -45,6 +58,8 @@ export interface NodeListing {
   versions?: NodeVersions;
   /** When it said it was leaving. Only ever set on a `draining` node. */
   drainingAt?: string;
+  /** What it says it cannot keep running, as its own record reports it. */
+  failing?: NodeFailing;
 }
 
 /** Every registered node, in id order, judged against `now`. */
@@ -59,16 +74,26 @@ export async function listFleetNodes(
 /** One record as the listing reads it. Pure, so the caller decides what "now" is. */
 export function readNode(record: NodeRecord, now: Date): NodeListing {
   const seenAt = record.heartbeatAt;
+  const failing = record.failing;
+  const degraded = failing !== undefined && Object.keys(failing).length > 0;
 
   return {
     id: record.id,
-    state: record.drainingAt !== undefined ? "draining" : isNodeLive(record, now) ? "live" : "lost",
+    state:
+      record.drainingAt !== undefined
+        ? "draining"
+        : !isNodeLive(record, now)
+          ? "lost"
+          : degraded
+            ? "degraded"
+            : "live",
     ...(seenAt === undefined ? {} : { seenAt }),
     internal: record.addresses.internal,
     apiPort: record.addresses.apiPort,
     labels: record.labels ?? {},
     ...(record.versions === undefined ? {} : { versions: record.versions }),
     ...(record.drainingAt === undefined ? {} : { drainingAt: record.drainingAt }),
+    ...(degraded ? { failing } : {}),
   };
 }
 
@@ -92,7 +117,11 @@ export function formatNodeTable(
     );
   }
 
-  const live = nodes.filter((node) => node.state === "live").length;
+  /* A degraded node is still live for placement, and is counted as one: what
+     it is not is a node that can be assumed to be serving everything it holds,
+     which the block under the table is for. */
+  const live = nodes.filter((node) => node.state === "live" || node.state === "degraded").length;
+  const degraded = nodes.filter((node) => node.state === "degraded");
   const rows = nodes.map((node) => [
     node.id,
     node.state,
@@ -110,8 +139,9 @@ export function formatNodeTable(
   );
 
   const lines = [
-    `scafo: ${String(nodes.length)} node${nodes.length === 1 ? "" : "s"}, ${String(live)} live ` +
-      `(a node counts as live for ${String(NODE_LIVENESS_WINDOW_MS / 1000)}s after it last ` +
+    `scafo: ${String(nodes.length)} node${nodes.length === 1 ? "" : "s"}, ${String(live)} live` +
+      (degraded.length === 0 ? "" : `, ${String(degraded.length)} degraded`) +
+      ` (a node counts as live for ${String(NODE_LIVENESS_WINDOW_MS / 1000)}s after it last ` +
       `said so)`,
     /* Above the version rolls, because a frozen fleet is usually a fleet part
        way through the upgrade those rolls are measuring. */
@@ -120,8 +150,40 @@ export function formatNodeTable(
     formatVersionRoll("scafo", nodes, (versions) => versions.scafo),
     "",
     ...[head, ...rows].map((row) => `  ${row.map(pad(width)).join("  ").trimEnd()}`),
+    ...describeDegraded(degraded),
   ];
   return lines.join("\n");
+}
+
+/**
+ * What a degraded node cannot keep running, beneath the table: one line per
+ * application, with how often it has been restarted and the last thing it said.
+ *
+ * SAID IN FULL RATHER THAN COUNTED. "1 degraded" in the header tells an operator
+ * to go looking; the whole point of carrying this in the node record is that
+ * they do not have to, and that the machine they would have to log into is the
+ * one that is failing.
+ */
+function describeDegraded(nodes: NodeListing[]): string[] {
+  const lines: string[] = [];
+  for (const node of nodes) {
+    const failing = Object.entries(node.failing ?? {}).sort(([a], [b]) => (a < b ? -1 : 1));
+    if (failing.length === 0) continue;
+
+    lines.push(
+      "",
+      `  ${node.id} cannot keep ${String(failing.length)} ` +
+        `application${failing.length === 1 ? "" : "s"} running:`,
+    );
+    for (const [application, failure] of failing) {
+      lines.push(
+        `    ${application}  ${String(failure.restarts)} restart` +
+          `${failure.restarts === 1 ? "" : "s"} since ${failure.since}` +
+          (failure.lastError === undefined ? "" : `: ${failure.lastError}`),
+      );
+    }
+  }
+  return lines;
 }
 
 /* ---------------------------------------------------------------- internals */

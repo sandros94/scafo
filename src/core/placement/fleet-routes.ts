@@ -2,7 +2,7 @@
 
 import type { FleetApiRouting, FleetRoute, FleetRouting, FleetUpstream } from "../types/ingress.ts";
 import type { ApplicationRecord, NodeRecord } from "../types/registry.ts";
-import { formatHostPort } from "../utils/host.ts";
+import { formatHostPort, wildcardBase } from "../utils/host.ts";
 import { isNodeLive } from "../registry/nodes.ts";
 import { hostBindings } from "./host-bindings.ts";
 import { API_DENIED_PREFIXES } from "./routes.ts";
@@ -79,10 +79,12 @@ export function renderFleetRouting(input: RenderFleetRoutingInput): FleetRouting
   }
 
   const api = input.api === true ? apiRouting(input.platformDomains, live, routes) : undefined;
+  const wildcards = wildcardBases(input.platformDomains, routes);
 
   return {
     v: 1,
     routes: [...routes.keys()].sort(compare).map((host) => routes.get(host) as FleetRoute),
+    ...(wildcards.length === 0 ? {} : { wildcards }),
     ...(api === undefined ? {} : { api }),
   };
 }
@@ -105,6 +107,25 @@ export function preferNode(routing: FleetRouting, nodeId: string): FleetRouting 
       ? {}
       : { api: { ...routing.api, upstreams: first(routing.api.upstreams) } }),
   };
+}
+
+/**
+ * The bases a `*.BASE` certificate is wanted for, sorted and without repeats.
+ *
+ * Every platform domain, because an application is always served at its name
+ * one label under one — whether anything is deployed right now or not, since an
+ * ingress obtains a certificate before it can answer the first request on it.
+ * Then the base of every wildcard KEY this render published, which is a claim
+ * made with its subdomains whose holder something is currently answering for:
+ * the entry is the question, so the answer cannot disagree with it.
+ */
+function wildcardBases(platformDomains: string[], routes: Map<string, FleetRoute>): string[] {
+  const bases = new Set(platformDomains);
+  for (const host of routes.keys()) {
+    const base = wildcardBase(host);
+    if (base !== null) bases.add(base);
+  }
+  return [...bases].sort(compare);
 }
 
 /** Every live node serving `application`, in node order, at the port it named. */

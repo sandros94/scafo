@@ -205,6 +205,7 @@ describe("createCoordinator", () => {
         return inner.get(key);
       },
       getBytes: (key, opts) => inner.getBytes(key, opts),
+      head: (key) => inner.head(key),
       put: (key, body, cas) => inner.put(key, body, cas),
       del: (key) => inner.del(key),
       list: (prefix) => inner.list(prefix),
@@ -229,6 +230,7 @@ describe("createCoordinator", () => {
     clock.ctx.store = {
       get: (key) => inner.get(key),
       getBytes: (key, opts) => inner.getBytes(key, opts),
+      head: (key) => inner.head(key),
       put: async (key, body, cas) => {
         if (key === coordinatorKey() && !stalled) {
           stalled = true;

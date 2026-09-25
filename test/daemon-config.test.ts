@@ -1641,6 +1641,156 @@ describe("the Traefik entryPoints the routers attach to", () => {
   });
 });
 
+describe("the certificate resolver the published Traefik routers name", () => {
+  it("reads it from the flag, the environment or the file alike", async () => {
+    const fromFlag = await loadDaemonConfig({
+      env: REQUIRED_ENV,
+      flags: { "traefik-cert-resolver": "letsencrypt" },
+    });
+    const fromEnv = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_TRAEFIK_CERT_RESOLVER: "letsencrypt" },
+    });
+    const fromFile = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(
+        CONFIG_PATH,
+        JSON.stringify({ ingress: { traefikCertResolver: "letsencrypt" } }),
+      ),
+      env: REQUIRED_ENV,
+    });
+
+    for (const config of [fromFlag, fromEnv, fromFile]) {
+      expect(config.ingress).toEqual({ traefikCertResolver: "letsencrypt" });
+    }
+  });
+
+  it("lets the flag outrank the environment, and the environment the file", async () => {
+    const overriddenByEnv = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { traefikCertResolver: "file" } })),
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_TRAEFIK_CERT_RESOLVER: "env" },
+    });
+    const overriddenByFlag = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { traefikCertResolver: "file" } })),
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_TRAEFIK_CERT_RESOLVER: "env" },
+      flags: { "traefik-cert-resolver": "flag" },
+    });
+
+    expect(overriddenByEnv.ingress?.traefikCertResolver).toBe("env");
+    expect(overriddenByFlag.ingress?.traefikCertResolver).toBe("flag");
+  });
+
+  it("leaves it absent when nothing names one, so the document mentions no TLS", async () => {
+    const config = await loadDaemonConfig({ env: REQUIRED_ENV });
+
+    expect(config.ingress?.traefikCertResolver).toBeUndefined();
+  });
+
+  it("refuses anything that is not a name Traefik's own configuration could carry", async () => {
+    for (const written of ["le@internal", "two words", "resolver!", "x".repeat(65)]) {
+      const error = await rejectionOf(() =>
+        loadDaemonConfig({
+          env: { ...REQUIRED_ENV, SCAFO_INGRESS_TRAEFIK_CERT_RESOLVER: written },
+        }),
+      );
+
+      expect(error.code, written).toBe("invalid-input");
+      expect(error.detail, written).toContain("ingress.traefikCertResolver");
+      expect(error.detail, written).toContain("--traefik-cert-resolver");
+      expect(error.detail, written).toContain("SCAFO_INGRESS_TRAEFIK_CERT_RESOLVER");
+    }
+  });
+
+  it("takes the names Traefik admits: letters, digits, hyphens and underscores", async () => {
+    for (const written of ["le", "my-resolver_2", "x".repeat(64)]) {
+      const config = await loadDaemonConfig({
+        env: { ...REQUIRED_ENV, SCAFO_INGRESS_TRAEFIK_CERT_RESOLVER: written },
+      });
+
+      expect(config.ingress?.traefikCertResolver, written).toBe(written);
+    }
+  });
+});
+
+describe("the name this installation solves DNS-01 at", () => {
+  const DELEGATION = "acme.example.com";
+
+  it("reads it from the flag, the environment or the file alike", async () => {
+    const fromFlag = await loadDaemonConfig({
+      env: REQUIRED_ENV,
+      flags: { "ingress-acme-delegation": DELEGATION },
+    });
+    const fromEnv = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_ACME_DELEGATION: DELEGATION },
+    });
+    const fromFile = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { acmeDelegation: DELEGATION } })),
+      env: REQUIRED_ENV,
+    });
+
+    for (const config of [fromFlag, fromEnv, fromFile]) {
+      expect(config.ingress).toEqual({ acmeDelegation: DELEGATION });
+    }
+  });
+
+  it("lets the flag outrank the environment, and the environment the file", async () => {
+    const overriddenByEnv = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { acmeDelegation: "file.test" } })),
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_ACME_DELEGATION: "env.test" },
+    });
+    const overriddenByFlag = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { acmeDelegation: "file.test" } })),
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_ACME_DELEGATION: "env.test" },
+      flags: { "ingress-acme-delegation": "flag.test" },
+    });
+
+    expect(overriddenByEnv.ingress?.acmeDelegation).toBe("env.test");
+    expect(overriddenByFlag.ingress?.acmeDelegation).toBe("flag.test");
+  });
+
+  it("leaves it absent when nothing names one, and says nothing about issuance", async () => {
+    const config = await loadDaemonConfig({ env: REQUIRED_ENV });
+
+    expect(config.ingress?.acmeDelegation).toBeUndefined();
+  });
+
+  it("refuses anything that is not a host, whichever source carried it", async () => {
+    for (const written of ["https://acme.example.com", "acme.example.com.", "ACME.example.com"]) {
+      const error = await rejectionOf(() =>
+        loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_INGRESS_ACME_DELEGATION: written } }),
+      );
+
+      expect(error.code, written).toBe("invalid-input");
+      expect(error.detail, written).toContain("ingress.acmeDelegation");
+      expect(error.detail, written).toContain("--ingress-acme-delegation");
+      expect(error.detail, written).toContain("SCAFO_INGRESS_ACME_DELEGATION");
+    }
+  });
+
+  it("carries both ingress settings beside the token and the entryPoints", async () => {
+    const config = await loadDaemonConfig({
+      env: {
+        ...REQUIRED_ENV,
+        SCAFO_INGRESS_TOKEN: "shared",
+        SCAFO_TRAEFIK_ENTRYPOINTS: "websecure",
+        SCAFO_INGRESS_ACME_DELEGATION: DELEGATION,
+        SCAFO_INGRESS_TRAEFIK_CERT_RESOLVER: "letsencrypt",
+      },
+    });
+
+    expect(config.ingress).toEqual({
+      token: ["shared"],
+      entryPoints: ["websecure"],
+      acmeDelegation: DELEGATION,
+      traefikCertResolver: "letsencrypt",
+    });
+  });
+});
+
 describe("the tokens guarding what the ingress reads", () => {
   it("reads the comma-separated list an operator shares with their ingress", async () => {
     const config = await loadDaemonConfig({

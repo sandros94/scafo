@@ -71,6 +71,16 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     if (entry === undefined || entry.deployment === null) return;
 
     /*
+     * BEFORE ANYTHING IS READ OR SPAWNED: a process that keeps exiting is
+     * started again on a jittered backoff rather than on every pass. A start
+     * costs a fleet listing, a runtime process and a bucket that process then
+     * opens, and a wedged application would otherwise pay all three every five
+     * seconds forever. Nothing is reported here — the pass has not failed, it
+     * is waiting — and `GET /v1/state` carries the deadline it is waiting for.
+     */
+    if (daemon.processHealth?.mayStart(application) === false) return;
+
+    /*
      * ASKED HERE, AS LATE AS THE ANSWER IS STILL USEFUL: the application's Celld
      * fleet takes one version, and the node that would break that is the one
      * about to start a second binary over it. Refused rather than raised, so the
@@ -120,6 +130,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       cleanup = (async (): Promise<void> => {
         try {
           await daemon.supervisor.stop(application, { graceMs: driver.stopGraceMs });
+          daemon.processHealth?.stopped(application);
           quarantined.delete(application);
           known.delete(application);
         } catch (error) {
@@ -139,6 +150,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       signal?.throwIfAborted();
       await daemon.supervisor.start(spec);
       processStarted = true;
+      daemon.processHealth?.started(application);
       signal?.throwIfAborted();
       known.set(application, started);
       observe?.emit({ type: "runtime.started", application });
@@ -153,6 +165,10 @@ export function createExecutor(deps: ExecutorDeps): Executor {
   async function runStop(action: Extract<ReconcileAction, { type: "stop" }>): Promise<void> {
     try {
       await daemon.supervisor.stop(action.application, { graceMs: driver.stopGraceMs });
+      /* A stop the daemon asked for ends this process's history: an application
+         placed here again later starts fresh rather than inheriting the exits
+         of the process that was retired. */
+      daemon.processHealth?.stopped(action.application);
       quarantined.delete(action.application);
       known.delete(action.application);
     } catch (error) {
