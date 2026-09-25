@@ -12,6 +12,10 @@ STATE=/var/lib/scafo
 LOGS=/var/log/scafo-ingress
 
 echo "== stop the previous roll"
+# STOPPED, then removed: `docker rm -f` alone is a SIGKILL, and a node killed
+# while its runtime processes are writing to the bucket leaves them no chance to
+# finish. The 50 seconds are the shutdown grace every recipe allows.
+docker stop --time 50 scafo-node >/dev/null 2>&1 || true
 docker rm -f scafo-node scafo-caddy >/dev/null 2>&1 || true
 wg-quick down wg0 >/dev/null 2>&1 || true
 # The tunnel material is the only thing a roll mints again. THE REST OF THE
