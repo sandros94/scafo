@@ -134,10 +134,6 @@ export interface SeededRegistry {
   serving: Map<string, NodeServing>;
   /** Objects written. */
   keys: number;
-  /** A host under the platform domain that resolves to a served application. */
-  platformHost: string;
-  /** A claimed custom host, or null when the profile claims none. */
-  customHost: string | null;
 }
 
 export interface SeedOptions {
@@ -263,7 +259,6 @@ export async function seedRegistry(
     keys += 2;
   }
 
-  const firstApplication = applications[0] as string;
   return {
     profile,
     applications,
@@ -271,8 +266,6 @@ export async function seedRegistry(
     placements,
     serving,
     keys,
-    platformHost: `${firstApplication}.${PLATFORM_DOMAIN}`,
-    customHost: domains === 0 ? null : customHostOf(firstApplication, 0),
   };
 }
 

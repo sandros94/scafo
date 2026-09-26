@@ -11,7 +11,7 @@
  */
 
 import { ScafoError } from "../error.ts";
-import { familyApplication, isFamilyApplication } from "../placement/hosts.ts";
+import { isFamilyApplication } from "../placement/hosts.ts";
 import type { ApplicationRecord, DomainClaim } from "../types/registry.ts";
 import { normalizeCustomDomain, splitHostLabel } from "../utils/host.ts";
 import { assertApplicationUnblocked, updateApplication } from "./applications.ts";
@@ -200,30 +200,6 @@ export function describeDomainConflict(
 export async function checkDomain(ctx: RegistryContext, host: string): Promise<DomainClaim | null> {
   const found = await readJson<DomainClaim>(ctx, domainKey(host));
   return found === null ? null : found.value;
-}
-
-/**
- * The application a claim NAMES for `host`: the one that claimed it exactly, or
- * — one label under a host claimed with its subdomains — `<holder>-<label>`,
- * which is the application `<holder>-<label>.<platform domain>` already serves.
- *
- * It never answers the wildcard's HOLDER for an arbitrary subdomain, although
- * the routing does route one there. The certificate ask is the caller that needs
- * that difference, and it is where the reasoning lives.
- */
-export async function claimedApplication(
-  ctx: RegistryContext,
-  host: string,
-): Promise<string | null> {
-  const exact = await readJson<DomainClaim>(ctx, domainKey(host));
-  if (exact !== null) return exact.value.application;
-
-  const split = splitHostLabel(host);
-  if (split === null) return null;
-
-  const parent = await readJson<DomainClaim>(ctx, domainKey(split.base));
-  if (parent === null || parent.value.wildcard !== true) return null;
-  return familyApplication(parent.value.application, split.label);
 }
 
 /* ---------------------------------------------------------------- internals */

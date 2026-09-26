@@ -4,13 +4,9 @@ import { H3 } from "h3";
 import { createNodeVerifier, type NodeSigningKey } from "../core/auth/node-token.ts";
 import { createOidcVerifier } from "../core/auth/oidc.ts";
 import { ScafoError } from "../core/error.ts";
-import { platformApplication, platformLabel } from "../core/placement/hosts.ts";
-import { deploymentRevision } from "../core/registry/_revision.ts";
-import { findApplication } from "../core/registry/applications.ts";
 import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
 import type { RegistryView } from "../core/registry/view.ts";
-import { claimedApplication } from "../core/registry/domains.ts";
 import { isLeaseExpired } from "../core/registry/lease.ts";
 import {
   abandonedDeploy,
@@ -26,7 +22,6 @@ import {
   type StagedArtifact,
 } from "../core/types/deploy.ts";
 import type {
-  ApplicationRecord,
   CoordinatorLease,
   DeployRecord,
   NodeRecord,
@@ -34,7 +29,6 @@ import type {
 } from "../core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../core/types/supervisor.ts";
 import type { ProcessHealthTracker, ProcessHealthView } from "./_process-health.ts";
-import { isHost } from "../core/utils/host.ts";
 import { assertSlug } from "../core/utils/slug.ts";
 import type { AssignmentFailure } from "./_assign.ts";
 import { registerIngressRoutes } from "./_ingress-routes.ts";
@@ -194,9 +188,8 @@ export interface DaemonState {
 
 /**
  * Builds the node app. Every route answers failures as RFC 9457 problem
- * documents, and every route but health and the on-demand-TLS ask requires a
- * token: a node, operator or workload token, or on the storage and routing
- * surfaces the ingress token.
+ * documents, and every route but health requires a token: a node, operator or
+ * workload token, or on the storage and routing surfaces the ingress token.
  */
 export function createNodeApp(daemon: DaemonContext): H3 {
   /* Reuse verifiers: node replay detection and OIDC key caches are app-wide. */
@@ -219,16 +212,6 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     version: daemon.versions.scafo,
     node: daemon.nodeId,
   }));
-
-  /* Public certificate-issuance check: answers only whether a public host is served. */
-  app.get("/v1/ingress/ask", async (event): Promise<Response> => {
-    const domain = event.url.searchParams.get("domain") ?? "";
-    if (await servesHost(daemon, domain)) return new Response(null, { status: 200 });
-
-    throw new ScafoError("not-found", "Host is not served here", {
-      detail: `"${domain}" is neither a claimed domain nor a label under a platform domain`,
-    });
-  });
 
   /* Operator tokens receive application-scoped state; peer and admin tokens
      receive the whole document. */
@@ -446,55 +429,6 @@ function coordinatorView(
           unplaced: unplaced.map((entry) => ({ ...entry })),
         }),
   };
-}
-
-/** Returns whether a host is currently certificate-eligible. Retired, missing
- * and blocked applications are refused. */
-async function servesHost(daemon: DaemonContext, host: string): Promise<boolean> {
-  if (!isHost(host)) return false;
-
-  /* Wildcard certificates exclude the bare platform apex, which serves the API
-     only while explicitly public. */
-  if (daemon.config.api.public && daemon.config.platformDomains.includes(host)) return true;
-
-  /* Require a deployed, unretired application before certificate issuance. A
-     host under a platform domain is only ever that application: a claim can
-     never be taken for one. */
-  const label = platformLabel(host, daemon.config.platformDomains);
-  if (label !== null) {
-    const named = platformApplication(host, daemon.config.platformDomains);
-    return named !== null && servesApplication(await findApplication(daemon.registry, named));
-  }
-
-  /*
-   * A CLAIM APPROVES THE NAMES IT CAN NAME, AND NO OTHERS. An exact claim
-   * approves its host; a claim made with its subdomains approves the base, and
-   * one label under it only where that label names an application of this
-   * installation — `<holder>-<label>`, deployed and serving.
-   *
-   * It deliberately does NOT approve an arbitrary name under a wildcard base,
-   * although the routing answers one from the holder's process. On-demand
-   * issuance per unknown subdomain would let anyone burn the certificate
-   * authority's weekly issuance limit for the customer's own domain by asking
-   * for random names, and it is asked over the open internet by whoever sends
-   * the first request. Those names are served over HTTPS where the ingress
-   * already holds a certificate covering them — a wildcard certificate the
-   * operator obtains through DNS-01 — which is a decision the operator makes
-   * once, with the registrar, rather than one a stranger's request makes here.
-   */
-  const named = await claimedApplication(daemon.registry, host);
-  if (named === null) return false;
-  return servesApplication(await findApplication(daemon.registry, named));
-}
-
-/** Whether an application owns a currently serviceable public host. */
-function servesApplication(application: ApplicationRecord | null): boolean {
-  return (
-    application !== null &&
-    application.blocked !== true &&
-    application.retiredAt === undefined &&
-    deploymentRevision(application) !== null
-  );
 }
 
 function deployService(daemon: DaemonContext): DeployService {

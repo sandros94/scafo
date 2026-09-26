@@ -6,7 +6,6 @@ import {
   blockApplication,
   checkDomain,
   claimDomain,
-  claimedApplication,
   createApplication,
   domainConflict,
   getApplication,
@@ -297,37 +296,6 @@ describe("a claim made WITH the one label below its host", () => {
     ).resolves.toEqual({ host: HOST, application: APPLICATION, relation: "child" });
     /* Nothing in the way of the claim the application already holds. */
     await expect(domainConflict(clock.ctx, HOST, APPLICATION)).resolves.toBeNull();
-  });
-});
-
-describe("claimedApplication", () => {
-  beforeEach(async () => {
-    await createApplication(clock.ctx, { name: `${APPLICATION}-preview` });
-  });
-
-  it("names the exact holder, the family member a wildcard covers, and nobody else", async () => {
-    await claimDomain(clock.ctx, HOST, APPLICATION, { wildcard: true });
-    await claimDomain(clock.ctx, "www.example.com", NEIGHBOUR);
-
-    await expect(claimedApplication(clock.ctx, HOST)).resolves.toBe(APPLICATION);
-    await expect(claimedApplication(clock.ctx, "www.example.com")).resolves.toBe(NEIGHBOUR);
-    await expect(claimedApplication(clock.ctx, `preview.${HOST}`)).resolves.toBe(
-      `${APPLICATION}-preview`,
-    );
-    /* NEVER THE HOLDER for an arbitrary subdomain, although the routing sends
-       one there: it names the application that label would be, and the caller
-       finds out there is no such application. */
-    await expect(claimedApplication(clock.ctx, `anything.${HOST}`)).resolves.toBe(
-      `${APPLICATION}-anything`,
-    );
-    await expect(claimedApplication(clock.ctx, `a.b.${HOST}`)).resolves.toBeNull();
-    await expect(claimedApplication(clock.ctx, "nobody.example.com")).resolves.toBeNull();
-  });
-
-  it("reads nothing above a host whose claim was not made with its subdomains", async () => {
-    await claimDomain(clock.ctx, HOST, APPLICATION);
-
-    await expect(claimedApplication(clock.ctx, `preview.${HOST}`)).resolves.toBeNull();
   });
 });
 

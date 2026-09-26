@@ -4,7 +4,6 @@
  * everything a node reads.
  */
 
-import type { H3 } from "h3";
 import { beforeEach, describe, expect, it } from "vitest";
 import { deploymentRevision, recordRevision } from "../src/core/registry/_revision.ts";
 import { readJson } from "../src/core/registry/cas.ts";
@@ -32,22 +31,13 @@ import {
   updateApplication,
   writePlacement,
 } from "../src/core/registry/index.ts";
-import type { ApplicationRecord, TrustPolicy } from "../src/core/types/registry.ts";
+import type { ApplicationRecord, NodeRecord, TrustPolicy } from "../src/core/types/registry.ts";
 import type { CasStore } from "../src/core/types/store.ts";
-import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
+import { renderFleetRouting } from "../src/core/placement/fleet-routes.ts";
 import { desiredFrom } from "../src/daemon/_desired.ts";
 import { createRegistryView } from "../src/core/registry/view.ts";
-import { createNodeApp } from "../src/daemon/app.ts";
-import type { DaemonConfig } from "../src/daemon/config.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import {
-  CLOCK_START_MS,
-  ctxWith,
-  type ManualClock,
-  rejectionOf,
-  rejectsWith,
-  TEST_VERSIONS,
-} from "./_helpers.ts";
+import { CLOCK_START_MS, ctxWith, type ManualClock, rejectionOf, rejectsWith } from "./_helpers.ts";
 
 const APPLICATION = "shop";
 const VERSION = "b1b1b1b1";
@@ -420,19 +410,20 @@ describe("what a block does to a node", () => {
   const PLATFORM_DOMAIN = "apps.test";
   const CUSTOM_DOMAIN = "shop.example.com";
 
+  const NODE: NodeRecord = {
+    v: 1,
+    id: NODE_ID,
+    publicKey: { kty: "OKP", crv: "Ed25519", x: "AAAA" },
+    addresses: { internal: "10.0.0.4", apiPort: 7400 },
+  };
+
   let registry: RegistryContext;
-  let app: H3;
 
   beforeEach(async () => {
     clock = ctxWith(new MemoryCasStore());
     registry = clock.ctx;
 
-    await registerNode(registry, {
-      v: 1,
-      id: NODE_ID,
-      publicKey: { kty: "OKP", crv: "Ed25519", x: "AAAA" },
-      addresses: { internal: "10.0.0.4", apiPort: 7400 },
-    });
+    await registerNode(registry, NODE);
     const lease = await acquireLease(registry, NODE_ID);
     if (lease === null) throw new Error("the fixture could not take the lease");
 
@@ -443,14 +434,6 @@ describe("what a block does to a node", () => {
       await writePlacement(registry, name, [NODE_ID], lease);
     }
     await claimDomain(registry, CUSTOM_DOMAIN, APPLICATION);
-
-    app = createNodeApp({
-      config: daemonConfig(),
-      nodeId: NODE_ID,
-      registry,
-      supervisor: idleSupervisor(),
-      versions: TEST_VERSIONS,
-    });
   });
 
   describe("what a node reads as its work", () => {
@@ -488,75 +471,45 @@ describe("what a block does to a node", () => {
     });
   });
 
-  describe("GET /v1/ingress/ask", () => {
-    it("refuses the platform host of a blocked application", async () => {
-      const before = await ask(`${APPLICATION}.${PLATFORM_DOMAIN}`);
-      expect(before.status).toBe(200);
+  describe("the routing an ingress approves certificates from", () => {
+    it("names no host of a blocked application, and nobody else's is touched", async () => {
+      const before = await routedHosts();
+      expect(before).toContain(`${APPLICATION}.${PLATFORM_DOMAIN}`);
+      expect(before).toContain(CUSTOM_DOMAIN);
 
       await blockApplication(registry, APPLICATION);
 
-      expect((await ask(`${APPLICATION}.${PLATFORM_DOMAIN}`)).status).toBe(404);
+      expect(await routedHosts()).toEqual([`${NEIGHBOUR}.${PLATFORM_DOMAIN}`]);
     });
 
-    it("refuses a custom domain claimed by a blocked application", async () => {
-      expect((await ask(CUSTOM_DOMAIN)).status).toBe(200);
-
-      await blockApplication(registry, APPLICATION);
-
-      expect((await ask(CUSTOM_DOMAIN)).status).toBe(404);
-    });
-
-    it("answers for both again once the block is lifted", async () => {
+    it("names both again once the block is lifted", async () => {
       await blockApplication(registry, APPLICATION);
       await unblockApplication(registry, APPLICATION);
 
-      expect((await ask(CUSTOM_DOMAIN)).status).toBe(200);
-      expect((await ask(`${APPLICATION}.${PLATFORM_DOMAIN}`)).status).toBe(200);
-    });
-
-    it("leaves the fleet's own apex alone, which is no application's name", async () => {
-      await blockApplication(registry, APPLICATION);
-
-      expect((await ask(PLATFORM_DOMAIN)).status).toBe(200);
+      expect(await routedHosts()).toEqual([
+        `${NEIGHBOUR}.${PLATFORM_DOMAIN}`,
+        `${APPLICATION}.${PLATFORM_DOMAIN}`,
+        CUSTOM_DOMAIN,
+      ]);
     });
   });
 
-  async function ask(domain: string): Promise<Response> {
-    return app.request(`/v1/ingress/ask?domain=${domain}`);
-  }
-
-  function daemonConfig(): DaemonConfig {
-    return {
-      bucket: {
-        endpoint: "http://store.test:9000",
-        region: "us-east-1",
-        bucket: "registry",
-        accessKey: "key",
-        secretKey: "secret",
-      },
-      node: { id: NODE_ID, listen: "127.0.0.1:7400" },
+  /** The hosts of the routing this node would render, with itself serving everything. */
+  async function routedHosts(): Promise<string[]> {
+    const state = desiredFrom(await createRegistryView(registry).sync(), { nodeId: NODE_ID });
+    const routing = renderFleetRouting({
       platformDomains: [PLATFORM_DOMAIN],
-      runtime: {
-        binPath: "celld",
-        portRangeStart: 42_000,
-        portRangeEnd: 42_998,
-        portQuarantineMs: 600_000,
-        bindHost: "127.0.0.1",
-      },
-      observability: { enabled: false },
-      api: { public: true, jsonBytes: 65_536 },
-    };
-  }
-
-  function idleSupervisor(): Supervisor {
-    return {
-      start: (spec) => Promise.reject(new Error(`unexpected start of "${spec.id}"`)),
-      stop: () => Promise.resolve(),
-      status: () => null,
-      list: (): ProcessStatus[] => [],
-      forget: () => {},
-      onExit: () => {},
-    };
+      applications: state.fleet,
+      nodes: [
+        {
+          ...NODE,
+          heartbeatAt: new Date(clock.nowMs()).toISOString(),
+          serving: { [APPLICATION]: { port: 42_000 }, [NEIGHBOUR]: { port: 42_002 } },
+        },
+      ],
+      now: new Date(clock.nowMs()),
+    });
+    return routing.routes.map((route) => route.host);
   }
 });
 

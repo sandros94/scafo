@@ -38,6 +38,7 @@ import {
   operatorKey as operatorRecordKey,
   trustKey,
 } from "../../src/core/registry/index.ts";
+import type { FleetRouting } from "../../src/core/types/ingress.ts";
 import type { NodeRecord, OperatorRecord, TrustPolicy } from "../../src/core/types/registry.ts";
 import {
   NODE_IMAGE,
@@ -427,17 +428,18 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   );
 
   it(
-    "tells an ingress it serves a platform host and refuses one nothing claimed",
+    "names a platform host it serves in the routing document, and nothing claimed by nobody",
     async () => {
-      const served = await httpGet(apiPort, `/v1/ingress/ask?domain=${appHost()}`, {});
-      expect(served.status).toBe(200);
+      const routing = await fleetRouting();
+      const hosts = routing.routes.map((route) => route.host);
 
-      const apex = await httpGet(apiPort, `/v1/ingress/ask?domain=${PLATFORM_DOMAIN}`, {});
-      expect(apex.status).toBe(200);
-
-      const unknown = await httpGet(apiPort, "/v1/ingress/ask?domain=unclaimed.example.com", {});
-      expect(unknown.status).toBe(404);
-      observed.ask = { served: served.status, apex: apex.status, unknown: unknown.status };
+      /* The document is what an ingress approves certificates from: a host it
+         names exactly may get one, and a host it does not name may not. */
+      expect(hosts).toContain(appHost());
+      expect(hosts).not.toContain("unclaimed.example.com");
+      expect(routing.api?.hosts).toContain(PLATFORM_DOMAIN);
+      expect(routing.wildcards).toContain(PLATFORM_DOMAIN);
+      observed.routedHosts = hosts;
     },
     STEP_TIMEOUT_MS,
   );
@@ -472,10 +474,9 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       const answer = await untilServes(CUSTOM_HOST, "v1");
       expect(JSON.parse(answer.body).url, `the url ${CUSTOM_HOST} saw`).toContain(CUSTOM_HOST);
 
-      /* And the certificate ask now approves it, which is what makes on-demand
-         TLS issue for a name an operator has just pointed here. */
-      const asked = await httpGet(apiPort, `/v1/ingress/ask?domain=${CUSTOM_HOST}`, {});
-      expect(asked.status).toBe(200);
+      /* And the routing document names it exactly, which is what makes
+         on-demand TLS issue for a name an operator has just pointed here. */
+      expect((await fleetRouting()).routes.map((route) => route.host)).toContain(CUSTOM_HOST);
 
       const listed = await runCli(
         ["app", "domain", "list", "--name", APPLICATION, "--json", ...nodeFlags],
@@ -500,9 +501,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         return got.status === 404 ? got : null;
       });
       expect(gone.body).toBe(NO_ROUTE);
-      expect((await httpGet(apiPort, `/v1/ingress/ask?domain=${CUSTOM_HOST}`, {})).status).toBe(
-        404,
-      );
+      expect((await fleetRouting()).routes.map((route) => route.host)).not.toContain(CUSTOM_HOST);
 
       /* The application keeps the host it was always served at. */
       const kept = await untilServes(appHost(), "v1");
@@ -931,19 +930,18 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       const env = await untilServes(envHost, "v6");
       expect(JSON.parse(env.body).url, `the url ${envHost} saw`).toContain(envHost);
 
-      /* The certificate ask approves exactly those two and nothing else: an
-         arbitrary subdomain gets no certificate of its own, and a name two
-         labels under the base is not covered at all. */
-      expect((await httpGet(apiPort, `/v1/ingress/ask?domain=${CUSTOM_HOST}`, {})).status).toBe(
-        200,
-      );
-      expect((await httpGet(apiPort, `/v1/ingress/ask?domain=${envHost}`, {})).status).toBe(200);
-      expect(
-        (await httpGet(apiPort, `/v1/ingress/ask?domain=anything.${CUSTOM_HOST}`, {})).status,
-      ).toBe(404);
-      expect((await httpGet(apiPort, `/v1/ingress/ask?domain=a.b.${CUSTOM_HOST}`, {})).status).toBe(
-        404,
-      );
+      /* The routing document names exactly those two, which is all an ingress
+         approves a certificate for: an arbitrary subdomain is covered only by
+         the `*.` entry, which routes and never approves, and a name two labels
+         under the base is not covered at all. */
+      const routing = await fleetRouting();
+      const hosts = routing.routes.map((route) => route.host);
+      expect(hosts).toContain(CUSTOM_HOST);
+      expect(hosts).toContain(envHost);
+      expect(hosts).toContain(`*.${CUSTOM_HOST}`);
+      expect(hosts).not.toContain(`anything.${CUSTOM_HOST}`);
+      expect(hosts).not.toContain(`a.b.${CUSTOM_HOST}`);
+      expect(routing.wildcards).toContain(CUSTOM_HOST);
 
       const listed = await runCli(
         ["app", "domain", "list", "--name", APPLICATION, "--json", ...nodeFlags],
@@ -1125,6 +1123,15 @@ async function deployedPrefixes(application: string): Promise<string[]> {
 /** The host the fixture's own application is served at. */
 function appHost(): string {
   return `${APPLICATION}.${PLATFORM_DOMAIN}`;
+}
+
+/** The fleet's routing document, as the node serves it to its ingress. */
+async function fleetRouting(): Promise<FleetRouting> {
+  const answer = await httpGet(apiPort, "/v1/ingress/routes", {
+    authorization: `Bearer ${INGRESS_TOKEN}`,
+  });
+  expect(answer.status, answer.body).toBe(200);
+  return JSON.parse(answer.body) as FleetRouting;
 }
 
 /** The host the `--env ci` application is served at, which shares a prefix with it. */

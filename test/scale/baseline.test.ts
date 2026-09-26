@@ -287,17 +287,6 @@ describe("what an ingress polls", () => {
        an ingress polling every few seconds costs the bucket nothing. */
     expect(snapshot.requests).toBe(0);
   });
-
-  it.each(profiles)("answers an issuance ask from one or two records at %s", (name) => {
-    const { notes } = cost(name, "ingressAsk");
-
-    /* A platform host names its application, so the record answers on its own. */
-    expect(notes.platformStatus).toBe(200);
-    expect(notes.platformGets).toBe(1);
-    /* A claimed domain costs the claim and then the application it names. */
-    expect(notes.customStatus).toBe(200);
-    expect(notes.customGets).toBe(2);
-  });
 });
 
 describe("an idle installation's monthly bill", () => {

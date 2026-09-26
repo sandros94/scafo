@@ -174,15 +174,15 @@ export function describeDomainClaim(change: DomainChange, via: string): string {
 /**
  * What an operator has to do at the ingress for a wildcard claim, which scafo
  * cannot do for them: a name under the base that is not an environment of the
- * application gets no certificate of its own, because scafo approves issuance
- * only for names it can name — see the certificate ask.
+ * application gets no certificate of its own, because the routing document an
+ * ingress approves issuance from names only the hosts it can name exactly.
  */
 export function describeWildcardCertificates(host: string): string {
   return (
     `a subdomain of "${host}" that is not an application of this installation is served over ` +
-    `HTTPS only where the ingress already holds a certificate covering "*.${host}": scafo ` +
-    `approves on-demand issuance for "${host}" and for a subdomain naming an application, and ` +
-    `never for an arbitrary one, so obtain the wildcard certificate through DNS-01 at the ingress`
+    `HTTPS only where the ingress already holds a certificate covering "*.${host}": the routing ` +
+    `document names "${host}" and each subdomain naming an application, and never an ` +
+    `arbitrary one, so obtain the wildcard certificate through DNS-01 at the ingress`
   );
 }
 

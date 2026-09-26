@@ -39,17 +39,12 @@ export function platformApplication(host: string, platformDomains: string[]): st
 }
 
 /**
- * The application one label under a wildcard-claimed base names: `preview` under
- * a base claimed for `shop` is `shop-preview`, exactly what `--env preview`
- * addresses on the command line and what `shop-preview.<platform domain>`
- * already serves. Null when the two do not join into a name.
+ * The label `candidate` carries one label under a base `holder` claimed with its
+ * subdomains: `shop-preview` under a base claimed for `shop` is `preview`,
+ * exactly what `--env preview` addresses on the command line and what
+ * `shop-preview.<platform domain>` already serves. Null when `candidate` is not
+ * of that family or the rest is not a label.
  */
-export function familyApplication(holder: string, label: string): string | null {
-  const named = `${holder}-${label}`;
-  return isSlug(named) ? named : null;
-}
-
-/** The inverse: the label `candidate` carries under its holder's base, or null. */
 export function familyLabel(holder: string, candidate: string): string | null {
   if (!candidate.startsWith(`${holder}-`)) return null;
   const label = candidate.slice(holder.length + 1);

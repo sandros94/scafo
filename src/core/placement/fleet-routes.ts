@@ -45,6 +45,18 @@ export interface RenderFleetRoutingInput {
  * something is currently answering. A host nobody serves is skipped rather than
  * taken, so an unserved environment falls through to the wildcard that encloses
  * it, exactly as the next binding for that host says.
+ *
+ * THIS DOCUMENT IS ALSO WHAT AN INGRESS APPROVES CERTIFICATES FROM, so it must
+ * name exactly the hosts that may get one. An exact entry is such a host: an
+ * application's name under a platform domain, a claim, or an environment one
+ * label under a wildcard base. The `*.` entry exists for ROUTING and never for
+ * issuance: approving on demand every name it covers would let anyone burn the
+ * certificate authority's weekly issuance limit for the customer's own domain
+ * by requesting random subdomains over the open internet. Those names are served
+ * over HTTPS where the ingress already holds a certificate covering them: the
+ * wildcard certificate `wildcards` asks for, obtained through DNS-01, which is a
+ * decision the operator makes once with the registrar rather than one a
+ * stranger's request makes here.
  */
 export function renderFleetRouting(input: RenderFleetRoutingInput): FleetRouting {
   const live = input.nodes

@@ -1,11 +1,12 @@
 #!/bin/sh
 # Installs verified scafo, Celld, Caddy, and esbuild binaries.
 # Root on a systemd host also writes, but does not start, node and ingress units.
-# The ingress is `scafo-caddy`, and only `scafo-caddy`: it carries the two modules
-# this install depends on — `caddy.storage.scafo`, which keeps TLS material in the
-# bucket through the node's storage API without a bucket credential, and the
-# `scafo` dynamic-upstreams source, which PULLS the fleet's routing off this node.
-# Upstream Caddy has neither, so it cannot route for scafo at all.
+# The ingress is `scafo-caddy`, and only `scafo-caddy`: it carries the modules
+# this install depends on — the `scafo` app that names the fleet, the storage
+# that keeps TLS material in the bucket through the node's storage API without a
+# bucket credential, the dynamic-upstreams source that PULLS the fleet's routing
+# off this node, and the permission module that decides which names get a
+# certificate. Upstream Caddy has none of them, so it cannot route for scafo at all.
 # The ingress receives a systemd credential copy of the ingress token; do not widen
 # the token's source-file permissions.
 #
@@ -291,9 +292,8 @@ fetch_caddy() {
     "could not download ${base}/${name}
 
   Check that the release asset exists and this host can access it. There is no
-  fallback: upstream Caddy carries neither caddy.storage.scafo nor the scafo
-  dynamic-upstreams source, so it cannot hold this fleet's TLS material and
-  cannot answer for a single deployed name.
+  fallback: upstream Caddy carries none of the scafo modules, so it cannot
+  hold this fleet's TLS material and cannot answer for a single deployed name.
 
   SCAFO_CADDY_BASE selects another compatible artifact base. Provide
   ${name}.sha256 there or set SCAFO_CADDY_SHA256."

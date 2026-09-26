@@ -96,7 +96,6 @@ export const SCENARIOS: readonly ScenarioName[] = [
   "listApplicationsRoute",
   "stateRoute",
   "ingressRoutes",
-  "ingressAsk",
 ] as const;
 
 export type ScenarioName =
@@ -111,8 +110,7 @@ export type ScenarioName =
   | "peerSeesDeploy"
   | "listApplicationsRoute"
   | "stateRoute"
-  | "ingressRoutes"
-  | "ingressAsk";
+  | "ingressRoutes";
 
 /** What one scenario cost, and what it did while costing it. */
 export interface ScenarioResult {
@@ -228,9 +226,6 @@ export async function runScenario(name: ScenarioName, world: ScaleWorld): Promis
     }
     case "ingressRoutes": {
       return ingressRoutes(world);
-    }
-    case "ingressAsk": {
-      return ingressAsk(world);
     }
   }
 }
@@ -712,35 +707,6 @@ export async function ingressRoutes(world: ScaleWorld): Promise<ScenarioResult> 
       genericBytes: encoder.encode(genericBody).length,
       traefikBytes: encoder.encode(traefikBody).length,
       routes: reconciler.fleetRouting()?.routes.length ?? 0,
-    },
-  };
-}
-
-/* -------------------------------------------------------------- (i) ingress ask */
-
-/** One `GET /v1/ingress/ask` for a platform host, and one for a custom domain. */
-export async function ingressAsk(world: ScaleWorld): Promise<ScenarioResult> {
-  const daemon = daemonFor(world);
-  const app = createNodeApp(daemon);
-  const custom = world.seed.customHost;
-
-  world.meter.reset();
-  const started = performance.now();
-  const platform = await app.request(`/v1/ingress/ask?domain=${world.seed.platformHost}`);
-  const afterPlatform = world.meter.snapshot();
-  const claimed = custom === null ? null : await app.request(`/v1/ingress/ask?domain=${custom}`);
-  const wallMs = performance.now() - started;
-
-  const snapshot = world.meter.snapshot();
-  return {
-    scenario: "ingressAsk",
-    snapshot,
-    wallMs,
-    notes: {
-      platformStatus: platform.status,
-      platformGets: afterPlatform.gets,
-      customStatus: claimed?.status ?? 0,
-      customGets: snapshot.gets - afterPlatform.gets,
     },
   };
 }

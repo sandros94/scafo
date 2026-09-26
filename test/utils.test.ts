@@ -19,11 +19,7 @@ import {
   wildcardBase,
   wildcardHost,
 } from "../src/core/utils/host.ts";
-import {
-  familyApplication,
-  familyLabel,
-  isFamilyApplication,
-} from "../src/core/placement/hosts.ts";
+import { familyLabel, isFamilyApplication } from "../src/core/placement/hosts.ts";
 import { stableStringify } from "../src/core/utils/json.ts";
 import { assertPositiveSafeInteger } from "../src/core/utils/number.ts";
 import { assertSlug, isSlug, SLUG_MAX_LENGTH } from "../src/core/utils/slug.ts";
@@ -209,15 +205,13 @@ describe("the one label below a host", () => {
 });
 
 describe("the family a wildcard base stands for", () => {
-  it("joins and splits the name an environment carries under its holder's base", () => {
-    expect(familyApplication("shop", "preview")).toBe("shop-preview");
+  it("reads the label an environment carries under its holder's base", () => {
     expect(familyLabel("shop", "shop-preview")).toBe("preview");
     /* A label may itself hold hyphens: `--env pull-request-7` is one name. */
     expect(familyLabel("shop", "shop-pull-request-7")).toBe("pull-request-7");
 
     expect(familyLabel("shop", "shop")).toBeNull();
     expect(familyLabel("shop", "shopping")).toBeNull();
-    expect(familyApplication("shop", "-bad")).toBeNull();
   });
 
   it("counts the holder and its own environments as the family, and nothing else", () => {

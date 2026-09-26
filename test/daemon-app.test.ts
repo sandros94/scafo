@@ -7,7 +7,6 @@ import { H3, HTTPError } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { recordRevision } from "../src/core/registry/_revision.ts";
 import { type DaemonState, createNodeApp, type ApplicationResult } from "../src/daemon/app.ts";
 import type { AssignmentFailure } from "../src/daemon/_assign.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
@@ -18,11 +17,7 @@ import type { ProblemDetails } from "../src/core/error.ts";
 import { ScafoError } from "../src/core/error.ts";
 import {
   acquireLease,
-  applicationKey,
-  claimDomain,
   createApplication,
-  createDeployment,
-  deleteKey,
   getApplication,
   registerNode,
   retireApplication,
@@ -36,10 +31,8 @@ const NODE_ID = "node-a";
 const APPLICATION = "shop";
 /** A second application of the same fleet, for what must stay apart from the first. */
 const OTHER_APPLICATION = "blog";
-const CUSTOM_DOMAIN = "shop.example.com";
 /** The one platform domain this node serves; its bare apex is the fleet's API. */
 const PLATFORM_DOMAIN = "apps.test";
-const VERSION = "aaaa1111";
 
 /**
  * What the stand-in supervisor reports; the state route must pass it through.
@@ -436,109 +429,6 @@ describe("GET /v1/state, on the node that is coordinating", () => {
   });
 });
 
-describe("GET /v1/ingress/ask", () => {
-  it("answers for a platform label only when something real is behind it", async () => {
-    await deployedApplication();
-    const real = await app.request(`/v1/ingress/ask?domain=${APPLICATION}.${PLATFORM_DOMAIN}`);
-    expect(real.status).toBe(200);
-
-    /* A label is an application name and nothing else: a deployment version
-       under the same domain names no application, so it is served by none. */
-    const direct = await app.request(`/v1/ingress/ask?domain=${VERSION}.${PLATFORM_DOMAIN}`);
-    expect(direct.status).toBe(404);
-
-    await createApplication(clock.ctx, { name: OTHER_APPLICATION });
-    const undeployed = await app.request(
-      `/v1/ingress/ask?domain=${OTHER_APPLICATION}.${PLATFORM_DOMAIN}`,
-    );
-    expect(undeployed.status).toBe(404);
-
-    const junk = await app.request(`/v1/ingress/ask?domain=nothing.${PLATFORM_DOMAIN}`);
-    expect(junk.status).toBe(404);
-  });
-
-  it("answers for a custom domain an application has claimed", async () => {
-    await deployedApplication();
-    await claimDomain(clock.ctx, CUSTOM_DOMAIN, APPLICATION);
-
-    const response = await app.request(`/v1/ingress/ask?domain=${CUSTOM_DOMAIN}`);
-
-    expect(response.status).toBe(200);
-  });
-
-  it("REFUSES a claim whose application has been retired", async () => {
-    await deployedApplication();
-    await claimDomain(clock.ctx, CUSTOM_DOMAIN, APPLICATION);
-    await retireApplication(clock.ctx, APPLICATION);
-
-    const response = await app.request(`/v1/ingress/ask?domain=${CUSTOM_DOMAIN}`);
-
-    expect(response.status).toBe(404);
-    await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:not-found" });
-  });
-
-  it("answers for it again once it is taken back", async () => {
-    await deployedApplication();
-    await claimDomain(clock.ctx, CUSTOM_DOMAIN, APPLICATION);
-
-    const retired = await app.request(`/v1/applications/${APPLICATION}/retire`, {
-      method: "POST",
-      headers: await bearer(),
-    });
-    expect(retired.status).toBe(200);
-    const taken = await app.request(`/v1/applications/${APPLICATION}/unretire`, {
-      method: "POST",
-      headers: await bearer(),
-    });
-    expect(taken.status).toBe(200);
-
-    const response = await app.request(`/v1/ingress/ask?domain=${CUSTOM_DOMAIN}`);
-
-    expect(response.status).toBe(200);
-  });
-
-  it("refuses a claim left behind by an application that is gone", async () => {
-    await deployedApplication();
-    await claimDomain(clock.ctx, CUSTOM_DOMAIN, APPLICATION);
-    await deleteKey(clock.ctx, applicationKey(APPLICATION));
-
-    const response = await app.request(`/v1/ingress/ask?domain=${CUSTOM_DOMAIN}`);
-
-    expect(response.status).toBe(404);
-  });
-
-  it("refuses a domain nobody claimed, and anything that is not a host", async () => {
-    for (const domain of ["unclaimed.example.com", "not a host", ""]) {
-      const response = await app.request(`/v1/ingress/ask?domain=${encodeURIComponent(domain)}`);
-
-      expect(response.status, domain).toBe(404);
-    }
-  });
-
-  it("APPROVES the bare platform apex, which the wildcard does not cover", async () => {
-    const response = await app.request(`/v1/ingress/ask?domain=${PLATFORM_DOMAIN}`);
-
-    expect(response.status).toBe(200);
-  });
-
-  it("REFUSES it while the API is not published there", async () => {
-    const closed = appWith({ api: { public: false, jsonBytes: 65_536 } });
-
-    const response = await closed.request(`/v1/ingress/ask?domain=${PLATFORM_DOMAIN}`);
-
-    expect(response.status).toBe(404);
-    await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:not-found" });
-  });
-
-  it("still refuses a label under the apex that names nothing, either way", async () => {
-    for (const app_ of [app, appWith({ api: { public: false, jsonBytes: 65_536 } })]) {
-      const response = await app_.request(`/v1/ingress/ask?domain=nothing.${PLATFORM_DOMAIN}`);
-
-      expect(response.status).toBe(404);
-    }
-  });
-});
-
 describe("the fleet's API at the platform apex", () => {
   it("dispatches the bare apex to the API routes rather than to the host surface", async () => {
     const health = await app.request("/.well-known/scafo/health", {
@@ -681,17 +571,6 @@ function daemonConfig(): DaemonConfig {
   };
 }
 
-/** The same app again, with part of the configuration stated differently. */
-function appWith(overrides: Partial<DaemonConfig>): H3 {
-  return createNodeApp({
-    config: { ...daemonConfig(), ...overrides },
-    nodeId: NODE_ID,
-    registry: clock.ctx,
-    supervisor: fakeSupervisor(),
-    versions: TEST_VERSIONS,
-  });
-}
-
 /** The same app again, reporting `status` as the last pass of its reconcile loop. */
 function appReconciling(status: ReconcileStatus): H3 {
   return createNodeApp({
@@ -737,13 +616,6 @@ async function bearer(): Promise<Record<string, string>> {
 /** An application the routes that need something to act on can act on. */
 async function deployable(): Promise<void> {
   await createApplication(clock.ctx, { name: APPLICATION });
-}
-
-/** The same application, with a deployment behind it, so it is publicly served. */
-async function deployedApplication(): Promise<void> {
-  await deployable();
-  await createDeployment(clock.ctx, APPLICATION, { version: VERSION });
-  await recordRevision(clock.ctx, APPLICATION, VERSION);
 }
 
 /** One call to the selector route with `sent` as the whole body. */

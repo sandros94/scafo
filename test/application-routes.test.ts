@@ -751,7 +751,7 @@ describe("a claim made with the one label below its host", () => {
     expect(raw).toContain(SUB);
   });
 
-  describe("the certificate ask", () => {
+  describe("the routing an ingress approves certificates from", () => {
     beforeEach(async () => {
       for (const name of [MINE, FAMILY]) {
         await createDeployment(clock.ctx, name, { version: "aaaa1111" });
@@ -760,28 +760,50 @@ describe("a claim made with the one label below its host", () => {
       await claim(MINE, HOST, await asKey(ADMIN_ID, admin), { wildcard: true });
     });
 
-    it("approves the base and a subdomain naming a serving application, and nothing else", async () => {
-      const asked = async (host: string): Promise<number> =>
-        (await app.request(`/v1/ingress/ask?domain=${host}`)).status;
+    /*
+     * The hosts the fleet's routing names while this node serves both, leaving
+     * out a blocked application as the node's desired state does.
+     */
+    const routedHosts = async (): Promise<string[]> => {
+      const applications = await Promise.all(
+        [MINE, FAMILY].map((name) => getApplication(clock.ctx, name)),
+      );
+      const routing = renderFleetRouting({
+        platformDomains: [PLATFORM_DOMAIN],
+        applications: applications.filter((record) => record.blocked !== true),
+        nodes: [
+          {
+            ...nodeRecord(NODE_ID, node.publicKey.x),
+            heartbeatAt: new Date(clock.nowMs()).toISOString(),
+            serving: { [MINE]: { port: 42_010 }, [FAMILY]: { port: 42_012 } },
+          },
+        ],
+        now: new Date(clock.nowMs()),
+      });
+      return routing.routes.map((route) => route.host);
+    };
+
+    it("names the base and a subdomain naming a serving application exactly, and nothing else", async () => {
+      const hosts = await routedHosts();
 
       /* Rule 1 and rule 2: names this installation can name. */
-      expect(await asked(HOST)).toBe(200);
-      expect(await asked(SUB)).toBe(200);
-      /* Rule 3 is served from the holder's process and gets NO certificate of
-         its own: issuance per unknown subdomain is how a stranger would burn
-         the CA's weekly limit for somebody else's domain. */
-      expect(await asked(`anything.${HOST}`)).toBe(404);
-      /* And a wildcard covers one label, so a deeper name is nobody's. */
-      expect(await asked(`a.b.${HOST}`)).toBe(404);
+      expect(hosts).toContain(HOST);
+      expect(hosts).toContain(SUB);
+      /* Rule 3 is the `*.` entry, which routes and never approves a name: an
+         arbitrary subdomain, or a deeper one, is never an exact entry. */
+      expect(hosts).toContain(`*.${HOST}`);
+      expect(hosts).not.toContain(`anything.${HOST}`);
+      expect(hosts).not.toContain(`a.b.${HOST}`);
     });
 
-    it("stops approving the subdomain once its application stops being served", async () => {
-      expect((await app.request(`/v1/ingress/ask?domain=${SUB}`)).status).toBe(200);
+    it("stops naming the subdomain once its application stops being served", async () => {
+      expect(await routedHosts()).toContain(SUB);
 
       await block(FAMILY, await asKey(ADMIN_ID, admin));
 
-      expect((await app.request(`/v1/ingress/ask?domain=${SUB}`)).status).toBe(404);
-      expect((await app.request(`/v1/ingress/ask?domain=${HOST}`)).status).toBe(200);
+      const hosts = await routedHosts();
+      expect(hosts).not.toContain(SUB);
+      expect(hosts).toContain(HOST);
     });
   });
 });
@@ -825,19 +847,6 @@ describe("what a claim changes about what the fleet answers on", () => {
       now: new Date(clock.nowMs()),
     });
     expect(released.routes.map((route) => route.host)).toEqual([`${MINE}.${PLATFORM_DOMAIN}`]);
-  });
-
-  it("says yes to the certificate ask while it is claimed, and no once it is released", async () => {
-    const before = await app.request(`/v1/ingress/ask?domain=${HOST}`);
-    expect(before.status).toBe(404);
-
-    await claim(MINE, HOST, await asKey(ADMIN_ID, admin));
-    const asked = await app.request(`/v1/ingress/ask?domain=${HOST}`);
-    expect(asked.status).toBe(200);
-
-    await release(MINE, HOST, await asKey(ADMIN_ID, admin));
-    const after = await app.request(`/v1/ingress/ask?domain=${HOST}`);
-    expect(after.status).toBe(404);
   });
 });
 
