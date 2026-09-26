@@ -1,5 +1,5 @@
 # Pin the runtime by tag and multi-architecture digest.
-FROM ghcr.io/denoland/celld:0.5.0@sha256:df8e74bb9a059df5779644368984933eba76acd6a2d196672732f4368f760fc8 AS celld
+FROM ghcr.io/denoland/celld:0.5.1@sha256:9df15352bcbb92a8d73dabadc349383ccd3d7851b2ba4ccffe2c956f2f9fc93f AS celld
 
 # Build stage.
 FROM node:24-slim AS build
