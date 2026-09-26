@@ -1,6 +1,7 @@
 /* Whether an application's Celld fleet is already being served by another build. */
 
 import { ScafoError } from "../error.ts";
+import { celldReleasesMayShareFleet, rollingReleaseList } from "../registry/_celld-contract.ts";
 import { isNodeAnswering } from "../registry/nodes.ts";
 import type { NodeRecord } from "../types/registry.ts";
 
@@ -24,16 +25,26 @@ export interface VersionSkewQuery {
 }
 
 /**
- * Every other node still answering that serves `application` on a Celld other
- * than `celld`, in node order. Empty means this node may serve the application.
+ * Every other node still answering that serves `application` on a Celld that
+ * may not share a fleet with `celld`, in node order. Empty means this node may
+ * serve the application.
  *
- * ONE APPLICATION IS ONE CELLD FLEET, AND A FLEET TAKES ONE VERSION. A newer
- * binary upgrades the fleet's bucket format as it starts, and refuses to while
- * an older node still holds a lease in it; an older binary writing after that
- * upgrade corrupts what the newer one wrote. Neither failure is one scafo can
- * repair afterwards, so the pair is never allowed to exist: a node checks who
- * else holds the application before it starts a process for it or accepts a
- * deploy into it, and an upgrade stops every node of the installation first.
+ * ONE APPLICATION IS ONE CELLD FLEET, AND A FLEET TAKES ONE BUCKET FORMAT. A
+ * newer binary upgrades that format as it starts, and refuses to while an older
+ * node still holds a lease in it; an older binary writing after that upgrade
+ * corrupts what the newer one wrote. Neither failure is one scafo can repair
+ * afterwards, so such a pair is never allowed to exist: a node checks who else
+ * holds the application before it starts a process for it or accepts a deploy
+ * into it, and an upgrade stops every node of the installation first.
+ *
+ * THE ONE EXCEPTION IS A ROLLING PAIR UPSTREAM DECLARED. Two releases that share
+ * a format and tolerate each other's peers may serve one fleet while nodes are
+ * replaced one at a time, and only upstream can say that two binaries do — so
+ * the pairs are an allowlist quoted from Celld's release notes
+ * (`ROLLING_CELLD_RELEASES` in `_celld-contract.ts`), never read off version
+ * numbers. The check is pairwise against every other live node, so a node never
+ * joins a fleet holding any release it may not share one with, however the
+ * listed sets chain together.
  *
  * A RECORD WITH NO VERSIONS COUNTS AS DIFFERENT. It was written by a build from
  * before the field existed, which makes it older than anything that reports one
@@ -56,7 +67,7 @@ export function findVersionSkew(nodes: NodeRecord[], opts: VersionSkewQuery): Ve
     if (!isNodeAnswering(record, opts.now, window)) continue;
 
     const celld = record.versions?.celld;
-    if (celld === opts.celld) continue;
+    if (celldReleasesMayShareFleet(celld, opts.celld)) continue;
     found.push({ nodeId: record.id, celld });
   }
 
@@ -72,7 +83,9 @@ const UNREPORTED = "unreported";
  *
  * Every name is in it because the operator's next move is to stop those
  * machines, and a refusal naming one of three would be followed by the same
- * refusal twice more.
+ * refusal twice more. The rolling pairs are in it because they are the only
+ * upgrades that would not have earned it, and an operator planning the next one
+ * needs to know which those are.
  */
 export function versionSkewError(
   skew: VersionSkew[],
@@ -85,7 +98,9 @@ export function versionSkewError(
   return new ScafoError("version-skew", "Celld versions differ across the fleet", {
     detail:
       `this node runs celld ${about.celld}, and "${about.application}" is held elsewhere by ` +
-      `${others}; one application is one Celld fleet and a fleet takes one version, so stop ` +
-      `every node of this installation before starting the new binaries`,
+      `${others}; one application is one Celld fleet, and a fleet takes one version at a time ` +
+      `except across a rolling pair upstream declared (rolling pairs this build allows: ` +
+      `${rollingReleaseList()}), so stop every node of this installation before starting the ` +
+      `new binaries`,
   });
 }

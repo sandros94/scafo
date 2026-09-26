@@ -8,7 +8,8 @@
  * formats between releases. Everything they pin themselves to lives here, each
  * constant beside a permalink to the upstream lines it mirrors, pinned to the
  * commit of a tag so the link says what the code said rather than what `main`
- * says today.
+ * says today. So does the one statement about formats the version-skew gate
+ * needs: which releases upstream declared may serve one fleet together.
  *
  * ADDING A RELEASE, in this order: run the end-to-end prune case against a
  * bucket that release wrote; re-check every permalinked site below and in
@@ -16,7 +17,10 @@
  * release here, together with any marker value the new tag introduced,
  * permalinked to it. KEEP THE OLD VALUES AND THE OLD LINKS — an installation is
  * upgraded one machine at a time, and a fleet still on the older release is
- * still writing what that release wrote.
+ * still writing what that release wrote. Then read the new release's notes: it
+ * joins a set in `ROLLING_CELLD_RELEASES` only when they say the step from a
+ * listed release may be taken as a rolling update, quoted and linked beside the
+ * set; otherwise it stands alone, and moving onto it stops every node first.
  *
  * THE LAYOUT these markers live in, as one `celld deploy` writes it:
  *   `deploy/<script>/<version>/`
@@ -70,6 +74,24 @@
  * nothing here has read.
  */
 export const VERIFIED_CELLD_RELEASES: readonly string[] = ["0.5.0", "0.5.1"];
+
+/**
+ * Sets of Celld releases UPSTREAM DECLARED may serve one fleet together while an
+ * installation moves between them, one node at a time.
+ *
+ * A fleet takes one bucket format, and a binary that finds an older one upgrades
+ * it as it starts; two releases may share a fleet only when they share that
+ * format and each tolerates the other's peers, which is something only upstream
+ * can say. So this is an allowlist of what its release notes said, never an
+ * inference from version numbers: a patch release is not assumed to roll, and a
+ * release named in no set shares a fleet with nothing but itself.
+ */
+export const ROLLING_CELLD_RELEASES: readonly (readonly string[])[] = [
+  /* "Upgrading from v0.5.0 can use a rolling update. Stop one node, wait for its
+     replacement to report healthy, then continue to the next node."
+       https://github.com/denoland/celld/releases/tag/v0.5.1 */
+  ["0.5.0", "0.5.1"],
+];
 
 /**
  * `Manifest.schema_version` values this build knows. `celld deploy` writes 2
@@ -203,4 +225,23 @@ export const CELLD_NODE_NAME_RE: RegExp = /^(?!\.{1,2}$)[A-Za-z\d_.-]{1,128}$/;
 /** The verified releases as a refusal names them. */
 export function verifiedReleaseList(): string {
   return VERIFIED_CELLD_RELEASES.join(", ");
+}
+
+/**
+ * Whether nodes reporting Celld `a` and `b` may serve one fleet at the same
+ * time: the same release, or two members of one set in
+ * {@link ROLLING_CELLD_RELEASES}. Symmetric. An unreported release (`undefined`)
+ * shares a fleet with nothing, itself included — nothing in it says which
+ * format it writes.
+ */
+export function celldReleasesMayShareFleet(a: string | undefined, b: string | undefined): boolean {
+  if (a === undefined || b === undefined) return false;
+  if (a === b) return true;
+  return ROLLING_CELLD_RELEASES.some((set) => set.includes(a) && set.includes(b));
+}
+
+/** The rolling sets as a refusal names them: `0.5.0↔0.5.1`, or `none`. */
+export function rollingReleaseList(): string {
+  if (ROLLING_CELLD_RELEASES.length === 0) return "none";
+  return ROLLING_CELLD_RELEASES.map((set) => set.join("↔")).join(", ");
 }
