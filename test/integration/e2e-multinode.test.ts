@@ -891,7 +891,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       const wedgedAt = Date.now();
 
       /*
-       * WHAT CELLD 0.5.0 DOES WITH IT is the question, and the answer is observed
+       * WHAT CELLD DOES WITH IT is the question, and the answer is observed
        * rather than assumed: it may exit and be restarted for ever, or it may
        * overwrite the object and carry on. Whether it recovers by itself is what
        * decides whether `scafo app lease` is needed at all on a conforming store.
@@ -925,7 +925,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       };
       observed.wedgedLease = wedged;
       console.log(
-        `e2e: celld 0.5.0 on a truncated node lease at "${leaseKey}" (SeaweedFS): ${outcome}\n` +
+        `e2e: celld on a truncated node lease at "${leaseKey}" (SeaweedFS): ${outcome}\n` +
           String(wedged.celldSaid),
       );
 
@@ -1545,7 +1545,7 @@ async function celldRepairedItsOwnLease(opts: { broken: Node; leaseKey: string }
   expect(lease?.body, "Celld left the truncated lease and still came up").toContain("expires_ms");
 
   return (
-    `celld 0.5.0 recovered from a truncated node lease at "${opts.leaseKey}" without help, ` +
+    `celld recovered from a truncated node lease at "${opts.leaseKey}" without help, ` +
     `so "scafo app lease drop" was not needed on this store`
   );
 }
@@ -1635,7 +1635,7 @@ async function tookItOutAndTheLeaseDropPutItBack(opts: {
   note.recoveredAfterDropMs = Date.now() - droppedAt;
 
   return (
-    `celld 0.5.0 could not recover from a truncated node lease at "${opts.leaseKey}" by ` +
+    `celld could not recover from a truncated node lease at "${opts.leaseKey}" by ` +
     `itself; "scafo app lease drop" is what got the process serving again`
   );
 }
