@@ -6,7 +6,9 @@ import { assertNodeId, NODE_ID_RE } from "../src/core/registry/paths.ts";
  * build runs: non-empty, at most 128 bytes, ASCII alphanumerics plus `_ - .`,
  * and neither of the two path components.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/logic/peer.rs#L18-L25 (v0.5.0)
+ *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/logic/peer.rs#L18-L25 (v0.5.1)
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/machine.rs#L14-L22 (v0.5.0)
+ *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/machine.rs#L14-L22 (v0.5.1)
  */
 function isCelldNodeName(name: string): boolean {
   if (name === "." || name === "..") return false;
