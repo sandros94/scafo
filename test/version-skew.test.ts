@@ -4,7 +4,11 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { findVersionSkew } from "../src/core/placement/version-skew.ts";
+import { findVersionSkew, versionSkewError } from "../src/core/placement/version-skew.ts";
+import {
+  celldReleasesMayShareFleet,
+  ROLLING_CELLD_RELEASES,
+} from "../src/core/registry/_celld-contract.ts";
 import { NODE_LIVENESS_WINDOW_MS } from "../src/core/registry/nodes.ts";
 import type { NodeRecord, NodeServing } from "../src/core/types/registry.ts";
 
@@ -14,10 +18,10 @@ const APPLICATION = "shop";
 const CELLD = "0.5.0";
 
 /** What a start or a deploy asks about: this node's binary, against everyone else's. */
-function skewFor(nodes: NodeRecord[]): ReturnType<typeof findVersionSkew> {
+function skewFor(nodes: NodeRecord[], celld = CELLD): ReturnType<typeof findVersionSkew> {
   return findVersionSkew(nodes, {
     application: APPLICATION,
-    celld: CELLD,
+    celld,
     selfId: SELF,
     now: NOW,
   });
@@ -88,6 +92,77 @@ describe("what counts as another version on the same application", () => {
     expect(skewFor([node("node-b", { celld: "0.4.1", serving: serves("shop-preview") })])).toEqual(
       [],
     );
+  });
+});
+
+describe("releases upstream declared may roll", () => {
+  it("says nothing about a live node on the other half of a declared pair", () => {
+    /* Celld 0.5.1's release notes: "Upgrading from v0.5.0 can use a rolling
+       update." Both directions, since a roll has nodes on each side of it. */
+    expect(skewFor([node("node-b", { celld: "0.5.1", serving: serves(APPLICATION) })])).toEqual([]);
+    expect(
+      skewFor([node("node-b", { celld: "0.5.0", serving: serves(APPLICATION) })], "0.5.1"),
+    ).toEqual([]);
+  });
+
+  it("still names a node on a release no declared pair joins to this one", () => {
+    expect(
+      skewFor([node("node-b", { celld: "0.4.1", serving: serves(APPLICATION) })], "0.5.1"),
+    ).toEqual([{ nodeId: "node-b", celld: "0.4.1" }]);
+  });
+
+  it("still names a node that reports no versions, beside either half of a pair", () => {
+    for (const celld of ["0.5.0", "0.5.1"]) {
+      expect(skewFor([node("node-b", { serving: serves(APPLICATION) })], celld)).toEqual([
+        { nodeId: "node-b", celld: undefined },
+      ]);
+    }
+  });
+
+  it("names only the node a pair does not cover when both kinds hold the application", () => {
+    const nodes = [
+      node("node-b", { celld: "0.5.1", serving: serves(APPLICATION) }),
+      node("node-c", { celld: "0.4.1", serving: serves(APPLICATION) }),
+    ];
+
+    expect(skewFor(nodes)).toEqual([{ nodeId: "node-c", celld: "0.4.1" }]);
+  });
+
+  it("answers the same whichever release is asked about first", () => {
+    const releases = [...new Set(["0.4.1", "0.5.2", ...ROLLING_CELLD_RELEASES.flat()])];
+    for (const a of releases) {
+      for (const b of releases) {
+        expect(celldReleasesMayShareFleet(a, b)).toBe(celldReleasesMayShareFleet(b, a));
+      }
+    }
+  });
+
+  it("lets an unreported release share a fleet with nothing, not even another one", () => {
+    expect(celldReleasesMayShareFleet(undefined, "0.5.0")).toBe(false);
+    expect(celldReleasesMayShareFleet("0.5.0", undefined)).toBe(false);
+    expect(celldReleasesMayShareFleet(undefined, undefined)).toBe(false);
+  });
+
+  it("infers nothing from version numbers", () => {
+    /* A later patch release rolls only once its own notes say so. */
+    expect(celldReleasesMayShareFleet("0.5.1", "0.5.2")).toBe(false);
+    expect(celldReleasesMayShareFleet("0.5.0", "0.5.2")).toBe(false);
+  });
+
+  it("names every node and the pairs this build allows in the refusal", () => {
+    const error = versionSkewError(
+      [
+        { nodeId: "node-b", celld: "0.4.1" },
+        { nodeId: "node-c", celld: undefined },
+      ],
+      { application: APPLICATION, celld: "0.5.1" },
+    );
+
+    expect(error.code).toBe("version-skew");
+    expect(error.detail).toContain("node-b (celld 0.4.1)");
+    expect(error.detail).toContain("node-c (celld unreported)");
+    expect(error.detail).toContain("rolling pairs this build allows: 0.5.0↔0.5.1");
+    expect(error.detail).toContain("stop every node of this installation");
   });
 });
 

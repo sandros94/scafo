@@ -40,8 +40,8 @@ export const DEFAULT_CELLD_BIN: string = "celld";
  *
  * CHECKED WHERE A DAEMON STARTS, which is the moment a machine picks up a
  * binary. What keeps one application's fleet from being served by two Celld
- * versions at once is the separate gate on starting a process and on taking a
- * deploy; see `core/placement/version-skew.ts`.
+ * versions that may not share it is the separate gate on starting a process and
+ * on taking a deploy; see `core/placement/version-skew.ts`.
  */
 export const MIN_CELLD_VERSION: string = "0.5.0";
 

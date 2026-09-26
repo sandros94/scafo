@@ -3,7 +3,6 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Readable } from "node:stream";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { DaemonState } from "../../src/daemon/app.ts";
@@ -25,6 +24,7 @@ import {
   NODE_IMAGE,
   BOOT_DEADLINE_MS,
   type BucketSettings,
+  collectLogs,
   type CommandResult,
   DEADLINE_MS,
   deploymentOf,
@@ -153,10 +153,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
         "--listen",
         `0.0.0.0:${String(NODE_PORT)}`,
       ])
-      .withLogConsumer((stream: Readable) => {
-        stream.on("data", (chunk) => daemonLog.push(String(chunk)));
-        stream.on("err", (chunk) => daemonLog.push(String(chunk)));
-      })
+      .withLogConsumer(collectLogs(daemonLog))
       .withWaitStrategy(Wait.forLogMessage(/listening on/))
       .withStartupTimeout(BOOT_DEADLINE_MS)
       .start();

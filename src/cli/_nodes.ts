@@ -196,12 +196,13 @@ const UNREPORTED = "-";
  * 0.4.1 on 1`.
  *
  * WHICH MACHINES STILL RUN THE OLD BINARY IS THE QUESTION THIS ANSWERS. An
- * installation is upgraded by stopping every node and starting the new ones, so
- * a second version in this line is work left to do: the column below says which
- * machine it is, and this says how much of the fleet is waiting on it. Newest
- * first, because that is the half that is done. A record from a build older
- * than the field itself counts as `unreported` rather than as a version, since
- * nothing in it says one.
+ * installation is upgraded by stopping every node and starting the new ones, or
+ * one node at a time between a rolling pair of Celld releases upstream declared,
+ * so a second version in this line is work left to do: the column below says
+ * which machine it is, and this says how much of the fleet is waiting on it.
+ * Newest first, because that is the half that is done. A record from a build
+ * older than the field itself counts as `unreported` rather than as a version,
+ * since nothing in it says one.
  */
 function formatVersionRoll(
   label: string,

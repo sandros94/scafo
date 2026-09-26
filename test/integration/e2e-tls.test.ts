@@ -14,7 +14,6 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { request as httpsRequest } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Readable } from "node:stream";
 import type { DetailedPeerCertificate, TLSSocket } from "node:tls";
 import {
   GenericContainer,
@@ -33,6 +32,7 @@ import {
   NODE_IMAGE,
   BOOT_DEADLINE_MS,
   type BucketSettings,
+  collectLogs,
   type CommandResult,
   DEADLINE_MS,
   registryAt,
@@ -177,10 +177,7 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
         PEBBLE_WFE_NONCEREJECT: "0",
       })
       .withExposedPorts(PEBBLE_PORT, PEBBLE_MANAGEMENT_PORT)
-      .withLogConsumer((stream: Readable) => {
-        stream.on("data", (chunk) => pebbleLog.push(String(chunk)));
-        stream.on("err", (chunk) => pebbleLog.push(String(chunk)));
-      })
+      .withLogConsumer(collectLogs(pebbleLog))
       .withWaitStrategy(Wait.forLogMessage(/ACME directory available at/))
       .withStartupTimeout(BOOT_DEADLINE_MS)
       .start();
@@ -214,10 +211,7 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
         `0.0.0.0:${String(NODE_PORT)}`,
       ])
       .withExposedPorts(NODE_PORT)
-      .withLogConsumer((stream: Readable) => {
-        stream.on("data", (chunk) => daemonLog.push(String(chunk)));
-        stream.on("err", (chunk) => daemonLog.push(String(chunk)));
-      })
+      .withLogConsumer(collectLogs(daemonLog))
       .withWaitStrategy(Wait.forLogMessage(/listening on/))
       .withStartupTimeout(BOOT_DEADLINE_MS)
       .start();
@@ -491,10 +485,7 @@ async function startCaddy(name: string, alias: string): Promise<Caddy> {
     ])
     .withCommand(["caddy", "run", "--config", CONFIG_IN_CADDY])
     .withExposedPorts(CADDY_HTTPS_PORT)
-    .withLogConsumer((stream: Readable) => {
-      stream.on("data", (chunk) => log.push(String(chunk)));
-      stream.on("err", (chunk) => log.push(String(chunk)));
-    })
+    .withLogConsumer(collectLogs(log))
     .withWaitStrategy(Wait.forLogMessage(/serving initial configuration/))
     .withStartupTimeout(BOOT_DEADLINE_MS)
     .start();

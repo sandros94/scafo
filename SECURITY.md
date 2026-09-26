@@ -36,7 +36,7 @@ Do not use one installation for arbitrary customer code, public build submission
 
 ## Celld boundary
 
-Scafo requires Celld 0.5.0 — `scafo sail` runs `celld --version` at start and refuses an older binary — and creates one Celld fleet per application. Celld owns deployment adoption, application health, cells, and runtime resource policy; Scafo owns registry, authorization, placement, supervision, deploy intake, and the routing every ingress reads.
+Scafo requires Celld 0.5.0 — `scafo sail` runs `celld --version` at start and refuses an older binary — and creates one Celld fleet per application, served by one Celld release at a time: an upgrade stops every node first, except between releases `src/core/registry/_celld-contract.ts` lists as a rolling pair upstream declared, whose nodes may be replaced one at a time. Celld owns deployment adoption, application health, cells, and runtime resource policy; Scafo owns registry, authorization, placement, supervision, deploy intake, and the routing every ingress reads.
 
 Celld exposes one current deployment per fleet. Scafo records a monotonic deployment revision, not a selected version; it provides no old-build routing or historical deployment selector. See [Celld issue #181](https://github.com/denoland/celld/issues/181).
 
