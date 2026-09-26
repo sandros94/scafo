@@ -15,7 +15,7 @@ export interface DeployTarget {
   region: string;
   bucket: string;
   /**
-   * Key prefix within the bucket the environment's fleet lives under, with the
+   * Key prefix within the bucket the application's fleet lives under, with the
    * installation's own key prefix already applied.
    */
   prefix: string;
@@ -29,14 +29,14 @@ export const DEFAULT_ARTIFACT_BYTES: number = 1_073_741_824;
 /** Default number of entries one archive may contain. */
 export const DEFAULT_ARCHIVE_ENTRIES: number = 20_000;
 
-/** One uploaded artifact, and where publishing it should land. */
+/**
+ * One uploaded artifact, and where publishing it should land.
+ *
+ * The artifact is published exactly as it arrived: its runtime config is the
+ * application's own, and nothing on this side of the seam rewrites it.
+ */
 export interface DeployRunInput {
-  project: string;
-  environment: string;
-  /** Name the runtime files this application under within the fleet. */
-  script: string;
-  /** Ask Celld to use the artifact's already self-contained Worker entry. */
-  noBundle?: true;
+  application: string;
   /** The uploaded archive, exactly as it arrived and staged outside memory. */
   artifact: StagedArtifact;
   target: DeployTarget;
@@ -72,7 +72,7 @@ export interface ArtifactStager {
 
 /** What publishing an artifact produced. */
 export interface DeployRunResult {
-  /** Version id the runtime assigned; the build record records it. */
+  /** Version id the runtime assigned; the deployment record is filed under it. */
   celldVersionId: string;
 }
 

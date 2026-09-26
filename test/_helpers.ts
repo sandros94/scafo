@@ -3,22 +3,37 @@
 import { expect } from "vitest";
 import { ScafoError, type ScafoErrorCode } from "../src/core/error.ts";
 import {
+  applicationKey,
   coordinatorKey,
   domainKey,
   domainsPrefix,
-  environmentKey,
-  listEnvironments,
-  listProjects,
+  listApplications,
   readJson,
   type RegistryContext,
 } from "../src/core/registry/index.ts";
 import type {
   CoordinatorLease,
   DomainClaim,
-  EnvironmentRecord,
+  ApplicationRecord,
+  NodeVersions,
 } from "../src/core/types/registry.ts";
-import type { ByteRange, CasHeaders, CasStore, StoredObject } from "../src/core/types/store.ts";
+import { MIN_CELLD_VERSION } from "../src/drivers/runtime/celld.ts";
+import type {
+  ByteRange,
+  CasHeaders,
+  CasStore,
+  StoredEntry,
+  StoredHead,
+  StoredObject,
+} from "../src/core/types/store.ts";
 import { SLUG_MAX_LENGTH } from "../src/core/utils/slug.ts";
+
+/**
+ * What a node's daemon booted with, for a test that only needs it to be current.
+ * The Celld half is this build's floor, so a test that does not care which
+ * version is running never has to be edited when the floor moves.
+ */
+export const TEST_VERSIONS: NodeVersions = { scafo: "0.0.0-test", celld: MIN_CELLD_VERSION };
 
 /** xorshift32; returns floats in `[0, 1)`. The same seed always replays the same run. */
 export function seededRng(seed: number): () => number {
@@ -93,8 +108,20 @@ export class FaultStore implements CasStore {
   puts: number = 0;
   /** Deletes dispatched to the wrapped store. */
   dels: number = 0;
+  /** Listings dispatched to the wrapped store, keys and entries alike. */
+  lists: number = 0;
+  /** Keys read, in order, so a caller can ask what a pass actually looked at. */
+  readKeys: string[] = [];
+  /** Prefixes listed, in order, keys and entries alike. */
+  listedPrefixes: string[] = [];
   /** Runs before every put; write through the wrapped store here to race the caller. */
   onBeforePut?: (key: string) => void | Promise<void>;
+  /**
+   * Runs after every put that landed. Throwing here is the one failure a caller
+   * cannot tell from a write that never happened: the record is already the new
+   * one, and the answer saying so was lost.
+   */
+  onAfterPut?: (key: string) => void | Promise<void>;
   /** Runs before every delete; the same seam for a race against a multi-step deletion. */
   onBeforeDel?: (key: string) => void | Promise<void>;
 
@@ -124,19 +151,29 @@ export class FaultStore implements CasStore {
 
   get(key: string): Promise<StoredObject | null> {
     this.gets++;
+    this.readKeys.push(key);
     return this.#inner.get(key);
   }
 
   getBytes(key: string, opts?: { range: ByteRange }): Promise<Uint8Array | null> {
     this.gets++;
+    this.readKeys.push(key);
     return this.#inner.getBytes(key, opts);
+  }
+
+  head(key: string): Promise<StoredHead | null> {
+    this.gets++;
+    this.readKeys.push(key);
+    return this.#inner.head(key);
   }
 
   async put(key: string, body: string, cas?: CasHeaders): Promise<{ etag: string }> {
     await this.onBeforePut?.(key);
     this.#spend();
     this.puts++;
-    return this.#inner.put(key, body, cas);
+    const written = await this.#inner.put(key, body, cas);
+    await this.onAfterPut?.(key);
+    return written;
   }
 
   async del(key: string): Promise<void> {
@@ -147,7 +184,15 @@ export class FaultStore implements CasStore {
   }
 
   list(prefix: string): Promise<string[]> {
+    this.lists++;
+    this.listedPrefixes.push(prefix);
     return this.#inner.list(prefix);
+  }
+
+  listEntries(prefix: string): Promise<StoredEntry[]> {
+    this.lists++;
+    this.listedPrefixes.push(prefix);
+    return this.#inner.listEntries(prefix);
   }
 
   #spend(): void {
@@ -207,9 +252,13 @@ export class ObservingStore implements CasStore {
   }
 
   /* Not instrumented: the delays and faults above are about the registry's own
-     reads, and nothing observed here reads an object as bytes. */
+     reads, and nothing observed here reads an object as bytes or metadata. */
   getBytes(key: string, opts?: { range: ByteRange }): Promise<Uint8Array | null> {
     return this.#inner.getBytes(key, opts);
+  }
+
+  head(key: string): Promise<StoredHead | null> {
+    return this.#inner.head(key);
   }
 
   put(key: string, body: string, cas?: CasHeaders): Promise<{ etag: string }> {
@@ -223,38 +272,36 @@ export class ObservingStore implements CasStore {
   list(prefix: string): Promise<string[]> {
     return this.#inner.list(prefix);
   }
+
+  listEntries(prefix: string): Promise<StoredEntry[]> {
+    return this.#inner.listEntries(prefix);
+  }
 }
 
 export interface InvariantOptions {
   /**
-   * Tolerates a claim whose environment record is gone. `executeReap` deletes the
-   * environment before its claims, so a killed run leaves the claim behind.
+   * Tolerates a claim whose application record is gone: a deletion killed
+   * partway can leave one behind.
    */
   allowOrphanClaims?: boolean;
 }
 
 /**
  * Reads the whole registry and asserts it is referentially safe: pointers only
- * ever name records that exist. A claim without the environment listing it is
+ * ever name records that exist. A claim without the application listing it is
  * legal (claim-first crash state); a listing without a claim is not.
  */
 export async function invariants(store: CasStore, opts?: InvariantOptions): Promise<void> {
   const ctx: RegistryContext = { store };
 
-  for (const project of await listProjects(ctx)) {
-    for (const name of await listEnvironments(ctx, project)) {
-      const found = await readJson<EnvironmentRecord>(ctx, environmentKey(project, name));
-      if (found === null) continue;
-      const environment = found.value;
+  for (const name of await listApplications(ctx)) {
+    const found = await readJson<ApplicationRecord>(ctx, applicationKey(name));
+    if (found === null) continue;
 
-      for (const host of environment.domains) {
-        const claim = await readJson<DomainClaim>(ctx, domainKey(host));
-        expect(claim, `${project}/${name} lists "${host}" without a claim`).not.toBeNull();
-        expect({ project: claim?.value.project, environment: claim?.value.environment }).toEqual({
-          project,
-          environment: name,
-        });
-      }
+    for (const host of found.value.domains) {
+      const claim = await readJson<DomainClaim>(ctx, domainKey(host));
+      expect(claim, `"${name}" lists "${host}" without a claim`).not.toBeNull();
+      expect(claim?.value.application).toBe(name);
     }
   }
 
@@ -262,11 +309,11 @@ export async function invariants(store: CasStore, opts?: InvariantOptions): Prom
     const claim = await readJson<DomainClaim>(ctx, key);
     if (claim === null || opts?.allowOrphanClaims === true) continue;
 
-    const environment = await readJson<EnvironmentRecord>(
+    const application = await readJson<ApplicationRecord>(
       ctx,
-      environmentKey(claim.value.project, claim.value.environment),
+      applicationKey(claim.value.application),
     );
-    expect(environment, `claim "${key}" points at a missing environment`).not.toBeNull();
+    expect(application, `claim "${key}" points at a missing application`).not.toBeNull();
   }
 
   const lease = await readJson<CoordinatorLease>(ctx, coordinatorKey());
@@ -286,6 +333,16 @@ export async function rejectionOf(fn: () => Promise<unknown>): Promise<ScafoErro
 
   expect(caught, "expected the call to reject").toBeInstanceOf(ScafoError);
   return caught as ScafoError;
+}
+
+/**
+ * The URL a `fetch` input names, whichever of the three shapes it arrived in.
+ * An app answering in-process takes a URL, and stringifying the input wholesale
+ * would render a `Request` as `[object Object]`.
+ */
+export function urlOf(input: Parameters<typeof fetch>[0]): string {
+  if (typeof input === "string") return input;
+  return input instanceof URL ? input.href : input.url;
 }
 
 /** Asserts `fn` rejects with `code`, and hands the error back for further checks. */

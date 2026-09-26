@@ -5,7 +5,6 @@ import {
   type ObserveEventRecord,
   type ObserveRecord,
 } from "../daemon/observe-records.ts";
-import { parseProcessId } from "../core/placement/ids.ts";
 
 /** Events a listing shows when the caller states no limit. */
 export const DEFAULT_TRACE_LIMIT: number = 200;
@@ -32,8 +31,8 @@ export interface TraceSelection {
 }
 
 export interface TraceFilter {
-  /** Only what belongs to this project. */
-  project?: string;
+  /** Only what belongs to this application. */
+  application?: string;
   /** Events shown at most. Defaults to {@link DEFAULT_TRACE_LIMIT}. */
   limit?: number;
   /**
@@ -54,7 +53,7 @@ export function selectTraces(
 
   let hidden = 0;
   const matched = events.filter((event) => {
-    if (filter.project !== undefined && !belongsTo(event, filter.project)) return false;
+    if (filter.application !== undefined && !belongsTo(event, filter.application)) return false;
 
     if (filter.all !== true && PERIODIC_EVENTS.includes(event.type)) {
       hidden++;
@@ -108,9 +107,7 @@ function fields(event: ObserveEventRecord): string[] {
   return rendered;
 }
 
-/** Whether an event is this project's: by name or by its process id. */
-function belongsTo(event: ObserveEventRecord, project: string): boolean {
-  if ("project" in event) return event.project === project;
-  if ("processId" in event) return parseProcessId(event.processId)?.project === project;
-  return false;
+/** Whether an event names this application; one that names none belongs to nobody. */
+function belongsTo(event: ObserveEventRecord, application: string): boolean {
+  return "application" in event && event.application === application;
 }

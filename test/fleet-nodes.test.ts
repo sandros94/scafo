@@ -9,7 +9,7 @@ import {
   heartbeatNode,
   registerNode,
 } from "../src/core/registry/nodes.ts";
-import type { NodeRecord } from "../src/core/types/registry.ts";
+import type { FreezeRecord, NodeRecord } from "../src/core/types/registry.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock } from "./_helpers.ts";
 
@@ -18,7 +18,7 @@ describe("what the listing reads", () => {
     const clock = ctxWith(new MemoryCasStore());
     await register(clock, "node-b", {
       labels: { tier: "fast", region: "eu-west-1" },
-      versions: { scafo: "0.0.0", celld: "0.4.1" },
+      versions: { scafo: "0.0.0", celld: "0.5.0" },
     });
     await register(clock, "node-a", {});
 
@@ -30,7 +30,7 @@ describe("what the listing reads", () => {
       apiPort: 7400,
       labels: { region: "eu-west-1", tier: "fast" },
       /* Carried through untouched, so `--json` says which binaries are where. */
-      versions: { scafo: "0.0.0", celld: "0.4.1" },
+      versions: { scafo: "0.0.0", celld: "0.5.0" },
     });
     expect(listing[0]?.versions).toBeUndefined();
   });
@@ -61,6 +61,59 @@ describe("what the listing reads", () => {
        failing — and reading it as lost would hide the difference that matters. */
     expect(listing[0]).toMatchObject({ state: "draining" });
     expect(listing[0]?.drainingAt).toBeTypeOf("string");
+  });
+
+  /*
+   * The incident this exists for: a node whose process for one application
+   * exited every fifteen seconds still heartbeat, still answered, still served
+   * everything else — and read as plainly "live" here while a tenant's traffic
+   * was being dropped.
+   */
+  it("says degraded for a live node that cannot keep an application running", async () => {
+    const clock = ctxWith(new MemoryCasStore());
+    await register(clock, "node-a", {});
+    await heartbeatNode(clock.ctx, "node-a", {
+      serving: { blog: { port: 24_000 } },
+      failing: {
+        shop: { since: "2026-01-01T00:00:00.000Z", restarts: 5, lastError: "Error: wedged" },
+      },
+    });
+
+    const listing = await listFleetNodes(clock.ctx, { now: new Date(clock.nowMs()) });
+
+    expect(listing[0]?.state).toBe("degraded");
+    expect(listing[0]?.failing).toEqual({
+      shop: { since: "2026-01-01T00:00:00.000Z", restarts: 5, lastError: "Error: wedged" },
+    });
+  });
+
+  it("goes back to live once the node takes the word back", async () => {
+    const clock = ctxWith(new MemoryCasStore());
+    await register(clock, "node-a", {});
+    await heartbeatNode(clock.ctx, "node-a", {
+      failing: { shop: { since: "2026-01-01T00:00:00.000Z", restarts: 5 } },
+    });
+    /* An empty map is the node saying it recovered; the field goes with it. */
+    await heartbeatNode(clock.ctx, "node-a", { serving: {}, failing: {} });
+
+    const listing = await listFleetNodes(clock.ctx, { now: new Date(clock.nowMs()) });
+
+    expect(listing[0]?.state).toBe("live");
+    expect(listing[0]?.failing).toBeUndefined();
+  });
+
+  it("keeps saying what it said when a beat carries no word about failures", async () => {
+    const clock = ctxWith(new MemoryCasStore());
+    await register(clock, "node-a", {});
+    await heartbeatNode(clock.ctx, "node-a", {
+      failing: { shop: { since: "2026-01-01T00:00:00.000Z", restarts: 5 } },
+    });
+    /* A plain liveness beat has not looked at the node's processes. */
+    await heartbeatNode(clock.ctx, "node-a");
+
+    expect((await listFleetNodes(clock.ctx, { now: new Date(clock.nowMs()) }))[0]?.state).toBe(
+      "degraded",
+    );
   });
 
   it("is NOT live when nothing in the record says when the node was last seen", async () => {
@@ -100,22 +153,75 @@ describe("what the listing prints", () => {
     expect(printed).toContain("scafo: unreported on 2 nodes");
   });
 
+  it("counts a degraded node in and names what it cannot keep running", async () => {
+    const clock = ctxWith(new MemoryCasStore());
+    await register(clock, "node-a", {});
+    await heartbeatNode(clock.ctx, "node-a", {
+      failing: {
+        shop: {
+          since: "2026-09-20T11:59:00.000Z",
+          restarts: 5,
+          lastError: "Error: node authority was not established before wake scan",
+        },
+      },
+    });
+    const now = new Date(clock.nowMs());
+
+    const printed = formatNodeTable(await listFleetNodes(clock.ctx, { now }), now);
+
+    /* Still live for placement, and said to be degraded in the same breath. */
+    expect(printed).toContain("1 node, 1 live, 1 degraded");
+    expect(printed).toContain("node-a cannot keep 1 application running:");
+    expect(printed).toContain("shop  5 restarts since 2026-09-20T11:59:00.000Z");
+    expect(printed).toContain("node authority was not established before wake scan");
+  });
+
   it("says what each machine runs, and rolls the fleet up by binary", async () => {
     const clock = ctxWith(new MemoryCasStore());
-    await register(clock, "node-a", { versions: { scafo: "0.0.0", celld: "0.4.1" } });
-    await register(clock, "node-b", { versions: { scafo: "0.0.0", celld: "0.4.1" } });
-    await register(clock, "node-c", { versions: { scafo: "0.0.0", celld: "0.4.0" } });
+    await register(clock, "node-a", { versions: { scafo: "0.0.0", celld: "0.5.0" } });
+    await register(clock, "node-b", { versions: { scafo: "0.0.0", celld: "0.5.0" } });
+    await register(clock, "node-c", { versions: { scafo: "0.0.0", celld: "0.4.1" } });
     await register(clock, "node-d", {});
     const now = new Date(clock.nowMs());
 
     const printed = formatNodeTable(await listFleetNodes(clock.ctx, { now }), now);
 
     expect(printed).toContain("CELLD  SCAFO  LABELS");
-    /* Newest first: mid-upgrade, the question is how much of the fleet has moved. */
-    expect(printed).toContain("celld: 0.4.1 on 2 nodes, 0.4.0 on 1, unreported on 1");
+    /* Newest first: the question is how much of the fleet is still on the old one. */
+    expect(printed).toContain("celld: 0.5.0 on 2 nodes, 0.4.1 on 1, unreported on 1");
     expect(printed).toContain("scafo: 0.0.0 on 3 nodes, unreported on 1");
     /* A record from a build that kept no versions reads as a dash, not a guess. */
     expect(printed).toMatch(/^ {2}node-d\s+lost\s+never\s+\S+\s+-\s+-$/m);
+  });
+
+  it("says under the header that this fleet is refusing deploys, and why", async () => {
+    const clock = ctxWith(new MemoryCasStore());
+    await register(clock, "node-a", { versions: { scafo: "0.0.0", celld: "0.5.0" } });
+    const now = new Date(clock.nowMs());
+    const listing = await listFleetNodes(clock.ctx, { now });
+    const freeze: FreezeRecord = {
+      v: 1,
+      frozenAt: "2026-09-17T09:00:00.000Z",
+      by: "op-aaaa1111",
+      reason: "celld 0.5.0 upgrade",
+    };
+
+    const printed = formatNodeTable(listing, now, freeze);
+
+    /* Directly under the count, and above the version rolls: an operator looking
+       at the fleet mid-upgrade is looking at the thing the freeze was set for. */
+    const lines = printed.split("\n");
+    expect(lines[0]).toContain("1 node");
+    expect(lines[1]).toBe(
+      `deploys: frozen since 2026-09-17T09:00:00.000Z by "op-aaaa1111": celld 0.5.0 upgrade`,
+    );
+    expect(lines[2]).toContain("celld: 0.5.0");
+
+    /* No line at all when nothing is frozen, rather than one saying so. */
+    expect(formatNodeTable(listing, now)).not.toContain("deploys:");
+    expect(formatNodeTable(listing, now, { v: 1, frozenAt: freeze.frozenAt, by: freeze.by })).toBe(
+      printed.replace(": celld 0.5.0 upgrade", ""),
+    );
   });
 
   it("says plainly when the bucket holds no node, and how a machine joins", async () => {

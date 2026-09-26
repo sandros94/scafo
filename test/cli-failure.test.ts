@@ -39,11 +39,11 @@ describe("how a failure is printed", () => {
     const said = capture();
 
     reportFailure(
-      new ScafoError("not-found", "No such environment", { detail: `"shop/preview" is not there` }),
+      new ScafoError("not-found", "No such application", { detail: `"shop-preview" is not there` }),
     );
 
     expect(said()).toEqual([
-      `scafo: No such environment: "shop/preview" is not there [urn:scafo:not-found]`,
+      `scafo: No such application: "shop-preview" is not there [urn:scafo:not-found]`,
     ]);
     expect(process.exitCode).toBe(1);
   });
@@ -71,6 +71,31 @@ describe("how a failure is printed", () => {
       "scafo: unexpected failure: TypeError: fetch failed, caused by " +
         "connect ECONNREFUSED 127.0.0.1:7400",
     ]);
+  });
+
+  it("renders a cause that is a plain object by what it holds, not as [object Object]", () => {
+    const said = capture();
+
+    reportFailure(
+      new Error("S3Error: We encountered an internal error, please try again.", {
+        cause: { code: "InternalError", requestId: "7f3a", status: 500 },
+      }),
+    );
+
+    expect(said()).toEqual([
+      "scafo: unexpected failure: S3Error: We encountered an internal error, please try again., " +
+        `caused by {"code":"InternalError","requestId":"7f3a","status":500}`,
+    ]);
+  });
+
+  it("bounds a cause that is a large object rather than flooding the line", () => {
+    const said = capture();
+
+    reportFailure(new Error("store failed", { cause: { body: "x".repeat(2000) } }));
+
+    const [line] = said();
+    expect(line?.length).toBeLessThan(500);
+    expect(line).toContain("…");
   });
 
   it("prints a thrown value that is not an error at all as what it says it is", () => {

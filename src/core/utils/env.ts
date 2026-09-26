@@ -17,19 +17,34 @@ export function isEnvName(s: string): boolean {
 }
 
 /**
+ * Names an object answers for whether or not anything was stored under them.
+ * They are valid variable names for a process, but a record keyed by data cannot
+ * carry one: writing it either changes the object itself or is shadowed by what
+ * JavaScript already put there, and reading it back answers with that instead.
+ */
+export const RESERVED_ENV_NAMES: readonly string[] = ["__proto__", "constructor", "prototype"];
+
+/**
+ * The whole rule a variable name has to meet, worded for a refusal. Said once
+ * so every surface that carries variables — `scafo deploy --var`, the runtime
+ * policy an operator hands a node — refuses the same names in the same words.
+ */
+export const ENV_NAME_RULE: string =
+  "letters, digits and underscores, never beginning on a digit, and never " +
+  RESERVED_ENV_NAMES.map((reserved) => `"${reserved}"`).join(", ");
+
+/**
  * Throws `ScafoError("invalid-input")` naming `what` unless `s` is a variable
- * name a process could read back.
+ * name a process could read back out of a record keyed by data.
  *
  * `what` is how the value is described to whoever typed it, so a refusal says
  * which half of a pair was the problem.
  */
 export function assertEnvName(s: unknown, what: string = "variable name"): void {
-  if (typeof s === "string" && isEnvName(s)) return;
+  if (typeof s === "string" && isEnvName(s) && !RESERVED_ENV_NAMES.includes(s)) return;
 
   throw new ScafoError("invalid-input", "Invalid environment variable", {
-    detail:
-      `${describe(s)} is not a usable ${what}: letters, digits and underscores, ` +
-      `never beginning on a digit`,
+    detail: `${describe(s)} is not a usable ${what}: ${ENV_NAME_RULE}`,
   });
 }
 
@@ -64,24 +79,24 @@ export function assertEnvVars(
 }
 
 /**
- * Reads variables written as text — a command-line flag, an environment
- * variable — into the record a process is handed: `"NAME=value,NAME2=value2"`.
+ * Reads variables written one whole `NAME=value` pair at a time — an occurrence
+ * of a repeated flag, an entry of an environment variable's list — into the
+ * record a process is handed.
  *
- * A VALUE MAY NOT CONTAIN A COMMA in this form: the separator wins, and a value
- * that needs one belongs in a config file, which carries the same record as an
- * object and has no such limit. Everything after the FIRST `=` is the value, so
- * `NAME=a=b` is `a=b`, and surrounding spacing is dropped on both halves.
+ * Everything after the FIRST `=` is the value, so `NAME=a=b` is `a=b`, and
+ * surrounding spacing is dropped on both halves. A value is whatever the entry
+ * holds, commas included.
  *
- * Blank entries are skipped, so a trailing comma costs nothing. A DUPLICATE NAME
- * is refused rather than resolved, as it is for labels: both "the first wins" and
- * "the last wins" are defensible, which is why neither is guessed at on the
- * operator's behalf. Text that names nothing at all is refused too — it was
- * written for a reason, and the reason was not "no variables".
+ * Blank entries are skipped, so a trailing separator costs nothing. A DUPLICATE
+ * NAME is refused rather than resolved, as it is for labels: both "the first
+ * wins" and "the last wins" are defensible, which is why neither is guessed at
+ * on the operator's behalf. A list that names nothing at all is refused too — it
+ * was written for a reason, and the reason was not "no variables".
  */
-export function parseEnvVars(text: string, field: string): Record<string, string> {
+export function parseEnvVarEntries(entries: string[], field: string): Record<string, string> {
   const vars: Record<string, string> = {};
 
-  for (const entry of text.split(",")) {
+  for (const entry of entries) {
     const pair = entry.trim();
     if (pair === "") continue;
 

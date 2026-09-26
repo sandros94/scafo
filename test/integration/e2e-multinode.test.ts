@@ -8,7 +8,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -17,25 +17,27 @@ import type { Readable } from "node:stream";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { S3Client } from "uns3";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { DaemonState } from "../../src/daemon/app.ts";
+import type { DaemonState, SupervisedProcess } from "../../src/daemon/app.ts";
 import type { OperatorKeyFile } from "../../src/cli/_operator-key.ts";
 import { signNodeToken } from "../../src/core/auth/node-token.ts";
 import {
+  applicationKey,
   claimDomain,
-  createEnvironment,
   domainKey,
   listNodes,
   NODE_LIVENESS_WINDOW_MS,
   placementKey,
   readJson,
   type RegistryContext,
-  environmentKey,
   nodeKey,
   setReplicas,
 } from "../../src/core/registry/index.ts";
+import { celldNodeLeaseKey } from "../../src/core/registry/paths.ts";
+import type { FleetRouting } from "../../src/core/types/ingress.ts";
 import type { NodeRecord } from "../../src/core/types/registry.ts";
 import type { ProcessStatus } from "../../src/core/types/supervisor.ts";
 import { createUns3Store } from "../../src/drivers/store/uns3.ts";
+import { ADOPTION_BOUND_MS } from "./_harness.ts";
 
 const env = process.env;
 const E2E = env.SCAFO_E2E === "1";
@@ -63,22 +65,21 @@ const ACCESS_KEY = "scafo";
 const SECRET_KEY = "scafo-secret";
 const REGION = "us-east-1";
 const PLATFORM_DOMAIN = "scafo.test";
-const PROJECT = "app";
-const ENVIRONMENT = "production";
-/** Deployed, deleted through the coordinator, and reaped: the ephemeral one. */
-const PREVIEW = "preview";
+/** The application every other name here shares a prefix with. */
+const APPLICATION = "app";
+/** Deployed, then deleted through the coordinator and reaped. */
+const PREVIEW = "app-preview";
 /**
  * Scaled down to a single node, then carried through the coordinator's death.
  *
- * The NAME is load-bearing, and only for how much this suite proves: rendezvous
- * hashing is deterministic, so `app/single` over these two node ids always lands
- * on node-a — which is the node that boots first, therefore usually wins the
- * coordinator lease, and is therefore the one the kill step kills. That makes
- * the interesting branch the usual one: the environment has to be MOVED to a
- * node that was not running it. Neither the name nor the boot order guarantees
- * it, so the assertion still handles the other outcome.
+ * Rendezvous hashing is deterministic, so this name alone decides which of the
+ * two nodes holds it. The node that boots first usually wins the coordinator
+ * lease and is therefore the one the kill step kills, which makes the
+ * interesting branch — the application has to be MOVED to a node that was not
+ * running it — the likely one. Nothing guarantees it, so the assertion handles
+ * either outcome.
  */
-const SOLO = "single";
+const SOLO = "app-single";
 /**
  * Deployed under a node selector only one node satisfies, then let loose again.
  *
@@ -87,16 +88,44 @@ const SOLO = "single";
  * label at all, so `--node-selector tier=fast --replicas all` has exactly one
  * eligible node however the digests fall.
  */
-const TARGETED = "targeted";
+const TARGETED = "app-targeted";
 
 /** The label node-b boots with, and the one {@link TARGETED} selects on. */
 const FAST_LABEL = "tier=fast";
 
 /** Deployed through a node excluded from its placement selector. */
-const AWAITED = "awaited";
+const AWAITED = "app-awaited";
+
+/**
+ * Counted up on both nodes, then carried through a SIGKILL of both while the
+ * bucket was frozen. It is deployed last and nothing else touches it.
+ */
+const DURABLE = "app-durable";
+
+/**
+ * Deployed to both nodes, then made unable to start on ONE of them by putting a
+ * body Celld cannot use at that node's own Celld node lease.
+ *
+ * WHY THE LEASE. It is the object a Celld process must read or create before it
+ * has any authority at all, and the node name it is filed under is the scafo node
+ * id — stable across restarts, deliberately. A store that holds a body there
+ * which Celld cannot use therefore wedges that node's process on the same key,
+ * every restart, for as long as the object stands. This case is the only place
+ * the whole rule is shown against a real Celld and a real object store.
+ */
+const WEDGED = "app-wedged";
+
+/**
+ * The body put at the wedged node's lease key: JSON that stops half way.
+ *
+ * TRUNCATED RATHER THAN NONSENSE, because that is the shape a store leaves
+ * behind — a write that was cut off, or an object served short. It is not a lease
+ * by upstream's own rule (`node` and `expires_ms`) and it is not JSON either.
+ */
+const TRUNCATED_LEASE = '{"node":"node-a","expires_ms":';
 
 /** Deployed to both nodes, retired out of service, then force-deleted. */
-const SUNSET = "sunset";
+const SUNSET = "app-sunset";
 /** Claimed for {@link SUNSET}, so its deletion has a claim to release too. */
 const SUNSET_DOMAIN = "sunset.example.test";
 
@@ -123,17 +152,64 @@ const POLL_MS = 500;
 /** Covers liveness expiry, reassignment, reconcile, and process start after a node dies. */
 const REASSIGN_DEADLINE_MS = 240_000;
 const REASSIGN_STEP_TIMEOUT_MS = 300_000;
+/**
+ * How long the durability case gives the warm-up counts to reach the bucket
+ * before it freezes the bucket.
+ *
+ * A WAIT AND NOT AN ASSERTION, because nothing the fleet publishes says "the
+ * bucket has this row now" — an upload is what the runtime does after it has
+ * already answered. It only has to be long enough that the write taken while
+ * the bucket is frozen is the ONLY one whose fate is in question.
+ */
+const BUCKET_UPLOAD_SETTLE_MS = 6_000;
+/**
+ * How long the bucket stays frozen.
+ *
+ * SHORT ON PURPOSE: a runtime process renews its own node lease against the
+ * bucket every few seconds and fences itself after ten without it, so a longer
+ * freeze would stop the processes for a reason that has nothing to do with what
+ * this case is about. Everything inside the window is one HTTP GET and two
+ * container kills.
+ */
+const FROZEN_BUDGET_MS = 8_000;
+/** How long the bucket must have been taking writes before the nodes come back. */
+const STORE_AWAKE_WINDOW_MS = 20_000;
 /** Draining reassignment must finish before the liveness-expiry bound. */
 const GRACEFUL_DRAIN_BUDGET_MS = 60_000;
 
-/** The lease TTL the daemon runs with; failover is bounded by a few of these. */
+/**
+ * The lease TTL the daemon runs with; failover is bounded by a few of these.
+ *
+ * Read off the default rather than written down again: the lease lifetime is a
+ * setting, and a bound that quoted a number of its own would pass or fail for
+ * reasons that have nothing to do with failover.
+ */
+/* Set on every node through the setting an operator has, shorter than the
+   default so that the failover case waits seconds rather than minutes. */
 const LEASE_TTL_MS = 15_000;
+
+/**
+ * Where a node keeps what it must remember between boots, inside its container.
+ *
+ * A HOST DIRECTORY IS MOUNTED HERE, because the runtime work directories live
+ * under it: a write is acknowledged once a peer holds it on the follower disk
+ * kept there, before the bucket has it, and a node recovers it at boot from what
+ * its predecessor of the same name left. A state directory that only existed
+ * inside the container would make the durability case prove nothing about a
+ * deployment where the container is re-created.
+ */
+const STATE_DIR = "/var/lib/scafo";
+
+/** Mode the mounted directory is given, so the image's uid 10001 may write it. */
+const STATE_DIR_MODE = 0o777;
 
 /** One node's ingress, daemon, and host-facing ports. */
 interface Node {
   id: string;
   ingress: StartedTestContainer;
   daemon: StartedTestContainer;
+  /** The host directory mounted at {@link STATE_DIR}; it outlives the container. */
+  stateDir: string;
   /** Address the other containers reach this pair at. */
   bridgeAddress: string;
   httpPort: number;
@@ -153,7 +229,7 @@ let storeFromContainers: string;
 let registry: RegistryContext;
 let keyPath: string;
 let operatorKey: OperatorKeyFile;
-let buildV1: string;
+let versionV1: string;
 /** The one node placement gave {@link SOLO} to; which one is not this test's to pick. */
 let soloHolder: Node;
 /** Its process there, so a survivor that kept it can be shown never to have restarted. */
@@ -165,9 +241,6 @@ const observed: Record<string, unknown> = {};
 
 describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   beforeAll(async () => {
-    const built = await run("pnpm", ["build"], REPO_ROOT, env as Record<string, string>);
-    if (built.code !== 0) throw new Error(`"pnpm build" failed:\n${built.output}`);
-
     store = await new GenericContainer(STORE_IMAGE)
       .withCommand(["server", "-s3"])
       .withExposedPorts(STORE_PORT)
@@ -209,6 +282,29 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       await node.ingress.stop().catch(() => {});
     }
     await store?.stop().catch(() => {});
+    /* The node wrote these as uid 10001 into directories only it may enter, so
+       they are removed from inside a container that may enter them. */
+    for (const node of nodes) {
+      await run(
+        "docker",
+        [
+          "run",
+          "--rm",
+          "--user",
+          "0",
+          "-v",
+          `${node.stateDir}:/state`,
+          "--entrypoint",
+          "sh",
+          NODE_IMAGE,
+          "-c",
+          "rm -rf /state/..?* /state/.[!.]* /state/*",
+        ],
+        REPO_ROOT,
+        { PATH: env.PATH ?? "" },
+      ).catch(() => {});
+      await rm(node.stateDir, { recursive: true, force: true }).catch(() => {});
+    }
     for (const dir of tmpDirs) await rm(dir, { recursive: true, force: true });
 
     console.log(`\n[e2e-multinode] raw observations\n${JSON.stringify(observed, null, 2)}`);
@@ -256,22 +352,55 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
     "deploys through one node and is served by both",
     async () => {
       const started = Date.now();
-      const result = await runCli(deployArgs(await stageApp("v1"), ENVIRONMENT), {});
+      const result = await runCli(deployArgs(await stageApp("v1"), APPLICATION), {});
       observed.deployV1Ms = Date.now() - started;
       observed.deployV1Output = result.output;
 
       expectCleanExit(result);
       expect(result.output, daemonLogTail()).toContain("deployed");
-      buildV1 = buildIdOf(result.output);
-      observed.buildV1 = buildV1;
+      versionV1 = deploymentOf(result.output);
+      observed.versionV1 = versionV1;
 
       const servedAt: Record<string, number> = {};
       for (const node of nodes) {
         const at = Date.now();
-        await untilServes(node, envHost(), "v1");
+        await untilServes(node, hostOf(APPLICATION), "v1");
         servedAt[node.id] = Date.now() - at;
       }
       observed.servedAfterDeployMs = servedAt;
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "has the node that did NOT accept a deploy serving it seconds later",
+    async () => {
+      /*
+       * A deploy lands on ONE node. The others are told nothing directly: their
+       * next reconcile pass sees the application's deployment revision move, and
+       * each asks its own runtime process to adopt the fleet's pointer at once
+       * rather than waiting out that process's own thirty-second poll. This
+       * measures the node that took no part in the deploy.
+       */
+      const accepting = nodes[0] as Node;
+      const peer = nodes.find((node) => node.id !== accepting.id) as Node;
+
+      const result = await runCli(deployArgs(await stageApp("v2"), APPLICATION, [], accepting), {});
+      expectCleanExit(result);
+      expect(result.output, daemonLogTail()).toContain("deployed");
+      const deployedAt = Date.now();
+
+      await untilServes(peer, hostOf(APPLICATION), "v2");
+      const adoptedMs = Date.now() - deployedAt;
+      observed.peerAdoptedMs = { node: peer.id, ms: adoptedMs };
+      console.log(
+        `e2e: ${peer.id}, which did not accept the deploy, served v2 ` +
+          `${String(adoptedMs)}ms after it was deployed`,
+      );
+      expect(
+        adoptedMs,
+        `${String(adoptedMs)}ms from "deployed" to ${peer.id} serving v2`,
+      ).toBeLessThan(ADOPTION_BOUND_MS);
     },
     STEP_TIMEOUT_MS,
   );
@@ -281,7 +410,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
     async () => {
       for (const node of nodes) {
         await until(`${node.id} to answer /count`, DEADLINE_MS, async () => {
-          const answer = await httpGet(node.httpPort, "/count", { host: envHost() });
+          const answer = await httpGet(node.httpPort, "/count", { host: hostOf(APPLICATION) });
           return answer.status === 200 && typeof countOf(answer.body) === "number" ? answer : null;
         });
       }
@@ -289,7 +418,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       const counts: Array<{ node: string; n: number }> = [];
       for (let round = 0; round < 3; round++) {
         for (const node of nodes) {
-          const answer = await httpGet(node.httpPort, "/count", { host: envHost() });
+          const answer = await httpGet(node.httpPort, "/count", { host: hostOf(APPLICATION) });
           expectStatus(answer, 200);
           counts.push({ node: node.id, n: countOf(answer.body) as number });
         }
@@ -334,24 +463,25 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   );
 
   it(
-    "deletes an ephemeral environment asked of the node that is NOT the coordinator",
+    "deletes an application outright when asked of the node that is NOT the coordinator",
     async () => {
-      await createEnvironment(registry, PROJECT, {
-        name: PREVIEW,
-        ephemeral: true,
-      });
       expectCleanExit(
         await runCli(deployArgs(await stageApp("v1"), PREVIEW, ["--replicas", "all"]), {}),
       );
 
       const coordinator = await coordinatorNode();
       const asked = nodes.find((node) => node.id !== coordinator.id) as Node;
-      await untilServes(asked, previewHost(), "v1");
+      expect(asked.id, "the deletion must be sent to a node holding no lease").not.toBe(
+        coordinator.id,
+      );
+      await untilServes(asked, hostOf(PREVIEW), "v1");
 
       const started = Date.now();
+      /* Forced: the application was never retired, and this case is about which
+         node carries the deletion out, not about the two steps that precede it. */
       const answer = await httpDelete(
         asked.apiPort,
-        `/v1/environments/${PROJECT}/${PREVIEW}`,
+        `/v1/applications/${PREVIEW}?force=1`,
         await operatorToken(),
       );
       observed.proxiedDelete = {
@@ -363,15 +493,15 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       };
 
       expectStatus(answer, 200);
-      expect(JSON.parse(answer.body).deleted).toContain(environmentKey(PROJECT, PREVIEW));
-      expect(await readJson(registry, environmentKey(PROJECT, PREVIEW))).toBeNull();
+      expect(JSON.parse(answer.body).deleted).toContain(applicationKey(PREVIEW));
+      expect(await readJson(registry, applicationKey(PREVIEW))).toBeNull();
 
       const reapedAt = Date.now();
       for (const node of nodes) {
         await until(`${node.id} to stop running ${PREVIEW}`, DEADLINE_MS, async () => {
           const state = await stateOf(node);
           const running = state.processes.filter(
-            (process) => process.state === "running" && process.id === `${PROJECT}--${PREVIEW}`,
+            (process) => process.state === "running" && process.id === PREVIEW,
           );
           return running.length === 0 ? state : null;
         });
@@ -382,7 +512,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   );
 
   it(
-    "runs a labelled environment only on the node carrying the label, then spreads it when the selector is lifted",
+    "runs a labelled application only on the node carrying the label, then spreads it when the selector is lifted",
     async () => {
       const labelled = nodes.find((node) => node.id === NODE_B) as Node;
       const plain = nodes.find((node) => node.id === NODE_A) as Node;
@@ -410,7 +540,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       );
       const placedMs = Date.now() - deployedAt;
 
-      const served = await untilServes(labelled, targetedHost(), "v1");
+      const served = await untilServes(labelled, hostOf(TARGETED), "v1");
       expect(JSON.parse(served.body).version).toBe("v1");
 
       await until(`${plain.id} to run nothing for ${TARGETED}`, DEADLINE_MS, async () => {
@@ -420,35 +550,35 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       /* The node the selector excluded runs nothing for the host, and still
        * answers for it: its Traefik reads the FLEET's routing from it, and that
        * document names the holder's upstream because nothing local can serve. */
-      const excludedAnswer = await untilServes(plain, targetedHost(), "v1");
+      const excludedAnswer = await untilServes(plain, hostOf(TARGETED), "v1");
       expect(JSON.parse(excludedAnswer.body).version).toBe("v1");
       expect((await stateOf(plain)).processes.some(runsTargeted)).toBe(false);
 
       const view = (await stateOf(plain)).placements.find(
-        (entry) => entry.project === PROJECT && entry.env === TARGETED,
+        (entry) => entry.application === TARGETED,
       );
       expect(view?.selector).toEqual({ tier: "fast" });
 
       const clearedAt = Date.now();
-      const cleared = await runCli(envArgs("selector", TARGETED, plain, ["--clear"]), {});
+      const cleared = await runCli(appArgs("selector", TARGETED, plain, ["--clear"]), {});
       expectCleanExit(cleared);
       expect(cleared.output).toContain("no nodes any more");
 
-      /* Serving is no longer what says the environment arrived: the excluded node
+      /* Serving is no longer what says the application arrived: the excluded node
        * already answered for it by forwarding. The process on it is. */
       await until(`${TARGETED} to spread to both nodes`, DEADLINE_MS, async () => {
         const states = await Promise.all(nodes.map(async (node) => stateOf(node)));
         if (!states.every((state) => placedNodes(state, TARGETED)?.length === 2)) return null;
         return states.every((state) => state.processes.some(runsTargeted)) ? states : null;
       });
-      const spread = await untilServes(plain, targetedHost(), "v1");
+      const spread = await untilServes(plain, hostOf(TARGETED), "v1");
       const spreadMs = Date.now() - clearedAt;
 
       expect(JSON.parse(spread.body).version).toBe("v1");
       expect(placedNodes(await stateOf(plain), TARGETED)).toEqual([NODE_A, NODE_B]);
 
       observed.nodeSelector = {
-        environment: TARGETED,
+        application: TARGETED,
         selector: FAST_LABEL,
         deployedThrough: labelled.id,
         placedOn: labelled.id,
@@ -493,7 +623,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expect((await stateOf(plain)).processes.some(runsAwaited)).toBe(false);
 
       observed.deployThroughOtherNode = {
-        environment: AWAITED,
+        application: AWAITED,
         deployedThrough: plain.id,
         placedOn: labelled.id,
         deployedMs,
@@ -504,13 +634,13 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   );
 
   it(
-    "runs an environment scaled to one replica on exactly one node, and takes it off the other",
+    "runs an application scaled to one replica on exactly one node, and takes it off the other",
     async () => {
       expectCleanExit(await runCli(deployArgs(await stageApp("v1"), SOLO), {}));
-      for (const node of nodes) await untilServes(node, soloHost(), "v1");
+      for (const node of nodes) await untilServes(node, hostOf(SOLO), "v1");
 
       const scaledAt = Date.now();
-      await setReplicas(registry, PROJECT, SOLO, 1);
+      await setReplicas(registry, SOLO, 1);
 
       const holder = await until(
         `exactly one node to be left running ${SOLO}`,
@@ -528,7 +658,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       );
       const unassigned = nodes.find((node) => node.id !== holder.id) as Node;
 
-      const served = await untilServes(holder, soloHost(), "v1");
+      const served = await untilServes(holder, hostOf(SOLO), "v1");
       expect(JSON.parse(served.body).version).toBe("v1");
 
       await until(`${unassigned.id} to run nothing for ${SOLO}`, DEADLINE_MS, async () => {
@@ -538,7 +668,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       /* Same contract as the selector case: the node scaling took the process off
        * keeps answering for the host, because the fleet document its own Traefik
        * polls names the one node left running it. */
-      const unassignedAnswer = await untilServes(unassigned, soloHost(), "v1");
+      const unassignedAnswer = await untilServes(unassigned, hostOf(SOLO), "v1");
       expect(JSON.parse(unassignedAnswer.body).version).toBe("v1");
       expect((await stateOf(unassigned)).processes.some(runsSolo)).toBe(false);
       expect(placedNodes(await stateOf(unassigned), SOLO)).toEqual([holder.id]);
@@ -560,7 +690,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   );
 
   it(
-    "moves a single-replica environment off a node that was asked to stop, FAST",
+    "moves a single-replica application off a node that was asked to stop, FAST",
     async () => {
       const leaving = soloHolder;
       const survivor = nodes.find((node) => node.id !== leaving.id) as Node;
@@ -584,7 +714,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
           if (placedNodes(state, SOLO)?.includes(survivor.id) !== true) return null;
           if (!state.processes.some(runsSolo)) return null;
 
-          const answer = await httpGet(survivor.httpPort, "/", { host: soloHost() });
+          const answer = await httpGet(survivor.httpPort, "/", { host: hostOf(SOLO) });
           return answer.status === 200 && answer.body.includes('"v1"') ? answer : null;
         },
       );
@@ -643,24 +773,24 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
   );
 
   it(
-    "retires an environment out of service, then refuses to delete it until it is forced",
+    "retires an application out of service, then refuses to delete it until it is forced",
     async () => {
       expectCleanExit(await runCli(deployArgs(await stageApp("v1"), SUNSET), {}));
-      for (const node of nodes) await untilServes(node, sunsetHost(), "v1");
-      await claimDomain(registry, SUNSET_DOMAIN, PROJECT, SUNSET);
+      for (const node of nodes) await untilServes(node, hostOf(SUNSET), "v1");
+      await claimDomain(registry, SUNSET_DOMAIN, SUNSET);
 
       const retiredAt = Date.now();
-      const retired = await runCli(envArgs("retire", SUNSET, nodes[0]), {});
+      const retired = await runCli(appArgs("retire", SUNSET, nodes[0]), {});
       expectCleanExit(retired);
       expect(retired.output).toContain("retired");
 
-      /* A retired environment leaves the fleet document entirely, so neither node
+      /* A retired application leaves the fleet document entirely, so neither node
        * has an upstream to forward to and both fall through to Traefik's own 404. */
       for (const node of nodes) {
         await until(`${node.id} to stop serving ${SUNSET}`, DEADLINE_MS, async () => {
           const state = await stateOf(node);
           if (state.processes.some(runsSunset)) return null;
-          const answer = await httpGet(node.httpPort, "/", { host: sunsetHost() });
+          const answer = await httpGet(node.httpPort, "/", { host: hostOf(SUNSET) });
           return answer.status === 404 && answer.body.includes("404 page not found")
             ? answer
             : null;
@@ -669,28 +799,30 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       const stoppedMs = Date.now() - retiredAt;
 
       await until(`the placement of ${SUNSET} to be removed`, DEADLINE_MS, async () =>
-        (await readJson(registry, placementKey(PROJECT, SUNSET))) === null ? true : null,
+        (await readJson(registry, placementKey(SUNSET))) === null ? true : null,
       );
 
       const coordinator = await coordinatorNode();
       const asked = nodes.find((node) => node.id !== coordinator.id) as Node;
 
-      const refused = await runCli(envArgs("delete", SUNSET, asked), {});
+      const refused = await runCli(appArgs("delete", SUNSET, asked), {});
       expect(refused.code, refused.output).toBe(1);
       expect(refused.output).toContain("grace");
       expect(refused.output).toContain("force");
-      expect(await readJson(registry, environmentKey(PROJECT, SUNSET))).not.toBeNull();
+      expect(await readJson(registry, applicationKey(SUNSET))).not.toBeNull();
 
-      const forced = await runCli(envArgs("delete", SUNSET, asked, ["--force"]), {});
+      const forced = await runCli(appArgs("delete", SUNSET, asked, ["--force"]), {});
       expectCleanExit(forced);
-      expect(forced.output).toContain(environmentKey(PROJECT, SUNSET));
+      expect(forced.output).toContain(applicationKey(SUNSET));
 
-      expect(await readJson(registry, environmentKey(PROJECT, SUNSET))).toBeNull();
-      expect(await readJson(registry, placementKey(PROJECT, SUNSET))).toBeNull();
+      expect(await readJson(registry, applicationKey(SUNSET))).toBeNull();
+      expect(await readJson(registry, placementKey(SUNSET))).toBeNull();
       expect(await readJson(registry, domainKey(SUNSET_DOMAIN))).toBeNull();
+      /* The application whose name every one of these prefixes is untouched. */
+      expect(await readJson(registry, applicationKey(APPLICATION))).not.toBeNull();
 
       observed.retirement = {
-        environment: SUNSET,
+        application: SUNSET,
         retiredThrough: nodes[0].id,
         deletedThrough: asked.id,
         coordinator: coordinator.id,
@@ -700,6 +832,130 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       };
     },
     STEP_TIMEOUT_MS,
+  );
+
+  /*
+   * THE DEFECT THIS CASE EXISTS FOR. A process that can never become ready stays
+   * up for as long as it takes to give up and then exits, over and over. Judged by
+   * how long each run lasted, every one of those runs "lasted": the node stayed
+   * live, the application stayed `serving`, and the dead port stayed in the
+   * routing every ingress reads. Readiness is what tells the two apart, and this
+   * is that rule against a real Celld and a real object store.
+   */
+  it(
+    "takes an application out of the routing on the node whose process cannot become ready, and puts it back when the lease is dropped",
+    async () => {
+      const both = await bothNodesRunning();
+      expectCleanExit(
+        await runCli(deployArgs(await stageApp("v1"), WEDGED, ["--replicas", "all"]), {}),
+      );
+      for (const node of both) await untilServes(node, hostOf(WEDGED), "v1");
+
+      const broken = both[0] as Node;
+      const healthy = both.find((node) => node.id !== broken.id) as Node;
+
+      /* Both nodes answer for it, and both are named as upstreams for its host:
+         the state this case takes one node out of. */
+      const readyEverywhere = await until(
+        `both nodes to publish ${WEDGED} as ready and served`,
+        DEADLINE_MS,
+        async () => {
+          const states = await Promise.all(both.map(async (node) => stateOf(node)));
+          if (!states.every((state) => processOf(state, WEDGED)?.ready === true)) return null;
+          const records = await Promise.all(
+            both.map(async (node) => readJson<NodeRecord>(registry, nodeKey(node.id))),
+          );
+          return records.every((record) => record?.value.serving?.[WEDGED] !== undefined)
+            ? states
+            : null;
+        },
+      );
+      const brokenPort = portOf(readyEverywhere[0] as DaemonState, WEDGED);
+      /* WAITED FOR RATHER THAN ASSERTED. A node's own `serving` reaches the
+         document it renders only once its beat has landed and its registry view
+         has re-read the node records, which is a reconcile interval away. */
+      await untilBothUpstreams(healthy);
+
+      const pid = processOf(readyEverywhere[0] as DaemonState, WEDGED)?.pid;
+      if (pid === undefined) throw new Error(`${broken.id} runs no process for ${WEDGED}`);
+
+      /*
+       * The process is killed first and the lease written second: a running Celld
+       * renews its own lease every few seconds, so a body written under it would
+       * simply be overwritten by the process this case is about.
+       */
+      const leaseKey = celldNodeLeaseKey(WEDGED, broken.id);
+      const leaseBefore = await registry.store.get(leaseKey);
+      expectCleanExit(await docker(["exec", broken.daemon.getId(), "sh", "-c", `kill -9 ${pid}`]));
+      await registry.store.put(leaseKey, TRUNCATED_LEASE);
+      const wedgedAt = Date.now();
+
+      /*
+       * WHAT CELLD 0.5.0 DOES WITH IT is the question, and the answer is observed
+       * rather than assumed: it may exit and be restarted for ever, or it may
+       * overwrite the object and carry on. Whether it recovers by itself is what
+       * decides whether `scafo app lease` is needed at all on a conforming store.
+       */
+      const outcome = await until(
+        `${broken.id} to either report ${WEDGED} as failing or get it serving again`,
+        REASSIGN_DEADLINE_MS,
+        async () => {
+          const record = await readJson<NodeRecord>(registry, nodeKey(broken.id));
+          if (record?.value.failing?.[WEDGED] !== undefined) return "crash-looping" as const;
+
+          const state = await stateOf(broken);
+          const lease = await registry.store.get(leaseKey);
+          if (processOf(state, WEDGED)?.ready === true && lease?.body !== TRUNCATED_LEASE) {
+            return "recovered-on-its-own" as const;
+          }
+          return null;
+        },
+      );
+
+      const wedged: Record<string, unknown> = {
+        application: WEDGED,
+        brokenNode: broken.id,
+        healthyNode: healthy.id,
+        leaseKey,
+        leaseBefore: leaseBefore?.body ?? null,
+        wrote: TRUNCATED_LEASE,
+        outcome,
+        observedMs: Date.now() - wedgedAt,
+        celldSaid: celldLinesOn(broken, WEDGED),
+      };
+      observed.wedgedLease = wedged;
+      console.log(
+        `e2e: celld 0.5.0 on a truncated node lease at "${leaseKey}" (SeaweedFS): ${outcome}\n` +
+          String(wedged.celldSaid),
+      );
+
+      /* The healthy node is untouched in either branch: its own lease is its own
+         key, and the application keeps answering there throughout. */
+      const healthyRecord = await readJson<NodeRecord>(registry, nodeKey(healthy.id));
+      expect(healthyRecord?.value.serving?.[WEDGED], `${healthy.id} stopped serving`).toBeDefined();
+      expect(await upstreamNodes(healthy, hostOf(WEDGED))).toContain(healthy.id);
+      await untilServes(healthy, hostOf(WEDGED), "v1");
+
+      /* Each branch proves its own half — see the two functions — and BOTH end
+         with the node serving the application again, which is asserted here. */
+      wedged.conclusion =
+        outcome === "crash-looping"
+          ? await tookItOutAndTheLeaseDropPutItBack({
+              broken,
+              healthy,
+              brokenPort,
+              leaseKey,
+              note: wedged,
+            })
+          : await celldRepairedItsOwnLease({ broken, leaseKey });
+
+      const back = await readJson<NodeRecord>(registry, nodeKey(broken.id));
+      expect(back?.value.serving?.[WEDGED], `${broken.id} never published it again`).toBeDefined();
+      expect(back?.value.failing?.[WEDGED]).toBeUndefined();
+      await untilBothUpstreams(healthy);
+      await untilServes(broken, hostOf(WEDGED), "v1");
+    },
+    REASSIGN_STEP_TIMEOUT_MS,
   );
 
   it(
@@ -742,14 +998,17 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
       expect(failoverMs).toBeGreaterThanOrEqual(LEASE_TTL_MS - LEASE_TTL_MS / 3);
       expect(failoverMs).toBeLessThanOrEqual(3 * LEASE_TTL_MS);
 
-      const answer = await untilServes(survivor, envHost(), "v1");
-      expect(JSON.parse(answer.body).version).toBe("v1");
+      /* v2, because the deploy that measured peer adoption put it there: what
+         this step is about is that a coordinator's death interrupts nothing the
+         survivor is serving. */
+      const answer = await untilServes(survivor, hostOf(APPLICATION), "v2");
+      expect(JSON.parse(answer.body).version).toBe("v2");
     },
     STEP_TIMEOUT_MS,
   );
 
   it(
-    "carries the single-replica environment through the death of whichever node held it",
+    "carries the single-replica application through the death of whichever node held it",
     async () => {
       const survivor = nodes.find((node) => node.running) as Node;
       const killedHeldIt = soloHolder.id !== survivor.id;
@@ -763,7 +1022,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
           if (placedNodes(state, SOLO)?.includes(survivor.id) !== true) return null;
           if (!state.processes.some(runsSolo)) return null;
 
-          const answer = await httpGet(survivor.httpPort, "/", { host: soloHost() });
+          const answer = await httpGet(survivor.httpPort, "/", { host: hostOf(SOLO) });
           if (answer.status !== 200 || !answer.body.includes('"v1"')) return null;
           return { state, answer };
         },
@@ -792,7 +1051,346 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
     },
     REASSIGN_STEP_TIMEOUT_MS,
   );
+
+  /*
+   * LAST, AND ON AN APPLICATION OF ITS OWN. It kills both nodes at once and
+   * freezes the bucket under them, which is not a state any case before it
+   * would survive being run in.
+   */
+  it(
+    "gives back the write it acknowledged while the bucket was frozen, after both nodes were killed",
+    async () => {
+      const both = await bothNodesRunning();
+      expectCleanExit(
+        await runCli(
+          deployArgs(
+            await stageApp("v1"),
+            DURABLE,
+            /* Its own name as a variable: every other application of the suite
+             answers `/` with the fixture's default, so an answer for this host
+             says WHICH application's process produced it. */
+            ["--replicas", "all", "--var", `GREETING:${DURABLE}`],
+            both[0],
+          ),
+          {},
+        ),
+      );
+      for (const node of both) await untilServes(node, hostOf(DURABLE), "v1");
+      /* The counter's cell belongs to whichever node activates it first. It is
+         activated on the SECOND node, and every request below goes through the
+         first: the acknowledged write then exists on the asking node's follower
+         disk only, and after the restart the cell has to come back through a
+         node that never owned it — the harder of the two recoveries. */
+      await untilCellAnswers(both[1]);
+      await untilCellAnswers(both[0]);
+
+      /* The two halves of what makes a restart recoverable, read off the
+         process that is running: the name it will come back under, and the
+         directories it is working out of. */
+      const environs: Record<string, Record<string, string>> = {};
+      for (const node of both) environs[node.id] = await celldEnvironOn(node, DURABLE);
+      for (const node of both) {
+        expect(environs[node.id], node.id).toMatchObject({
+          CELLD_NODE: node.id,
+          CELLD_WATCH: `${STATE_DIR}/celld/${DURABLE}/work`,
+          CELLD_ASSET_CACHE_DIR: `${STATE_DIR}/celld/${DURABLE}/assets`,
+        });
+      }
+
+      /* The ports every application of this suite holds on every node, read
+         off the nodes themselves rather than assumed: a port that changed
+         hands across a restart is a host answered by another application's
+         process, whatever the routing then says. */
+      const portsBefore: Record<string, Record<string, string>> = {};
+      for (const node of both) portsBefore[node.id] = await portsOn(node);
+      for (const node of both) {
+        expect(Object.keys(portsBefore[node.id] ?? {}), node.id).toContain(DURABLE);
+      }
+
+      const warmUp: number[] = [];
+      for (let round = 0; round < 2; round++) {
+        for (const node of both) warmUp.push(await countOnce(node));
+      }
+      for (let i = 1; i < warmUp.length; i++) expect(warmUp[i]).toBe((warmUp[i - 1] as number) + 1);
+
+      /* The work directory is the follower disk; a fleet that has taken writes
+         has put something in it. */
+      const held: Record<string, number> = {};
+      for (const node of both) {
+        held[node.id] = await workDirEntriesOn(node, DURABLE);
+        expect(held[node.id], `${node.id} wrote nothing under ${STATE_DIR}`).toBeGreaterThan(0);
+      }
+
+      /* Long enough that the only write whose fate is in question is the one
+         taken while the bucket is frozen. */
+      await delay(BUCKET_UPLOAD_SETTLE_MS);
+
+      /* The route to the counter's cell is resolved from the bucket when the
+         node taking the request does not already hold it, and this case is
+         about the WRITE rather than about that lookup: `/peek` resolves it
+         here, where the bucket still answers, and writes nothing. */
+      await untilCellAnswers(both[0]);
+
+      const frozenAt = Date.now();
+      expectCleanExit(await docker(["pause", store.getId()]));
+      let acknowledged: number;
+      try {
+        acknowledged = await countOnce(both[0]);
+        expectCleanExit(
+          await docker(["kill", "-s", "KILL", ...both.map((node) => node.daemon.getId())]),
+        );
+        for (const node of both) node.running = false;
+      } finally {
+        expectCleanExit(await docker(["unpause", store.getId()]));
+      }
+      const frozenMs = Date.now() - frozenAt;
+      await untilStoreTakesWrites();
+
+      expect(acknowledged).toBe((warmUp.at(-1) as number) + 1);
+      /* A runtime process fences itself ten seconds after it last reached the
+         bucket, so a longer freeze would be testing something else. */
+      expect(frozenMs, "the bucket was frozen for too long to be this case").toBeLessThan(
+        FROZEN_BUDGET_MS,
+      );
+
+      const restartedAt = Date.now();
+      for (const node of both) {
+        expectCleanExit(await docker(["start", node.daemon.getId()]));
+        node.running = true;
+      }
+      for (const node of both) {
+        await until(`${node.id} to answer health again`, REASSIGN_DEADLINE_MS, async () => {
+          const answer = await httpGet(node.apiPort, "/.well-known/scafo/health", {});
+          return answer.status === 200 ? answer : null;
+        });
+      }
+      /* Every application comes back on the ports it had, so the `serving` the
+         node record still carries from before the kill is CORRECT: nothing had
+         to be re-announced for a peer or an ingress to route rightly. */
+      for (const node of both) {
+        const kept = portsBefore[node.id] ?? {};
+        const back = await until(
+          `${node.id} to run its applications again`,
+          REASSIGN_DEADLINE_MS,
+          async () => {
+            const now = await portsOn(node);
+            return Object.keys(kept).every((application) => application in now) ? now : null;
+          },
+        );
+        for (const [application, pair] of Object.entries(kept)) {
+          expect(back[application], `${node.id} moved ${application} across the restart`).toBe(
+            pair,
+          );
+        }
+      }
+
+      const misdelivered: string[] = [];
+      const serving = await until(
+        `${DURABLE} to be served again by a node that has its cell`,
+        REASSIGN_DEADLINE_MS,
+        async () => {
+          for (const node of both) {
+            /* Asked who is answering before it is asked for the number: a host
+               answered by another application's process would hand back THAT
+               application's counter, and no recovery could be judged by it. */
+            const front = await httpGet(node.httpPort, "/", { host: hostOf(DURABLE) });
+            if (front.status !== 200) continue;
+            if (!front.body.includes(`"greeting":"${DURABLE}"`)) {
+              misdelivered.push(`${node.id}: ${front.body}`);
+              continue;
+            }
+            const answer = await httpGet(node.httpPort, "/peek", { host: hostOf(DURABLE) });
+            if (answer.status === 200 && typeof countOf(answer.body) === "number") return node;
+          }
+          return null;
+        },
+      );
+      const recoveredMs = Date.now() - restartedAt;
+
+      /* The whole case, in one number: the next write the fleet takes follows
+         the one it acknowledged, rather than repeating it. */
+      const next = await countOnce(serving);
+
+      observed.durability = {
+        application: DURABLE,
+        portsBefore: JSON.stringify(portsBefore),
+        warmUp,
+        acknowledgedWhileFrozen: acknowledged,
+        frozenMs,
+        killed: both.map((node) => node.id),
+        restarted: both.map((node) => node.id),
+        recoveredMs,
+        servedBy: serving.id,
+        next,
+        workDirEntriesBefore: held,
+        celldEnv: environs,
+      };
+      console.log(
+        `e2e: acknowledged n=${String(acknowledged)} with the bucket frozen; after both nodes ` +
+          `were killed and restarted the next count was n=${String(next)}`,
+      );
+
+      if (misdelivered.length > 0) {
+        console.log(
+          `e2e: ${String(misdelivered.length)} answers for ${hostOf(DURABLE)} came from ANOTHER ` +
+            `application after the restart, e.g. ${misdelivered[0] ?? ""}`,
+        );
+      }
+      if (next !== acknowledged + 1) {
+        /* What the runtime said about its own recovery is the only account of
+           why a write is missing, and the containers are gone once this fails. */
+        for (const node of both) {
+          const logs = await docker(["logs", node.daemon.getId()]);
+          const told = logs.output
+            .split("\n")
+            .filter((line) =>
+              /node_log|recover|predecessor|fenc|bounded loss|discard|WARN|ERROR|Counter|cell|restor|activat|epoch|404|NoSuchKey/i.test(
+                line,
+              ),
+            )
+            .slice(-120)
+            .join("\n");
+          console.log(`e2e: ${node.id} on its own recovery:\n${told}`);
+        }
+        /* Whether the missing state is gone or only elsewhere: both nodes asked
+           again, half a minute on, without writing. */
+        await delay(30_000);
+        for (const node of both) {
+          const later = await httpGet(node.httpPort, "/peek", { host: hostOf(DURABLE) });
+          console.log(`e2e: ${node.id} peeks ${later.body} thirty seconds later`);
+        }
+        const keys = await registry.store.list(`fleets/${DURABLE}/`);
+        console.log(
+          `e2e: bucket holds ${String(keys.length)} keys for ${DURABLE}:\n${keys.slice(0, 80).join("\n")}`,
+        );
+      }
+      expect(next, "an acknowledged write was lost across the restart").toBe(acknowledged + 1);
+      expect(misdelivered, "a host was answered by another application's process").toEqual([]);
+    },
+    REASSIGN_STEP_TIMEOUT_MS,
+  );
 });
+
+/**
+ * Every node of this suite up and answering. Cases before this one deliberately
+ * stop nodes and leave them stopped; this one needs both.
+ */
+async function bothNodesRunning(): Promise<Node[]> {
+  for (const node of nodes) {
+    if (node.running) continue;
+    expectCleanExit(await docker(["start", node.daemon.getId()]));
+    node.running = true;
+  }
+  for (const node of nodes) {
+    await until(`${node.id} to answer health`, REASSIGN_DEADLINE_MS, async () => {
+      const answer = await httpGet(node.apiPort, "/.well-known/scafo/health", {});
+      return answer.status === 200 ? answer : null;
+    });
+  }
+  return nodes;
+}
+
+/**
+ * Waits until the bucket has taken writes without interruption for
+ * {@link STORE_AWAKE_WINDOW_MS}.
+ *
+ * SeaweedFS answers its S3 port throughout a `docker pause`, but its master
+ * evicts the volume server whose heartbeat went stale while it was frozen and
+ * then refuses writes with "no available server" until it registers again —
+ * seconds AFTER the unpause, so one write that succeeds is not the store being
+ * back. That is the store recovering, not the fleet, and a node restarted into
+ * it fails for a reason this case is not about.
+ */
+async function untilStoreTakesWrites(): Promise<void> {
+  const key = "_e2e-store-awake";
+  let since: number | null = null;
+
+  await until("the bucket to take writes again", DEADLINE_MS, async () => {
+    try {
+      await registry.store.put(key, "awake");
+      since ??= Date.now();
+    } catch (error) {
+      since = null;
+      throw error;
+    }
+    return Date.now() - since >= STORE_AWAKE_WINDOW_MS ? true : null;
+  });
+  await registry.store.del(key).catch(() => {});
+}
+
+/** One `/count`, which is one write; the number it answered with. */
+async function countOnce(node: Node): Promise<number> {
+  const answer = await httpGet(node.httpPort, "/count", { host: hostOf(DURABLE) });
+  expectStatus(answer, 200);
+  const n = countOf(answer.body);
+  if (n === null) throw new Error(`${node.id} answered /count with ${answer.body}`);
+  return n;
+}
+
+/** Waits until the counter's cell answers, WITHOUT counting: see the fixture's `/peek`. */
+async function untilCellAnswers(node: Node): Promise<void> {
+  await until(`${node.id} to answer for the counter cell`, DEADLINE_MS, async () => {
+    const answer = await httpGet(node.httpPort, "/peek", { host: hostOf(DURABLE) });
+    return answer.status === 200 && typeof countOf(answer.body) === "number" ? answer : null;
+  });
+}
+
+/**
+ * The ports each application is served on by `node`, as the node itself reports
+ * them: `"<public>/<internal>"` per application name.
+ */
+async function portsOn(node: Node): Promise<Record<string, string>> {
+  const processes = (await stateOf(node)).reconcile?.processes ?? [];
+  return Object.fromEntries(
+    processes.map((entry) => [
+      entry.application,
+      `${String(entry.port)}/${String(entry.internalPort)}`,
+    ]),
+  );
+}
+
+/** The environment of the runtime process `node` runs for `application`. */
+async function celldEnvironOn(node: Node, application: string): Promise<Record<string, string>> {
+  const process = (await stateOf(node)).processes.find((entry) => runs(entry, application));
+  if (process?.pid === undefined) {
+    throw new Error(`${node.id} runs no process for ${application}`);
+  }
+
+  /* Read off the RUNNING process rather than off a spec: a variable the node
+     derived but never handed over would read the same in a spec. */
+  const read = await docker([
+    "exec",
+    node.daemon.getId(),
+    "cat",
+    `/proc/${String(process.pid)}/environ`,
+  ]);
+  expectCleanExit(read);
+
+  const environ: Record<string, string> = {};
+  for (const entry of read.output.split("\0")) {
+    const at = entry.indexOf("=");
+    if (at > 0) environ[entry.slice(0, at)] = entry.slice(at + 1);
+  }
+  return environ;
+}
+
+/** How many entries the work directory of one application holds on `node`. */
+async function workDirEntriesOn(node: Node, application: string): Promise<number> {
+  const listed = await docker([
+    "exec",
+    node.daemon.getId(),
+    "ls",
+    "-A",
+    `${STATE_DIR}/celld/${application}/work`,
+  ]);
+  expectCleanExit(listed);
+  return listed.output.split("\n").filter((line) => line.trim() !== "").length;
+}
+
+/** One docker command, run the way every other step of this suite runs one. */
+function docker(args: string[]): Promise<CommandResult> {
+  return run("docker", args, REPO_ROOT, { PATH: env.PATH ?? "" });
+}
 
 /**
  * Starts one Traefik and the daemon that shares its network namespace.
@@ -821,9 +1419,16 @@ async function startNode(id: string, labels?: string): Promise<Node> {
   const bridgeAddress = ingress.getIpAddress(BRIDGE_NETWORK);
   const log: string[] = [];
 
+  const stateDir = await mkdtemp(join(tmpdir(), `scafo-e2e-state-${id}-`));
+  /* Written from inside the container by uid 10001, which owns nothing here. */
+  await chmod(stateDir, STATE_DIR_MODE);
+
   const daemon = await new GenericContainer(NODE_IMAGE)
     .withNetworkMode(`container:${ingress.getId()}`)
-    .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "rw" }])
+    .withBindMounts([
+      { source: REPO_ROOT, target: "/work", mode: "ro" },
+      { source: stateDir, target: STATE_DIR, mode: "rw" },
+    ])
     .withWorkingDir("/work")
     .withEnvironment({
       SCAFO_S3_ENDPOINT: storeFromContainers,
@@ -834,12 +1439,13 @@ async function startNode(id: string, labels?: string): Promise<Node> {
       SCAFO_S3_REGION: REGION,
       SCAFO_NODE_ID: id,
       SCAFO_TRANSPORT: "none",
-      SCAFO_STATE_DIR: `/var/lib/scafo-${id}`,
+      SCAFO_STATE_DIR: STATE_DIR,
       SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
       SCAFO_INGRESS_TOKEN: INGRESS_TOKEN,
       /* What the peers dial: the fleet document's upstreams are this address. */
       SCAFO_ADVERTISE: `${bridgeAddress}:${String(NODE_PORT)}`,
       SCAFO_BIND_HOST: "0.0.0.0",
+      SCAFO_COORDINATOR_LEASE_TTL_MS: String(LEASE_TTL_MS),
       CELLD_ESBUILD: "/usr/local/bin/esbuild",
       ...(labels === undefined ? {} : { SCAFO_NODE_LABELS: labels }),
     })
@@ -856,6 +1462,7 @@ async function startNode(id: string, labels?: string): Promise<Node> {
     id,
     ingress,
     daemon,
+    stateDir,
     bridgeAddress,
     httpPort: ingress.getMappedPort(TRAEFIK_HTTP_PORT),
     apiPort: ingress.getMappedPort(NODE_PORT),
@@ -864,54 +1471,42 @@ async function startNode(id: string, labels?: string): Promise<Node> {
   };
 }
 
-function envHost(): string {
-  return `${PROJECT}--${ENVIRONMENT}.${PLATFORM_DOMAIN}`;
-}
-
-function previewHost(): string {
-  return `${PROJECT}--${PREVIEW}.${PLATFORM_DOMAIN}`;
-}
-
-function soloHost(): string {
-  return `${PROJECT}--${SOLO}.${PLATFORM_DOMAIN}`;
-}
-
-function sunsetHost(): string {
-  return `${PROJECT}--${SUNSET}.${PLATFORM_DOMAIN}`;
-}
-
-function targetedHost(): string {
-  return `${PROJECT}--${TARGETED}.${PLATFORM_DOMAIN}`;
+/** The host one application is served at under the platform domain. */
+function hostOf(application: string): string {
+  return `${application}.${PLATFORM_DOMAIN}`;
 }
 
 /** Whether a process on a node is one serving {@link TARGETED}. */
 function runsTargeted(process: ProcessStatus): boolean {
-  return process.state === "running" && process.id === `${PROJECT}--${TARGETED}`;
+  return runs(process, TARGETED);
 }
 
 function runsAwaited(process: ProcessStatus): boolean {
-  return process.state === "running" && process.id === `${PROJECT}--${AWAITED}`;
+  return runs(process, AWAITED);
 }
 
 /** Whether a process on a node is one serving {@link SOLO}. */
 function runsSolo(process: ProcessStatus): boolean {
-  return process.state === "running" && process.id === `${PROJECT}--${SOLO}`;
+  return runs(process, SOLO);
 }
 
 /** Whether a process on a node is one serving {@link SUNSET}. */
 function runsSunset(process: ProcessStatus): boolean {
-  return process.state === "running" && process.id === `${PROJECT}--${SUNSET}`;
+  return runs(process, SUNSET);
 }
 
-/** One `scafo env <action>` run from the host against `node`'s node API. */
-function envArgs(action: string, environment: string, node: Node, extra: string[] = []): string[] {
+/** Whether `process` is the running runtime of `application`. */
+function runs(process: ProcessStatus, application: string): boolean {
+  return process.state === "running" && process.id === application;
+}
+
+/** One `scafo app <action>` run from the host against `node`'s node API. */
+function appArgs(action: string, application: string, node: Node, extra: string[] = []): string[] {
   return [
-    "env",
+    "app",
     action,
-    "--project",
-    PROJECT,
-    "--env",
-    environment,
+    "--name",
+    application,
     "--node",
     `http://127.0.0.1:${String(node.apiPort)}`,
     "--key",
@@ -920,9 +1515,185 @@ function envArgs(action: string, environment: string, node: Node, extra: string[
   ];
 }
 
-/** The nodes a state says an environment was placed on, or null when it has no decision. */
-function placedNodes(state: DaemonState, env: string): string[] | null {
-  const placed = state.placements.find((view) => view.project === PROJECT && view.env === env);
+/**
+ * Waits until the routing `node` renders names BOTH nodes as answering for the
+ * wedged application's host.
+ *
+ * A NODE'S OWN `serving` TAKES A MOMENT TO REACH ITS OWN DOCUMENT: the routing is
+ * rendered from the node RECORDS a pass read, so a process that has just become
+ * ready is in the document only after the beat that published it has landed and
+ * the view has re-read those records.
+ */
+async function untilBothUpstreams(node: Node): Promise<void> {
+  await until(
+    `the routing ${node.id} renders to name both nodes for ${hostOf(WEDGED)}`,
+    DEADLINE_MS,
+    async () => {
+      const named = await upstreamNodes(node, hostOf(WEDGED));
+      return named.length === 2 && named[0] === NODE_A && named[1] === NODE_B ? named : null;
+    },
+  );
+}
+
+/**
+ * Celld read the truncated lease, replaced it, and carried on: nothing had to be
+ * dropped, and what scafo reported was the transient absence it should be.
+ */
+async function celldRepairedItsOwnLease(opts: { broken: Node; leaseKey: string }): Promise<string> {
+  const lease = await registry.store.get(opts.leaseKey);
+  expect(lease?.body, "the lease Celld wrote over the truncated one").not.toBe(TRUNCATED_LEASE);
+  expect(lease?.body, "Celld left the truncated lease and still came up").toContain("expires_ms");
+
+  return (
+    `celld 0.5.0 recovered from a truncated node lease at "${opts.leaseKey}" without help, ` +
+    `so "scafo app lease drop" was not needed on this store`
+  );
+}
+
+/**
+ * Celld could not get past the lease. The node says what it cannot keep running,
+ * takes the application out of what it serves, and the routing the fleet
+ * publishes stops naming that node's port for the host — and then the operator's
+ * own `scafo app lease drop`, run as the real CLI against this bucket, is what
+ * gets the process serving again.
+ */
+async function tookItOutAndTheLeaseDropPutItBack(opts: {
+  broken: Node;
+  healthy: Node;
+  /** The port the wedged process held, which nothing may still be routed to. */
+  brokenPort: number;
+  leaseKey: string;
+  /** Raw observations this branch adds to the report. */
+  note: Record<string, unknown>;
+}): Promise<string> {
+  const { broken, healthy, note } = opts;
+
+  const failingRecord = await until(
+    `${broken.id} to drop ${WEDGED} from what it serves`,
+    DEADLINE_MS,
+    async () => {
+      const record = await readJson<NodeRecord>(registry, nodeKey(broken.id));
+      if (record === null) return null;
+      if (record.value.failing?.[WEDGED] === undefined) return null;
+      return record.value.serving?.[WEDGED] === undefined ? record.value : null;
+    },
+  );
+  expect(failingRecord.failing?.[WEDGED]?.restarts).toBeGreaterThanOrEqual(3);
+  note.failing = failingRecord.failing?.[WEDGED];
+
+  const withoutBroken = await until(
+    `the fleet routing to stop naming ${broken.id} for ${hostOf(WEDGED)}`,
+    DEADLINE_MS,
+    async () => {
+      const named = await upstreamNodes(healthy, hostOf(WEDGED));
+      return named.includes(broken.id) ? null : named;
+    },
+  );
+  expect(withoutBroken).toEqual([healthy.id]);
+
+  /* And nothing anywhere in the document routes to the port that answers nothing. */
+  const document = await routingOf(healthy);
+  const addresses = document.routes.flatMap((route) =>
+    route.upstreams.map((upstream) => upstream.address),
+  );
+  expect(
+    addresses.filter((address) => address.endsWith(`:${String(opts.brokenPort)}`)),
+    "a dead port is still routed to",
+  ).toEqual([]);
+
+  /* The operator's own hands, through the REAL CLI against this bucket. */
+  const shown = await runCli(
+    ["app", "lease", "show", "--name", WEDGED, "--node", broken.id, "--json"],
+    storeEnv(),
+  );
+  expectCleanExit(shown);
+  /* The key it diagnosed, always; WHAT it made of the body is an observation the
+     report carries rather than something this case dictates to Celld. */
+  expect(shown.output).toContain(opts.leaseKey);
+  note.leaseShow = shown.output.trim().slice(0, 1200);
+
+  const dropped = await runCli(
+    ["app", "lease", "drop", "--name", WEDGED, "--node", broken.id, "--yes"],
+    storeEnv(),
+  );
+  expectCleanExit(dropped);
+  expect(dropped.output).toContain(opts.leaseKey);
+  note.leaseDrop = dropped.output.trim().slice(0, 1200);
+
+  const droppedAt = Date.now();
+  await until(
+    `${broken.id} to get ${WEDGED} ready and published again`,
+    REASSIGN_DEADLINE_MS,
+    async () => {
+      const state = await stateOf(broken);
+      if (processOf(state, WEDGED)?.ready !== true) return null;
+      const record = await readJson<NodeRecord>(registry, nodeKey(broken.id));
+      if (record?.value.serving?.[WEDGED] === undefined) return null;
+      return record.value.failing?.[WEDGED] === undefined ? record.value : null;
+    },
+  );
+  note.recoveredAfterDropMs = Date.now() - droppedAt;
+
+  return (
+    `celld 0.5.0 could not recover from a truncated node lease at "${opts.leaseKey}" by ` +
+    `itself; "scafo app lease drop" is what got the process serving again`
+  );
+}
+
+/** One node's supervised process for an application, as `/v1/state` reports it. */
+function processOf(state: DaemonState, application: string): SupervisedProcess | undefined {
+  return state.processes.find((entry) => entry.id === application && entry.state === "running");
+}
+
+/** The public port a node's reconcile loop says it serves an application on. */
+function portOf(state: DaemonState, application: string): number {
+  const found = (state.reconcile?.processes ?? []).find(
+    (entry) => entry.application === application,
+  );
+  if (found === undefined) throw new Error(`no process for ${application}`);
+  return found.port;
+}
+
+/** The fleet's routing as one node renders it, read the way an ingress reads it. */
+async function routingOf(node: Node): Promise<FleetRouting> {
+  const answer = await httpGet(node.apiPort, "/v1/ingress/routes", {
+    authorization: `Bearer ${INGRESS_TOKEN}`,
+  });
+  if (answer.status !== 200) {
+    throw new Error(
+      `${node.id} answered the routing with ${String(answer.status)}: ${answer.body}`,
+    );
+  }
+  return JSON.parse(answer.body) as FleetRouting;
+}
+
+/** The nodes that routing names as answering for one host, in the order it names them. */
+async function upstreamNodes(node: Node, host: string): Promise<string[]> {
+  const document = await routingOf(node);
+  const route = document.routes.find((entry) => entry.host === host);
+  return (route?.upstreams ?? []).map((upstream) => upstream.node).sort();
+}
+
+/**
+ * What the wedged node's own log says about one application, which is the only
+ * account of what Celld did with the object put under it.
+ */
+function celldLinesOn(node: Node, application: string, limit: number = 40): string {
+  return node.log
+    .join("")
+    .split("\n")
+    .filter(
+      (line) =>
+        line.includes(application) ||
+        /lease|authority|node_log|fenc|expired|ERROR|WARN|panic|exited with code/i.test(line),
+    )
+    .slice(-limit)
+    .join("\n");
+}
+
+/** The nodes a state says an application was placed on, or null when it has no decision. */
+function placedNodes(state: DaemonState, application: string): string[] | null {
+  const placed = state.placements.find((view) => view.application === application);
   return placed?.nodes ?? null;
 }
 
@@ -963,7 +1734,7 @@ function countOf(body: string): number | null {
 /** The flags one deploy of the fixture is run with, from the host through `via`. */
 function deployArgs(
   dir: string,
-  environment: string,
+  application: string,
   extra: string[] = [],
   via: Node = nodes[0],
 ): string[] {
@@ -972,10 +1743,8 @@ function deployArgs(
     dir,
     "--node",
     `http://127.0.0.1:${String(via.apiPort)}`,
-    "--project",
-    PROJECT,
-    "--env",
-    environment,
+    "--name",
+    application,
     "--key",
     keyPath,
     ...extra,
@@ -1009,10 +1778,10 @@ async function stageApp(version: string): Promise<string> {
   return dir;
 }
 
-function buildIdOf(output: string): string {
-  const build = /scafo: build ([\da-f]{8,64})/.exec(output)?.[1];
-  if (build === undefined) throw new Error(`the deploy named no build:\n${output}`);
-  return build;
+function deploymentOf(output: string): string {
+  const version = /scafo: deployment ([\da-f]{8,64})/.exec(output)?.[1];
+  if (version === undefined) throw new Error(`the deploy named no deployment:\n${output}`);
+  return version;
 }
 
 /** A fresh single-use operator token; a spent one is refused as a replay. */

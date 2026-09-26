@@ -1,98 +1,64 @@
-/* Pure planning for one environment-owned runtime process per assigned node. */
+/* Pure planning for one application-owned runtime process per assigned node. */
 
-import type { EnvironmentRecord } from "../types/registry.ts";
+import type { ApplicationRecord } from "../types/registry.ts";
 import type { RuntimeProcess } from "../types/runtime.ts";
 
-/** One environment as the registry wants it served. */
-export interface DesiredEnvironment {
-  project: string;
-  env: EnvironmentRecord;
-  varsetId?: string;
-}
-
-export interface PortView {
-  nextPorts(): { public: number; internal: number };
-}
-
 export interface ReconcileInput {
-  desired: DesiredEnvironment[];
+  /** Applications this node should serve, as their records stand. */
+  desired: ApplicationRecord[];
   actual: RuntimeProcess[];
-  ports: PortView;
 }
 
+/**
+ * What a pass does about one application.
+ *
+ * A START CARRIES NO PORTS. The ports an application is served on here belong to
+ * that application for as long as this node knows it, and they are kept on disk
+ * beside the rest of its local state — so they are read, probed and if need be
+ * re-chosen by the runtime driver at the moment the process is started, not
+ * handed out by whatever plans the pass.
+ */
 export type ReconcileAction =
-  | {
-      type: "start";
-      project: string;
-      env: string;
-      ports: { public: number; internal: number };
-    }
-  | {
-      type: "restart";
-      processId: string;
-      project: string;
-      env: string;
-      ports: { public: number; internal: number };
-    }
-  | { type: "stop"; processId: string; reason: string };
+  | { type: "start"; application: string }
+  | { type: "stop"; application: string; reason: string };
 
-/** Plans starts and configuration restarts before unrelated placement stops. */
+/** Plans starts before unrelated placement stops. */
 export function planReconcile(input: ReconcileInput): ReconcileAction[] {
   const moves: ReconcileAction[] = [];
   const stops: ReconcileAction[] = [];
   const running = new Map(
     [...input.actual]
-      .sort((a, b) => compare(a.processId, b.processId))
-      .map((process) => [placementKey(process.project, process.env), process]),
+      .sort((a, b) => compare(a.application, b.application))
+      .map((process) => [process.application, process]),
   );
-  const desired = [...input.desired].sort((a, b) =>
-    compare(placementKey(a.project, a.env.name), placementKey(b.project, b.env.name)),
-  );
+  const desired = [...input.desired].sort((a, b) => compare(a.name, b.name));
 
   for (const wanted of desired) {
-    const project = wanted.project;
-    const env = wanted.env.name;
-    if (wanted.env.deployment === null) continue;
+    if (wanted.deployment === null) continue;
 
-    const key = placementKey(project, env);
-    const process = running.get(key);
-    running.delete(key);
+    const application = wanted.name;
+    const process = running.get(application);
+    running.delete(application);
 
     if (process === undefined) {
-      moves.push({ type: "start", project, env, ports: input.ports.nextPorts() });
+      moves.push({ type: "start", application });
     } else if (process.teardownPending === true) {
       moves.push({
         type: "stop",
-        processId: process.processId,
+        application,
         reason: "runtime teardown is pending",
-      });
-    } else if (process.configuredVarset !== (wanted.varsetId ?? null)) {
-      moves.push({
-        type: "restart",
-        processId: process.processId,
-        project,
-        env,
-        ports:
-          process.port > 0 && process.internalPort > 0
-            ? { public: process.port, internal: process.internalPort }
-            : input.ports.nextPorts(),
       });
     }
   }
 
-  for (const key of [...running.keys()].sort(compare)) {
-    const process = running.get(key) as RuntimeProcess;
+  for (const application of [...running.keys()].sort(compare)) {
     stops.push({
       type: "stop",
-      processId: process.processId,
-      reason: "environment is no longer served by this node",
+      application,
+      reason: "application is no longer served by this node",
     });
   }
   return [...moves, ...stops];
-}
-
-function placementKey(project: string, env: string): string {
-  return `${project}/${env}`;
 }
 
 function compare(a: string, b: string): number {

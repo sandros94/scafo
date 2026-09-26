@@ -41,7 +41,9 @@ const addArgs: ArgsDef = {
   name: { type: "positional", description: "Name to reach this remote by", required: false },
   endpoint: {
     type: "string",
-    description: "Base URL of one of its nodes; comma-separated for several",
+    multiple: true,
+    valueHint: "url",
+    description: "Base URL of one of its nodes; repeat the flag for several",
   },
   key: {
     type: "string",
@@ -59,7 +61,8 @@ const addArgs: ArgsDef = {
     type: "string",
     description:
       `Tier to register at: admin (the first key is always one, and this path admits no other ` +
-      `— an operator-tier key needs a project scope, which only the wire path can give it)`,
+      `— an operator-tier key needs an application scope, which only the wire path can give ` +
+      `it)`,
   },
   config: { type: "string", description: "Path to scafo.config.jsonc, for --register" },
 };
@@ -132,7 +135,6 @@ async function runAdd(flags: Record<string, unknown>): Promise<void> {
   const home = resolveOperatorHome();
   const added = await addRemote(home, {
     ...(text(flags.name) === undefined ? {} : { name: text(flags.name) as string }),
-    /* A URL cannot contain a comma, so splitting one flag on them is unambiguous. */
     endpoints: flagList(flags.endpoint),
     ...(text(flags.key) === undefined ? {} : { keyName: text(flags.key) as string }),
     ...(text(flags.from) === undefined ? {} : { from: text(flags.from) as string }),

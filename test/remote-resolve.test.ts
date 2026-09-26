@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
-import { nodeOps } from "../src/cli/_environments.ts";
+import { nodeOps } from "../src/cli/_applications.ts";
 import { addRemote, exportRemote } from "../src/cli/_remotes.ts";
 import { homeKeyPath } from "../src/cli/_home.ts";
 import { operatorSigner } from "../src/cli/_node.ts";
@@ -22,11 +22,11 @@ import {
   SCAFO_REMOTE_ENV,
 } from "../src/cli/_operator.ts";
 import { registerNode } from "../src/core/registry/nodes.ts";
-import { createEnvironment, createProject, getEnvironment } from "../src/core/registry/index.ts";
+import { createApplication, getApplication } from "../src/core/registry/index.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { toBase64 } from "../src/core/utils/base64.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
+import { ctxWith, type ManualClock, rejectsWith, TEST_VERSIONS, urlOf } from "./_helpers.ts";
 
 const PROD_URL = "http://10.0.0.4:7400";
 const STAGING_URL = "http://10.0.0.5:7400";
@@ -65,7 +65,7 @@ describe("which remote a command acts on", () => {
     expect(resolved.remote).toBe("staging");
   });
 
-  it("takes the one the project pinned when neither names one", async () => {
+  it("takes the one the working directory pinned when neither names one", async () => {
     const home = await twoFleets();
 
     const resolved = await resolveOperator({
@@ -338,27 +338,26 @@ describe("the resolved remote against a real node", () => {
       publicKey: { kty: "OKP", crv: "Ed25519", x: key.publicKey.x },
       addresses: { internal: "operator", apiPort: 0 },
     });
-    await createProject(clock.ctx, { slug: "app" });
-    await createEnvironment(clock.ctx, "app", { name: "prod" });
+    await createApplication(clock.ctx, { name: "shop" });
 
     const app = createNodeApp({
       config: daemonConfig(),
       nodeId: "node-a",
       registry: clock.ctx,
       supervisor: idleSupervisor(),
-      version: "0.0.0-test",
+      versions: TEST_VERSIONS,
     });
     const ops = nodeOps({
       url: resolved.nodeUrl as string,
       authorize: operatorSigner(key),
       /* The app may answer synchronously; `fetch` never does. */
-      fetchFn: async (input, init) => app.request(String(input), init),
+      fetchFn: async (input, init) => app.request(urlOf(input), init),
     });
 
-    const environment = await ops.retire({ project: "app", env: "prod" });
+    const application = await ops.retire("shop");
 
-    expect(environment.retiredAt).toBe(new Date(clock.nowMs()).toISOString());
-    expect((await getEnvironment(clock.ctx, "app", "prod")).retiredAt).toBe(environment.retiredAt);
+    expect(application.retiredAt).toBe(new Date(clock.nowMs()).toISOString());
+    expect((await getApplication(clock.ctx, "shop")).retiredAt).toBe(application.retiredAt);
   });
 });
 
@@ -408,7 +407,7 @@ async function readText(path: string): Promise<string> {
   return readFile(path, "utf8");
 }
 
-/** A project directory that pins a remote by name, and holds nothing else. */
+/** A working directory that pins a remote by name, and holds nothing else. */
 function pinned(name: string): (path: string) => Promise<string | null> {
   return async (path) =>
     path.endsWith("scafo.config.jsonc") ? `{ /* no secrets here */ "remote": "${name}" }` : null;
@@ -430,6 +429,8 @@ function daemonConfig(): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
+      portRangeEnd: 42_998,
+      portQuarantineMs: 600_000,
       bindHost: "127.0.0.1",
     },
     observability: { enabled: false },
@@ -443,6 +444,7 @@ function idleSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: () => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

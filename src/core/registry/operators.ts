@@ -18,8 +18,14 @@ export const LEGACY_OPERATOR_ROLE: OperatorRole = "admin";
 /** The tier a key lands at when nobody says otherwise: the least privilege there is. */
 export const DEFAULT_OPERATOR_ROLE: OperatorRole = "operator";
 
-/** Explicit all-project grant. It must be the scope's sole entry. */
-export const WILDCARD_PROJECT: string = "*";
+/** Explicit all-application grant. It must be the scope's sole entry. */
+export const WILDCARD_APPLICATION: string = "*";
+
+/**
+ * A prefix glob: a non-empty run of slug characters, which may end in a hyphen,
+ * followed by one trailing `*`. `shop-*` reaches `shop-preview` and not `shop`.
+ */
+const PREFIX_GLOB_RE = /^[a-z\d][a-z\d-]*\*$/;
 
 /** The public half of an Ed25519 operator key, as the registry files it. */
 export interface OperatorPublicKey {
@@ -36,8 +42,8 @@ export interface TrustedOperator {
   role: OperatorRole;
   /** Key it was registered to replace, when a rotation registered it. */
   supersedes?: string;
-  /** Project scope. Omitted means all projects for admin, none for operator. */
-  projects?: string[];
+  /** Application scope. Omitted means all applications for admin, none for operator. */
+  applications?: string[];
 }
 
 /** Resolves legacy role defaults without widening an explicitly stored scope. */
@@ -47,7 +53,7 @@ export function readOperator(record: OperatorRecord): TrustedOperator {
     publicKey: record.publicKey,
     role: record.role ?? LEGACY_OPERATOR_ROLE,
     ...(record.supersedes === undefined ? {} : { supersedes: record.supersedes }),
-    ...(record.projects === undefined ? {} : { projects: [...record.projects] }),
+    ...(record.applications === undefined ? {} : { applications: [...record.applications] }),
   };
 }
 
@@ -89,70 +95,106 @@ export function canRevoke(caller: TrustedOperator, targetId: string): boolean {
 }
 
 /** True only for the valid sole-entry wildcard scope. */
-export function isWildcardScope(projects: string[] | undefined): boolean {
-  return projects?.length === 1 && projects[0] === WILDCARD_PROJECT;
+export function isWildcardScope(applications: string[] | undefined): boolean {
+  return applications?.length === 1 && applications[0] === WILDCARD_APPLICATION;
 }
 
-/** Returns project reachability. Scope-less operator records reach nothing. */
-export function canReachProject(operator: TrustedOperator, project: string): boolean {
-  if (operator.projects === undefined) return operator.role === "admin";
-  if (isWildcardScope(operator.projects)) return true;
-  return operator.projects.includes(project);
+/** The prefix a glob entry covers, or null when the entry is an exact name. */
+function globPrefix(entry: string): string | null {
+  return PREFIX_GLOB_RE.test(entry) ? entry.slice(0, -1) : null;
 }
 
-/** Returns whether a requested scope is no wider than the caller's reach. */
+/** Returns application reachability. Scope-less operator records reach nothing. */
+export function canReachApplication(operator: TrustedOperator, name: string): boolean {
+  if (operator.applications === undefined) return operator.role === "admin";
+  if (isWildcardScope(operator.applications)) return true;
+
+  return operator.applications.some((entry) => {
+    const prefix = globPrefix(entry);
+    return prefix === null ? entry === name : name.startsWith(prefix);
+  });
+}
+
+/**
+ * Whether a requested scope is no wider than the caller's reach.
+ *
+ * An entry is covered when the caller holds `*`, the identical entry, or a
+ * prefix glob whose prefix the entry — an exact name or another glob's prefix —
+ * starts with. `shop-*` therefore grants `shop-preview` and `shop-pre*`, and
+ * never `shop` or `shop*`.
+ */
 export function canGrantScope(caller: TrustedOperator, wanted: string[] | undefined): boolean {
   if (wanted === undefined) return true;
-  if (caller.role === "admin" || isWildcardScope(caller.projects)) return true;
+  if (caller.role === "admin" || isWildcardScope(caller.applications)) return true;
 
-  const own = caller.projects ?? [];
+  const own = caller.applications ?? [];
   /* Only admin and wildcard-scoped callers may grant wildcard scope. */
   if (isWildcardScope(wanted)) return false;
-  return wanted.every((project) => own.includes(project));
+
+  return wanted.every((entry) => {
+    const reach = globPrefix(entry) ?? entry;
+    return own.some((held) => {
+      const prefix = globPrefix(held);
+      return prefix === null ? held === entry : reach.startsWith(prefix);
+    });
+  });
 }
 
 /** Validates scopes: admins unscoped, nonempty operator scope, wildcard alone. */
-export function assertOperatorScope(key: Pick<TrustedOperator, "role" | "projects">): void {
-  const projects = key.projects;
-  if (projects === undefined) return;
+export function assertOperatorScope(key: Pick<TrustedOperator, "role" | "applications">): void {
+  const applications = key.applications;
+  if (applications === undefined) return;
 
   if (key.role === "admin") {
-    throw new ScafoError("invalid-input", "An admin cannot be scoped to projects", {
+    throw new ScafoError("invalid-input", "An admin cannot be scoped to applications", {
       detail:
         `an admin administers every key this fleet trusts, so it can grant itself a key for ` +
-        `any project at any time — a scope on one would state a boundary it does not have; ` +
+        `any application at any time — a scope on one would state a boundary it does not have; ` +
         `register it as an operator-tier key to scope it, or as an admin with no scope`,
     });
   }
-  if (projects.length === 0) {
-    throw new ScafoError("invalid-input", "A scope must name a project", {
+  if (applications.length === 0) {
+    throw new ScafoError("invalid-input", "A scope must name an application", {
       detail:
-        `an empty list is a key that may reach nothing at all; name the projects this key is ` +
-        `for, or "${WILDCARD_PROJECT}" alone for every project of this fleet`,
+        `an empty list is a key that may reach nothing at all; name the applications this key ` +
+        `is for, or "${WILDCARD_APPLICATION}" alone for every application of this fleet`,
     });
   }
-  if (isWildcardScope(projects)) return;
-  if (projects.includes(WILDCARD_PROJECT)) {
+  if (isWildcardScope(applications)) return;
+  if (applications.includes(WILDCARD_APPLICATION)) {
     throw new ScafoError("invalid-input", "A wildcard scope stands alone", {
       detail:
-        `"${WILDCARD_PROJECT}" means every project of this fleet, so listing it beside named ` +
-        `projects says two different things at once; use "${WILDCARD_PROJECT}" on its own, or ` +
-        `name the projects and leave it out`,
+        `"${WILDCARD_APPLICATION}" means every application of this fleet, so listing it beside ` +
+        `named applications says two different things at once; use ` +
+        `"${WILDCARD_APPLICATION}" on its own, or name the applications and leave it out`,
     });
   }
-  for (const project of projects) assertSlug(project);
+  for (const entry of applications) {
+    if (globPrefix(entry) !== null) continue;
+    if (entry.includes(WILDCARD_APPLICATION)) {
+      throw new ScafoError("invalid-input", "Invalid scope entry", {
+        detail:
+          `"${entry}" is neither an application name nor a prefix glob; a glob is a run of ` +
+          `name characters, which may end in a hyphen, followed by one trailing ` +
+          `"${WILDCARD_APPLICATION}" — as in "shop-*", which reaches "shop-preview" and not ` +
+          `"shop"`,
+      });
+    }
+    assertSlug(entry);
+  }
 }
 
-/** Validates a new grant. Operator keys must state nonempty project reach. */
-export function assertGrantableScope(key: Pick<TrustedOperator, "role" | "projects">): void {
+/** Validates a new grant. Operator keys must state nonempty application reach. */
+export function assertGrantableScope(key: Pick<TrustedOperator, "role" | "applications">): void {
   assertOperatorScope(key);
-  if (key.role === "admin" || key.projects !== undefined) return;
+  if (key.role === "admin" || key.applications !== undefined) return;
 
-  throw new ScafoError("invalid-input", "An operator-tier key must name its projects", {
+  throw new ScafoError("invalid-input", "An operator-tier key must name its applications", {
     detail:
-      `a key that names no projects would reach nothing at all, and a key meant to reach the ` +
-      `whole fleet has to say so: name the projects this one is for, or "${WILDCARD_PROJECT}" ` +
-      `alone for every project — which an admin of this fleet grants`,
+      `a key that names no applications would reach nothing at all, and a key meant to reach ` +
+      `the whole fleet has to say so: name the applications this one is for, or ` +
+      `"${WILDCARD_APPLICATION}" alone for every application — which an admin of this fleet ` +
+      `grants`,
   });
 }
 
@@ -253,7 +295,7 @@ function operatorRecord(key: TrustedOperator): OperatorRecord {
     publicKey: key.publicKey,
     role: key.role,
     ...(key.supersedes === undefined ? {} : { supersedes: key.supersedes }),
-    ...(key.projects === undefined ? {} : { projects: [...key.projects] }),
+    ...(key.applications === undefined ? {} : { applications: [...key.applications] }),
   };
 }
 

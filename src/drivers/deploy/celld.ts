@@ -1,10 +1,10 @@
 /* Unpacks an artifact and publishes it through a short-lived Celld CLI process. */
 
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseJSONC } from "confbox";
+import { safeJsonParse } from "unsecure/sanitize";
 import { ScafoError } from "../../core/error.ts";
 import { assertPositiveSafeInteger } from "../../core/utils/number.ts";
 import { ByteTail, decodeUtf8Tail } from "../../core/utils/byte-tail.ts";
@@ -69,7 +69,7 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
           ...(opts?.archiveEntries === undefined ? {} : { maxEntries: opts.archiveEntries }),
           signal: runOpts.signal,
         });
-        const config = await prepareConfig(dir, input.script, input.noBundle);
+        const config = await locateConfig(dir);
 
         const version = await run(
           binPath,
@@ -109,37 +109,22 @@ export function createCelldDeployRunner(opts?: CelldDeployRunnerOptions): Deploy
   };
 }
 
-/** Rewrites the artifact config with the environment name used by the runtime. */
-async function prepareConfig(
-  dir: string,
-  script: string,
-  noBundle: true | undefined,
-): Promise<string> {
+/**
+ * The artifact's own runtime config, found at the root of what it unpacked to.
+ *
+ * Handed to the publish exactly as its author wrote it: nothing here parses or
+ * rewrites the file, so what the runtime reads is byte-for-byte what was
+ * uploaded. Whoever wanted a value changed changed it before the artifact was
+ * packed.
+ */
+async function locateConfig(dir: string): Promise<string> {
   for (const name of CONFIG_NAMES) {
     const path = join(dir, name);
-    let text: string;
     try {
-      text = await readFile(path, "utf8");
+      await access(path);
     } catch {
       continue;
     }
-
-    const parsed: unknown = parseJSONC(text, { allowTrailingComma: true });
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      throw new ScafoError("invalid-input", "Artifact config is not an object", {
-        detail: `"${name}" must hold an object of runtime settings`,
-      });
-    }
-
-    await writeFile(
-      path,
-      JSON.stringify(
-        { ...parsed, name: script, ...(noBundle === true ? { no_bundle: true } : {}) },
-        null,
-        2,
-      ),
-      "utf8",
-    );
     return path;
   }
 
@@ -238,7 +223,7 @@ function run(
       const prefix = `${partial}"${command} ${args[0] ?? ""}" ${ended}: `;
       const tailBytes = Math.max(1, 4096 - new TextEncoder().encode(prefix).byteLength);
       reject(
-        new ScafoError("invalid-input", "Publish failed", {
+        new ScafoError("publish-failed", "Publish failed", {
           detail:
             prefix + decodeUtf8Tail(output.bytes(), Math.min(opts.outputBytes, tailBytes)).trim(),
         }),
@@ -262,7 +247,7 @@ function afterPublished(version: string, failure: ScafoError): ScafoError {
 function deployVersion(bytes: Uint8Array): string | undefined {
   let value: unknown;
   try {
-    value = JSON.parse(decodeUtf8Tail(bytes, bytes.byteLength).trim());
+    value = safeJsonParse<unknown>(decodeUtf8Tail(bytes, bytes.byteLength).trim());
   } catch {
     return undefined;
   }

@@ -9,11 +9,11 @@ import {
 const baseLimits: DeploySchedulerOptions = {
   artifactBytes: 100,
   activeTasks: 2,
-  projectActiveTasks: 1,
+  applicationActiveTasks: 1,
   queuedTasks: 4,
-  projectQueuedTasks: 2,
+  applicationQueuedTasks: 2,
   stagedBytes: 300,
-  projectStagedBytes: 200,
+  applicationStagedBytes: 200,
   receiveTimeoutMs: 600_000,
   queueTimeoutMs: 600_000,
   taskTimeoutMs: 300_000,
@@ -29,7 +29,7 @@ function limits(overrides: Partial<DeploySchedulerOptions> = {}): DeploySchedule
 afterEach(() => vi.useRealTimers());
 
 describe("deploy scheduler accounting", () => {
-  it("reserves global and project count and bytes atomically", () => {
+  it("reserves global and application count and bytes atomically", () => {
     const scheduler = createDeployScheduler(limits({ queuedTasks: 2 }));
     scheduler.reserve("one");
     scheduler.reserve("two");
@@ -41,7 +41,7 @@ describe("deploy scheduler accounting", () => {
       activeTasks: 0,
       queuedTasks: 2,
       stagedBytes: 200,
-      projects: {
+      applications: {
         one: { activeTasks: 0, queuedTasks: 1, stagedBytes: 100 },
         two: { activeTasks: 0, queuedTasks: 1, stagedBytes: 100 },
       },
@@ -49,7 +49,7 @@ describe("deploy scheduler accounting", () => {
   });
 
   it("mutates nothing when one dimension refuses a reservation", () => {
-    const scheduler = createDeployScheduler(limits({ projectQueuedTasks: 1 }));
+    const scheduler = createDeployScheduler(limits({ applicationQueuedTasks: 1 }));
     scheduler.reserve("one");
     const before = scheduler.usage();
 
@@ -72,7 +72,7 @@ describe("deploy scheduler accounting", () => {
   });
 
   it("zero queued capacity refuses all intake because receiving consumes that slot", () => {
-    const scheduler = createDeployScheduler(limits({ queuedTasks: 0, projectQueuedTasks: 0 }));
+    const scheduler = createDeployScheduler(limits({ queuedTasks: 0, applicationQueuedTasks: 0 }));
     expect(() => scheduler.reserve("one")).toThrow(
       expect.objectContaining({ code: "deploy-overloaded" }),
     );
@@ -143,7 +143,7 @@ describe("deploy scheduler accounting", () => {
 });
 
 describe("deploy scheduler ordering", () => {
-  it("is per-project FIFO and round-robin across ready projects", async () => {
+  it("is per-application FIFO and round-robin across ready applications", async () => {
     const scheduler = createDeployScheduler(limits({ activeTasks: 1 }));
     const gate = deferred<void>();
     const order: string[] = [];
@@ -160,7 +160,7 @@ describe("deploy scheduler ordering", () => {
     await expect.poll(() => scheduler.usage()).toEqual(emptyUsage());
   });
 
-  it("does not let a project waiting on its cap occupy a global slot", async () => {
+  it("does not let an application waiting on its cap occupy a global slot", async () => {
     const scheduler = createDeployScheduler(limits());
     const gate = deferred<void>();
     const order: string[] = [];
@@ -373,12 +373,12 @@ function staged(byteLength: number, disposal: Promise<void> = Promise.resolve())
 
 function enqueue(
   scheduler: DeployScheduler,
-  project: string,
+  application: string,
   name: string,
   order: string[],
   wait: Promise<void> = Promise.resolve(),
 ): void {
-  scheduler.reserve(project).enqueue(staged(1), async () => {
+  scheduler.reserve(application).enqueue(staged(1), async () => {
     order.push(name);
     await wait;
   });
@@ -389,7 +389,7 @@ function emptyUsage(): ReturnType<DeployScheduler["usage"]> {
     activeTasks: 0,
     queuedTasks: 0,
     stagedBytes: 0,
-    projects: {},
+    applications: {},
   };
 }
 

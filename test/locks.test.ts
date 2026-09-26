@@ -19,8 +19,16 @@ import {
 } from "../src/core/registry/locks.ts";
 import { tlsLockKey } from "../src/core/registry/paths.ts";
 import { TLS_LOCK_SPACE } from "../src/core/registry/tls-lock.ts";
+import { ScafoError } from "../src/core/error.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { CLOCK_START_MS, ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
+import {
+  CLOCK_START_MS,
+  ctxWith,
+  FaultStore,
+  type ManualClock,
+  rejectionOf,
+  rejectsWith,
+} from "./_helpers.ts";
 
 const HOLDER = "node-a-0f0f0f0f";
 const FOREIGN = "somebody-else";
@@ -73,6 +81,52 @@ describe("taking a lock", () => {
     });
   });
 
+  it("takes a lock whose creation landed before the store failed to say so", async () => {
+    const store = new FaultStore(new MemoryCasStore());
+    const clock = ctxWith(store);
+    /* The record is already written and the answer that said so was lost, so
+       the repeat the driver sent is refused by its own precondition. Refusing
+       the caller over that would deny it a lock it holds, for the whole stale
+       window. */
+    store.onAfterPut = (): void => {
+      store.onAfterPut = undefined;
+      throw new ScafoError("cas-conflict", "Conditional write failed", { status: 412 });
+    };
+
+    const handle = await acquireLock(clock.ctx, SPACE, "one", HOLDER);
+
+    expect(handle.lock).toMatchObject({ holder: HOLDER });
+    clock.tick(SPACE.refreshMs);
+    await expect(refreshLock(clock.ctx, SPACE, handle)).resolves.toMatchObject({ name: "one" });
+  });
+
+  it("takes over a stale lock whose takeover landed before the store failed to say so", async () => {
+    const store = new FaultStore(new MemoryCasStore());
+    const clock = ctxWith(store);
+    await acquireLock(clock.ctx, SPACE, "one", FOREIGN);
+    clock.tick(SPACE.staleMs);
+    store.onAfterPut = (): void => {
+      store.onAfterPut = undefined;
+      throw new ScafoError("cas-conflict", "Conditional write failed", { status: 412 });
+    };
+
+    const handle = await acquireLock(clock.ctx, SPACE, "one", HOLDER);
+
+    expect(handle.lock).toMatchObject({ holder: HOLDER });
+    await expect(refreshLock(clock.ctx, SPACE, handle)).resolves.toMatchObject({ name: "one" });
+  });
+
+  it("refuses the same holder taking the same name again within one clock tick", async () => {
+    const { clock } = world();
+    await acquireLock(clock.ctx, SPACE, "one", HOLDER);
+
+    /* Holder and moment are the same record, field for field; only the token
+       drawn at each acquisition says this is a second one and not the first
+       one's unanswered repeat. */
+    const error = await rejectionOf(() => acquireLock(clock.ctx, SPACE, "one", HOLDER));
+    expect(error.code).toBe("cas-conflict");
+  });
+
   it("hands a holder id that tells two daemons of one node apart", () => {
     const first = lockHolder("node-a");
     expect(first).toMatch(/^node-a-[0-9a-f]{8}$/);
@@ -107,6 +161,45 @@ describe("keeping a lock", () => {
 
     const error = await rejectsWith(() => refreshLock(clock.ctx, SPACE, handle), "lease-lost");
     expect(error.detail).toContain(HOLDER);
+  });
+
+  it("keeps a lock whose restamp landed before the store failed to say so", async () => {
+    const store = new FaultStore(new MemoryCasStore());
+    const clock = ctxWith(store);
+    const handle = await acquireLock(clock.ctx, SPACE, "one", HOLDER);
+
+    clock.tick(SPACE.refreshMs);
+    /* The record is already restamped and the answer that said so was lost, so
+       the repeat the driver sent is refused by its own precondition. */
+    store.onAfterPut = (): void => {
+      store.onAfterPut = undefined;
+      throw new ScafoError("cas-conflict", "Conditional write failed", { status: 412 });
+    };
+
+    const kept = await refreshLock(clock.ctx, SPACE, handle);
+
+    expect(kept.lock).toMatchObject({
+      holder: HOLDER,
+      acquiredAt: handle.lock.acquiredAt,
+      refreshedAt: new Date(clock.nowMs()).toISOString(),
+    });
+    /* And the handle it answered with fences the next restamp, which the one
+       the caller came in with no longer could. */
+    clock.tick(SPACE.refreshMs);
+    await expect(refreshLock(clock.ctx, SPACE, kept)).resolves.toMatchObject({ name: "one" });
+  });
+
+  it("types a restamp onto a record its own id has taken again as lease loss", async () => {
+    const { clock } = world();
+    const handle = await acquireLock(clock.ctx, SPACE, "one", HOLDER);
+
+    clock.tick(SPACE.staleMs);
+    /* The same id holding the name a second time: only the moment it was taken
+       tells the two tenancies apart. */
+    await acquireLock(clock.ctx, SPACE, "one", HOLDER);
+
+    const error = await rejectsWith(() => refreshLock(clock.ctx, SPACE, handle), "lease-lost");
+    expect(error.detail).toContain(handle.lock.acquiredAt);
   });
 
   it("types an unreachable restamp as lease loss too, and preserves its cause", async () => {
@@ -170,6 +263,7 @@ describe("reading a record's staleness", () => {
       holder: HOLDER,
       acquiredAt: new Date(CLOCK_START_MS).toISOString(),
       refreshedAt: new Date(CLOCK_START_MS).toISOString(),
+      token: "0123456789abcdef",
     };
 
     expect(isLockStale(lock, new Date(CLOCK_START_MS + LOCK_STALE_MS - 1), LOCK_STALE_MS)).toBe(
@@ -181,7 +275,12 @@ describe("reading a record's staleness", () => {
   it("counts a record it cannot read a time out of as stale", () => {
     /* Nobody is coming back for a record whose stamp means nothing, and refusing
        every later attempt over it would be worse than taking it over. */
-    const lock: NamedLock = { holder: HOLDER, acquiredAt: "", refreshedAt: "whenever" };
+    const lock: NamedLock = {
+      holder: HOLDER,
+      acquiredAt: "",
+      refreshedAt: "whenever",
+      token: "0123456789abcdef",
+    };
 
     expect(isLockStale(lock, new Date(CLOCK_START_MS), LOCK_STALE_MS)).toBe(true);
   });

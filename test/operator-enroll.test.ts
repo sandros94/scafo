@@ -26,7 +26,7 @@ import {
   enrollInBucket,
   enrollOnWire,
   enrollPath,
-  operatorProjects,
+  operatorApplications,
   showOperator,
 } from "../src/cli/_operators.ts";
 import { addRemote } from "../src/cli/_remotes.ts";
@@ -34,11 +34,17 @@ import { getOperator, trustOperator } from "../src/core/registry/operators.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { toBase64 } from "../src/core/utils/base64.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
+import {
+  ctxWith,
+  type ManualClock,
+  rejectionOf,
+  rejectsWith,
+  TEST_VERSIONS,
+  urlOf,
+} from "./_helpers.ts";
 
 const NODE_URL = "http://10.0.0.4:7400";
 const REMOTE = "prod";
-const VERSION = "0.0.0-test";
 
 const homes: string[] = [];
 
@@ -160,24 +166,25 @@ describe("admitting a key over the wire", () => {
       role: "operator",
       /* Named because an operator-tier key must name what it reaches, and the
          admin doing the enrolling carries no scope for it to inherit. */
-      projects: ["acme"],
+      applications: ["acme"],
       fetchFn: through(app),
     });
 
     expect(enrolled).toMatchObject({ id: joiner.id, role: "operator", path: "wire" });
     await expect(getOperator(clock.ctx, joiner.id)).resolves.toMatchObject({
       role: "operator",
-      projects: ["acme"],
+      applications: ["acme"],
       publicKey: { kty: "OKP", crv: "Ed25519", x: joiner.publicKey.x },
     });
   });
 
-  it("REFUSES an operator-tier key that names no projects, whoever is enrolling it", async () => {
+  it("REFUSES an operator-tier key that names no applications, whoever is enrolling it", async () => {
     const { home } = await registeredRemote();
     const joiner = publicOperator(await generateOperatorKey());
 
     /* The default-deny, read from this end: an admin has no scope to hand down,
-       so an enrollment that leaves the flag off used to mean every project. */
+       so an enrollment that leaves the flag off would otherwise mean every
+       application of the fleet. */
     await rejectsWith(
       () => enrollOnWire(home, REMOTE, joiner, { role: "operator", fetchFn: through(app) }),
       "invalid-input",
@@ -203,7 +210,7 @@ describe("admitting a key over the wire", () => {
     const joiner = publicOperator(await generateOperatorKey());
 
     const enrolled = await enrollOnWire(home, REMOTE, joiner, {
-      projects: ["acme"],
+      applications: ["acme"],
       fetchFn: through(app),
     });
 
@@ -211,30 +218,52 @@ describe("admitting a key over the wire", () => {
   });
 });
 
-describe("the projects an enrollment scopes a key to", () => {
-  it("reads a comma-separated list, the way endpoints and labels are read", () => {
-    expect(operatorProjects("acme,globex")).toEqual({ projects: ["acme", "globex"] });
-    expect(operatorProjects(" acme , globex ")).toEqual({ projects: ["acme", "globex"] });
+describe("the applications an enrollment scopes a key to", () => {
+  it("reads one whole entry per --apps, the way every list on the command line is read", () => {
+    expect(operatorApplications(["acme", "globex"])).toEqual({
+      applications: ["acme", "globex"],
+    });
+    expect(operatorApplications([" acme ", " globex "])).toEqual({
+      applications: ["acme", "globex"],
+    });
   });
 
   it("leaves an absent list absent, for the NODE to decide what that means", () => {
     /* Absent must stay absent all the way down rather than becoming a `[]`:
        what it means depends on the tier the key lands at, which is the node's
-       to settle — every project for an admin, and a refusal below that. */
-    expect(operatorProjects(undefined)).toEqual({});
-    expect(operatorProjects("")).toEqual({});
+       to settle — every application for an admin, and a refusal below that. */
+    expect(operatorApplications(undefined)).toEqual({});
+    expect(operatorApplications([])).toEqual({});
+    expect(operatorApplications([""])).toEqual({});
   });
 
   it('passes "*" through unchecked, because whether it is allowed is the node\'s to say', () => {
     /* It is not a slug, so validating it here would mean either teaching this
        the rule that it stands alone — policy in the one place that cannot
        enforce it — or refusing it with a message about lowercase letters. */
-    expect(operatorProjects("*")).toEqual({ projects: ["*"] });
-    expect(operatorProjects("*,acme")).toEqual({ projects: ["*", "acme"] });
+    expect(operatorApplications(["*"])).toEqual({ applications: ["*"] });
+    expect(operatorApplications(["*", "acme"])).toEqual({ applications: ["*", "acme"] });
   });
 
-  it("refuses a name that is not a project slug, here rather than at the node", async () => {
-    await rejectsWith(async () => operatorProjects("Not A Slug"), "invalid-slug");
+  it("passes a PREFIX GLOB through for the same reason, unchecked and unexpanded", () => {
+    /* "shop-*" reaches "shop-preview" and not "shop", and whether a glob is
+       allowed where it was used is the node's to say rather than this end's. */
+    expect(operatorApplications(["shop-*"])).toEqual({ applications: ["shop-*"] });
+    expect(operatorApplications(["acme", "shop-*", "globex"])).toEqual({
+      applications: ["acme", "shop-*", "globex"],
+    });
+  });
+
+  it("refuses a name that is not an application name, here rather than at the node", async () => {
+    expect((await rejectionOf(async () => operatorApplications(["Not A Name"]))).code).toBe(
+      "invalid-slug",
+    );
+
+    /* A comma is part of the name it was written in rather than a separator,
+       so a list written the old way is refused instead of quietly scoping. */
+    expect((await rejectionOf(async () => operatorApplications(["acme,globex"]))).code).toBe(
+      "invalid-slug",
+    );
   });
 
   it("scopes the key a node records, and reports the scope the node decided", async () => {
@@ -242,23 +271,42 @@ describe("the projects an enrollment scopes a key to", () => {
     const joiner = publicOperator(await generateOperatorKey());
 
     const enrolled = await enrollOnWire(home, REMOTE, joiner, {
-      projects: ["acme"],
+      applications: ["acme"],
       fetchFn: through(app),
     });
 
-    expect(enrolled.projects).toEqual(["acme"]);
+    expect(enrolled.applications).toEqual(["acme"]);
     await expect(getOperator(clock.ctx, joiner.id)).resolves.toMatchObject({
       role: "operator",
-      projects: ["acme"],
+      applications: ["acme"],
     });
   });
 
-  it("says which projects the key may reach, where it is scoped at all", async () => {
+  it.each([
+    ["exact names", ["acme", "globex"]],
+    ["a prefix glob", ["shop-*"]],
+    ["the wildcard", ["*"]],
+  ])("records %s, exactly as --apps named them", async (_what, applications) => {
+    const { home } = await registeredRemote();
+    const joiner = publicOperator(await generateOperatorKey());
+
+    const enrolled = await enrollOnWire(home, REMOTE, joiner, {
+      applications,
+      fetchFn: through(app),
+    });
+
+    /* Unexpanded: a glob is matched at every check rather than resolved once
+       here, so an application created tomorrow is reached by the same entry. */
+    expect(enrolled.applications).toEqual(applications);
+    await expect(getOperator(clock.ctx, joiner.id)).resolves.toMatchObject({ applications });
+  });
+
+  it("says which applications the key may reach, where it is scoped at all", async () => {
     const { home } = await registeredRemote();
     const joiner = publicOperator(await generateOperatorKey());
 
     const said = describeEnrollment(
-      await enrollOnWire(home, REMOTE, joiner, { projects: ["acme"], fetchFn: through(app) }),
+      await enrollOnWire(home, REMOTE, joiner, { applications: ["acme"], fetchFn: through(app) }),
     );
 
     expect(said).toContain("acme");
@@ -277,8 +325,8 @@ describe("the projects an enrollment scopes a key to", () => {
   });
 
   it("REFUSES the ceremony flags together with an operator TIER", async () => {
-    /* The same contradiction from the other end: that path names no projects,
-       and an operator-tier key naming none may reach nothing at all. */
+    /* The same contradiction from the other end: that path names no
+       applications, and an operator-tier key naming none may reach nothing. */
     const error = await rejectsWith(
       async () => assertScopedEnrollment("bucket", undefined, "operator"),
       "invalid-input",
@@ -409,14 +457,14 @@ async function scratch(): Promise<string> {
   return home;
 }
 
-/** A working directory holding no project configuration at all. */
+/** A working directory holding no scafo configuration at all. */
 function noConfig(): Promise<string | null> {
   return Promise.resolve(null);
 }
 
 /** Calls that reach the app in this process; the app may answer synchronously. */
 function through(target: H3): typeof fetch {
-  return async (input, init) => target.request(String(input), init);
+  return async (input, init) => target.request(urlOf(input), init);
 }
 
 function nodeApp(): H3 {
@@ -425,7 +473,7 @@ function nodeApp(): H3 {
     nodeId: "node-a",
     registry: clock.ctx,
     supervisor: idleSupervisor(),
-    version: VERSION,
+    versions: TEST_VERSIONS,
   });
 }
 
@@ -443,6 +491,8 @@ function daemonConfig(): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
+      portRangeEnd: 42_998,
+      portQuarantineMs: 600_000,
       bindHost: "127.0.0.1",
     },
     observability: { enabled: false },
@@ -456,6 +506,7 @@ function idleSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: () => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

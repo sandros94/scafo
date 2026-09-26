@@ -21,16 +21,15 @@ import { operatorKey } from "../src/core/registry/paths.ts";
 import type { OperatorRecord } from "../src/core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock } from "./_helpers.ts";
+import { ctxWith, type ManualClock, TEST_VERSIONS } from "./_helpers.ts";
 
 const NODE_ID = "node-a";
 const OPERATOR_ID = "op-aaaa1111";
 const SECOND_ID = "op-bbbb2222";
 const THIRD_ID = "op-cccc3333";
 const FOURTH_ID = "op-dddd4444";
-const VERSION = "0.0.0-test";
-/** The project every operator-tier key in this file is scoped to; see {@link scopedHalf}. */
-const PROJECT = "acme";
+/** The application every operator-tier key in this file is scoped to; see {@link scopedHalf}. */
+const APPLICATION = "acme";
 
 /** Every problem body a caller that did not authenticate may see. */
 const AUTH_INVALID_PROBLEM = {
@@ -66,7 +65,7 @@ beforeEach(async () => {
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: idleSupervisor(),
-    version: VERSION,
+    versions: TEST_VERSIONS,
     observability: observed,
   });
 });
@@ -109,35 +108,26 @@ describe("the tier a listing shows", () => {
 });
 
 describe("what tier a POST may grant", () => {
-  const grants: Array<[OperatorRole, OperatorRole, number]> = [
-    ["admin", "admin", 200],
-    ["admin", "operator", 200],
-    ["operator", "operator", 200],
-    ["operator", "admin", 403],
+  const granted: Array<[OperatorRole, OperatorRole]> = [
+    ["admin", "admin"],
+    ["admin", "operator"],
+    ["operator", "operator"],
   ];
 
-  it.each(grants)("a %s registering a %s is answered %i", async (caller, wanted, status) => {
-    const callerKeys = await generateJWK("EdDSA", { kid: SECOND_ID });
-    await trustAs(SECOND_ID, callerKeys, caller);
-    const minted = await generateJWK("EdDSA", { kid: THIRD_ID });
+  it.each(granted)("a %s registering a %s is answered 200", async (caller, wanted) => {
+    const response = await grant(caller, wanted);
 
-    const response = await app.request("/v1/operators", {
-      method: "POST",
-      headers: { ...(await asKey(SECOND_ID, callerKeys)), "content-type": "application/json" },
-      body: JSON.stringify({
-        ...(wanted === "operator" ? scopedHalf(THIRD_ID, minted) : publicHalf(THIRD_ID, minted)),
-        role: wanted,
-      }),
-    });
+    expect(response.status).toBe(200);
+    await expect(getOperator(clock.ctx, THIRD_ID)).resolves.toMatchObject({ role: wanted });
+  });
 
-    expect(response.status).toBe(status);
-    if (status === 200) {
-      await expect(getOperator(clock.ctx, THIRD_ID)).resolves.toMatchObject({ role: wanted });
-    } else {
-      const problem = (await response.json()) as { type: string; detail?: string };
-      expect(problem.type).toBe("urn:scafo:auth-scope");
-      expect(await getOperator(clock.ctx, THIRD_ID)).toBeNull();
-    }
+  it("REFUSES an operator-tier key registering an admin, and files nothing", async () => {
+    const response = await grant("operator", "admin");
+
+    expect(response.status).toBe(403);
+    const problem = (await response.json()) as { type: string; detail?: string };
+    expect(problem.type).toBe("urn:scafo:auth-scope");
+    expect(await getOperator(clock.ctx, THIRD_ID)).toBeNull();
   });
 
   it("defaults a registration to the operator tier, which is least privilege", async () => {
@@ -199,6 +189,22 @@ describe("what tier a POST may grant", () => {
 
     expect(response.status).toBe(400);
   });
+
+  /** A `caller`-tier key registering a fresh key at the `wanted` tier. */
+  async function grant(caller: OperatorRole, wanted: OperatorRole): Promise<Response> {
+    const callerKeys = await generateJWK("EdDSA", { kid: SECOND_ID });
+    await trustAs(SECOND_ID, callerKeys, caller);
+    const minted = await generateJWK("EdDSA", { kid: THIRD_ID });
+
+    return app.request("/v1/operators", {
+      method: "POST",
+      headers: { ...(await asKey(SECOND_ID, callerKeys)), "content-type": "application/json" },
+      body: JSON.stringify({
+        ...(wanted === "operator" ? scopedHalf(THIRD_ID, minted) : publicHalf(THIRD_ID, minted)),
+        role: wanted,
+      }),
+    });
+  }
 });
 
 describe("who a DELETE may take away", () => {
@@ -560,14 +566,14 @@ function publicHalf(id: string, keys: Keypair): Omit<TrustedOperator, "role"> {
 
 /**
  * The same, naming a SCOPE — which an operator-tier registration must, since a
- * key that names no projects reaches none of them.
+ * key that names no applications reaches none of them.
  *
  * Used wherever the tier a body lands at is `operator`, and left off wherever it
  * is `admin`, which is never scoped. What that refusal looks like on its own is
  * `test/operator-tenancy.test.ts`; these cases are about the tiers.
  */
 function scopedHalf(id: string, keys: Keypair): Omit<TrustedOperator, "role"> {
-  return { ...publicHalf(id, keys), projects: [PROJECT] };
+  return { ...publicHalf(id, keys), applications: [APPLICATION] };
 }
 
 /**
@@ -585,7 +591,7 @@ async function trust(id: string, keys: Keypair): Promise<void> {
 /**
  * The same, at a stated tier and with the lineage a rotation would have left.
  *
- * An operator-tier key is given a SCOPE, because one that names no projects is
+ * An operator-tier key is given a SCOPE, because one that names no applications is
  * a shape nothing grants: it reaches nothing, and a fixture carrying it would be
  * testing the broken record rather than the tier rules these cases are about.
  * `test/operator-tenancy.test.ts` is where the scope-less record is exercised.
@@ -602,7 +608,7 @@ async function trustAs(
     publicKey: { kty: "OKP", crv: "Ed25519", x: keys.publicKey.x },
     role,
     ...(supersedes === undefined ? {} : { supersedes }),
-    ...(role === "operator" ? { projects: [PROJECT] } : {}),
+    ...(role === "operator" ? { applications: [APPLICATION] } : {}),
   });
 }
 
@@ -660,6 +666,8 @@ function daemonConfig(): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
+      portRangeEnd: 42_998,
+      portQuarantineMs: 600_000,
       bindHost: "127.0.0.1",
     },
     observability: { enabled: false },
@@ -674,6 +682,7 @@ function idleSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: (): ProcessStatus[] => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

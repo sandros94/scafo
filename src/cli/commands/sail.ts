@@ -14,6 +14,7 @@ import type { DaemonContext } from "../../daemon/app.ts";
 import { loadDaemonConfig } from "../../daemon/config.ts";
 import { createCoordinator } from "../../daemon/coordinator.ts";
 import { createHeartbeat } from "../../daemon/heartbeat.ts";
+import { createProcessHealth } from "../../daemon/_process-health.ts";
 import { createObservability, OBSERVED_RING_SIZE } from "../../daemon/observe.ts";
 import {
   createObserveFlusher,
@@ -27,6 +28,7 @@ import { createReconciler, runtimeBaseEnv } from "../../daemon/reconcile.ts";
 import { startDaemon } from "../../daemon/serve.ts";
 import { createStorageService } from "../../daemon/storage.ts";
 import { DEFAULT_ARCHIVE_ENTRIES, DEFAULT_ARTIFACT_BYTES } from "../../core/types/deploy.ts";
+import type { NodeVersions } from "../../core/types/registry.ts";
 import { initRegistry, readMeta } from "../../core/registry/meta.ts";
 import { createDeployService } from "../../daemon/deploys.ts";
 import { createCelldDeployRunner } from "../../drivers/deploy/celld.ts";
@@ -45,11 +47,11 @@ import {
   drainThisNode,
   loadNodeIdentity,
   loadIngressTokens,
-  loadVarsetKey,
   loadWireguardRecord,
   nodeStateDir,
   registerThisNode,
 } from "../_bootstrap.ts";
+import { configFlags } from "../_flags.ts";
 import { INGRESS_TOKEN_FILE, ingressTokenNotice } from "../_ingress-token.ts";
 import { deprecatedAlias, readPackageVersion, readTextFile, reportFailure } from "../_utils.ts";
 
@@ -66,7 +68,9 @@ export const sailArgs: ArgsDef = {
   "state-dir": { type: "string", description: "Directory this node keeps its identity in" },
   "node-labels": {
     type: "string",
-    description: "What this node is, for environments to select on (region=eu-west-1,tier=fast)",
+    multiple: true,
+    valueHint: "key=value",
+    description: "What this node is, for applications to select on; one pair per flag",
   },
   "listen": { type: "string", description: "host:port the node API binds to" },
   "advertise": { type: "string", description: "host:port other nodes reach this one at" },
@@ -80,24 +84,67 @@ export const sailArgs: ArgsDef = {
     description: "host:port peers send this node's tunnel traffic to",
   },
   "wg-port": { type: "string", description: "UDP port the tunnel interface listens on (51820)" },
-  "platform-domains": { type: "string", description: "Comma-separated apex domains to serve" },
-  "varset-key-file": { type: "string", description: "File holding the varset encryption key" },
+  "platform-domains": {
+    type: "string",
+    multiple: true,
+    valueHint: "domain",
+    description: "Apex domain to serve; repeat the flag for several",
+  },
   "ingress-token": {
     type: "string",
+    multiple: true,
+    valueHint: "token",
     description:
-      "Token(s) admitted on /v1/ingress and /v1/storage, instead of one this node mints: " +
-      "new,old admits both while a rotation is in flight, and the first is written to the " +
-      "state directory's ingress-token file. Restart the daemon before reloading the ingress",
+      "Token admitted on /v1/ingress and /v1/storage, instead of one this node mints: " +
+      "repeat the flag to admit the previous one as well while a rotation is in flight, and " +
+      "the first is written to the state directory's ingress-token file. Restart the daemon " +
+      "before reloading the ingress",
   },
-  "celld-bin": { type: "string", description: "Executable that runs an environment" },
+  "celld-bin": { type: "string", description: "Executable that runs an application" },
   "celld-env": {
     type: "string",
+    multiple: true,
+    valueHint: "NAME=value",
     description:
-      "Upstream Celld variables for every runtime process, NAME=value,NAME2=value2; " +
-      "a value cannot contain a comma here — write those as runtime.celldEnv in the config file",
+      "Upstream Celld variable for every runtime process; one pair per flag, and a value " +
+      "written here may hold anything, commas included",
   },
   "port-range-start": { type: "string", description: "First port runtime processes use" },
+  "port-range-end": {
+    type: "string",
+    description:
+      "Last port runtime processes use; with --network host these are the HOST's ports, so " +
+      "fit the range to the machine (24998)",
+  },
+  "port-quarantine-ms": {
+    type: "string",
+    description:
+      "How long a port released on this node is kept from a different application, in " +
+      "milliseconds, so nothing still routing there reaches another application (600000)",
+  },
   "bind-host": { type: "string", description: "Address runtime processes bind their listeners to" },
+  "registry-resync-ms": {
+    type: "string",
+    description:
+      "How often this node re-reads the whole registry regardless of the change hint, " +
+      "in milliseconds: the bound on a hint that never arrived (60000)",
+  },
+  "registry-node-refresh-ms": {
+    type: "string",
+    description:
+      "How often this node re-reads the fleet's node records, in milliseconds; liveness is " +
+      "the age of a heartbeat and no write announces a death (30000)",
+  },
+  "coordinator-lease-ttl-ms": {
+    type: "string",
+    description:
+      "Lifetime written into the coordinator lease, in milliseconds; it is renewed at a " +
+      "third of it (45000)",
+  },
+  "coordinator-reap-interval-ms": {
+    type: "string",
+    description: "Time between two reap passes while this node coordinates (600000)",
+  },
   "artifact-bytes": {
     type: "string",
     description: "Maximum compressed and expanded bytes per deploy artifact",
@@ -107,19 +154,19 @@ export const sailArgs: ArgsDef = {
     description: "Maximum entries per deploy archive",
   },
   "active-tasks": { type: "string", description: "Maximum active deploy tasks on this node" },
-  "project-active-tasks": {
+  "application-active-tasks": {
     type: "string",
-    description: "Maximum active deploy tasks for one project",
+    description: "Maximum active deploy tasks for one application",
   },
   "queued-tasks": { type: "string", description: "Maximum receiving and queued deploys" },
-  "project-queued-tasks": {
+  "application-queued-tasks": {
     type: "string",
-    description: "Maximum receiving and queued deploys for one project",
+    description: "Maximum receiving and queued deploys for one application",
   },
   "staged-bytes": { type: "string", description: "Maximum staged deploy bytes on this node" },
-  "project-staged-bytes": {
+  "application-staged-bytes": {
     type: "string",
-    description: "Maximum staged deploy bytes for one project",
+    description: "Maximum staged deploy bytes for one application",
   },
   "receive-timeout-ms": {
     type: "string",
@@ -138,7 +185,7 @@ export const sailArgs: ArgsDef = {
     type: "string",
     description:
       "File the ingress writes its JSON access log to; the node follows it and counts " +
-      "requests, bytes, statuses and latencies per environment. Needs --observability",
+      "requests, bytes, statuses and latencies per application. Needs --observability",
   },
   "api-public": {
     type: "boolean",
@@ -153,7 +200,23 @@ export const sailArgs: ArgsDef = {
   },
   "traefik-entrypoints": {
     type: "string",
-    description: "Traefik entryPoints the published routers attach to (web,websecure)",
+    multiple: true,
+    valueHint: "name",
+    description: "Traefik entryPoint the published routers attach to; repeat the flag for several",
+  },
+  "traefik-cert-resolver": {
+    type: "string",
+    valueHint: "name",
+    description:
+      "Certificate resolver from Traefik's own static configuration; the published routers " +
+      "ask it for their certificates, one wildcard per base rather than one per host",
+  },
+  "ingress-acme-delegation": {
+    type: "string",
+    valueHint: "host",
+    description:
+      "Host this installation's ingress answers DNS-01 at, so whoever claims a domain " +
+      'delegates "_acme-challenge.<domain>" to it with a CNAME; scafo only says it',
   },
 };
 
@@ -179,7 +242,7 @@ export const up: CommandDef = deprecatedAlias({
 async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   const config = await loadDaemonConfig({
     configPath: typeof flags.config === "string" ? flags.config : undefined,
-    flags: stringFlags(flags),
+    flags: configFlags(flags),
     env: process.env,
     readFile: readTextFile,
   });
@@ -193,7 +256,6 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
 
   const state = await loadNodeIdentity(config);
   const ingressTokens = await loadIngressTokens(config);
-  const varsetKey = await loadVarsetKey(config);
 
   /*
    * BEFORE THE BUCKET IS EVEN OPENED. A node whose Celld is older than this
@@ -204,6 +266,9 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   const celldBin = config.runtime.binPath;
   const celldVersion = await probeCelldVersion(celldBin);
   const version = await readPackageVersion();
+  /* Said once and used twice: the record the fleet reads this node's binaries
+     from, and what this node measures every other node's against. */
+  const versions: NodeVersions = { scafo: version, celld: celldVersion };
   console.log(`scafo: celld ${celldVersion} at "${celldBin}"`);
 
   const registry = createRegistry(config);
@@ -217,13 +282,18 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   await registerThisNode(registry, {
     config,
     state,
-    versions: { scafo: version, celld: celldVersion },
+    versions,
     ...(wireguard === undefined ? {} : { wireguard }),
   });
 
   const supervisor = createChildSupervisor();
+  /* What the node remembers about its own processes: the restarts, the exits and
+     the last thing each one said. The supervisor reports an exit and forgets it;
+     this is what turns a series of them into something an operator is told. */
+  const processHealth = createProcessHealth();
   supervisor.onExit((status) => {
     /* Reporting only: deciding what to do about it belongs to the reconcile loop. */
+    processHealth.exited(status);
     console.error(`scafo: process "${status.id}" exited with code ${String(status.exitCode)}`);
   });
 
@@ -232,11 +302,11 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
     nodeId: state.id,
     registry,
     supervisor,
-    version,
+    processHealth,
+    versions,
     /* Kept for the node tokens this node will sign for calls to its peers. */
     signingKey: state.privateKey,
   };
-  if (varsetKey !== undefined) daemon.varsetKey = varsetKey;
 
   /*
    * ATTACHED ONLY WHILE IT IS ON, and that is the whole of what the switch costs
@@ -279,8 +349,14 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
      of the fleet reads the fleet's routing from whichever node answers, and the
      entryPoints are the one thing about it a node has to be told. */
   const entryPoints = config.ingress?.entryPoints ?? [DEFAULT_ENTRY_POINT];
+  const certResolver = config.ingress?.traefikCertResolver;
   daemon.ingressFormats = {
-    traefik: (routing, { prefer }) => renderTraefikConfig(routing, { entryPoints, prefer }),
+    traefik: (routing, { prefer }) =>
+      renderTraefikConfig(routing, {
+        entryPoints,
+        prefer,
+        ...(certResolver === undefined ? {} : { certResolver }),
+      }),
   };
 
   /* Said once, at boot, because nothing else on this node ever will: an ingress
@@ -292,7 +368,12 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
     `scafo: this node serves the fleet's routing at /v1/ingress/routes (Caddy's ` +
       `"dynamic scafo") and /v1/ingress/routes/traefik?prefer=self (Traefik's http provider) ` +
       `on ${config.node.listen}, behind the ingress token; point your ingress there. Traefik ` +
-      `routers attach to entryPoint(s) ${entryPoints.join(", ")}`,
+      `routers attach to entryPoint(s) ${entryPoints.join(", ")}` +
+      /* The resolver is Traefik's own, so the node says which name it wrote
+         rather than anything about what that name does. */
+      (certResolver === undefined
+        ? ""
+        : `, and ask the "${certResolver}" certificate resolver for their certificates`),
   );
 
   /* What a colocated ingress keeps its certificates, its account key and its
@@ -327,11 +408,11 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
           scheduler: {
             artifactBytes: config.deploy.artifactBytes,
             activeTasks: config.deploy.activeTasks,
-            projectActiveTasks: config.deploy.projectActiveTasks,
+            applicationActiveTasks: config.deploy.applicationActiveTasks,
             queuedTasks: config.deploy.queuedTasks,
-            projectQueuedTasks: config.deploy.projectQueuedTasks,
+            applicationQueuedTasks: config.deploy.applicationQueuedTasks,
             stagedBytes: config.deploy.stagedBytes,
-            projectStagedBytes: config.deploy.projectStagedBytes,
+            applicationStagedBytes: config.deploy.applicationStagedBytes,
             receiveTimeoutMs: config.deploy.receiveTimeoutMs,
             queueTimeoutMs: config.deploy.queueTimeoutMs,
             taskTimeoutMs: config.deploy.taskTimeoutMs,
@@ -342,6 +423,14 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
 
   const driver = createCelldDriver({
     binPath: celldBin,
+    /* The same directory this node's identity and ingress token live in: what a
+       supervised process works out of has to come back with the node. */
+    stateDir: nodeStateDir(config),
+    /* Where the ports each application holds are kept and probed: the range is
+       this node's by convention only, and on a host network it is the host's. */
+    portRange: { start: config.runtime.portRangeStart, end: config.runtime.portRangeEnd },
+    portQuarantineMs: config.runtime.portQuarantineMs,
+    bindHost: config.runtime.bindHost,
     ...(config.runtime.celldEnv === undefined ? {} : { operatorEnv: config.runtime.celldEnv }),
   });
   const reconciler = createReconciler(daemon, driver, {
@@ -355,7 +444,7 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   daemon.coordinator = coordinator;
 
   /* What tells the coordinator this node is still there. Without it the node is
-     counted out after three intervals and its environments go elsewhere. */
+     counted out after three intervals and its applications go elsewhere. */
   const heartbeat = createHeartbeat(daemon);
   daemon.heartbeat = heartbeat;
 
@@ -381,7 +470,7 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
     /*
      * Written FIRST, before anything is stopped: this is what tells placement
      * the node is leaving rather than dying, and every millisecond it is late is
-     * a millisecond an environment is still assigned to a node that is going
+     * a millisecond an application is still assigned to a node that is going
      * away. A heartbeat that lands between this write and the stop below cannot
      * undo it — a beat touches its own field and nothing else.
      *
@@ -458,7 +547,7 @@ function attachIngressCounters(
   daemon.ingressCounters = counters;
   console.log(
     `scafo: counting what the ingress serves from "${path}"; requests, bytes, statuses ` +
-      `and latencies are kept per environment, in memory, since this boot`,
+      `and latencies are kept per application, in memory, since this boot`,
   );
 
   return createAccessLogTailer({
@@ -491,22 +580,4 @@ function untilSignalled(shutdown: () => Promise<void>): Promise<void> {
     process.once("SIGINT", () => stop("SIGINT"));
     process.once("SIGTERM", () => stop("SIGTERM"));
   });
-}
-
-/**
- * The declared flags that were actually given; anything else the parser adds is
- * not configuration.
- *
- * A switch reaches the loader as the text that loader accepts for one. Only a
- * flag the operator actually WROTE gets here — an unpassed boolean is undefined
- * rather than false — so a `--flag` says on, a `--no-flag` says off, and a flag
- * nobody wrote leaves the environment and the config file to answer.
- */
-function stringFlags(flags: Record<string, unknown>): Record<string, string | undefined> {
-  const given: Record<string, string | undefined> = {};
-  for (const [name, value] of Object.entries(flags)) {
-    if (typeof value === "string") given[name] = value;
-    else if (typeof value === "boolean") given[name] = value ? "true" : "false";
-  }
-  return given;
 }

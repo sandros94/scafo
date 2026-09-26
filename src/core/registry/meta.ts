@@ -6,6 +6,7 @@ import type { CasStore } from "../types/store.ts";
 import { isCasConflict } from "./_shared.ts";
 import { createJson, readJson, requireJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
+import { randomHex } from "../utils/random.ts";
 import { metaKey, probeKey } from "./paths.ts";
 
 /**
@@ -15,11 +16,11 @@ import { metaKey, probeKey } from "./paths.ts";
  * throws `ScafoError("store-nonconforming")` naming the step that failed — a
  * store that silently drops preconditions would corrupt the registry.
  *
- * THE RANGED READ IS THE LAST STEP AND IT IS NOT ABOUT THE REGISTRY. celld has
- * required `Range` of its bucket since 0.4.1 and stops a runtime whose
- * store answers the whole object instead, so a bucket that ignores the header
- * kills a process per environment at reconcile, long after the operator was
- * told the fleet was healthy. Asking here means it fails once, at `scafo sail`,
+ * THE RANGED READ IS THE LAST STEP AND IT IS NOT ABOUT THE REGISTRY. celld
+ * requires `Range` of its bucket and stops a runtime whose store answers the
+ * whole object instead, so a bucket that ignores the header kills a process per
+ * application at reconcile, long after the operator was told the fleet was
+ * healthy. Asking here means it fails once, at `scafo sail`,
  * with the store named as the thing that is wrong.
  */
 export async function probeStore(store: CasStore): Promise<void> {
@@ -150,12 +151,4 @@ function nonconforming(step: number, what: string, cause?: unknown): ScafoError 
     detail: `Conformance probe failed at step ${String(step)} (${what})`,
     cause,
   });
-}
-
-function randomHex(bytes: number): string {
-  let hex = "";
-  for (const byte of crypto.getRandomValues(new Uint8Array(bytes))) {
-    hex += byte.toString(16).padStart(2, "0");
-  }
-  return hex;
 }

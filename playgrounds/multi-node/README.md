@@ -49,14 +49,14 @@ The bucket contains separate node and operator keyspaces plus one coordinator le
 ## 4. Deploy to every node
 
 ```sh
-scafo deploy ./app --project shop --env production --replicas all
+scafo deploy ./app --replicas all
 curl -H 'Host: shop.scafo.test' http://127.0.0.1:8081/
 curl -H 'Host: shop.scafo.test' http://127.0.0.1:8082/
 curl -H 'Host: shop.scafo.test' \
   http://127.0.0.1:8081/.well-known/celld/health
 ```
 
-The deploy finishes as `deployed`; each assigned node then reconciles the environment. Both ingresses serve it, and the final request reaches Celld's health endpoint on that application host. Any Scafo node accepts the deployment request; coordinator-only registry work is forwarded to the lease holder.
+The deploy finishes as `deployed`; each assigned node then reconciles the application. Both ingresses serve it, and the final request reaches Celld's health endpoint on that application host. Any Scafo node accepts the deployment request; coordinator-only registry work is forwarded to the lease holder.
 
 ## 5. One cell owner across two machines
 
@@ -69,13 +69,15 @@ curl -H 'Host: shop.scafo.test' http://127.0.0.1:8082/count
 
 The responses form one sequence. Celld owns the durable cell on one runtime node and forwards peer traffic internally. This requires the configured `runtime.bindHost` beyond loopback and a private or WireGuard transport; Celld's peer listener is not a public surface.
 
-## 6. Place an environment on one node
+## 6. Place an application on one node
+
+`--env solo` is a naming convenience: it addresses the application `shop-solo`, which this deploy creates alongside `shop`.
 
 ```sh
-scafo deploy ./app --project shop --env solo --replicas 1
-curl -s "$SCAFO_S3_ENDPOINT/scafo/playground/_scafo/placement/shop/solo.json"
-curl -H 'Host: shop--solo.scafo.test' http://127.0.0.1:8081/
-curl -H 'Host: shop--solo.scafo.test' http://127.0.0.1:8082/
+scafo deploy ./app --env solo --replicas 1
+curl -s "$SCAFO_S3_ENDPOINT/scafo/playground/_scafo/placement/shop-solo.json"
+curl -H 'Host: shop-solo.scafo.test' http://127.0.0.1:8081/
+curl -H 'Host: shop-solo.scafo.test' http://127.0.0.1:8082/
 ```
 
 The placement record names one node, and only that node runs the process — yet both addresses answer. Every node renders the same fleet-wide routing from the registry, so each ingress reads one document naming every host and every node currently serving it; `prefer=self` only reorders the upstreams. The holder's ingress therefore serves the host from its own machine and the other forwards to the holder's advertised address, which is why `runtime.bindHost` must reach beyond loopback here. The forwarding is the ingress's; the node daemon proxies no application request. A host nobody serves is absent from the document altogether: no upstream resolves, and the error route answers 404 rather than any wildcard fallback.
@@ -84,12 +86,12 @@ Placement uses rendezvous hashing over eligible node ids. A node selector first 
 
 ## 7. Drain a node and restore it
 
-Substitute whichever node holds `solo` or the coordinator lease:
+Substitute whichever node holds `shop-solo` or the coordinator lease:
 
 ```sh
 docker compose stop node-b
 curl -H 'Host: shop.scafo.test' http://127.0.0.1:8081/
-curl -s "$SCAFO_S3_ENDPOINT/scafo/playground/_scafo/placement/shop/solo.json"
+curl -s "$SCAFO_S3_ENDPOINT/scafo/playground/_scafo/placement/shop-solo.json"
 curl -s "$SCAFO_S3_ENDPOINT/scafo/playground/_scafo/coordinator/lease.json"
 ```
 

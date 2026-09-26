@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProcessSpec, ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
-import { createChildSupervisor } from "../src/drivers/supervisor/child.ts";
+import { createChildSupervisor, STDERR_LINE_MAX } from "../src/drivers/supervisor/child.ts";
 import { rejectsWith } from "./_helpers.ts";
 
 /** Stays up until it is killed; SIGTERM is left at its default, which ends it. */
@@ -125,8 +125,9 @@ describe("stopping a process", () => {
 
       await supervisor.stop("cooperative");
 
-      /* A signal death carries no exit code, which is what `null` records. */
-      expect(supervisor.status("cooperative")).toMatchObject({ state: "exited", exitCode: null });
+      /* The caller asked for it to be gone, so there is nothing left to report. */
+      expect(supervisor.status("cooperative")).toBeNull();
+      expect(supervisor.list()).toEqual([]);
     },
   );
 
@@ -140,7 +141,7 @@ describe("stopping a process", () => {
       await supervisor.stop("stubborn", { graceMs: 200 });
 
       expect(Date.now() - startedAtMs).toBeLessThan(5000);
-      expect(supervisor.status("stubborn")).toMatchObject({ state: "exited", exitCode: null });
+      expect(supervisor.status("stubborn")).toBeNull();
     },
   );
 
@@ -214,17 +215,109 @@ describe("stopping a process", () => {
 
     await supervisor.stop("held", { graceMs: 100 });
 
-    expect(supervisor.status("held")).toMatchObject({ state: "exited" });
+    expect(supervisor.status("held")).toBeNull();
   });
 
-  it("is a no-op for an unknown id and for one that has already exited", async () => {
+  it("is a no-op for an unknown id, and forgets one that has already exited", async () => {
     await expect(supervisor.stop("never-started")).resolves.toBeUndefined();
 
     await supervisor.start(child("brief", SELF_EXIT));
-    await untilExited("brief");
+    expect(await untilExited("brief")).toMatchObject({ state: "exited", exitCode: 3 });
 
     await expect(supervisor.stop("brief")).resolves.toBeUndefined();
-    expect(supervisor.status("brief")).toMatchObject({ state: "exited", exitCode: 3 });
+    expect(supervisor.status("brief")).toBeNull();
+  });
+});
+
+describe("forgetting a process", () => {
+  it("keeps an unexpected exit until it has been read, and drops it after", async () => {
+    await supervisor.start(child("gone", SELF_EXIT));
+    const exited = await untilExited("gone");
+
+    /* The exit code is read by whoever asks next, not by the exit itself. */
+    expect(exited).toMatchObject({ state: "exited", exitCode: 3 });
+    expect(supervisor.list()).toEqual([exited]);
+
+    supervisor.forget("gone");
+
+    expect(supervisor.status("gone")).toBeNull();
+    expect(supervisor.list()).toEqual([]);
+  });
+
+  it("leaves a running process alone, and says nothing about an unknown id", async () => {
+    const started = await supervisor.start(child("busy", KEEPALIVE));
+
+    supervisor.forget("busy");
+    supervisor.forget("never-started");
+
+    expect(supervisor.status("busy")).toEqual(started);
+    expect(supervisor.list()).toEqual([started]);
+  });
+});
+
+describe("what a process said on its way out", () => {
+  /* The stderr of a supervised process is piped so it can be attributed to that
+     process, and forwarded so the daemon's own log is unchanged. */
+  it("keeps the last lines it wrote to stderr, and hands them over with the exit", async () => {
+    const exits: ProcessStatus[] = [];
+    supervisor.onExit((status) => exits.push(status));
+
+    await supervisor.start(
+      child(
+        "noisy",
+        `console.error("booting"); ` +
+          `console.error("Error: node authority was not established before wake scan"); ` +
+          `setTimeout(() => process.exit(3), 100)`,
+      ),
+    );
+    await untilExited("noisy");
+
+    expect(exits[0]?.lastError).toEqual([
+      "booting",
+      "Error: node authority was not established before wake scan",
+    ]);
+  });
+
+  it("keeps only the last few lines, whatever the process wrote", async () => {
+    await supervisor.start(
+      child("chatty", `for (let i = 0; i < 50; i++) console.error("line " + i);` + KEEPALIVE),
+    );
+
+    await expect.poll(() => supervisor.status("chatty")?.lastError?.length ?? 0).toBe(5);
+    expect(supervisor.status("chatty")?.lastError).toEqual([
+      "line 45",
+      "line 46",
+      "line 47",
+      "line 48",
+      "line 49",
+    ]);
+  });
+
+  it("strips the terminal escapes a runtime colours its own log with", async () => {
+    await supervisor.start(
+      child("coloured", String.raw`console.error("[31mred alert[0m");` + KEEPALIVE),
+    );
+
+    await expect.poll(() => supervisor.status("coloured")?.lastError?.[0]).toBe("red alert");
+  });
+
+  it("cuts a line that would not fit, rather than holding whatever was written", async () => {
+    await supervisor.start(child("shouty", `console.error("x".repeat(5000));` + KEEPALIVE));
+
+    await expect
+      .poll(() => supervisor.status("shouty")?.lastError?.[0]?.length ?? 0)
+      .toBe(STDERR_LINE_MAX + 1);
+  });
+
+  it("reports the signal that ended a process, beside the absent code", async () => {
+    const exits: ProcessStatus[] = [];
+    supervisor.onExit((status) => exits.push(status));
+
+    const started = await supervisor.start(child("signalled", KEEPALIVE));
+    globalThis.process.kill(started.pid as number, "SIGKILL");
+    await untilExited("signalled");
+
+    expect(exits[0]).toMatchObject({ exitCode: null, exitSignal: "SIGKILL" });
   });
 });
 
@@ -253,7 +346,7 @@ describe("exit notifications", () => {
       await supervisor.start(child("retired", KEEPALIVE));
       await supervisor.stop("retired");
 
-      expect(supervisor.status("retired")).toMatchObject({ state: "exited" });
+      expect(supervisor.status("retired")).toBeNull();
       expect(calls).toBe(0);
     },
   );

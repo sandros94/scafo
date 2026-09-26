@@ -3,22 +3,27 @@
 import { describe, expect, it } from "vitest";
 import {
   acquireLease,
-  createEnvironment,
-  createProject,
+  createApplication,
   executeReap,
   isLeaseExpired,
   type LeaseHandle,
   planReap,
   readJson,
   releaseLease,
-  retireEnvironment,
+  retireApplication,
   renewLease,
   verifyLease,
 } from "../src/core/registry/index.ts";
 import type { CoordinatorLease } from "../src/core/types/registry.ts";
 import { coordinatorKey } from "../src/core/registry/paths.ts";
+import { ScafoError } from "../src/core/error.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, FaultStore, rejectsWith } from "./_helpers.ts";
+import { CLOCK_START_MS, ctxWith, FaultStore, rejectsWith } from "./_helpers.ts";
+
+/** What the store driver raises once it has repeated a write that had landed. */
+function unacknowledged(): ScafoError {
+  return new ScafoError("cas-conflict", "Conditional write failed", { status: 412 });
+}
 
 const TTL_MS = 15_000;
 
@@ -95,8 +100,85 @@ describe("renewLease", () => {
     expect(Date.parse(renewed.lease.acquiredAt)).toBeGreaterThan(
       Date.parse(first.lease.acquiredAt),
     );
-    await expect(verifyLease(ctx, first)).resolves.toBe(false);
+    /* A renewal is the SAME tenancy going on: work that was handed the lease
+       before it — a deletion walking a large application — still holds it, and
+       refusing it would fail every deletion that outlasts a coordinator tick. */
+    await expect(verifyLease(ctx, first)).resolves.toBe(true);
     await expect(verifyLease(ctx, renewed)).resolves.toBe(true);
+  });
+
+  it("is no longer held once the same node has taken it again at a new fence", async () => {
+    const { ctx } = ctxWith(new MemoryCasStore());
+    const first = await held(acquireLease(ctx, "node-a", { ttlMs: TTL_MS }), "node-a");
+    const again = await held(acquireLease(ctx, "node-a", { ttlMs: TTL_MS }), "node-a");
+
+    expect(again.lease.fence).toBe(first.lease.fence + 1);
+    await expect(verifyLease(ctx, first)).resolves.toBe(false);
+    await expect(verifyLease(ctx, again)).resolves.toBe(true);
+  });
+
+  it("holds a lease whose acquisition landed before the store failed to say so", async () => {
+    const store = new FaultStore(new MemoryCasStore());
+    const { ctx } = ctxWith(store);
+    store.onAfterPut = (): void => {
+      store.onAfterPut = undefined;
+      throw unacknowledged();
+    };
+
+    const handle = await acquireLease(ctx, "node-a", { ttlMs: TTL_MS });
+
+    expect(handle?.lease).toMatchObject({ node: "node-a", fence: 1 });
+    await expect(verifyLease(ctx, handle as LeaseHandle)).resolves.toBe(true);
+  });
+
+  it("holds a lease it took over from an expired holder when that write went unanswered", async () => {
+    const store = new FaultStore(new MemoryCasStore());
+    const { ctx, tick } = ctxWith(store);
+    await held(acquireLease(ctx, "node-b", { ttlMs: TTL_MS }), "node-b");
+    tick(TTL_MS + 1);
+    store.onAfterPut = (): void => {
+      store.onAfterPut = undefined;
+      throw unacknowledged();
+    };
+
+    const handle = await acquireLease(ctx, "node-a", { ttlMs: TTL_MS });
+
+    expect(handle?.lease).toMatchObject({ node: "node-a", fence: 2 });
+    await expect(verifyLease(ctx, handle as LeaseHandle)).resolves.toBe(true);
+  });
+
+  it("keeps a lease whose renewal landed before the store failed to say so", async () => {
+    const store = new FaultStore(new MemoryCasStore());
+    const { ctx, tick } = ctxWith(store);
+
+    const first = await held(acquireLease(ctx, "node-a", { ttlMs: TTL_MS }), "node-a");
+    tick(1000);
+    /* The record is already the renewed one and the answer that said so was
+       lost, so the repeat the driver sent is refused by its own precondition.
+       Fencing the node over that would take the lease off its rightful holder. */
+    store.onAfterPut = (): void => {
+      store.onAfterPut = undefined;
+      throw unacknowledged();
+    };
+
+    const renewed = await renewLease(ctx, first);
+
+    expect(renewed.lease).toMatchObject({ node: "node-a", fence: 1 });
+    expect(Date.parse(renewed.lease.acquiredAt)).toBe(CLOCK_START_MS + 1000);
+    await expect(verifyLease(ctx, renewed)).resolves.toBe(true);
+  });
+
+  it("loses a lease its own node has since taken again at a higher fence", async () => {
+    const { ctx, tick } = ctxWith(new MemoryCasStore());
+
+    const first = await held(acquireLease(ctx, "node-a", { ttlMs: TTL_MS }), "node-a");
+    tick(TTL_MS + 1);
+    /* The same node after a restart: the holder id is unchanged, and only the
+       fence tells the two runs of it apart. */
+    await held(acquireLease(ctx, "node-a", { ttlMs: TTL_MS }), "node-a again");
+
+    const error = await rejectsWith(() => renewLease(ctx, first), "lease-lost");
+    expect(error.detail).toContain(`fence ${String(first.lease.fence)}`);
   });
 });
 
@@ -105,15 +187,14 @@ describe("a superseded holder", () => {
     const store = new FaultStore(new MemoryCasStore());
     const { ctx, tick } = ctxWith(store);
 
-    await createProject(ctx, { slug: "app" });
-    await createEnvironment(ctx, "app", { name: "preview", ephemeral: true });
-    await retireEnvironment(ctx, "app", "preview");
+    await createApplication(ctx, { name: "app-preview" });
+    await retireApplication(ctx, "app-preview");
 
     const stale = await held(acquireLease(ctx, "node-a", { ttlMs: TTL_MS }), "node-a");
     tick(86_400_001);
-    const reapOptions = { buildRetention: { maxAgeMs: 1000 } };
+    const reapOptions = { deploymentRetention: { maxAgeMs: 1000 } };
     const plan = await planReap(ctx, reapOptions);
-    expect(plan.environments).toHaveLength(1);
+    expect(plan.applications).toHaveLength(1);
 
     await held(acquireLease(ctx, "node-b", { ttlMs: TTL_MS }), "node-b");
     const deletesBefore = store.dels;

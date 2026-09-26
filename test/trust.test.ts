@@ -1,8 +1,8 @@
-/* Which CI issuers may deploy a project, and how loosely their subjects match. */
+/* Which CI issuers may deploy an application, and how loosely their subjects match. */
 
 import { describe, expect, it } from "vitest";
 import {
-  createProject,
+  createApplication,
   getTrustPolicy,
   matchTrust,
   setTrustPolicy,
@@ -11,7 +11,7 @@ import type { TrustPolicy } from "../src/core/types/registry.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, rejectsWith } from "./_helpers.ts";
 
-const PROJECT = "app";
+const APPLICATION = "shop";
 const ISS = "https://token.actions.githubusercontent.com";
 const AUD = "scafo";
 
@@ -108,21 +108,31 @@ describe("matchTrust", () => {
 describe("setTrustPolicy", () => {
   it("creates the policy, then replaces it wholesale", async () => {
     const { ctx } = ctxWith(new MemoryCasStore());
-    await createProject(ctx, { slug: PROJECT });
+    await createApplication(ctx, { name: APPLICATION });
 
-    await expect(setTrustPolicy(ctx, PROJECT, POLICY)).resolves.toEqual(POLICY);
-    await expect(getTrustPolicy(ctx, PROJECT)).resolves.toEqual(POLICY);
+    await expect(setTrustPolicy(ctx, APPLICATION, POLICY)).resolves.toEqual(POLICY);
+    await expect(getTrustPolicy(ctx, APPLICATION)).resolves.toEqual(POLICY);
 
     const replaced = withSubjects(["repo:sandros94/scafo:*"]);
-    await expect(setTrustPolicy(ctx, PROJECT, replaced)).resolves.toEqual(replaced);
-    await expect(getTrustPolicy(ctx, PROJECT)).resolves.toEqual(replaced);
+    await expect(setTrustPolicy(ctx, APPLICATION, replaced)).resolves.toEqual(replaced);
+    await expect(getTrustPolicy(ctx, APPLICATION)).resolves.toEqual(replaced);
   });
 
-  it("throws not-found for a project with no policy", async () => {
+  it("writes a policy for an application that does not exist yet", async () => {
     const { ctx } = ctxWith(new MemoryCasStore());
-    await createProject(ctx, { slug: PROJECT });
 
-    const error = await rejectsWith(() => getTrustPolicy(ctx, PROJECT), "not-found");
+    /* An admin pre-grants a name, and the first deploy under it is what creates
+       the application; a policy that insisted on one first could never be the
+       thing that authorized that deploy. */
+    await expect(setTrustPolicy(ctx, APPLICATION, POLICY)).resolves.toEqual(POLICY);
+    await expect(getTrustPolicy(ctx, APPLICATION)).resolves.toEqual(POLICY);
+  });
+
+  it("throws not-found for an application with no policy", async () => {
+    const { ctx } = ctxWith(new MemoryCasStore());
+    await createApplication(ctx, { name: APPLICATION });
+
+    const error = await rejectsWith(() => getTrustPolicy(ctx, APPLICATION), "not-found");
     expect(error.status).toBe(404);
   });
 });

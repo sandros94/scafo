@@ -29,7 +29,7 @@ import {
 import { getOperator } from "../src/core/registry/operators.ts";
 import { toBase64 } from "../src/core/utils/base64.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, rejectsWith } from "./_helpers.ts";
+import { ctxWith, rejectionOf, rejectsWith } from "./_helpers.ts";
 
 const ENDPOINT = "http://10.0.0.4:7400";
 const OTHER_ENDPOINT = "http://10.0.0.5:7400";
@@ -103,10 +103,11 @@ describe("registering a remote", () => {
   it("refuses a name that could not be a file in the home", async () => {
     const home = await scratch();
 
-    await rejectsWith(
-      () => addRemote(home, { name: "../../etc/passwd", endpoints: [ENDPOINT] }),
-      "invalid-slug",
+    const error = await rejectionOf(() =>
+      addRemote(home, { name: "../../etc/passwd", endpoints: [ENDPOINT] }),
     );
+
+    expect(error.code).toBe("invalid-slug");
   });
 
   it("refuses a remote with no endpoint, which nothing could reach", async () => {
@@ -239,7 +240,7 @@ describe("unregistering a remote", () => {
   it("reports a remote that is not registered rather than doing nothing quietly", async () => {
     const home = await scratch();
 
-    await rejectsWith(() => removeRemote(home, "ghost"), "not-found");
+    expect((await rejectionOf(() => removeRemote(home, "ghost"))).code).toBe("not-found");
   });
 });
 
@@ -312,7 +313,9 @@ describe("exporting a remote", () => {
   it("reports a remote that is not registered", async () => {
     const home = await scratch();
 
-    await rejectsWith(() => exportRemote(home, "ghost", { write: () => {} }), "not-found");
+    expect((await rejectionOf(() => exportRemote(home, "ghost", { write: () => {} }))).code).toBe(
+      "not-found",
+    );
   });
 });
 
@@ -340,23 +343,32 @@ function inline(file: PortableOperator): string {
   return INLINE_PREFIX + toBase64(new TextEncoder().encode(JSON.stringify(file)));
 }
 
-describe("the endpoints one --endpoint value may carry", () => {
-  it("splits a comma-separated value into every endpoint it names", async () => {
+describe("the endpoints --endpoint names", () => {
+  it("keeps every occurrence of the flag as one whole endpoint", async () => {
     const { flagList } = await import("../src/cli/_flags.ts");
-    expect(flagList("http://a:7400,http://b:7400")).toEqual(["http://a:7400", "http://b:7400"]);
-  });
-
-  it("trims around the commas and drops empty entries", async () => {
-    const { flagList } = await import("../src/cli/_flags.ts");
-    expect(flagList(" http://a:7400 , ,http://b:7400,")).toEqual([
+    expect(flagList(["http://a:7400", "http://b:7400"])).toEqual([
       "http://a:7400",
       "http://b:7400",
     ]);
   });
 
-  it("keeps a single plain value as the one-entry list it is", async () => {
+  it("splits nothing: a comma inside a value stays in it", async () => {
+    const { flagList } = await import("../src/cli/_flags.ts");
+    expect(flagList(["http://a:7400,http://b:7400"])).toEqual(["http://a:7400,http://b:7400"]);
+  });
+
+  it("trims each value and drops the empty ones", async () => {
+    const { flagList } = await import("../src/cli/_flags.ts");
+    expect(flagList([" http://a:7400 ", "  ", "http://b:7400"])).toEqual([
+      "http://a:7400",
+      "http://b:7400",
+    ]);
+  });
+
+  it("keeps a plain string as the one value it is", async () => {
     const { flagList } = await import("../src/cli/_flags.ts");
     expect(flagList("http://a:7400")).toEqual(["http://a:7400"]);
+    expect(flagList(undefined)).toEqual([]);
   });
 });
 
@@ -401,7 +413,7 @@ describe("the tier a bucket-side registration files a key at", () => {
     const second = await generateOperatorKey();
 
     /*
-     * The ceremony admits a key with no projects named, and an operator-tier
+     * The ceremony admits a key with no applications named, and an operator-tier
      * key that names none reaches nothing — so what it would produce here is a
      * key that authenticates and can do nothing, filed by the one path with no
      * node in it to say so. It bypasses the TIER rules on purpose, because
@@ -410,7 +422,7 @@ describe("the tier a bucket-side registration files a key at", () => {
      */
     const error = await rejectsWith(() => registerOperatorKey(clock.ctx, second), "invalid-input");
 
-    expect(error.detail).toContain("projects");
+    expect(error.detail).toContain("applications");
     await expect(getOperator(clock.ctx, second.id)).resolves.toBeNull();
   });
 

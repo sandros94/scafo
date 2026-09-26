@@ -30,8 +30,10 @@ import {
   traefikApiDenyKey,
   traefikApiKey,
   traefikKey,
+  traefikWildcardKey,
   type TraefikDynamicConfig,
   type TraefikLoadBalancerService,
+  WILDCARD_PRIORITY,
 } from "../src/drivers/ingress/traefik.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, type ManualClock } from "./_helpers.ts";
@@ -39,8 +41,10 @@ import { ctxWith, type ManualClock } from "./_helpers.ts";
 const NODE_ID = "node-a";
 const PEER = "node-b";
 const HOST = "shop.apps.test";
-const OTHER_HOST = "shop--staging.apps.test";
+const OTHER_HOST = "shop-staging.apps.test";
 const APEX = "apps.test";
+/** A host of an operator's own, claimed with the one label below it. */
+const CUSTOM = "shop.example.com";
 const TOKEN = "SdUvvcE1nlEQm4iJ4Nx6BdxUjHZ2Uzt4vPXH0cQnJKk";
 
 /** EntryPoints of an operator's own Traefik; the node is told them and nothing else. */
@@ -158,16 +162,182 @@ describe("rendering the fleet's routing", () => {
     );
   });
 
+  it("renders a covered base as one regexp router, below every exact host", () => {
+    const covered = route(`*.${CUSTOM}`, LOCAL);
+    const config = renderTraefikConfig(fleet([route(CUSTOM, LOCAL), covered]));
+    const key = traefikWildcardKey(CUSTOM);
+
+    expect(config.http?.routers[key]).toEqual({
+      /* One label and no more: `a.b.shop.example.com` matches nothing here, as
+         it matches no wildcard certificate either. Dots are escaped, or the
+         pattern would match `shopXexampleYcom` as happily. */
+      rule: "HostRegexp(`^[^.]+\\.shop\\.example\\.com$`)",
+      service: key,
+      entryPoints: [DEFAULT_ENTRY_POINT],
+      middlewares: [RETRY_MIDDLEWARE],
+      priority: WILDCARD_PRIORITY,
+    });
+    /* The health check names a host a process can answer for, never the pattern. */
+    expect(config.http?.services[key]).toEqual(
+      balancerOf([LOCAL], { path: APP_HEALTH_PATH, hostname: CUSTOM }),
+    );
+
+    /* Every exact router outranks it. Traefik's default priority is the LENGTH
+       of the rule, so each one is compared as Traefik would compare it. */
+    for (const [name, router] of Object.entries(config.http?.routers ?? {})) {
+      if (name === key) continue;
+      expect(router.priority ?? router.rule.length, `router "${name}"`).toBeGreaterThan(
+        WILDCARD_PRIORITY,
+      );
+    }
+  });
+
+  it("checks the base of a covered claim for shape, exactly as it checks a host", () => {
+    expect(() =>
+      renderTraefikConfig(fleet([route("*.evil`) || Host(`admin.test", LOCAL)])),
+    ).toThrow(expect.objectContaining({ code: "invalid-slug" }));
+  });
+
   it("renders an EMPTY DOCUMENT for a fleet that answers nothing, not empty maps", () => {
     /*
      * Pinned against Traefik 3.7.10, and the reason this is not the obvious
      * thing. `{"http":{"routers":{},"services":{}}}` is refused by Traefik's
      * decoder — "routers cannot be a standalone element" — which makes the poll a
      * failed one, and a failed poll leaves the configuration Traefik last read in
-     * place. A fleet that stopped serving an environment would go on serving it.
+     * place. A fleet that stopped serving an application would go on serving it.
      */
     expect(renderTraefikConfig(fleet([]))).toEqual({});
     expect(JSON.stringify(renderTraefikConfig(fleet([])))).toBe("{}");
+  });
+});
+
+describe("the certificates the published routers ask for", () => {
+  /** A resolver of the operator's own, defined in Traefik's static configuration. */
+  const RESOLVER = "letsencrypt";
+  /** The environment answering one label under the covered base. */
+  const ENV_HOST = `preview.${CUSTOM}`;
+
+  /** The whole fleet a covered claim renders as, and the bases it wants certificates for. */
+  const COVERED: FleetRouting = {
+    ...fleet(
+      [
+        route(HOST, LOCAL),
+        route(CUSTOM, LOCAL),
+        route(ENV_HOST, LOCAL),
+        route(`*.${CUSTOM}`, LOCAL),
+      ],
+      apiAt(LOCAL),
+    ),
+    wildcards: [APEX, CUSTOM],
+  };
+
+  it("says nothing whatever about TLS when no resolver was named", () => {
+    /* Byte for byte: an operator who configures certificates elsewhere must get
+       the document they had before this existed, not one that merely parses the
+       same. */
+    const before = renderTraefikConfig(COVERED, { entryPoints: ENTRY_POINTS });
+
+    expect(JSON.stringify(before)).toBe(
+      JSON.stringify(
+        renderTraefikConfig(
+          { v: 1, routes: COVERED.routes, api: COVERED.api },
+          {
+            entryPoints: ENTRY_POINTS,
+          },
+        ),
+      ),
+    );
+    for (const [key, router] of Object.entries(before.http?.routers ?? {})) {
+      expect(router.tls, `router "${key}"`).toBeUndefined();
+    }
+  });
+
+  it("gives every router of a covered base the one wildcard certificate", () => {
+    const config = renderTraefikConfig(COVERED, {
+      entryPoints: ENTRY_POINTS,
+      certResolver: RESOLVER,
+    });
+
+    /* One subject per router, and the SAME subject for every host under the
+       base: the base itself, its environment, the catch-all no name can be read
+       out of, and the platform host under the other base. */
+    const wildcardOf = (base: string): unknown => ({
+      certResolver: RESOLVER,
+      domains: [{ main: base, sans: [`*.${base}`] }],
+    });
+    expect(config.http?.routers[traefikKey(CUSTOM)]?.tls).toEqual(wildcardOf(CUSTOM));
+    expect(config.http?.routers[traefikKey(ENV_HOST)]?.tls).toEqual(wildcardOf(CUSTOM));
+    expect(config.http?.routers[traefikWildcardKey(CUSTOM)]?.tls).toEqual(wildcardOf(CUSTOM));
+    expect(config.http?.routers[traefikKey(HOST)]?.tls).toEqual(wildcardOf(APEX));
+  });
+
+  it("covers the fleet's API and its denial with the same certificate, never one each", () => {
+    const config = renderTraefikConfig(COVERED, {
+      entryPoints: ENTRY_POINTS,
+      certResolver: RESOLVER,
+    });
+
+    /* The denial above all: a router with no `tls` matches plain HTTP only, so
+       a denial that left it out would stand aside on the TLS entryPoint and let
+       `/v1/storage` through on the one public name it guards. */
+    const expected = {
+      certResolver: RESOLVER,
+      domains: [{ main: APEX, sans: [`*.${APEX}`] }],
+    };
+    expect(config.http?.routers[traefikApiKey(APEX)]?.tls).toEqual(expected);
+    expect(config.http?.routers[traefikApiDenyKey(APEX)]?.tls).toEqual(expected);
+  });
+
+  it("names the resolver alone for a host claimed without its subdomains", () => {
+    const plain = "blog.example.org";
+    const config = renderTraefikConfig(
+      { ...fleet([route(plain, LOCAL)]), wildcards: [APEX] },
+      { entryPoints: ENTRY_POINTS, certResolver: RESOLVER },
+    );
+
+    /* No `domains`: Traefik reads the subject off the `Host` rule, which is the
+       one name it would be issued for anyway. */
+    expect(config.http?.routers[traefikKey(plain)]?.tls).toEqual({ certResolver: RESOLVER });
+  });
+
+  it("writes one subject per router however many hosts share the base", () => {
+    const config = renderTraefikConfig(COVERED, {
+      entryPoints: ENTRY_POINTS,
+      certResolver: RESOLVER,
+    });
+
+    for (const [key, router] of Object.entries(config.http?.routers ?? {})) {
+      expect(router.tls?.certResolver, `router "${key}"`).toBe(RESOLVER);
+      expect(router.tls?.domains?.length ?? 1, `router "${key}"`).toBe(1);
+    }
+    /* And the bases named across the whole document are the ones the routing
+       asked for, each written once per router that needs it and never twice. */
+    const mains = Object.values(config.http?.routers ?? {}).flatMap((router) =>
+      (router.tls?.domains ?? []).map((domain) => domain.main),
+    );
+    expect([...new Set(mains)].sort()).toEqual([APEX, CUSTOM]);
+  });
+
+  it("leaves a wildcard router without a subject when the document names no base", () => {
+    /* A document from a node that does not state `wildcards` — an older one, or
+       one whose base is not covered. Traefik can read no name out of a regexp,
+       so this router gets no certificate; what it must never do is claim the
+       certificate of the base ABOVE it, which covers one label and not two. */
+    const config = renderTraefikConfig(fleet([route(`*.${CUSTOM}`, LOCAL)]), {
+      certResolver: RESOLVER,
+    });
+
+    expect(config.http?.routers[traefikWildcardKey(CUSTOM)]?.tls).toEqual({
+      certResolver: RESOLVER,
+    });
+  });
+
+  it("renders the same document twice, keys and all", () => {
+    const opts = { entryPoints: ENTRY_POINTS, certResolver: RESOLVER };
+
+    expect(JSON.stringify(renderTraefikConfig(COVERED, opts))).toBe(
+      JSON.stringify(renderTraefikConfig(COVERED, opts)),
+    );
   });
 });
 
@@ -403,7 +573,7 @@ describe("the token both routing routes are behind", () => {
 
 /** One host and the nodes answering on it, in the order the routing states them. */
 function route(host: string, ...upstreams: FleetUpstream[]): FleetRoute {
-  return { host, project: "shop", env: "production", upstreams };
+  return { host, application: "shop", upstreams };
 }
 
 /** Where one node answers, as the fleet advertises it. */
@@ -481,7 +651,7 @@ function context(routing: FleetRouting | undefined): DaemonContext {
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
-    version: "0.0.0-test",
+    versions: { scafo: "0.0.0-test", celld: "0.5.0" },
     reconciler: fakeReconciler(routing),
     /* Exactly as `sail` registers it: the entryPoints are the one thing about
        the document a node has to be told. */
@@ -506,6 +676,8 @@ function daemonConfig(): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
+      portRangeEnd: 42_998,
+      portQuarantineMs: 600_000,
       bindHost: "127.0.0.1",
     },
     observability: { enabled: false },
@@ -522,6 +694,7 @@ function fakeReconciler(routing: FleetRouting | undefined): Reconciler {
   return {
     runOnce: () => Promise.resolve([]),
     kick: () => {},
+    reload: (): Promise<void> => Promise.resolve(),
     start: () => {},
     shutdown: () => Promise.resolve(),
     stop: () => {},
@@ -544,6 +717,7 @@ function fakeSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: () => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

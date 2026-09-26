@@ -6,9 +6,9 @@ Two or more rented machines, no orchestrator. Each host runs one Scafo node in D
 
 With `SCAFO_TRANSPORT=wireguard` the node's API, its advertised address and the address runtime processes bind all default to its tunnel address. So the node API is private without being loopback-only: the colocated Caddy reaches it over the tunnel interface, a peer's Caddy reaches that host's application processes the same way, and nothing on the public interfaces answers on port 7400.
 
-Each host's Caddy reads its certificates through its own node's `/v1/storage` and the fleet's routing from `/v1/ingress/routes` with `prefer self`, holding one ingress token and never a bucket credential. Both Caddys therefore share one certificate store in the bucket, and either can serve any host: with apex and wildcard DNS pointing at both machines, the one a request lands on serves it locally when it can and proxies to the holder over the tunnel when it cannot.
+Each host's Caddy declares its own node once, as the fleet in its global `scafo` block, and reads its certificates through that node's `/v1/storage` and the fleet's routing from `/v1/ingress/routes` with `prefer self`, holding one ingress token and never a bucket credential. Both Caddys therefore share one certificate store in the bucket, and either can serve any host: with apex and wildcard DNS pointing at both machines, the one a request lands on serves it locally when it can and proxies to the holder over the tunnel when it cannot.
 
-The platform domain and everything under it come from one DNS-01 wildcard, which is what the `-dns` image flavour is for. Custom domains a project claims are issued per name through on-demand TLS, gated by the node's `/v1/ingress/ask` endpoint — the fleet issues only for hosts it has been told about.
+The platform domain and everything under it come from one DNS-01 wildcard, which is what the `-dns` image flavour is for. Custom domains an application claims are issued per name through on-demand TLS, gated by the `scafo` permission module — Caddy issues only for hosts the fleet's routing document names.
 
 This is the multi-host recipe. For one machine use [`../compose.yaml`](../compose.yaml), or [`scripts/install.sh`](../../scripts/install.sh) for a systemd host without Docker.
 
@@ -63,7 +63,7 @@ The tunnel addresses share one `/24`; the id is the node id placement records an
 
 Per host, `roll.sh` writes the two environment files and the Caddyfile template, installs [`roll-node.sh`](roll-node.sh) as `/usr/local/bin/scafo-roll`, and runs it. That script stops the previous roll, mints a WireGuard keypair with the host's own `wg` — the image carries neither `wg` nor key material — brings the interface up from `scafo wg init`, starts the node, waits for the image's healthcheck to report `healthy`, renders the Caddyfile and starts Caddy. Afterwards `roll.sh` runs `scafo wg peers` on every host and `wg syncconf`s the result, so the hosts rolled first pick up the ones rolled last.
 
-**A roll is destructive on the hosts it touches.** It removes the containers, `/var/lib/scafo` and `/etc/wireguard/wg0.conf`, so the node comes back with a new tunnel keypair under the same id. The registry, the applications' deployments and the certificates are in the bucket and survive it; anything else on those hosts does not.
+**A roll is destructive on the hosts it touches.** It removes the containers, the tunnel keypair in `/var/lib/scafo` and `/etc/wireguard/wg0.conf`, so the node comes back with a new tunnel keypair under the same id. The rest of `/var/lib/scafo` stays where it is, because each runtime process keeps its work directory there and that directory can hold writes a peer has already acknowledged and the bucket has not got yet; a host that loses it comes back having lost them. The registry, the applications' deployments and the certificates are in the bucket and survive a roll either way; anything else on those hosts does not.
 
 ## Verify
 
@@ -80,7 +80,7 @@ To deploy, reach a node's API through the tunnel from your own machine:
 ```sh
 ssh -L 7400:10.83.0.1:7400 ubuntu@203.0.113.10
 scafo remote add prod --endpoint http://127.0.0.1:7400 --register
-scafo deploy ./app --project hello --env production --replicas all
+scafo deploy ./app --name hello --replicas all
 curl -sS https://hello.apps.example.com/
 ```
 
@@ -94,7 +94,7 @@ Add its entry to `HOSTS` — a free tunnel address in the same `/24` — point i
 ./roll.sh vps-c
 ```
 
-Named hosts are the only ones rolled, but the peer refresh at the end runs everywhere, which is what tells the existing hosts about the new one. Placement moves environments onto it by rendezvous hashing as it joins; `--replicas all` environments start there on the next reconcile.
+Named hosts are the only ones rolled, but the peer refresh at the end runs everywhere, which is what tells the existing hosts about the new one. Placement moves applications onto it by rendezvous hashing as it joins; `--replicas all` applications start there on the next reconcile.
 
 ## Caveats
 

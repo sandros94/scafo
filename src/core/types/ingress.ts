@@ -8,67 +8,7 @@
  * ({@link IngressFormat}). Caddy reads it through the `scafo` dynamic-upstreams
  * module, Traefik through its http provider, and both present the same ingress
  * token to do it.
- *
- * {@link IngressDesired} is what ONE NODE has running, rendered per pass: the
- * input the access counters read whose host is whose from, and the node-local
- * half of what the fleet document is assembled out of.
  */
-
-/** One routable backend: a running runtime process serving an environment. */
-export interface IngressBackend {
-  project: string;
-  env: string;
-  /** Loopback port the process answers public traffic on. */
-  port: number;
-}
-
-/** One host and the current environment process that answers on it. */
-export interface IngressRoute {
-  host: string;
-  backend: IngressBackend;
-}
-
-/**
- * The fleet's own API, served at each platform domain's BARE APEX so that a CI
- * job, a CLI or a dashboard reaches any node of the installation at one
- * well-known name — the registry is in the bucket, so any node answers any call.
- *
- * AN EXPLICIT ROUTE PER APEX, which is also why the apex has no wildcard
- * certificate and mints its own.
- *
- * {@link ApiRouting.denied} IS THE SECURITY RULE OF THIS SURFACE AND THE INGRESS
- * MUST ENFORCE IT ITSELF, not by trusting the daemon behind it: a request for one
- * of these prefixes on one of these hosts must be answered by the ingress and
- * must never be proxied. Both prefixes are matched at a path SEGMENT boundary —
- * the prefix exactly, or the prefix followed by `/` and anything — which is what
- * both ingresses are pinned to.
- */
-export interface ApiRouting {
-  /** Loopback port the daemon answers on. */
-  port: number;
-  /** Bare platform-domain apexes routed to the daemon, sorted. */
-  hosts: string[];
-  /** Path prefixes that must NEVER be proxied through {@link ApiRouting.hosts}. */
-  denied: string[];
-}
-
-/** The whole of the routing an ingress should present for this node. */
-export interface IngressDesired {
-  /**
-   * Host to backend, sorted by host. Hosts are fully qualified: a host label
-   * under one of the platform domains, or a custom domain an environment claimed.
-   */
-  routes: IngressRoute[];
-  /**
-   * The platform apexes serving the fleet's API, when this node publishes it.
-   * Absent when `api.public` is off, which is the routing scafo renders when the
-   * apex answers nothing at all.
-   *
-   * These entries sit below every {@link IngressDesired.routes} host: a renderer
-   * leaves an apex out entirely when an application already answers on it.
-   */
-  api?: ApiRouting;
-}
 
 /**
  * Renders the fleet's routing in the document format one ingress polls for.
@@ -98,26 +38,47 @@ export interface FleetUpstream {
  * one node to be put first, which is how a colocated ingress stays local.
  */
 export interface FleetRoute {
+  /**
+   * A fully qualified host, or ONE WILDCARD KEY: `*.shop.example` — everything
+   * exactly one label under `shop.example` that no exact entry names.
+   *
+   * A consumer looks a request's host up exactly first and, failing that,
+   * replaces its first label with `*` and looks that up once; two labels below
+   * the base match nothing, as under a wildcard certificate. A consumer that
+   * knows nothing of the key never matches it and answers as it would for a host
+   * the fleet does not serve, which is what it was doing before the key existed.
+   */
   host: string;
-  project: string;
-  env: string;
+  application: string;
   upstreams: FleetUpstream[];
 }
 
 /**
- * The fleet's API at the platform apexes, answered by every live node's daemon.
- * {@link ApiRouting.denied} applies here unchanged: an ingress answers those
- * prefixes itself and never proxies them.
+ * The fleet's own API, served at each platform domain's BARE APEX so that a CI
+ * job, a CLI or a dashboard reaches any node of the installation at one
+ * well-known name — the registry is in the bucket, so any node answers any call.
+ *
+ * AN EXPLICIT ROUTE PER APEX, which is also why the apex has no wildcard
+ * certificate and mints its own.
+ *
+ * {@link FleetApiRouting.denied} IS THE SECURITY RULE OF THIS SURFACE AND THE
+ * INGRESS MUST ENFORCE IT ITSELF, not by trusting the daemon behind it: a
+ * request for one of these prefixes on one of these hosts must be answered by
+ * the ingress and must never be proxied. Both prefixes are matched at a path
+ * SEGMENT boundary — the prefix exactly, or the prefix followed by `/` and
+ * anything — which is what both ingresses are pinned to.
  */
 export interface FleetApiRouting {
+  /** Bare platform-domain apexes routed to the daemon, sorted. */
   hosts: string[];
   upstreams: FleetUpstream[];
+  /** Path prefixes that must NEVER be proxied through {@link FleetApiRouting.hosts}. */
   denied: string[];
 }
 
 /**
  * The routing of the whole fleet, as any ingress in front of it reads it: every
- * host any environment answers on, and every node currently answering. Rendered
+ * host any application answers on, and every node currently answering. Rendered
  * by every node from the same registry, so every node's copy says the same
  * thing, give or take a heartbeat.
  *
@@ -130,6 +91,19 @@ export interface FleetRouting {
   v: 1;
   /** Sorted by host. */
   routes: FleetRoute[];
+  /**
+   * The bases this installation wants a `*.BASE` certificate for, sorted and
+   * without repeats: every platform domain, and the base of every wildcard
+   * route this document publishes. Absent when there are none.
+   *
+   * WHAT AN INGRESS ISSUES FOR, not what it routes — the routes above already
+   * say that. One certificate per base covers the base itself and every name one
+   * label under it, which is the whole of what {@link FleetRoute.host} can name,
+   * so an ingress that reads this asks a certificate authority once per base
+   * instead of once per host. A consumer that ignores it behaves as it did
+   * before the field existed.
+   */
+  wildcards?: string[];
   /** Absent when the rendering node does not publish the API. */
   api?: FleetApiRouting;
 }

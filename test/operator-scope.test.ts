@@ -1,20 +1,19 @@
-/* Project-scoped operator authorization and disclosure. */
+/* Application-scoped operator authorization and disclosure. */
 
 import type { H3 } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
+import { recordRevision } from "../src/core/registry/_revision.ts";
 import { createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import type { DeployMeta, DeployService, DeployStatus } from "../src/daemon/deploys.ts";
 import { signNodeToken } from "../src/core/auth/index.ts";
 import {
-  createBuild,
-  createEnvironment,
-  createProject,
-  getEnvironment,
-  getProject,
+  createApplication,
+  createDeployment,
+  getApplication,
+  heartbeatNode,
   registerNode,
 } from "../src/core/registry/index.ts";
 import { getOperator, listOperators } from "../src/core/registry/operators.ts";
@@ -25,24 +24,27 @@ import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts"
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { createFileArtifactStager } from "../src/drivers/artifact/file.ts";
 import { DEPLOY_METADATA_HEADER, encodeDeployMetadata } from "../src/daemon/_intake.ts";
-import { ctxWith, type ManualClock } from "./_helpers.ts";
+import { ctxWith, type ManualClock, TEST_VERSIONS } from "./_helpers.ts";
 
 const NODE_ID = "node-a";
-const VERSION = "0.0.0-test";
 
-/** The tenant's own project, and the one next door that is none of its business. */
+/** The tenant's own application, and the one next door that is none of its business. */
 const MINE = "acme";
 const THEIRS = "globex";
-const ENVIRONMENT = "prod";
-const PREVIEW = "preview";
-const BUILD = "aaaa1111";
-const OTHER_BUILD = "bbbb2222";
+/** The three names a `shop-*` key is measured against. */
+const GLOB_MATCH = "shop-preview";
+const GLOB_BARE = "shop";
+const GLOB_NEAR = "shopping";
+const VERSION = "aaaa1111";
+const OTHER_VERSION = "bbbb2222";
 
 const ADMIN_ID = "op-admin111";
 /** An operator-tier key scoped to {@link MINE} and to nothing else. */
 const TENANT_ID = "op-tenant11";
 /** A key filed before roles or scopes existed: no `operator` block at all. */
 const LEGACY_ID = "op-legacy11";
+/** An operator-tier key whose whole scope is the prefix glob `shop-*`. */
+const GLOB_ID = "op-glob1111";
 
 type Keypair = { privateKey: JWK_OKP_Private<"EdDSA">; publicKey: JWK_OKP_Public<"EdDSA"> };
 
@@ -51,6 +53,7 @@ let node: Keypair;
 let admin: Keypair;
 let tenant: Keypair;
 let legacy: Keypair;
+let globber: Keypair;
 let deploys: StubDeploys;
 let app: H3;
 
@@ -60,6 +63,7 @@ beforeEach(async () => {
   admin = await generateJWK("EdDSA", { kid: ADMIN_ID });
   tenant = await generateJWK("EdDSA", { kid: TENANT_ID });
   legacy = await generateJWK("EdDSA", { kid: LEGACY_ID });
+  globber = await generateJWK("EdDSA", { kid: GLOB_ID });
 
   await registerNode(clock.ctx, {
     v: 1,
@@ -68,17 +72,16 @@ beforeEach(async () => {
     addresses: { internal: "10.0.0.4", apiPort: 7400 },
   });
   await fileKey(ADMIN_ID, admin, { role: "admin" });
-  await fileKey(TENANT_ID, tenant, { role: "operator", projects: [MINE] });
+  await fileKey(TENANT_ID, tenant, { role: "operator", applications: [MINE] });
   await fileKey(LEGACY_ID, legacy);
+  await fileKey(GLOB_ID, globber, { role: "operator", applications: ["shop-*"] });
 
-  for (const project of [MINE, THEIRS]) {
-    await createProject(clock.ctx, { slug: project });
-    await createEnvironment(clock.ctx, project, { name: ENVIRONMENT });
-    await createEnvironment(clock.ctx, project, { name: PREVIEW, ephemeral: true });
-    for (const id of [BUILD, OTHER_BUILD]) {
-      await createBuild(clock.ctx, project, { id });
+  for (const name of [MINE, THEIRS, GLOB_MATCH, GLOB_BARE, GLOB_NEAR]) {
+    await createApplication(clock.ctx, { name });
+    for (const version of [VERSION, OTHER_VERSION]) {
+      await createDeployment(clock.ctx, name, { version });
     }
-    await recordDeployment(clock.ctx, project, ENVIRONMENT, BUILD);
+    await recordRevision(clock.ctx, name, VERSION);
   }
 
   deploys = stubDeploys();
@@ -87,26 +90,26 @@ beforeEach(async () => {
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: idleSupervisor(),
-    version: VERSION,
+    versions: TEST_VERSIONS,
     deploys,
     artifactStager: createFileArtifactStager(),
   });
 });
 
-describe("an operator scoped to one project cannot touch another", () => {
-  it("deploys into its own project, and is refused the one next door", async () => {
+describe("an operator scoped to one application cannot touch another", () => {
+  it("deploys into its own application, and is refused the one next door", async () => {
     const mine = await upload(TENANT_ID, tenant, MINE);
     const theirs = await upload(TENANT_ID, tenant, THEIRS);
 
     expect(mine.status).toBe(202);
     expect(theirs.status).toBe(403);
     await expect(theirs.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
-    expect(deploys.started.map((meta) => meta.project)).toEqual([MINE]);
+    expect(deploys.started.map((meta) => meta.application)).toEqual([MINE]);
   });
 
-  it("refuses the project next door before reading one artifact chunk", async () => {
+  it("refuses the application next door before reading one artifact chunk", async () => {
     let reads = 0;
-    const response = await app.request(`/v1/projects/${THEIRS}/deploys`, {
+    const response = await app.request(`/v1/applications/${THEIRS}/deploys`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${await signNodeToken(tenant.privateKey, TENANT_ID)}`,
@@ -121,14 +124,14 @@ describe("an operator scoped to one project cannot touch another", () => {
     expect(deploys.started).toEqual([]);
   });
 
-  it.each(environmentCalls())("runs %s on its own project", async (_what, path, init) => {
+  it.each(applicationCalls())("runs %s on its own application", async (_what, path, init) => {
     const response = await call(pathIn(MINE, path), TENANT_ID, tenant, init);
 
     expect(response.status, await response.clone().text()).not.toBe(403);
   });
 
-  it.each(environmentCalls())(
-    "is refused %s on the project next door",
+  it.each(applicationCalls())(
+    "is refused %s on the application next door",
     async (_what, path, init) => {
       const response = await call(pathIn(THEIRS, path), TENANT_ID, tenant, init);
 
@@ -137,10 +140,28 @@ describe("an operator scoped to one project cannot touch another", () => {
     },
   );
 
-  it("changes nothing about the environment it was refused", async () => {
+  it("changes nothing about the application it was refused", async () => {
     await call(pathIn(THEIRS, "/retire"), TENANT_ID, tenant, { method: "POST" });
 
-    expect((await getEnvironment(clock.ctx, THEIRS, ENVIRONMENT)).retiredAt).toBeUndefined();
+    expect((await getApplication(clock.ctx, THEIRS)).retiredAt).toBeUndefined();
+  });
+
+  /* The node record quotes what a failing runtime wrote to its own stderr, and
+     that text belongs to the tenant whose application wrote it. */
+  it("is told its own application is failing, and never reads the neighbour's words", async () => {
+    await heartbeatNode(clock.ctx, NODE_ID, {
+      failing: {
+        [MINE]: { since: "2026-01-01T00:00:00.000Z", restarts: 4, lastError: "mine: wedged" },
+        [THEIRS]: { since: "2026-01-01T00:00:00.000Z", restarts: 9, lastError: "theirs: secret" },
+      },
+    });
+
+    const state = (await (
+      await call("/v1/state", TENANT_ID, tenant, { method: "GET" })
+    ).json()) as { node: { failing?: Record<string, unknown> } };
+
+    expect(Object.keys(state.node.failing ?? {})).toEqual([MINE]);
+    expect(JSON.stringify(state)).not.toContain("theirs: secret");
   });
 
   it("keeps a warm scoped key scoped after its record is revoked within the auth TTL", async () => {
@@ -179,7 +200,7 @@ describe("an operator scoped to one project cannot touch another", () => {
     await expect(foreign.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
   });
 
-  it("is refused the status of a deploy that belongs to another project", async () => {
+  it("is refused the status of a deploy that belongs to another application", async () => {
     const started = deploys.recordFor(THEIRS);
 
     const response = await call(`/v1/deploys/${started.id}`, TENANT_ID, tenant, { method: "GET" });
@@ -189,8 +210,59 @@ describe("an operator scoped to one project cannot touch another", () => {
   });
 });
 
+describe("an operator scoped to a PREFIX GLOB reaches what carries the prefix", () => {
+  it.each(applicationCalls())("runs %s on a name under its prefix", async (_what, path, init) => {
+    const response = await call(pathIn(GLOB_MATCH, path), GLOB_ID, globber, init);
+
+    expect(response.status, await response.clone().text()).not.toBe(403);
+  });
+
+  it.each(applicationCalls())(
+    "is refused %s on the bare prefix, which is a different application",
+    async (_what, path, init) => {
+      const response = await call(pathIn(GLOB_BARE, path), GLOB_ID, globber, init);
+
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toMatchObject({ type: "urn:scafo:auth-scope" });
+    },
+  );
+
+  it.each(applicationCalls())(
+    "is refused %s on a name that merely starts with the same letters",
+    async (_what, path, init) => {
+      const response = await call(pathIn(GLOB_NEAR, path), GLOB_ID, globber, init);
+
+      expect(response.status).toBe(403);
+    },
+  );
+
+  it("deploys into a name under its prefix, and into neither of the two beside it", async () => {
+    expect((await upload(GLOB_ID, globber, GLOB_MATCH)).status).toBe(202);
+    expect((await upload(GLOB_ID, globber, GLOB_BARE)).status).toBe(403);
+    expect((await upload(GLOB_ID, globber, GLOB_NEAR)).status).toBe(403);
+    expect(deploys.started.map((meta) => meta.application)).toEqual([GLOB_MATCH]);
+  });
+
+  it("is answered a listing of the names under its prefix alone", async () => {
+    const response = await call("/v1/applications", GLOB_ID, globber, { method: "GET" });
+    const raw = await response.text();
+
+    const body = JSON.parse(raw) as { applications: Array<{ name: string }>; scoped?: true };
+    expect(body.applications.map((entry) => entry.name)).toEqual([GLOB_MATCH]);
+    expect(body.scoped).toBe(true);
+    expect(raw).not.toContain(GLOB_NEAR);
+  });
+
+  it("is answered a state document narrowed to what its prefix reaches", async () => {
+    const response = await call("/v1/state", GLOB_ID, globber, { method: "GET" });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ scoped: true });
+  });
+});
+
 describe("what a scoped operator is told about the refusal", () => {
-  it("names the project it asked for, and says the key is scoped", async () => {
+  it("names the application it asked for, and says the key is scoped", async () => {
     const response = await call(pathIn(THEIRS, "/retire"), TENANT_ID, tenant, { method: "POST" });
     const problem = (await response.json()) as { type: string; title: string; detail?: string };
 
@@ -200,8 +272,8 @@ describe("what a scoped operator is told about the refusal", () => {
     expect(problem.detail).toContain("scoped");
   });
 
-  it("NEVER names the other projects the key may reach, because those are tenants", async () => {
-    await fileKey(TENANT_ID, tenant, { role: "operator", projects: [MINE, "initech"] });
+  it("NEVER names the other applications the key may reach, because those are tenants", async () => {
+    await fileKey(TENANT_ID, tenant, { role: "operator", applications: [MINE, "initech"] });
 
     const response = await call(pathIn(THEIRS, "/retire"), TENANT_ID, tenant, { method: "POST" });
     const body = await response.text();
@@ -247,27 +319,27 @@ describe("every JSON control route is bounded", () => {
   );
 });
 
-describe("a key that names no projects notices nothing", () => {
-  it.each(environmentCalls())(
-    "lets an ADMIN run %s on either project",
+describe("a key that names no applications notices nothing", () => {
+  it.each(applicationCalls())(
+    "lets an ADMIN run %s on either application",
     async (_what, path, init) => {
-      for (const project of [MINE, THEIRS]) {
-        const response = await call(pathIn(project, path), ADMIN_ID, admin, init);
+      for (const application of [MINE, THEIRS]) {
+        const response = await call(pathIn(application, path), ADMIN_ID, admin, init);
 
-        expect(response.status, `${project}: ${await response.clone().text()}`).not.toBe(403);
+        expect(response.status, `${application}: ${await response.clone().text()}`).not.toBe(403);
       }
     },
   );
 
-  it("lets an admin deploy into either project", async () => {
-    for (const project of [MINE, THEIRS]) {
-      expect((await upload(ADMIN_ID, admin, project)).status, project).toBe(202);
+  it("lets an admin deploy into either application", async () => {
+    for (const application of [MINE, THEIRS]) {
+      expect((await upload(ADMIN_ID, admin, application)).status, application).toBe(202);
     }
   });
 
-  it("lets a role-LESS key from before this wave reach every project", async () => {
-    for (const project of [MINE, THEIRS]) {
-      expect((await upload(LEGACY_ID, legacy, project)).status, project).toBe(202);
+  it("lets a role-LESS key from before this wave reach every application", async () => {
+    for (const application of [MINE, THEIRS]) {
+      expect((await upload(LEGACY_ID, legacy, application)).status, application).toBe(202);
     }
   });
 
@@ -279,19 +351,19 @@ describe("a key that names no projects notices nothing", () => {
 });
 
 describe("granting a scope through POST /v1/operators", () => {
-  it("records the projects an admin enrolled a key for", async () => {
+  it("records the applications an admin enrolled a key for", async () => {
     const joiner = await generateJWK("EdDSA", { kid: "op-joiner11" });
 
     const response = await enroll(ADMIN_ID, admin, {
       ...publicHalf("op-joiner11", joiner),
       role: "operator",
-      projects: [THEIRS],
+      applications: [THEIRS],
     });
 
     expect(response.status).toBe(200);
     await expect(getOperator(clock.ctx, "op-joiner11")).resolves.toMatchObject({
       role: "operator",
-      projects: [THEIRS],
+      applications: [THEIRS],
     });
   });
 
@@ -301,7 +373,7 @@ describe("granting a scope through POST /v1/operators", () => {
     const response = await enroll(ADMIN_ID, admin, {
       ...publicHalf("op-joiner11", joiner),
       role: "admin",
-      projects: [MINE],
+      applications: [MINE],
     });
 
     expect(response.status).toBe(400);
@@ -317,7 +389,7 @@ describe("granting a scope through POST /v1/operators", () => {
     const response = await enroll(TENANT_ID, tenant, {
       ...publicHalf("op-wider111", minted),
       supersedes: TENANT_ID,
-      projects: [MINE, THEIRS],
+      applications: [MINE, THEIRS],
     });
 
     expect(response.status).toBe(403);
@@ -332,16 +404,16 @@ describe("granting a scope through POST /v1/operators", () => {
 
     expect(response.status).toBe(200);
     await expect(getOperator(clock.ctx, "op-beside11")).resolves.toMatchObject({
-      projects: [MINE],
+      applications: [MINE],
     });
   });
 
-  it("a scoped operator cannot enrol a key into a project it cannot reach itself", async () => {
+  it("a scoped operator cannot enrol a key into a application it cannot reach itself", async () => {
     const minted = await generateJWK("EdDSA", { kid: "op-beside11" });
 
     const response = await enroll(TENANT_ID, tenant, {
       ...publicHalf("op-beside11", minted),
-      projects: [THEIRS],
+      applications: [THEIRS],
     });
 
     expect(response.status).toBe(403);
@@ -360,7 +432,7 @@ describe("granting a scope through POST /v1/operators", () => {
     await expect(getOperator(clock.ctx, "op-rotated1")).resolves.toMatchObject({
       role: "operator",
       supersedes: TENANT_ID,
-      projects: [MINE],
+      applications: [MINE],
     });
     const refused = await call(pathIn(THEIRS, "/retire"), "op-rotated1", minted, {
       method: "POST",
@@ -368,34 +440,34 @@ describe("granting a scope through POST /v1/operators", () => {
     expect(refused.status).toBe(403);
   });
 
-  it("lets an admin narrow a key it is enrolling to a single project", async () => {
+  it("lets an admin narrow a key it is enrolling to a single application", async () => {
     const joiner = await generateJWK("EdDSA", { kid: "op-joiner11" });
     await enroll(ADMIN_ID, admin, {
       ...publicHalf("op-joiner11", joiner),
-      projects: [MINE],
+      applications: [MINE],
     });
 
     expect((await upload("op-joiner11", joiner, MINE)).status).toBe(202);
     expect((await upload("op-joiner11", joiner, THEIRS)).status).toBe(403);
   });
 
-  it("refuses a scope naming no project at all", async () => {
+  it("refuses a scope naming no application at all", async () => {
     const joiner = await generateJWK("EdDSA", { kid: "op-joiner11" });
 
     const response = await enroll(ADMIN_ID, admin, {
       ...publicHalf("op-joiner11", joiner),
-      projects: [],
+      applications: [],
     });
 
     expect(response.status).toBe(400);
   });
 
-  it("refuses a scope naming something that is not a project slug", async () => {
+  it("refuses a scope naming something that is not a application slug", async () => {
     const joiner = await generateJWK("EdDSA", { kid: "op-joiner11" });
 
     const response = await enroll(ADMIN_ID, admin, {
       ...publicHalf("op-joiner11", joiner),
-      projects: ["Not A Slug"],
+      applications: ["Not A Slug"],
     });
 
     expect(response.status).toBe(400);
@@ -416,22 +488,22 @@ interface JsonRoute {
 }
 
 async function jsonRoute(name: "selector" | "operator" | "labels"): Promise<JsonRoute> {
-  const environment = (): Promise<string> =>
-    getEnvironment(clock.ctx, MINE, ENVIRONMENT).then((record) => JSON.stringify(record));
+  const application = (): Promise<string> =>
+    getApplication(clock.ctx, MINE).then((record) => JSON.stringify(record));
   if (name === "selector") {
     return {
       path: pathIn(MINE, "/selector"),
       accepted: { selector: { tier: "fast" } },
       rejected: { selector: { tier: "slow" } },
-      snapshot: environment,
+      snapshot: application,
     };
   }
   if (name === "labels") {
     return {
-      path: `/v1/projects/${MINE}/labels`,
+      path: `/v1/applications/${MINE}/labels`,
       accepted: { labels: { plan: "pro" } },
       rejected: { labels: { plan: "free" } },
-      snapshot: () => getProject(clock.ctx, MINE).then((record) => JSON.stringify(record)),
+      snapshot: application,
     };
   }
 
@@ -439,8 +511,8 @@ async function jsonRoute(name: "selector" | "operator" | "labels"): Promise<Json
   const second = await generateJWK("EdDSA", { kid: "op-json2222" });
   return {
     path: "/v1/operators",
-    accepted: { ...publicHalf("op-json1111", first), projects: [MINE] },
-    rejected: { ...publicHalf("op-json2222", second), projects: [MINE] },
+    accepted: { ...publicHalf("op-json1111", first), applications: [MINE] },
+    rejected: { ...publicHalf("op-json2222", second), applications: [MINE] },
     snapshot: () => listOperators(clock.ctx).then((records) => JSON.stringify(records)),
   };
 }
@@ -479,19 +551,21 @@ function stream(value: Uint8Array): ReadableStream<Uint8Array> {
   });
 }
 
-/** Every operator-authed call that names a project in its PATH. */
-function environmentCalls(): Array<[string, string, Call]> {
+/** Every operator-authed call that names an application in its PATH. */
+function applicationCalls(): Array<[string, string, Call]> {
   return [
+    ["show", "", { method: "GET" }],
     ["retire", "/retire", { method: "POST" }],
     ["unretire", "/unretire", { method: "POST" }],
     ["selector", "/selector", { method: "POST", body: { selector: { tier: "fast" } } }],
-    ["delete", "", { method: "DELETE" }],
+    ["replicas", "/replicas", { method: "POST", body: { replicas: 2 } }],
+    ["delete", "?force=1", { method: "DELETE" }],
   ];
 }
 
-/** The environment route `suffix` names, inside `project`. */
-function pathIn(project: string, suffix: string): string {
-  return `/v1/environments/${project}/${ENVIRONMENT}${suffix}`;
+/** The application route `suffix` names, for `application`. */
+function pathIn(application: string, suffix: string): string {
+  return `/v1/applications/${application}${suffix}`;
 }
 
 /** One call to the node, signed by `keys` for exactly this request. */
@@ -506,9 +580,9 @@ async function call(path: string, id: string, keys: Keypair, sent: Call): Promis
   });
 }
 
-/** An artifact upload naming `project`, as a deploy client sends one. */
-async function upload(id: string, keys: Keypair, project: string): Promise<Response> {
-  return app.request(`/v1/projects/${project}/deploys`, {
+/** An artifact upload naming `application`, as a deploy client sends one. */
+async function upload(id: string, keys: Keypair, application: string): Promise<Response> {
+  return app.request(`/v1/applications/${application}/deploys`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${await signNodeToken(keys.privateKey, id)}`,
@@ -539,7 +613,7 @@ function publicHalf(id: string, keys: Keypair): Record<string, unknown> {
 async function fileKey(
   id: string,
   keys: Keypair,
-  operator?: { role: "admin" | "operator"; projects?: string[] },
+  operator?: { role: "admin" | "operator"; applications?: string[] },
 ): Promise<void> {
   await putJson<OperatorRecord>(clock.ctx, operatorKey(id), {
     v: 1,
@@ -552,8 +626,8 @@ async function fileKey(
 interface StubDeploys extends DeployService {
   /** Every meta the route handed over, in order. */
   started: DeployMeta[];
-  /** Records a deploy for `project` without going through the route. */
-  recordFor(project: string): DeployStatus;
+  /** Records a deploy for `application` without going through the route. */
+  recordFor(application: string): DeployStatus;
 }
 
 /**
@@ -565,11 +639,13 @@ function stubDeploys(): StubDeploys {
   const byId = new Map<string, DeployStatus>();
   let next = 0;
 
-  const record = (project: string): DeployStatus => {
+  const record = (application: string): DeployStatus => {
     next += 1;
     const status: DeployStatus = {
-      id: `000000000000000${String(next)}`,
-      project,
+      /* A deploy id names the application it belongs to; a poll is authenticated
+         against that application before anything is read. */
+      id: `${application}.000000000000000${String(next)}`,
+      application,
       state: "accepted",
     };
     byId.set(status.id, status);
@@ -580,7 +656,7 @@ function stubDeploys(): StubDeploys {
     started,
     recordFor: record,
     reserve: () => ({
-      project: "stub",
+      application: "stub",
       signal: new AbortController().signal,
       cancel: () => {},
       discard: () => Promise.resolve(),
@@ -593,12 +669,13 @@ function stubDeploys(): StubDeploys {
       return Promise.resolve({
         start: (artifact) => {
           void artifact.dispose();
-          return record(meta.project);
+          return Promise.resolve(record(meta.application));
         },
       });
     },
     get: (id) => byId.get(id) ?? null,
     stop: () => Promise.resolve(),
+    usage: () => ({ activeTasks: 0, queuedTasks: 0, stagedBytes: 0, applications: {} }),
   };
 }
 
@@ -616,6 +693,8 @@ function daemonConfig(): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
+      portRangeEnd: 42_998,
+      portQuarantineMs: 600_000,
       bindHost: "127.0.0.1",
     },
     observability: { enabled: false },
@@ -645,6 +724,7 @@ function idleSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: (): ProcessStatus[] => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

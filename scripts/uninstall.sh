@@ -74,8 +74,9 @@ scafo — undo scripts/install.sh on this host.
 
   --purge           also remove the state directory (/var/lib/scafo — the node
                     identity and the ingress token, which nothing can reissue),
-                    the ingress's own state directory (/var/lib/caddy — scratch,
-                    unless an older install kept certificates there), what it
+                    the ingress's own state directory (/var/lib/caddy — its ACME
+                    account, and certificates if an older install kept them
+                    there), what it
                     logged (/var/log/scafo-ingress) and the system users this
                     install created.
   --dry-run, -n     print every removal without performing any of them.
@@ -415,12 +416,12 @@ binary_note() {
   esac
 }
 
-# scafo-caddy keeps its certificates in the bucket, so this directory is scratch.
+# scafo-caddy keeps its certificates in the bucket and only its ACME account here.
 # Any other Caddy — an old install, or one this script cannot identify — keeps
 # them right here, which is worth saying before `--purge` removes them.
 caddy_state_note() {
   case "$MANIFEST_CADDY_FLAVOR" in
-    scafo) printf 'scafo-caddy kept its certificates in the bucket, not here\n' ;;
+    scafo) printf 'its ACME account; scafo-caddy kept its certificates in the bucket\n' ;;
     *) printf 'certificates and the ACME account\n' ;;
   esac
 }
@@ -516,17 +517,18 @@ report() {
   fi
 
   printf '\nTHE BUCKET WAS NOT TOUCHED\n\n'
-  printf '  This node'\''s record, its builds and every environment it served are\n'
+  printf '  This node'\''s record, its builds and every application it served are\n'
   printf '  where they were. That is not an omission: the registry is the FLEET'\''s,\n'
   printf '  deletion in it is gated on the coordinator lease this script does not\n'
-  printf '  hold, and another node may be serving those environments right now.\n'
+  printf '  hold, and another node may be serving those applications right now.\n'
   printf '  THIS NODE DROPS OFF THE FLEET ON ITS OWN — stopping the daemon marked it\n'
   printf '  draining, so placement counted it out on the coordinator'\''s next pass,\n'
   printf '  and a node that never got to say so is counted out once its liveness\n'
-  printf '  window runs out. Retiring what it served is "scafo env", from anywhere.\n'
+  printf '  window runs out. Retiring what it served is "scafo app retire", from\n'
+  printf '  anywhere.\n'
   if [ "$MANIFEST_CADDY_FLAVOR" = 'scafo' ]; then
     printf '  THE TLS MATERIAL IS IN THERE TOO. This host ran scafo-caddy, so the\n'
-    printf '  certificates, their keys and the ACME account were in the bucket rather\n'
+    printf '  certificates and their keys were in the bucket rather\n'
     printf '  than on this disk — and every other node in the fleet is serving them\n'
     printf '  right now. Nothing here removes them, and nothing should: this host\n'
     printf '  leaving is not the certificate expiring.\n'

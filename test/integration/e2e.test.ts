@@ -6,9 +6,16 @@
  * `scafo` dynamic-upstreams module, and Caddy asks the node where each host lives
  * every second. So an assertion after a deploy is a poll, not a one-shot — the
  * routing document has to be fetched before the new host resolves.
+ *
+ * TWO APPLICATIONS OUT OF ONE DIRECTORY. The fixture's config names `app`, and
+ * that name is what the CLI deploys into when no `--name` is given. `--env ci`
+ * on the same directory addresses `app-ci` instead, so the suite runs two
+ * applications whose names share a prefix side by side — which is what makes the
+ * deletion at the end worth making: `app-ci` has to leave without taking one
+ * byte of `app` with it.
  */
 
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
@@ -18,8 +25,12 @@ import type { DaemonState } from "../../src/daemon/app.ts";
 import type { OperatorKeyFile } from "../../src/cli/_operator-key.ts";
 import { signNodeToken } from "../../src/core/auth/node-token.ts";
 import {
-  getEnvironment,
-  listBuilds,
+  applicationKey,
+  deployPrefix,
+  fleetPrefix,
+  getApplication,
+  listDeployments,
+  placementKey,
   readJson,
   readMeta,
   type RegistryContext,
@@ -27,16 +38,17 @@ import {
   operatorKey as operatorRecordKey,
   trustKey,
 } from "../../src/core/registry/index.ts";
+import type { FleetRouting } from "../../src/core/types/ingress.ts";
 import type { NodeRecord, OperatorRecord, TrustPolicy } from "../../src/core/types/registry.ts";
 import {
   NODE_IMAGE,
+  ADOPTION_BOUND_MS,
   BOOT_DEADLINE_MS,
   BRIDGE_NETWORK,
   type BucketSettings,
-  buildIdOf,
-  buildRepo,
   type CommandResult,
   DEADLINE_MS,
+  deploymentOf,
   FIXTURES,
   type HttpAnswer,
   httpGet,
@@ -93,17 +105,34 @@ const BUCKET_SETTINGS: BucketSettings = {
 
 const PLATFORM_DOMAIN = "scafo.test";
 const OPERATOR_HOST = "operator.test";
-const PROJECT = "app";
-const ENVIRONMENT = "production";
+/** A host of the operator's own, outside every platform domain this node serves. */
+const CUSTOM_HOST = "shop.custom.test";
+/**
+ * The application the fixture's `wrangler.jsonc` names, and therefore the one a
+ * deploy of that directory addresses when it passes no `--name` at all.
+ */
+const APPLICATION = "app";
+/** The Celld script name the fixture's `wrangler.jsonc` carries, and the first
+    segment of every deployment Celld publishes for it. */
+const SCRIPT_NAME = "app";
 const NODE_ID = "node-e2e";
 
-/** Environment the CI-shaped deploy creates; it exists nowhere until then. */
-const CI_ENVIRONMENT = "ci";
-/** The subject pattern the project's policy trusts, as an operator would write it. */
-const WORKLOAD_GLOB = "repo:acme/shop:ref:refs/heads/*";
+/** `--env` of the workload-deployed application; it exists nowhere until then. */
+const CI_ENV = "ci";
+/** The application that `--env` addresses: the fixture's own name, suffixed. */
+const CI_APPLICATION = `${APPLICATION}-${CI_ENV}`;
+/** `--env` of the `--var` deploy, so nothing else is disturbed by it. */
+const VARS_ENV = "vars";
+/** `--env` of the already-bundled artifact, published with no flag. */
+const PREBUNDLED_ENV = "prebundled";
+
+/** The subject pattern `app-ci` trusts, as an operator would write it. */
+const CI_SUBJECT_GLOB = "repo:acme/shop:ref:refs/heads/*";
 /** A workload the glob above admits. */
-const WORKLOAD_SUBJECT = "repo:acme/shop:ref:refs/heads/main";
-/** A workload of a repository nothing in the policy names. */
+const CI_SUBJECT = "repo:acme/shop:ref:refs/heads/main";
+/** The subject pattern `app` trusts, which is a different repository entirely. */
+const APP_SUBJECT_GLOB = "repo:acme/storefront:ref:refs/heads/*";
+/** A workload of a repository nothing in either policy names. */
 const HOSTILE_SUBJECT = "repo:evil/other:ref:refs/heads/main";
 
 let store: StartedStore;
@@ -122,9 +151,9 @@ let apiPort: number;
 let registry: RegistryContext;
 let keyPath: string;
 let operatorKey: OperatorKeyFile;
-let buildV1: string;
-let buildV2: string;
-let buildCi: string;
+let versionV1: string;
+let versionV2: string;
+let versionCi: string;
 
 const tmpDirs: string[] = [];
 /** Daemon output retained for failure context. */
@@ -134,8 +163,6 @@ const observed: Record<string, unknown> = {};
 
 describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   beforeAll(async () => {
-    await buildRepo();
-
     store = await startStore(BUCKET_SETTINGS);
     storeFromHost = store.fromHost;
     storeFromContainers = store.fromContainers;
@@ -158,7 +185,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
 
     daemon = await new GenericContainer(NODE_IMAGE)
       .withNetworkMode(`container:${caddy.getId()}`)
-      .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "rw" }])
+      .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "ro" }])
       .withWorkingDir("/work")
       .withEnvironment({
         SCAFO_S3_ENDPOINT: storeFromContainers,
@@ -256,42 +283,49 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   );
 
   it(
-    "deploys the first build and reports it deployed",
+    "deploys the first version into the application the config names, with no --name at all",
     async () => {
+      const args = [...deployArgs(await stageApp("v1")), "--key", keyPath];
+      /* The directory's own `name` is what this deploy addresses: nothing on the
+         command line says which application it is, and the one it creates is the
+         one the config carries. */
+      expect(args).not.toContain("--name");
+      expect(args).not.toContain("--env");
+
       const started = Date.now();
-      const result = await runCli(deployArgs(await stageApp("v1")), {});
+      const result = await runCli(args, {});
       observed.deployV1Ms = Date.now() - started;
       observed.deployV1Output = result.output;
 
       expectCleanExit(result);
       expect(result.output, daemonLogTail()).toContain("deployed");
 
-      buildV1 = buildIdOf(result.output);
-      expect(await listBuilds(registry, PROJECT)).toContain(buildV1);
-      observed.buildV1 = buildV1;
+      versionV1 = deploymentOf(result.output);
+      expect(await listDeployments(registry, APPLICATION)).toContain(versionV1);
+      expect(await readJson(registry, applicationKey(APPLICATION))).not.toBeNull();
+      observed.versionV1 = versionV1;
     },
     STEP_TIMEOUT_MS,
   );
 
   it(
-    "serves the first build through Caddy on the environment host and apex",
+    "serves the first deployment through Caddy on the application's own host",
     async () => {
-      for (const host of [envHost(), apexHost()]) {
-        const answer = await untilServes(host, "v1");
-        expect(JSON.parse(answer.body).url, `the url ${host} saw`).toContain(host);
-      }
+      const answer = await untilServes(appHost(), "v1");
+      expect(JSON.parse(answer.body).url, `the url ${appHost()} saw`).toContain(appHost());
+
       const runtimeHealth = await until(
-        `${envHost()} to answer celld health`,
+        `${appHost()} to answer celld health`,
         DEADLINE_MS,
         async () => {
-          const answer = await httpGet(caddyHttpPort, "/.well-known/celld/health", {
-            host: envHost(),
+          const probed = await httpGet(caddyHttpPort, "/.well-known/celld/health", {
+            host: appHost(),
           });
-          return answer.status === 200 && answer.body === '{"ok":true}' ? answer : null;
+          return probed.status === 200 && probed.body === '{"ok":true}' ? probed : null;
         },
       );
       expect(JSON.parse(runtimeHealth.body)).toEqual({ ok: true });
-      observed.v1Hosts = [envHost(), apexHost()];
+      observed.v1Host = appHost();
       observed.celldHealth = runtimeHealth.status;
     },
     STEP_TIMEOUT_MS,
@@ -335,12 +369,9 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expect(missing.body).not.toContain("urn:scafo:not-found");
       expect(missing.body).not.toBe(NO_ROUTE);
 
-      const app = await httpGet(caddyHttpPort, "/", { host: apexHost() });
-      expect(app.status).toBe(200);
-      expect(app.body).toContain(`"v1"`);
-
-      const ask = await httpGet(apiPort, `/v1/ingress/ask?domain=${PLATFORM_DOMAIN}`, {});
-      expect(ask.status).toBe(200);
+      const served = await httpGet(caddyHttpPort, "/", { host: appHost() });
+      expect(served.status).toBe(200);
+      expect(served.body).toContain(`"v1"`);
     },
     STEP_TIMEOUT_MS,
   );
@@ -397,34 +428,118 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   );
 
   it(
-    "tells an ingress it serves a platform host and refuses one nothing claimed",
+    "names a platform host it serves in the routing document, and nothing claimed by nobody",
     async () => {
-      const served = await httpGet(apiPort, `/v1/ingress/ask?domain=${envHost()}`, {});
-      expect(served.status).toBe(200);
+      const routing = await fleetRouting();
+      const hosts = routing.routes.map((route) => route.host);
 
-      const unknown = await httpGet(apiPort, "/v1/ingress/ask?domain=unclaimed.example.com", {});
-      expect(unknown.status).toBe(404);
-      observed.ask = { served: served.status, unknown: unknown.status };
+      /* The document is what an ingress approves certificates from: a host it
+         names exactly may get one, and a host it does not name may not. */
+      expect(hosts).toContain(appHost());
+      expect(hosts).not.toContain("unclaimed.example.com");
+      expect(routing.api?.hosts).toContain(PLATFORM_DOMAIN);
+      expect(routing.wildcards).toContain(PLATFORM_DOMAIN);
+      observed.routedHosts = hosts;
     },
     STEP_TIMEOUT_MS,
   );
 
   it(
-    "deploys a second build for the existing environment",
+    "serves the application on a custom domain an operator claims, and stops when it is released",
+    async () => {
+      const nodeFlags = ["--node", `http://127.0.0.1:${String(apiPort)}`, "--key", keyPath];
+
+      /* Nothing answers there before the claim: the host is nobody's. */
+      const before = await httpGet(caddyHttpPort, "/", { host: CUSTOM_HOST });
+      expect(before.status).toBe(404);
+      expect(before.body).toBe(NO_ROUTE);
+
+      const added = await runCli(
+        ["app", "domain", "add", CUSTOM_HOST, "--name", APPLICATION, ...nodeFlags],
+        {},
+      );
+      observed.domainAddOutput = added.output;
+      expectCleanExit(added);
+      expect(added.output).toContain(CUSTOM_HOST);
+      /* The DNS helper really ran, and said one of the two things it can say.
+         WHICH one is the resolver's business rather than scafo's — a machine
+         whose resolver answers for `.test` reads the first — and either way the
+         claim stands and the command succeeded. */
+      expect(added.output).toMatch(
+        new RegExp(`already resolves to this installation|CNAME to "${appHost()}"`),
+      );
+
+      /* Caddy pulls, so this is a poll: the routing document has to carry the
+         new host before the ingress can answer for it. */
+      const answer = await untilServes(CUSTOM_HOST, "v1");
+      expect(JSON.parse(answer.body).url, `the url ${CUSTOM_HOST} saw`).toContain(CUSTOM_HOST);
+
+      /* And the routing document names it exactly, which is what makes
+         on-demand TLS issue for a name an operator has just pointed here. */
+      expect((await fleetRouting()).routes.map((route) => route.host)).toContain(CUSTOM_HOST);
+
+      const listed = await runCli(
+        ["app", "domain", "list", "--name", APPLICATION, "--json", ...nodeFlags],
+        {},
+      );
+      expectCleanExit(listed);
+      expect(JSON.parse(listed.output)).toEqual({
+        application: APPLICATION,
+        domains: [CUSTOM_HOST],
+        wildcardDomains: [],
+      });
+
+      const removed = await runCli(
+        ["app", "domain", "remove", CUSTOM_HOST, "--name", APPLICATION, ...nodeFlags],
+        {},
+      );
+      observed.domainRemoveOutput = removed.output;
+      expectCleanExit(removed);
+
+      const gone = await until(`${CUSTOM_HOST} to stop being served`, DEADLINE_MS, async () => {
+        const got = await httpGet(caddyHttpPort, "/", { host: CUSTOM_HOST });
+        return got.status === 404 ? got : null;
+      });
+      expect(gone.body).toBe(NO_ROUTE);
+      expect((await fleetRouting()).routes.map((route) => route.host)).not.toContain(CUSTOM_HOST);
+
+      /* The application keeps the host it was always served at. */
+      const kept = await untilServes(appHost(), "v1");
+      expect(JSON.parse(kept.body).version).toBe("v1");
+      observed.customDomain = { host: CUSTOM_HOST, servedThenReleased: true };
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "deploys a second version for the existing application",
     async () => {
       const started = Date.now();
-      const result = await runCli(deployArgs(await stageApp("v2")), {});
+      const result = await runCli([...deployArgs(await stageApp("v2")), "--key", keyPath], {});
       observed.deployV2Ms = Date.now() - started;
       observed.deployV2Output = result.output;
 
       expectCleanExit(result);
       expect(result.output, daemonLogTail()).toContain("deployed");
-      buildV2 = buildIdOf(result.output);
-      expect(buildV2).not.toBe(buildV1);
-      observed.buildV2 = buildV2;
+      versionV2 = deploymentOf(result.output);
+      expect(versionV2).not.toBe(versionV1);
+      observed.versionV2 = versionV2;
 
-      await untilServes(envHost(), "v2");
-      await untilServes(apexHost(), "v2");
+      /*
+       * FROM `deployed` TO SERVED, measured. The accepting node asks its local
+       * runtime process to adopt the fleet's pointer the moment the revision is
+       * recorded, instead of leaving it to the runtime's own thirty-second poll —
+       * so the application answers with the new version in seconds. The bound is
+       * well under that poll, and loose enough to hold on a loaded machine.
+       */
+      const deployedAt = Date.now();
+      await untilServes(appHost(), "v2");
+      const adoptedMs = Date.now() - deployedAt;
+      observed.adoptedMs = adoptedMs;
+      console.log(`e2e: ${APPLICATION} served v2 ${String(adoptedMs)}ms after it was deployed`);
+      expect(adoptedMs, `${String(adoptedMs)}ms from "deployed" to serving v2`).toBeLessThan(
+        ADOPTION_BOUND_MS,
+      );
 
       const operator = await httpGet(caddyHttpPort, "/", { host: OPERATOR_HOST });
       expect(operator.body, "the operator's own route outlives a deploy").toBe("operator");
@@ -433,7 +548,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   );
 
   it(
-    "settles on exactly one environment-owned runtime process",
+    "settles on exactly one application-owned runtime process",
     async () => {
       const state = await until(
         "the node to report a single running process",
@@ -451,7 +566,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       );
 
       const running = state.processes.filter((process) => process.state === "running");
-      expect(running[0].id).toBe(`${PROJECT}--${ENVIRONMENT}`);
+      expect(running[0].id).toBe(APPLICATION);
       expect(state.node?.id).toBe(NODE_ID);
       expect(state.reconcile?.failures ?? []).toEqual([]);
       observed.finalProcesses = state.processes;
@@ -461,47 +576,67 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   );
 
   it(
-    "records the trust policy that lets a CI job deploy without a key of ours",
+    "records one trust policy per application, each naming its own repository",
     async () => {
-      const result = await runCli(
-        [
-          "trust",
-          "set",
-          "--project",
-          PROJECT,
-          "--issuer",
-          issuer.iss,
-          "--audience",
-          "scafo",
-          "--subject",
-          WORKLOAD_GLOB,
-        ],
-        storeEnv(),
-      );
-      expectCleanExit(result);
+      /* Two policies, under two names that share a prefix, admitting different
+         repositories. Trust is stated for exactly one application: `app-ci` and
+         `app` are as unrelated here as any two names in the installation. */
+      for (const [flags, subject] of [
+        [["--name", APPLICATION, "--env", CI_ENV], CI_SUBJECT_GLOB],
+        [["--name", APPLICATION], APP_SUBJECT_GLOB],
+      ] as Array<[string[], string]>) {
+        const result = await runCli(
+          [
+            "trust",
+            "set",
+            ...flags,
+            "--issuer",
+            issuer.iss,
+            "--audience",
+            "scafo",
+            "--subject",
+            subject,
+          ],
+          storeEnv(),
+        );
+        expectCleanExit(result);
+      }
 
-      const policy = await readJson<TrustPolicy>(registry, trustKey(PROJECT));
-      expect(policy?.value.issuers).toEqual([
-        { iss: issuer.iss, aud: "scafo", subjects: [WORKLOAD_GLOB] },
+      const ciPolicy = await readJson<TrustPolicy>(registry, trustKey(CI_APPLICATION));
+      expect(ciPolicy?.value.issuers).toEqual([
+        { iss: issuer.iss, aud: "scafo", subjects: [CI_SUBJECT_GLOB] },
+      ]);
+      const appPolicy = await readJson<TrustPolicy>(registry, trustKey(APPLICATION));
+      expect(appPolicy?.value.issuers).toEqual([
+        { iss: issuer.iss, aud: "scafo", subjects: [APP_SUBJECT_GLOB] },
       ]);
 
-      const shown = await runCli(["trust", "show", "--project", PROJECT], storeEnv());
+      const shown = await runCli(
+        ["trust", "show", "--name", APPLICATION, "--env", CI_ENV],
+        storeEnv(),
+      );
       expectCleanExit(shown);
-      expect(shown.output).toContain(WORKLOAD_GLOB);
+      expect(shown.output).toContain(CI_SUBJECT_GLOB);
       expect(shown.output).toContain(issuer.iss);
-      observed.trustPolicy = policy?.value;
+      observed.trustPolicies = {
+        [CI_APPLICATION]: ciPolicy?.value,
+        [APPLICATION]: appPolicy?.value,
+      };
       observed.trustShowOutput = shown.output;
     },
     STEP_TIMEOUT_MS,
   );
 
   it(
-    "deploys a new environment with nothing but a workload token, and serves it",
+    "deploys a second application out of the same directory with nothing but a workload token",
     async () => {
-      const token = await issuer.mint({ sub: WORKLOAD_SUBJECT });
-      const args = [...deployArgs(await stageApp("v3"), CI_ENVIRONMENT), "--token", token];
+      const token = await issuer.mint({ sub: CI_SUBJECT });
+      const args = [...deployArgs(await stageApp("v3"), CI_ENV), "--token", token];
 
+      /* No operator key and no bucket credentials: everything this deploy is
+         allowed to do it is allowed on the strength of the token alone. */
       expect(args).not.toContain("--key");
+      expect(args).not.toContain("--name");
       const ciEnv: Record<string, string> = {};
       expect(Object.keys(ciEnv).filter((name) => name.startsWith("SCAFO_"))).toEqual([]);
 
@@ -513,18 +648,45 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expectCleanExit(result);
       expect(result.output, daemonLogTail()).toContain("deployed");
 
-      buildCi = buildIdOf(result.output);
-      expect(await listBuilds(registry, PROJECT)).toContain(buildCi);
-      observed.workloadBuild = buildCi;
-      observed.workloadSubject = WORKLOAD_SUBJECT;
+      versionCi = deploymentOf(result.output);
+      expect(await listDeployments(registry, CI_APPLICATION)).toContain(versionCi);
+      observed.workloadDeployment = versionCi;
+      observed.workloadSubject = CI_SUBJECT;
 
-      const answer = await untilServes(ciHost(), "v3");
-      expect(JSON.parse(answer.body).url).toContain(ciHost());
+      const ci = await getApplication(registry, CI_APPLICATION);
+      expect(ci.deployment).toMatchObject({ revision: 1 });
+    },
+    STEP_TIMEOUT_MS,
+  );
 
-      const environment = await getEnvironment(registry, PROJECT, CI_ENVIRONMENT);
-      expect(environment.deployment).toMatchObject({ revision: 1 });
+  it(
+    "serves both applications side by side, each on its own host and its own version",
+    async () => {
+      const ci = await untilServes(ciHost(), "v3");
+      expect(JSON.parse(ci.body).url).toContain(ciHost());
 
-      await untilServes(apexHost(), "v2");
+      const settled = await untilServes(appHost(), "v2");
+      expect(JSON.parse(settled.body).url).toContain(appHost());
+
+      expect(ciHost()).not.toBe(appHost());
+      expect(JSON.parse(ci.body).version).toBe("v3");
+      expect(JSON.parse(settled.body).version).toBe("v2");
+
+      const both = await httpGet(apiPort, "/v1/state", {
+        authorization: `Bearer ${await operatorToken()}`,
+      });
+      expect(both.status).toBe(200);
+      const running = (JSON.parse(both.body) as DaemonState).processes
+        .filter((process) => process.state === "running")
+        .map((process) => process.id)
+        .sort();
+      expect(running).toEqual([APPLICATION, CI_APPLICATION]);
+
+      observed.sideBySide = {
+        [appHost()]: JSON.parse(settled.body).version,
+        [ciHost()]: JSON.parse(ci.body).version,
+        running,
+      };
     },
     STEP_TIMEOUT_MS,
   );
@@ -534,7 +696,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
     async () => {
       const token = await issuer.mint({ sub: HOSTILE_SUBJECT });
       const result = await runCli(
-        [...deployArgs(await stageApp("v4"), CI_ENVIRONMENT), "--token", token],
+        [...deployArgs(await stageApp("v4"), CI_ENV), "--token", token],
         {},
       );
 
@@ -545,44 +707,453 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expect(result.output).toContain("urn:scafo:trust-mismatch");
       expect(result.output).toContain(HOSTILE_SUBJECT);
 
-      const environment = await getEnvironment(registry, PROJECT, CI_ENVIRONMENT);
-      expect(environment.deployment).toMatchObject({ revision: 1 });
+      const ci = await getApplication(registry, CI_APPLICATION);
+      expect(ci.deployment).toMatchObject({ revision: 1 });
       await untilServes(ciHost(), "v3");
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "admits the refused subject with the command the refusal ends on, keeping what was trusted",
+    async () => {
+      /* A third application, so that nothing else in the suite sees its deploys.
+         It trusts one repository; a token from another earns the refusal, and
+         the refusal's last words are run exactly as printed. */
+      const hintEnv = "hint";
+      const hinted = `${APPLICATION}-${hintEnv}`;
+      const granted = await runCli(
+        [
+          "trust",
+          "set",
+          "--name",
+          APPLICATION,
+          "--env",
+          hintEnv,
+          "--issuer",
+          issuer.iss,
+          "--subject",
+          CI_SUBJECT_GLOB,
+        ],
+        storeEnv(),
+      );
+      expectCleanExit(granted);
+
+      const token = await issuer.mint({ sub: HOSTILE_SUBJECT });
+      const refused = await runCli(
+        [...deployArgs(await stageApp("v7"), hintEnv), "--token", token],
+        {},
+      );
+      expect(refused.code, refused.output).not.toBe(0);
+      expect(refused.output).toContain("urn:scafo:trust-mismatch");
+      /* Nothing of what the application does trust is told to whoever was refused. */
+      expect(refused.output).not.toContain(CI_SUBJECT_GLOB);
+
+      const printed = /"(scafo trust add [^"]+)"/.exec(refused.output)?.[1];
+      expect(printed, refused.output).toBe(
+        `scafo trust add --name ${hinted} --issuer ${issuer.iss} --subject ${HOSTILE_SUBJECT}`,
+      );
+      observed.trustHint = printed;
+
+      const admitted = await runCli((printed ?? "").split(" ").slice(1), storeEnv());
+      expectCleanExit(admitted);
+      const policy = await readJson<TrustPolicy>(registry, trustKey(hinted));
+      expect(policy?.value.issuers).toEqual([
+        { iss: issuer.iss, aud: "scafo", subjects: [CI_SUBJECT_GLOB, HOSTILE_SUBJECT] },
+      ]);
+
+      const accepted = await runCli(
+        [
+          ...deployArgs(await stageApp("v7"), hintEnv),
+          "--token",
+          await issuer.mint({ sub: HOSTILE_SUBJECT }),
+        ],
+        {},
+      );
+      expectCleanExit(accepted);
+      await untilServes(`${hinted}.${PLATFORM_DOMAIN}`, "v7");
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "refuses a token one application trusts when it is presented for another",
+    async () => {
+      /* The same token that just deployed `app-ci`, offered to `app`. Trust is
+         stated per application and nothing about a shared prefix carries it
+         across: `app` names another repository, so this is a denial rather than
+         a token failure, and the refusal names the application it was for. */
+      const token = await issuer.mint({ sub: CI_SUBJECT });
+      const result = await runCli([...deployArgs(await stageApp("v5")), "--token", token], {});
+
+      observed.crossApplicationOutput = result.output;
+      expect(result.code, result.output).not.toBe(0);
+      expect(result.output).toContain("urn:scafo:trust-mismatch");
+      expect(result.output).toContain(CI_SUBJECT);
+      expect(result.output).toContain(`"${APPLICATION}"`);
+
+      const application = await getApplication(registry, APPLICATION);
+      expect(application.deployment).toMatchObject({ revision: 2 });
+      await untilServes(appHost(), "v2");
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "leaves one application exactly as it was when the other takes a deploy",
+    async () => {
+      const before = await getApplication(registry, APPLICATION);
+      const token = await issuer.mint({ sub: CI_SUBJECT });
+      const result = await runCli(
+        [...deployArgs(await stageApp("v6"), CI_ENV), "--token", token],
+        {},
+      );
+      expectCleanExit(result);
+      expect(result.output, daemonLogTail()).toContain("deployed");
+
+      await untilServes(ciHost(), "v6");
+      const untouched = await untilServes(appHost(), "v2");
+      expect(JSON.parse(untouched.body).version).toBe("v2");
+
+      const after = await getApplication(registry, APPLICATION);
+      expect(after.deployment).toEqual(before.deployment);
+      expect(await listDeployments(registry, APPLICATION)).toEqual(
+        await listDeployments(registry, APPLICATION),
+      );
+      expect(await listDeployments(registry, CI_APPLICATION)).toHaveLength(2);
+
+      observed.independentDeploy = {
+        redeployed: CI_APPLICATION,
+        untouched: APPLICATION,
+        deployment: after.deployment,
+      };
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "lets --var override the config's own variable and leaves the others as written",
+    async () => {
+      const result = await runCli(
+        [
+          ...deployArgs(await stageApp("v7"), VARS_ENV),
+          "--key",
+          keyPath,
+          "--var",
+          "GREETING:from-flag",
+        ],
+        {},
+      );
+      observed.varDeployOutput = result.output;
+
+      expectCleanExit(result);
+      expect(result.output, daemonLogTail()).toContain("deployed");
+
+      const host = `${APPLICATION}-${VARS_ENV}.${PLATFORM_DOMAIN}`;
+      const answer = await untilServes(host, "v7");
+      const body = JSON.parse(answer.body) as Record<string, unknown>;
+
+      /* The running application is the proof: the flag's value reached it, and
+         the variable the flag never named arrived exactly as the config has it. */
+      expect(body.greeting).toBe("from-flag");
+      expect(body.kept).toBe("kept");
+      observed.varDeployBody = body;
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "publishes an already-bundled artifact on its own config, with no flag at all",
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), "scafo-e2e-prebundled-"));
+      tmpDirs.push(dir);
+      await cp(join(FIXTURES, "prebundled"), dir, { recursive: true });
+
+      const args = [...deployArgs(dir, PREBUNDLED_ENV), "--key", keyPath];
+      expect(args).not.toContain("--no-bundle");
+      expect(args).not.toContain("--var");
+
+      const result = await runCli(args, {});
+      observed.prebundledDeployOutput = result.output;
+
+      expectCleanExit(result);
+      expect(result.output, daemonLogTail()).toContain("deployed");
+
+      const host = `${APPLICATION}-${PREBUNDLED_ENV}.${PLATFORM_DOMAIN}`;
+      const answer = await untilServes(host, "prebundled");
+      expect(JSON.parse(answer.body).url).toContain(host);
+      observed.prebundled = JSON.parse(answer.body);
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "serves the base and its environment when a claim is made with its subdomains",
+    async () => {
+      const nodeFlags = ["--node", `http://127.0.0.1:${String(apiPort)}`, "--key", keyPath];
+
+      const added = await runCli(
+        [
+          "app",
+          "domain",
+          "add",
+          CUSTOM_HOST,
+          "--name",
+          APPLICATION,
+          "--wildcard",
+          "--json",
+          ...nodeFlags,
+        ],
+        {},
+      );
+      expectCleanExit(added);
+      const claimed = JSON.parse(added.output) as {
+        application: { wildcardDomains?: string[] };
+        dns: string;
+        wildcardDns: string;
+      };
+      expect(claimed.application.wildcardDomains).toEqual([CUSTOM_HOST]);
+      /* Both questions were asked, and each answered with one of the three
+         things a resolver can say here. */
+      expect(["ok", "pending", "unknown"]).toContain(claimed.dns);
+      expect(["ok", "pending", "unknown"]).toContain(claimed.wildcardDns);
+      observed.wildcardClaim = claimed;
+
+      /* Rule 1: the base answers from the application itself. */
+      const base = await untilServes(CUSTOM_HOST, "v2");
+      expect(JSON.parse(base.body).url, `the url ${CUSTOM_HOST} saw`).toContain(CUSTOM_HOST);
+
+      /* Rule 2: `<env>.<base>` answers from `<application>-<env>`, which this
+         suite deployed through OIDC and which is serving v6. Both are ORDINARY
+         host entries in the routing document, so any ingress already reads them. */
+      const envHost = `${CI_ENV}.${CUSTOM_HOST}`;
+      const env = await untilServes(envHost, "v6");
+      expect(JSON.parse(env.body).url, `the url ${envHost} saw`).toContain(envHost);
+
+      /* The routing document names exactly those two, which is all an ingress
+         approves a certificate for: an arbitrary subdomain is covered only by
+         the `*.` entry, which routes and never approves, and a name two labels
+         under the base is not covered at all. */
+      const routing = await fleetRouting();
+      const hosts = routing.routes.map((route) => route.host);
+      expect(hosts).toContain(CUSTOM_HOST);
+      expect(hosts).toContain(envHost);
+      expect(hosts).toContain(`*.${CUSTOM_HOST}`);
+      expect(hosts).not.toContain(`anything.${CUSTOM_HOST}`);
+      expect(hosts).not.toContain(`a.b.${CUSTOM_HOST}`);
+      expect(routing.wildcards).toContain(CUSTOM_HOST);
+
+      const listed = await runCli(
+        ["app", "domain", "list", "--name", APPLICATION, "--json", ...nodeFlags],
+        {},
+      );
+      expectCleanExit(listed);
+      expect(JSON.parse(listed.output)).toEqual({
+        application: APPLICATION,
+        domains: [CUSTOM_HOST],
+        wildcardDomains: [CUSTOM_HOST],
+      });
+
+      const removed = await runCli(
+        ["app", "domain", "remove", CUSTOM_HOST, "--name", APPLICATION, ...nodeFlags],
+        {},
+      );
+      expectCleanExit(removed);
+      const gone = await until(`${envHost} to stop being served`, DEADLINE_MS, async () => {
+        const got = await httpGet(caddyHttpPort, "/", { host: envHost });
+        return got.status === 404 ? got : null;
+      });
+      expect(gone.body).toBe(NO_ROUTE);
+      expect(JSON.parse((await untilServes(appHost(), "v2")).body).version).toBe("v2");
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  /*
+   * Rule 3 — any other single label under the base answering from the
+   * application itself — is the one part of this that the ingress has to
+   * understand: it is published as a `*.<base>` key, which a consumer reaches
+   * only by replacing a request host's first label with `*` after an exact miss.
+   * Caddy reads the routing through the `scafo` dynamic-upstreams module, which
+   * ships from another repository: this case needs an image whose module has
+   * that lookup (`SCAFO_E2E_CADDY_IMAGE` overrides the pinned one).
+   */
+  it("serves any other subdomain from the application itself", async () => {
+    const nodeFlags = ["--node", `http://127.0.0.1:${String(apiPort)}`, "--key", keyPath];
+    await runCli(
+      ["app", "domain", "add", CUSTOM_HOST, "--name", APPLICATION, "--wildcard", ...nodeFlags],
+      {},
+    );
+
+    const other = await untilServes(`anything-else.${CUSTOM_HOST}`, "v2");
+    expect(JSON.parse(other.body).url).toContain(`anything-else.${CUSTOM_HOST}`);
+
+    await runCli(["app", "domain", "remove", CUSTOM_HOST, "--name", APPLICATION, ...nodeFlags], {});
+  });
+
+  it(
+    "prunes the application's old Celld deployments straight out of the bucket",
+    async () => {
+      /* Bucket-direct, like every other command that holds no node: the store
+         settings come from the environment, and no `--node` is passed. The
+         application has published two versions and its pointer names the
+         second, so one deployment is past `--keep 1` and the age gate is
+         lifted. */
+      const before = await deployedPrefixes(APPLICATION);
+      expect(before, "the two versions this suite deployed").toEqual(
+        expect.arrayContaining([versionV1, versionV2]),
+      );
+
+      const result = await runCli(
+        ["deployment", "prune", "--name", APPLICATION, "--keep", "1", "--older-than", "0", "--yes"],
+        storeEnv(),
+      );
+      observed.pruneOutput = result.output;
+      expectCleanExit(result);
+
+      const after = await deployedPrefixes(APPLICATION);
+      expect(after, "the version the fleet's own pointer names").toContain(versionV2);
+      expect(after, "the old version prune was told to take").not.toContain(versionV1);
+
+      /* The proof that what was deleted was old and not live: the application
+         answers on the version it was serving before the prune. */
+      const answer = await untilServes(appHost(), "v2");
+      expect(JSON.parse(answer.body).url).toContain(appHost());
+      observed.prunedAway = versionV1;
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "refuses to prune an installation no node is answering for",
+    async () => {
+      /* The release gate reads the Celld every answering node reports. Another
+         prefix of the same bucket is an installation no node ever started in,
+         so nothing says which Celld wrote it — and a prune that cannot tell
+         refuses rather than guesses. The same refusal meets a stopped fleet once
+         its last heartbeat has left the liveness window. */
+      const result = await runCli(
+        ["deployment", "prune", "--name", APPLICATION, "--keep", "0", "--older-than", "0", "--yes"],
+        { ...storeEnv(), SCAFO_S3_PREFIX: `${BUCKET_SETTINGS.prefix}-unserved` },
+      );
+      observed.pruneRefusalOutput = result.output;
+
+      expect(result.code, result.output).not.toBe(0);
+      expect(result.output).toContain("urn:scafo:capability-missing");
+      expect(result.output).toContain("no node of this installation is answering");
+    },
+    STEP_TIMEOUT_MS,
+  );
+
+  it(
+    "deletes one application whole and leaves the one whose name it prefixes serving",
+    async () => {
+      const nodeFlags = ["--node", `http://127.0.0.1:${String(apiPort)}`, "--key", keyPath];
+
+      const retired = await runCli(
+        ["app", "retire", "--name", APPLICATION, "--env", CI_ENV, ...nodeFlags],
+        {},
+      );
+      expectCleanExit(retired);
+      expect(retired.output).toContain("retired");
+
+      await until(`${ciHost()} to stop being served`, DEADLINE_MS, async () => {
+        const answer = await httpGet(caddyHttpPort, "/", { host: ciHost() });
+        return answer.status === 404 ? answer : null;
+      });
+
+      const deleted = await runCli(
+        ["app", "delete", "--name", APPLICATION, "--env", CI_ENV, "--force", ...nodeFlags],
+        {},
+      );
+      observed.deleteOutput = deleted.output;
+      expectCleanExit(deleted);
+      expect(deleted.output).toContain(applicationKey(CI_APPLICATION));
+
+      /* Everything of it, and only of it. `fleets/app-ci` and `fleets/app` share
+         every character up to the hyphen, so a sweep by string prefix would take
+         both — and the one that stays is what says this one did not. */
+      for (const key of [
+        applicationKey(CI_APPLICATION),
+        trustKey(CI_APPLICATION),
+        placementKey(CI_APPLICATION),
+      ]) {
+        expect(await readJson(registry, key), key).toBeNull();
+      }
+      expect(await registry.store.list(`${fleetPrefix(CI_APPLICATION)}/`)).toEqual([]);
+      expect(await listDeployments(registry, CI_APPLICATION)).toEqual([]);
+
+      expect(await readJson(registry, applicationKey(APPLICATION))).not.toBeNull();
+      expect(await readJson(registry, trustKey(APPLICATION))).not.toBeNull();
+      const kept = await registry.store.list(`${fleetPrefix(APPLICATION)}/`);
+      expect(kept.length, "the fleet of the application that stays").toBeGreaterThan(0);
+      expect(await listDeployments(registry, APPLICATION)).toContain(versionV2);
+
+      const answer = await untilServes(appHost(), "v2");
+      expect(JSON.parse(answer.body).url).toContain(appHost());
+
+      const gone = await httpGet(caddyHttpPort, "/", { host: ciHost() });
+      expect(gone.status).toBe(404);
+      expect(gone.body).toBe(NO_ROUTE);
+
+      observed.deleted = {
+        application: CI_APPLICATION,
+        keptFleetObjects: kept.length,
+        keptHost: appHost(),
+      };
     },
     STEP_TIMEOUT_MS,
   );
 });
 
-function envHost(): string {
-  return `${PROJECT}--${ENVIRONMENT}.${PLATFORM_DOMAIN}`;
+/** Every Celld version directory `application` still holds in the bucket. */
+async function deployedPrefixes(application: string): Promise<string[]> {
+  const prefix = `${deployPrefix(application)}${SCRIPT_NAME}/`;
+  const versions = new Set<string>();
+  for (const key of await registry.store.list(prefix)) {
+    /* A version is a DIRECTORY under the script, so only a key with something
+       beneath it names one; the script's own `current.json` sits here too. */
+    const rest = key.slice(prefix.length);
+    const slash = rest.indexOf("/");
+    if (slash > 0) versions.add(rest.slice(0, slash));
+  }
+  return [...versions].sort();
 }
 
-function apexHost(): string {
-  return `${PROJECT}.${PLATFORM_DOMAIN}`;
+/** The host the fixture's own application is served at. */
+function appHost(): string {
+  return `${APPLICATION}.${PLATFORM_DOMAIN}`;
 }
 
+/** The fleet's routing document, as the node serves it to its ingress. */
+async function fleetRouting(): Promise<FleetRouting> {
+  const answer = await httpGet(apiPort, "/v1/ingress/routes", {
+    authorization: `Bearer ${INGRESS_TOKEN}`,
+  });
+  expect(answer.status, answer.body).toBe(200);
+  return JSON.parse(answer.body) as FleetRouting;
+}
+
+/** The host the `--env ci` application is served at, which shares a prefix with it. */
 function ciHost(): string {
-  return `${PROJECT}--${CI_ENVIRONMENT}.${PLATFORM_DOMAIN}`;
+  return `${CI_APPLICATION}.${PLATFORM_DOMAIN}`;
 }
 
 /**
  * The flags one deploy of the fixture is run with, from the host.
  *
- * The operator key is named only for the environment the operator owns. A caller
- * deploying another environment appends its own `--token` instead, and the
- * absence of `--key` here is what makes that a real workload deploy.
+ * NO `--name`, ever: the directory's config names the application, and `--env`
+ * is the only thing that moves a deploy off it. Each caller adds the credential
+ * it holds — `--key` for the operator, `--token` for a workload — so that the
+ * absence of a key is visible at the call site rather than hidden here.
  */
-function deployArgs(dir: string, environment: string = ENVIRONMENT): string[] {
+function deployArgs(dir: string, env?: string): string[] {
   return [
     "deploy",
     dir,
     "--node",
     `http://127.0.0.1:${String(apiPort)}`,
-    "--project",
-    PROJECT,
-    "--env",
-    environment,
-    ...(environment === ENVIRONMENT ? ["--key", keyPath] : []),
+    ...(env === undefined ? [] : ["--env", env]),
   ];
 }
 

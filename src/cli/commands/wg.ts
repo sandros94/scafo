@@ -16,6 +16,7 @@ import { loadDaemonConfig } from "../../daemon/config.ts";
 import { ScafoError } from "../../core/error.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
 import { createRegistry, loadNodeIdentity, publishWireguard } from "../_bootstrap.ts";
+import { configFlags } from "../_flags.ts";
 import type { NodeState } from "../_node-state.ts";
 import { readTextFile, reportFailure, writeSecretFile } from "../_utils.ts";
 import { collectWireguardPeers, renderWireguardConf } from "../_wg-conf.ts";
@@ -151,7 +152,7 @@ interface Tunnel {
 async function resolveTunnel(flags: Record<string, unknown>): Promise<Tunnel> {
   const config = await loadDaemonConfig({
     configPath: text(flags.config),
-    flags: stringFlags(flags),
+    flags: configFlags(flags),
     env: process.env,
     readFile: readTextFile,
   });
@@ -226,13 +227,4 @@ function text(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed === "" ? undefined : trimmed;
-}
-
-/** The declared flags that were actually given; anything else the parser adds is not configuration. */
-function stringFlags(flags: Record<string, unknown>): Record<string, string | undefined> {
-  const given: Record<string, string | undefined> = {};
-  for (const [name, value] of Object.entries(flags)) {
-    if (typeof value === "string") given[name] = value;
-  }
-  return given;
 }

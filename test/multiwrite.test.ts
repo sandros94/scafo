@@ -1,27 +1,21 @@
 /* Fault injection proves multi-write flows remain referentially safe and retryable. */
 
-import { beforeAll, describe, expect, it } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
+import { describe, expect, it } from "vitest";
+import { recordRevision } from "../src/core/registry/_revision.ts";
 import {
   acquireLease,
   checkDomain,
   claimDomain,
-  createBuild,
-  createEnvironment,
-  createProject,
+  createApplication,
+  createDeployment,
   executeReap,
-  getBuild,
-  getEnvironment,
-  importVarsetKey,
+  getApplication,
+  getDeployment,
   planReap,
-  putVarset,
-  retireEnvironment,
+  retireApplication,
   type ReapOptions,
-  sealVarset,
-  setEnvironmentVarset,
 } from "../src/core/registry/index.ts";
 import { fleetPrefix } from "../src/core/registry/paths.ts";
-import type { VarsetEnvelope } from "../src/core/types/registry.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import {
   ctxWith,
@@ -32,8 +26,8 @@ import {
   rejectsWith,
 } from "./_helpers.ts";
 
-const PROJECT = "app";
-const BUILD = "0f0f0f0f";
+const APPLICATION = "app";
+const VERSION = "0f0f0f0f";
 const HOST = "flow.example.com";
 const HOUR_MS = 3_600_000;
 
@@ -48,29 +42,23 @@ interface Flow {
   invariantOptions?: InvariantOptions;
 }
 
-const REAP_OPTIONS: ReapOptions = { buildRetention: { maxAgeMs: HOUR_MS } };
-
-let sealed: { id: string; envelope: VarsetEnvelope };
-
-beforeAll(async () => {
-  const key = await importVarsetKey(crypto.getRandomValues(new Uint8Array(32)));
-  sealed = await sealVarset({ TOKEN: { value: "opaque", secret: true } }, key);
-});
+const REAP_OPTIONS: ReapOptions = { deploymentRetention: { maxAgeMs: HOUR_MS } };
 
 const FLOWS: Flow[] = [
   {
-    name: "createBuild then recordDeployment",
+    name: "createDeployment then recordRevision",
     seed: async ({ ctx }) => {
-      await createProject(ctx, { slug: PROJECT });
-      await createEnvironment(ctx, PROJECT, { name: "prod" });
+      await createApplication(ctx, { name: APPLICATION });
     },
     run: async ({ ctx }) => {
-      await createBuild(ctx, PROJECT, { id: BUILD });
-      await recordDeployment(ctx, PROJECT, "prod", BUILD);
+      await createDeployment(ctx, APPLICATION, { version: VERSION });
+      await recordRevision(ctx, APPLICATION, VERSION);
     },
     settled: async ({ ctx }) => {
-      await expect(getBuild(ctx, PROJECT, BUILD)).resolves.toMatchObject({ id: BUILD });
-      await expect(getEnvironment(ctx, PROJECT, "prod")).resolves.toMatchObject({
+      await expect(getDeployment(ctx, APPLICATION, VERSION)).resolves.toMatchObject({
+        version: VERSION,
+      });
+      await expect(getApplication(ctx, APPLICATION)).resolves.toMatchObject({
         deployment: { revision: 1 },
       });
     },
@@ -78,47 +66,24 @@ const FLOWS: Flow[] = [
   {
     name: "claimDomain",
     seed: async ({ ctx }) => {
-      await createProject(ctx, { slug: PROJECT });
-      await createEnvironment(ctx, PROJECT, { name: "prod" });
+      await createApplication(ctx, { name: APPLICATION });
     },
     run: async ({ ctx }) => {
-      await claimDomain(ctx, HOST, PROJECT, "prod");
+      await claimDomain(ctx, HOST, APPLICATION);
     },
     settled: async ({ ctx }) => {
-      await expect(checkDomain(ctx, HOST)).resolves.toMatchObject({ environment: "prod" });
-      await expect(getEnvironment(ctx, PROJECT, "prod")).resolves.toMatchObject({
-        domains: [HOST],
-      });
+      await expect(checkDomain(ctx, HOST)).resolves.toMatchObject({ application: APPLICATION });
+      await expect(getApplication(ctx, APPLICATION)).resolves.toMatchObject({ domains: [HOST] });
     },
   },
   {
-    name: "createEnvironment then setEnvironmentVarset",
-    seed: async ({ ctx }) => {
-      await createProject(ctx, { slug: PROJECT });
-      await putVarset(ctx, PROJECT, sealed);
-    },
-    run: async ({ ctx }) => {
-      await createEnvironment(ctx, PROJECT, { name: "preview" });
-      await setEnvironmentVarset(ctx, PROJECT, "preview", sealed.id);
-    },
-    settled: async ({ ctx }) => {
-      await expect(getEnvironment(ctx, PROJECT, "preview")).resolves.toMatchObject({
-        varset: sealed.id,
-      });
-    },
-  },
-  {
-    name: "executeReap of an environment with a domain and fleet keys",
+    name: "executeReap of an application with a domain and fleet keys",
     seed: async (clock) => {
-      await createProject(clock.ctx, { slug: PROJECT });
-      await createEnvironment(clock.ctx, PROJECT, {
-        name: "preview",
-        ephemeral: true,
-      });
-      await claimDomain(clock.ctx, HOST, PROJECT, "preview");
-      await retireEnvironment(clock.ctx, PROJECT, "preview");
+      await createApplication(clock.ctx, { name: APPLICATION });
+      await claimDomain(clock.ctx, HOST, APPLICATION);
+      await retireApplication(clock.ctx, APPLICATION);
       for (const suffix of ["node-a.json", "state/routes.json"]) {
-        await clock.ctx.store.put(`${fleetPrefix(PROJECT, "preview")}/${suffix}`, "{}");
+        await clock.ctx.store.put(`${fleetPrefix(APPLICATION)}/${suffix}`, "{}");
       }
       clock.tick(86_400_001);
     },
@@ -129,7 +94,7 @@ const FLOWS: Flow[] = [
       await executeReap(ctx, plan, lease, REAP_OPTIONS);
     },
     settled: async ({ ctx }) => {
-      await rejectsWith(() => getEnvironment(ctx, PROJECT, "preview"), "not-found");
+      await rejectsWith(() => getApplication(ctx, APPLICATION), "not-found");
     },
   },
 ];

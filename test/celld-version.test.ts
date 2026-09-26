@@ -12,41 +12,32 @@ import { MIN_CELLD_VERSION, probeCelldVersion } from "../src/drivers/runtime/cel
 import { rejectsWith } from "./_helpers.ts";
 
 describe.concurrent("what the probe reads", () => {
-  it("passes a binary at exactly the floor, and answers the version it named", async ({
+  it("answers the version a binary named, at the floor, ahead of it, or in a debug banner", async ({
     onTestFinished,
   }) => {
-    const bin = await celldStub(onTestFinished, `celld ${MIN_CELLD_VERSION}`);
+    const atFloor = await celldStub(onTestFinished, `celld ${MIN_CELLD_VERSION}`);
+    await expect(probeCelldVersion(atFloor)).resolves.toBe("0.5.0");
 
-    await expect(probeCelldVersion(bin)).resolves.toBe("0.4.1");
-  });
+    /* Lexically "0.10.0" sorts BEFORE "0.5.0", so a text compare would refuse a
+       binary that is several minor releases ahead of the floor. */
+    const newer = await celldStub(onTestFinished, "celld 0.10.0");
+    await expect(probeCelldVersion(newer)).resolves.toBe("0.10.0");
 
-  it("passes anything newer, comparing the numbers rather than the text", async ({
-    onTestFinished,
-  }) => {
-    /* Lexically "0.10.0" sorts BEFORE "0.4.1", so a text compare would refuse a
-       binary that is two minor releases ahead of the floor. */
-    const bin = await celldStub(onTestFinished, "celld 0.10.0");
-
-    await expect(probeCelldVersion(bin)).resolves.toBe("0.10.0");
-  });
-
-  it("reads the version out of a debug build's banner", async ({ onTestFinished }) => {
-    const bin = await celldStub(onTestFinished, "celld 0.4.1 (debug)");
-
-    await expect(probeCelldVersion(bin)).resolves.toBe("0.4.1");
+    const debug = await celldStub(onTestFinished, "celld 0.5.0 (debug)");
+    await expect(probeCelldVersion(debug)).resolves.toBe("0.5.0");
   });
 });
 
 describe.concurrent("what the probe refuses", () => {
   it("refuses a binary older than the floor, naming both versions", async ({ onTestFinished }) => {
-    const bin = await celldStub(onTestFinished, "celld 0.4.0");
+    const bin = await celldStub(onTestFinished, "celld 0.4.1");
 
     const error = await rejectsWith(() => probeCelldVersion(bin), "capability-missing");
 
     expect(error.message).toBe("Celld is too old");
     /* Both, because the operator has to decide what to install: what is there
        now, and what this build will accept. */
-    expect(error.detail).toContain("0.4.0");
+    expect(error.detail).toContain("0.4.1");
     expect(error.detail).toContain(MIN_CELLD_VERSION);
   });
 
@@ -71,7 +62,7 @@ describe.concurrent("what the probe refuses", () => {
   it("refuses a binary that never answers, rather than holding the boot open", async ({
     onTestFinished,
   }) => {
-    const bin = await celldStub(onTestFinished, "celld 0.4.1", { sleepSeconds: 5 });
+    const bin = await celldStub(onTestFinished, "celld 0.5.0", { sleepSeconds: 5 });
 
     const error = await rejectsWith(
       () => probeCelldVersion(bin, { timeoutMs: 250 }),
@@ -85,7 +76,7 @@ describe.concurrent("what the probe refuses", () => {
   it("says a path it could not start apart from one it could not read", async ({
     onTestFinished,
   }) => {
-    const bin = await celldStub(onTestFinished, "celld 0.4.1");
+    const bin = await celldStub(onTestFinished, "celld 0.5.0");
 
     const error = await rejectsWith(
       () => probeCelldVersion(`${bin}-does-not-exist`),

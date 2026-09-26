@@ -1,6 +1,8 @@
 import { ScafoError } from "../error.ts";
-import type { NodeRecord, NodeServing } from "../types/registry.ts";
+import type { NodeFailing, NodeRecord, NodeServing } from "../types/registry.ts";
+import { type ConcurrencyGate, DEFAULT_CONCURRENCY, mapConcurrent } from "../utils/concurrency.ts";
 import { deepEqual, isCasConflict, namesFromKeys } from "./_shared.ts";
+import { writeChangeHint } from "./changes.ts";
 import { createJson, readJson, requireJson, updateJson } from "./cas.ts";
 import { nowIso, type RegistryContext } from "./context.ts";
 import { claimIdentity, identityReservation } from "./identity.ts";
@@ -17,7 +19,10 @@ export const NODE_LIVENESS_WINDOW_MS: number = 3 * NODE_HEARTBEAT_INTERVAL_MS;
 export async function registerNode(ctx: RegistryContext, record: NodeRecord): Promise<NodeRecord> {
   const key = nodeKey(record.id);
   const existing = await registerNodeIfAbsent(ctx, record);
-  if (existing === null) return record;
+  if (existing === null) {
+    await announceFleetChange(ctx);
+    return record;
+  }
 
   const updated = await updateJson<NodeRecord>(ctx, key, (current) => {
     if (current.id !== record.id) {
@@ -27,7 +32,24 @@ export async function registerNode(ctx: RegistryContext, record: NodeRecord): Pr
     }
     return record;
   });
+  await announceFleetChange(ctx);
   return updated.value;
+}
+
+/**
+ * Mints a change token, so the rest of the fleet re-reads the node records on
+ * its next pass instead of on its node-refresh timer.
+ *
+ * A NODE RECORD IS NOT HINTED BY THE STORE, because a heartbeat rewrites one
+ * every thirty seconds and a token for each of those would cost every node a
+ * listing several times a minute — which is the cost the hint exists to remove.
+ * The two writes worth announcing are the ones that change what the fleet is:
+ * a machine arriving, and a machine saying it is leaving. Both happen once.
+ *
+ * Never throws: the record it follows has already been written.
+ */
+async function announceFleetChange(ctx: RegistryContext): Promise<void> {
+  await writeChangeHint(ctx.store);
 }
 
 /** Claims and creates a node only when absent; compatible existing records stay unchanged. */
@@ -86,14 +108,25 @@ export async function listNodes(ctx: RegistryContext): Promise<string[]> {
   return namesFromKeys(await ctx.store.list(prefix), prefix);
 }
 
-/** Node records in id order; records deleted after listing are omitted. */
-export async function listNodeRecords(ctx: RegistryContext): Promise<NodeRecord[]> {
-  const records: NodeRecord[] = [];
-  for (const id of await listNodes(ctx)) {
-    const found = await readJson<NodeRecord>(ctx, nodeKey(id));
-    if (found !== null) records.push(found.value);
-  }
-  return records;
+/**
+ * Node records in id order; records deleted after listing are omitted.
+ *
+ * READ WITH BOUNDED CONCURRENCY rather than one after another: every caller of
+ * this — the release gate, the version-skew check, an operator asking about the
+ * fleet — pays a full round trip per machine, and a serial loop makes that the
+ * fleet's size times the bucket's latency.
+ */
+export async function listNodeRecords(
+  ctx: RegistryContext,
+  opts?: { concurrency?: number | ConcurrencyGate },
+): Promise<NodeRecord[]> {
+  const ids = await listNodes(ctx);
+  const found = await mapConcurrent(ids, opts?.concurrency ?? DEFAULT_CONCURRENCY, (id) =>
+    readJson<NodeRecord>(ctx, nodeKey(id)),
+  );
+  return found
+    .filter((record): record is NonNullable<typeof record> => record !== null)
+    .map((record) => record.value);
 }
 
 export interface HeartbeatInput {
@@ -103,11 +136,19 @@ export interface HeartbeatInput {
    * node's processes has no business changing where the fleet routes.
    */
   serving?: NodeServing;
+  /**
+   * The applications this node cannot keep running, as of this beat. A beat
+   * that says what the node serves says this too, in the same breath and from
+   * the same look at its processes — so an EMPTY map is meaningful and clears
+   * the record, where leaving the field out keeps what the record said.
+   */
+  failing?: NodeFailing;
 }
 
 /**
- * Stamps `heartbeatAt`, and `serving` when the caller says what the node serves.
- * Nothing else is touched, and a heartbeat cannot create a node record.
+ * Stamps `heartbeatAt`, and `serving` and `failing` when the caller says what
+ * the node's processes are doing. Nothing else is touched, and a heartbeat
+ * cannot create a node record.
  */
 export async function heartbeatNode(
   ctx: RegistryContext,
@@ -116,11 +157,25 @@ export async function heartbeatNode(
 ): Promise<string> {
   const at = nowIso(ctx);
   const serving = input?.serving;
-  await updateJson<NodeRecord>(ctx, nodeKey(id), (current) => ({
-    ...current,
-    heartbeatAt: at,
-    ...(serving === undefined ? {} : { serving }),
-  }));
+  const failing = input?.failing;
+  await updateJson<NodeRecord>(ctx, nodeKey(id), (current) => {
+    const { failing: held, ...rest } = current;
+    return {
+      ...rest,
+      heartbeatAt: at,
+      ...(serving === undefined ? {} : { serving }),
+      /* An empty map is the node saying nothing is failing any more, and the
+         field goes rather than being written as `{}`: absence is what every
+         reader already means by "nothing wrong here". */
+      ...(failing === undefined
+        ? held === undefined
+          ? {}
+          : { failing: held }
+        : Object.keys(failing).length === 0
+          ? {}
+          : { failing }),
+    };
+  });
   return at;
 }
 
@@ -131,7 +186,7 @@ export async function heartbeatNode(
  * The first step of a graceful shutdown, and the whole reason one is worth
  * taking: a daemon that simply stopped would look exactly like a crash, and a
  * crash is only noticed once the liveness window has run out — a minute and a
- * half in which its environments are served by a process that is already gone.
+ * half in which its applications are served by a process that is already gone.
  * A node that says it is leaving is counted out on the coordinator's very next
  * assignment pass instead.
  *
@@ -142,18 +197,15 @@ export async function heartbeatNode(
 export async function drainNode(ctx: RegistryContext, id: string): Promise<string> {
   const at = nowIso(ctx);
   await updateJson<NodeRecord>(ctx, nodeKey(id), (current) => ({ ...current, drainingAt: at }));
+  await announceFleetChange(ctx);
   return at;
 }
 
 /**
- * Whether `record` counts as live for placement: it is not draining, and its
- * last sign of life is newer than {@link NODE_LIVENESS_WINDOW_MS}.
+ * Whether `record` counts as live for placement: it is not draining, and it has
+ * been heard from inside {@link NODE_LIVENESS_WINDOW_MS}.
  *
- * `heartbeatAt` is that sign. A record carrying none is NOT live: nothing in it
- * says when the node was last seen, and guessing "recently" would hand
- * environments to a node that may be years gone.
- *
- * `drainingAt` outranks all of it. A node on its way out has usually just
+ * `drainingAt` outranks the heartbeat. A node on its way out has usually just
  * beaten — it is stopping in an orderly fashion, not failing — so judging it by
  * its heartbeat alone would keep it a placement candidate for the whole liveness
  * window after it stopped serving. Its own word about where it is going is
@@ -163,7 +215,31 @@ export async function drainNode(ctx: RegistryContext, id: string): Promise<strin
  */
 export function isNodeLive(record: NodeRecord, now: Date, opts?: { windowMs?: number }): boolean {
   if (record.drainingAt !== undefined) return false;
+  return isNodeAnswering(record, now, opts);
+}
 
+/**
+ * Whether the node was last heard from inside {@link NODE_LIVENESS_WINDOW_MS},
+ * whatever it has said about leaving.
+ *
+ * THE OTHER HALF OF {@link isNodeLive}, and a different question. That one asks
+ * whether a node may be handed new work; this one asks whether it is still
+ * there. A draining node is a no to the first and a yes to the second: it is
+ * shutting down in an orderly fashion, and until it is done its processes are
+ * still running and still hold whatever they hold. A caller that has to reckon
+ * with what is running right now reads this one.
+ *
+ * `heartbeatAt` is the only sign. A record carrying none is NOT answering:
+ * nothing in it says when the node was last seen, and guessing "recently" would
+ * credit a machine that may be years gone.
+ *
+ * Pure, so the caller decides what "now" is.
+ */
+export function isNodeAnswering(
+  record: NodeRecord,
+  now: Date,
+  opts?: { windowMs?: number },
+): boolean {
   const seenAt = record.heartbeatAt;
   if (seenAt === undefined) return false;
 

@@ -13,7 +13,7 @@ import { createUns3Store } from "../../src/drivers/store/uns3.ts";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 
-/** Root of the worktree the suites build and bind-mount into the node image. */
+/** Root of the worktree, built once per run and bind-mounted read-only into the node image. */
 export const REPO_ROOT: string = resolve(HERE, "../..");
 /** Fixtures every suite copies from: the application, and the ingress configs. */
 export const FIXTURES: string = join(HERE, "_e2e-fixtures");
@@ -48,6 +48,18 @@ export const STEP_TIMEOUT_MS: number = 180_000;
 /** Per-assertion ceiling; the reconcile interval is 5s, so this is many passes. */
 export const DEADLINE_MS: number = 120_000;
 export const BOOT_DEADLINE_MS: number = 60_000;
+/**
+ * How long a node's runtime process may take to serve a deployment that has
+ * just been recorded.
+ *
+ * WELL UNDER CELLD'S OWN THIRTY-SECOND POINTER POLL, which is the whole point of
+ * asking a process to adopt at once: a deploy whose caller already holds a
+ * `deployed` record must not leave the application serving the previous version
+ * for half a minute. Ten seconds rather than five, because this is measured on
+ * whatever machine CI gave the suite — the reconcile interval alone is five —
+ * and a bound that fails on a loaded runner teaches nothing.
+ */
+export const ADOPTION_BOUND_MS: number = 10_000;
 /** SeaweedFS is the slowest thing here to become useful, by a wide margin. */
 export const STORE_DEADLINE_MS: number = 120_000;
 /** A blocked local tunnel must not consume the whole store readiness budget. */
@@ -190,11 +202,11 @@ export async function stageApp(version: string, keep: string[]): Promise<string>
   return dir;
 }
 
-/** The build id the CLI printed for a settled deploy. */
-export function buildIdOf(output: string): string {
-  const build = /scafo: build ([\da-f]{8,64})/.exec(output)?.[1];
-  if (build === undefined) throw new Error(`the deploy named no build:\n${output}`);
-  return build;
+/** The deployment version the CLI printed for a settled deploy. */
+export function deploymentOf(output: string): string {
+  const version = /scafo: deployment ([\da-f]{8,64})/.exec(output)?.[1];
+  if (version === undefined) throw new Error(`the deploy named no deployment:\n${output}`);
+  return version;
 }
 
 export interface HttpAnswer {
@@ -364,12 +376,6 @@ export function run(
     child.on("error", failOnce);
     child.on("close", (code) => finish({ code: code ?? -1, output }));
   });
-}
-
-/** Builds `dist/`, which the daemon container runs off the bind-mounted worktree. */
-export async function buildRepo(): Promise<void> {
-  const built = await run("pnpm", ["build"], REPO_ROOT, process.env as Record<string, string>);
-  if (built.code !== 0) throw new Error(`"pnpm build" failed:\n${built.output}`);
 }
 
 export function delay(ms: number): Promise<void> {

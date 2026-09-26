@@ -12,9 +12,9 @@
 
 import { describe, expect, it } from "vitest";
 import { preferNode, renderFleetRouting } from "../src/core/placement/fleet-routes.ts";
-import { API_DENIED_PREFIXES, APEX_ENVIRONMENT } from "../src/core/placement/routes.ts";
+import { API_DENIED_PREFIXES } from "../src/core/placement/routes.ts";
 import type { FleetRouting } from "../src/core/types/ingress.ts";
-import type { EnvironmentRecord, NodeRecord, NodeServing } from "../src/core/types/registry.ts";
+import type { ApplicationRecord, NodeRecord, NodeServing } from "../src/core/types/registry.ts";
 import { HOST_LABEL_RE, isHost } from "../src/core/utils/host.ts";
 import { isSlug } from "../src/core/utils/slug.ts";
 import {
@@ -32,8 +32,9 @@ import {
 
 const DOMAIN = "apps.test";
 const OTHER_DOMAIN = "apps.example";
-const PROJECT = "shop";
-const OTHER_PROJECT = "blog";
+const APP = "shop";
+const OTHER_APP = "blog";
+const PREVIEW_APP = "shop-preview";
 const CUSTOM_DOMAIN = "shop.example.com";
 
 const NOW = new Date("2026-01-01T00:01:00.000Z");
@@ -70,62 +71,56 @@ const FIXTURES: Array<{ name: string; routing: FleetRouting }> = [
     name: "a fleet serving nothing at all",
     routing: renderFleetRouting({
       platformDomains: [DOMAIN],
-      environments: [],
+      applications: [],
       nodes: [],
       now: NOW,
     }),
   },
   {
-    name: "one environment, on one node",
+    name: "one application, on one node",
     routing: renderFleetRouting({
       platformDomains: [DOMAIN],
-      environments: [environment(PROJECT, "staging")],
-      nodes: [node(HERE, "10.83.0.1", { [`${PROJECT}/staging`]: { port: 42_010 } })],
+      applications: [application(APP)],
+      nodes: [node(HERE, "10.83.0.1", { [APP]: { port: 42_010 } })],
       now: NOW,
     }),
   },
   {
-    name: "production, which is also the project apex",
+    name: "a custom domain claimed for an application, answered by two nodes",
     routing: renderFleetRouting({
       platformDomains: [DOMAIN],
-      environments: [environment(PROJECT, APEX_ENVIRONMENT)],
-      nodes: [node(HERE, "10.83.0.1", { [`${PROJECT}/production`]: { port: 42_000 } })],
-      now: NOW,
-    }),
-  },
-  {
-    name: "a custom domain claimed for an environment, answered by two nodes",
-    routing: renderFleetRouting({
-      platformDomains: [DOMAIN],
-      environments: [environment(PROJECT, APEX_ENVIRONMENT, [CUSTOM_DOMAIN])],
+      applications: [application(APP, [CUSTOM_DOMAIN])],
       nodes: [
-        node(HERE, "10.83.0.1", { [`${PROJECT}/production`]: { port: 42_000 } }),
-        node(THERE, "10.83.0.2", { [`${PROJECT}/production`]: { port: 42_001 } }),
+        node(HERE, "10.83.0.1", { [APP]: { port: 42_000 } }),
+        node(THERE, "10.83.0.2", { [APP]: { port: 42_001 } }),
       ],
       now: NOW,
     }),
   },
   {
-    name: "two projects under two platform domains",
+    name: "three applications under two platform domains",
     routing: renderFleetRouting({
       platformDomains: [DOMAIN, OTHER_DOMAIN],
-      environments: [
-        environment(PROJECT, APEX_ENVIRONMENT, [CUSTOM_DOMAIN]),
-        environment(PROJECT, "preview"),
-        environment(OTHER_PROJECT, APEX_ENVIRONMENT),
+      applications: [
+        application(APP, [CUSTOM_DOMAIN]),
+        application(PREVIEW_APP),
+        application(OTHER_APP),
       ],
       nodes: [
         node(HERE, "10.83.0.1", {
-          [`${PROJECT}/production`]: { port: 42_000 },
-          [`${PROJECT}/preview`]: { port: 42_004 },
-          [`${OTHER_PROJECT}/production`]: { port: 42_006 },
+          [APP]: { port: 42_000 },
+          [PREVIEW_APP]: { port: 42_004 },
+          [OTHER_APP]: { port: 42_006 },
         }),
-        node(THERE, "10.83.0.2", { [`${PROJECT}/production`]: { port: 42_001 } }),
+        node(THERE, "10.83.0.2", { [APP]: { port: 42_001 } }),
       ],
       now: NOW,
     }),
   },
 ];
+
+/** The fixture whose every host is answered by both nodes. */
+const BOTH_NODES = FIXTURES[2];
 
 /**
  * The same states with the fleet's API published at the platform apexes, which
@@ -136,7 +131,7 @@ const API_FIXTURES: Array<{ name: string; routing: FleetRouting }> = [
     name: "a fleet serving nothing, answering the API at its one apex",
     routing: renderFleetRouting({
       platformDomains: [DOMAIN],
-      environments: [],
+      applications: [],
       nodes: [node(HERE, "10.83.0.1")],
       now: NOW,
       api: true,
@@ -146,10 +141,10 @@ const API_FIXTURES: Array<{ name: string; routing: FleetRouting }> = [
     name: "two platform domains, so two apexes, answered by two nodes",
     routing: renderFleetRouting({
       platformDomains: [DOMAIN, OTHER_DOMAIN],
-      environments: [environment(PROJECT, APEX_ENVIRONMENT)],
+      applications: [application(APP)],
       nodes: [
-        node(HERE, "10.83.0.1", { [`${PROJECT}/production`]: { port: 42_000 } }),
-        node(THERE, "10.83.0.2", { [`${PROJECT}/production`]: { port: 42_001 } }),
+        node(HERE, "10.83.0.1", { [APP]: { port: 42_000 } }),
+        node(THERE, "10.83.0.2", { [APP]: { port: 42_001 } }),
       ],
       now: NOW,
       api: true,
@@ -159,8 +154,8 @@ const API_FIXTURES: Array<{ name: string; routing: FleetRouting }> = [
     name: "an apex beside a claimed domain",
     routing: renderFleetRouting({
       platformDomains: [DOMAIN, OTHER_DOMAIN],
-      environments: [environment(PROJECT, APEX_ENVIRONMENT, [CUSTOM_DOMAIN])],
-      nodes: [node(HERE, "10.83.0.1", { [`${PROJECT}/production`]: { port: 42_000 } })],
+      applications: [application(APP, [CUSTOM_DOMAIN])],
+      nodes: [node(HERE, "10.83.0.1", { [APP]: { port: 42_000 } })],
       now: NOW,
       api: true,
     }),
@@ -169,8 +164,8 @@ const API_FIXTURES: Array<{ name: string; routing: FleetRouting }> = [
     name: "the API beside an application host",
     routing: renderFleetRouting({
       platformDomains: [DOMAIN],
-      environments: [environment(PROJECT, "staging")],
-      nodes: [node(HERE, "10.83.0.1", { [`${PROJECT}/staging`]: { port: 42_010 } })],
+      applications: [application(PREVIEW_APP)],
+      nodes: [node(HERE, "10.83.0.1", { [PREVIEW_APP]: { port: 42_010 } })],
       now: NOW,
       api: true,
     }),
@@ -205,7 +200,7 @@ describe("the Traefik rendering says what the fleet document says", () => {
   });
 
   it("puts the preferred node's upstream first wherever it answers", () => {
-    const { routing } = FIXTURES[3];
+    const { routing } = BOTH_NODES;
     const preferred = preferNode(routing, THERE);
 
     expect(legsOf(preferred).map((leg) => leg.upstreams[0])).toEqual(
@@ -317,8 +312,8 @@ describe("the fleet's API at a platform apex", () => {
   it("leaves an apex alone when something else already answers on it", () => {
     const routing = renderFleetRouting({
       platformDomains: [DOMAIN, OTHER_DOMAIN],
-      environments: [environment(PROJECT, APEX_ENVIRONMENT, [DOMAIN])],
-      nodes: [node(HERE, "10.83.0.1", { [`${PROJECT}/production`]: { port: 42_000 } })],
+      applications: [application(APP, [DOMAIN])],
+      nodes: [node(HERE, "10.83.0.1", { [APP]: { port: 42_000 } })],
       now: NOW,
       api: true,
     });
@@ -360,7 +355,7 @@ describe("the Traefik namespace cannot collide with a host", () => {
   it("refuses the separators the prefixes are built from", () => {
     for (const separator of ["_", "/", "@"]) {
       expect(isHost(`shop${separator}apps.test`), separator).toBe(false);
-      expect(isSlug(`shop${separator}staging`), separator).toBe(false);
+      expect(isSlug(`shop${separator}preview`), separator).toBe(false);
       expect(HOST_LABEL_RE.test(`shop${separator}x`), separator).toBe(false);
     }
   });
@@ -473,22 +468,13 @@ function byHost(a: Leg, b: Leg): number {
   return a.host < b.host ? -1 : 1;
 }
 
-function environment(
-  project: string,
-  name: string,
-  domains: string[] = [],
-): { project: string; env: EnvironmentRecord } {
+function application(name: string, domains: string[] = []): ApplicationRecord {
   return {
-    project,
-    env: {
-      v: 1,
-      name,
-      prefix: `fleets/${project}/${name}`,
-      deployment: { revision: 1, deployedAt: "2026-01-01T00:00:00.000Z" },
-      domains,
-      ephemeral: false,
-      createdAt: "2026-01-01T00:00:00.000Z",
-    },
+    v: 1,
+    name,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    deployment: { revision: 1, deployedAt: "2026-01-01T00:00:00.000Z" },
+    domains,
   };
 }
 

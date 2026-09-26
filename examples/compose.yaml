@@ -39,8 +39,10 @@ services:
       start_period: 10s
 
   caddy:
-    # The image includes both `caddy.storage.scafo` and the `scafo` dynamic
-    # upstreams module. `edge` until a release pins the pair.
+    # The image's own Caddyfile is the whole configuration: it reads the fleet
+    # from the environment below, keeps certificates in the bucket through the
+    # node, issues on demand only for names the fleet routes, and redirects
+    # HTTP to HTTPS. `edge` until a release pins the pair.
     image: ghcr.io/sandros94/scafo-caddy:${SCAFO_CADDY_VERSION:-edge}
     restart: unless-stopped
     # Caddy reaches the node and the runtimes through shared loopback.
@@ -49,14 +51,25 @@ services:
       node:
         # Caddy reads shared certificate storage through the node at startup.
         condition: service_healthy
-    command: ["caddy", "run", "--config", "/etc/caddy/config.json"]
     environment:
+      SCAFO_FLEET_ENDPOINT: http://127.0.0.1:7400
       # The one credential Caddy holds, for both storage and routing.
-      SCAFO_INGRESS_TOKEN: ${SCAFO_INGRESS_TOKEN:?set SCAFO_INGRESS_TOKEN in .env}
+      SCAFO_FLEET_TOKEN: ${SCAFO_INGRESS_TOKEN:?set SCAFO_INGRESS_TOKEN in .env}
+      # Where the node counts served requests from (SCAFO_INGRESS_ACCESS_LOG).
+      SCAFO_ACCESS_LOG: /var/log/scafo-ingress/access.log
     volumes:
-      - ./caddy.json:/etc/caddy/config.json:ro
       - ingress-log:/var/log/scafo-ingress
+      # The ACME account: the ingress's own, so it is kept here and never in
+      # the bucket. Losing it only means registering with the CA again.
+      - caddy-data:/data
 
 volumes:
+  # The node's identity, its ingress token, and the work directory of every
+  # runtime process it supervises. It must outlive the container being
+  # RE-CREATED, not only restarted: a write is acknowledged once a peer holds
+  # it on the follower disk kept here, before the bucket has it, and a process
+  # recovers it at boot from what its predecessor of the same node name left.
+  # Removing this volume loses writes this fleet has already acknowledged.
   state:
   ingress-log:
+  caddy-data:

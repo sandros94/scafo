@@ -66,68 +66,24 @@ describe("the production Compose example", () => {
     expect(compose.services?.seaweedfs).toBeUndefined();
   });
 
-  it("terminates HTTPS through Caddy's shared Scafo storage, and routes by reading the node", async () => {
-    /* Both halves of what a scafo-caddy is given, and NEITHER is a credential
-       for anything but this node: certificates come out of the bucket through
-       `/v1/storage`, and where a request goes comes out of `/v1/ingress/routes`.
-       Nothing writes this file — the example ships what an operator keeps. */
-    const caddy: unknown = JSON.parse(await readFile(join(REPO, "examples/caddy.json"), "utf8"));
+  it("runs Caddy on the image's own configuration, told the node and the token alone", async () => {
+    /* The scafo-caddy image ships a Caddyfile that reads its fleet from the
+       environment: storage through `/v1/storage`, routing from
+       `/v1/ingress/routes`, both with this one token, which is a credential for
+       this node's ingress surface and nothing else. No file is mounted over it,
+       so nothing here can drift from what the image was tested with. */
+    const compose = parseYAML<ComposeFile>(
+      await readFile(join(REPO, "examples/compose.yaml"), "utf8"),
+    );
+    const caddy = compose.services?.caddy;
 
-    expect(caddy).toMatchObject({
-      storage: {
-        module: "scafo",
-        endpoint: "http://127.0.0.1:7400",
-        token: "{env.SCAFO_INGRESS_TOKEN}",
-      },
-      apps: {
-        tls: {
-          automation: {
-            policies: [{ on_demand: true }],
-            on_demand: {
-              permission: {
-                endpoint: "http://127.0.0.1:7400/v1/ingress/ask",
-                module: "http",
-              },
-            },
-          },
-        },
-        http: {
-          servers: {
-            scafo: {
-              listen: [":443"],
-              tls_connection_policies: [{}],
-              routes: [
-                {
-                  handle: [
-                    {
-                      handler: "reverse_proxy",
-                      dynamic_upstreams: {
-                        source: "scafo",
-                        endpoint: "http://127.0.0.1:7400",
-                        token: "{env.SCAFO_INGRESS_TOKEN}",
-                        prefer: "self",
-                      },
-                      /* The node's order is a priority, not a weighting. */
-                      load_balancing: { selection_policy: { policy: "first" } },
-                    },
-                  ],
-                },
-              ],
-              /* A host the fleet does not serve and a denied API path are one
-                 answer, so a denial does not confirm the path exists. */
-              errors: {
-                routes: [
-                  {
-                    match: [{ vars: { "scafo.route": ["unknown", "denied"] } }],
-                    handle: [{ handler: "static_response", status_code: 404 }],
-                  },
-                ],
-              },
-            },
-          },
-        },
-      },
+    expect(caddy?.command).toBeUndefined();
+    expect(caddy?.environment).toMatchObject({
+      SCAFO_FLEET_ENDPOINT: "http://127.0.0.1:7400",
+      SCAFO_FLEET_TOKEN: "${SCAFO_INGRESS_TOKEN:?set SCAFO_INGRESS_TOKEN in .env}",
     });
+    expect(caddy?.volumes?.filter((volume) => volume.includes("/etc/caddy"))).toEqual([]);
+    expect(caddy?.volumes).toContain("caddy-data:/data");
   });
 });
 
@@ -178,7 +134,10 @@ async function bucketScript(path: string): Promise<string> {
 }
 
 interface ComposeFile {
-  services?: Record<string, { command?: unknown } | undefined>;
+  services?: Record<
+    string,
+    { command?: unknown; environment?: Record<string, string>; volumes?: string[] } | undefined
+  >;
 }
 
 /**

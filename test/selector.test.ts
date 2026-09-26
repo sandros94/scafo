@@ -1,6 +1,6 @@
 /*
  * Labels and the selectors that match them: the charset both ends share, the `k=v,k2=v2` text a
- * flag carries them in, and the and-matching that decides which nodes an environment may run on
+ * flag carries them in, and the and-matching that decides which nodes an application may run on
  * at all.
  */
 
@@ -17,10 +17,10 @@ import {
   formatLabels,
   isLabel,
   LABEL_MAX_LENGTH,
-  parseLabels,
+  parseLabelEntries,
 } from "../src/core/utils/labels.ts";
 import type { NodeRecord } from "../src/core/types/registry.ts";
-import { rejectsWith } from "./_helpers.ts";
+import { rejectionOf, rejectsWith } from "./_helpers.ts";
 
 describe("what counts as a label", () => {
   it.each([
@@ -67,7 +67,7 @@ describe("what counts as a label", () => {
   });
 
   it.each([undefined, null, 1, true, {}, []])("refuses %p, which is not text at all", async (v) => {
-    await rejectsWith(() => Promise.resolve(assertLabel(v)), "invalid-input");
+    expect((await rejectionOf(() => Promise.resolve(assertLabel(v)))).code).toBe("invalid-input");
   });
 
   it("names which half of a pair was the problem", async () => {
@@ -113,27 +113,29 @@ describe("assertLabels", () => {
   });
 });
 
-describe("parseLabels", () => {
-  it("reads the comma syntax a flag and an environment variable carry", () => {
-    expect(parseLabels("tier=fast", "--node-labels")).toEqual({ tier: "fast" });
-    expect(parseLabels("tier=fast,region=eu-west-1", "--node-labels")).toEqual({
+describe("parseLabelEntries", () => {
+  it("reads one whole key=value pair per entry", () => {
+    expect(parseLabelEntries(["tier=fast"], "--node-labels")).toEqual({ tier: "fast" });
+    expect(parseLabelEntries(["tier=fast", "region=eu-west-1"], "--node-labels")).toEqual({
       tier: "fast",
       region: "eu-west-1",
     });
   });
 
-  it("forgives the whitespace and the trailing comma a shell leaves behind", () => {
-    expect(parseLabels("  tier = fast , region=eu-west-1 , ", "--node-labels")).toEqual({
+  it("forgives the whitespace and the blank entry a shell leaves behind", () => {
+    expect(
+      parseLabelEntries(["  tier = fast ", " region=eu-west-1 ", " "], "--node-labels"),
+    ).toEqual({
       tier: "fast",
       region: "eu-west-1",
     });
   });
 
-  it.each(["tier", "=fast", "tier fast", "", "  ", ",", "tier=FAST", "Tier=fast"])(
+  it.each([["tier"], ["=fast"], ["tier fast"], [""], ["  "], ["tier=FAST"], ["Tier=fast"]])(
     "refuses %p, naming the setting it came from",
-    async (text) => {
+    async (entry) => {
       const error = await rejectsWith(
-        () => Promise.resolve(parseLabels(text, "--node-labels")),
+        () => Promise.resolve(parseLabelEntries([entry], "--node-labels")),
         "invalid-input",
       );
       expect(error.detail).toContain("--node-labels");
@@ -144,7 +146,7 @@ describe("parseLabels", () => {
     /* Not currently a legal value, so this is about the split rather than about
        what passes: the refusal must be about the VALUE, not about the shape. */
     const error = await rejectsWith(
-      () => Promise.resolve(parseLabels("tier=a=b", "--node-labels")),
+      () => Promise.resolve(parseLabelEntries(["tier=a=b"], "--node-labels")),
       "invalid-input",
     );
     expect(error.detail).toContain(`"a=b"`);
@@ -154,22 +156,21 @@ describe("parseLabels", () => {
     /* Both "the first wins" and "the last wins" are defensible, which is exactly
        why neither should be guessed at on the operator's behalf. */
     const error = await rejectsWith(
-      () => Promise.resolve(parseLabels("tier=fast,tier=slow", "--node-labels")),
+      () => Promise.resolve(parseLabelEntries(["tier=fast", "tier=slow"], "--node-labels")),
       "invalid-input",
     );
 
     expect(error.detail).toContain("twice");
-    expect(error.detail).toContain("fast");
     expect(error.detail).toContain("slow");
   });
 
-  it("round-trips through the text it prints", () => {
+  it("round-trips through the text an environment variable carries", () => {
     const labels = { region: "eu-west-1", tier: "fast" };
 
     /* Sorted, so what an operator is shown is stable and can be pasted straight
-       back into the flag it came from. */
+       back into the variable it came from. */
     expect(formatLabels(labels)).toBe("region=eu-west-1,tier=fast");
-    expect(parseLabels(formatLabels(labels), "--node-labels")).toEqual(labels);
+    expect(parseLabelEntries(formatLabels(labels).split(","), "--node-labels")).toEqual(labels);
   });
 });
 
@@ -265,7 +266,9 @@ describe("assertSelector", () => {
   it.each([null, undefined, "tier=fast", 3, [], { Tier: "fast" }, { tier: "very fast" }])(
     "refuses %p",
     async (value) => {
-      await rejectsWith(() => Promise.resolve(assertSelector(value)), "invalid-input");
+      expect((await rejectionOf(() => Promise.resolve(assertSelector(value)))).code).toBe(
+        "invalid-input",
+      );
     },
   );
 

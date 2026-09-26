@@ -26,9 +26,11 @@ export default defineBuildConfig({
           "uns3",
           "unjwt",
           /^unjwt\//,
+          "unsecure",
+          /^unsecure\//,
           "h3",
           "confbox",
-          "citty",
+          // "citty"  is NOT external as it is currently being patched
           "consola",
           "tar",
           /^node:/,

@@ -21,11 +21,10 @@ import {
 } from "../src/core/registry/operators.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
+import { ctxWith, type ManualClock, rejectsWith, TEST_VERSIONS, urlOf } from "./_helpers.ts";
 
 const NODE_URL = "http://10.0.0.4:7400";
 const REMOTE = "prod";
-const VERSION = "0.0.0-test";
 
 /** The admin an operator-tier home is set up beside; see `registeredRemote`. */
 const ADMIN_ID = "op-9999admin";
@@ -282,23 +281,23 @@ describe("the other remotes in the home", () => {
   });
 });
 
-describe("rotating a key that is scoped to projects", () => {
+describe("rotating a key that is scoped to applications", () => {
   it("carries the scope onto the new key, exactly as it carries the tier", async () => {
     const { home, key } = await registeredRemote("operator", ["acme"]);
 
     const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
 
     expect(rotated.role).toBe("operator");
-    expect(rotated.projects).toEqual(["acme"]);
+    expect(rotated.applications).toEqual(["acme"]);
     expect(rotated.newKeyId).not.toBe(key.id);
     await expect(getOperator(clock.ctx, rotated.newKeyId)).resolves.toMatchObject({
       role: "operator",
-      projects: ["acme"],
+      applications: ["acme"],
       supersedes: key.id,
     });
   });
 
-  it("says which projects the rotated key still reaches", async () => {
+  it("says which applications the rotated key still reaches", async () => {
     const { home } = await registeredRemote("operator", ["acme"]);
 
     const said = describeRotation(await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) }));
@@ -311,9 +310,9 @@ describe("rotating a key that is scoped to projects", () => {
 
     const rotated = await rotateRemoteKey(home, REMOTE, { fetchFn: through(app) });
 
-    expect(rotated.projects).toBeUndefined();
-    const trusted = (await getOperator(clock.ctx, rotated.newKeyId)) as { projects?: string[] };
-    expect("projects" in trusted).toBe(false);
+    expect(rotated.applications).toBeUndefined();
+    const trusted = (await getOperator(clock.ctx, rotated.newKeyId)) as { applications?: string[] };
+    expect("applications" in trusted).toBe(false);
   });
 });
 
@@ -343,13 +342,13 @@ describe("reading what a fleet trusts", () => {
     expect(printed).toMatch(/op-cccc3333\s+operator\s+none\s*$/m);
   });
 
-  it("names the PROJECTS each key may reach, and `all` for an ADMIN that names none", async () => {
+  it("names the APPLICATIONS each key may reach, and `all` for an ADMIN that names none", async () => {
     const { home, key } = await registeredRemote("admin");
     await trustOperator(clock.ctx, {
       id: "op-cccc3333",
       publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-a-tenant" },
       role: "operator",
-      projects: ["acme", "globex"],
+      applications: ["acme", "globex"],
     });
 
     const printed = formatRemoteKeys(await listRemoteKeys(home, REMOTE, { fetchFn: through(app) }));
@@ -391,7 +390,7 @@ describe("reading what a fleet trusts", () => {
           id: "op-tenant11",
           publicKey: { kty: "OKP", crv: "Ed25519", x: "x-for-a-tenant" },
           role: "operator",
-          projects: ["acme"],
+          applications: ["acme"],
         },
       ],
       scoped: true,
@@ -523,7 +522,7 @@ describe("revoking another operator's key", () => {
  */
 async function registeredRemote(
   role: OperatorRole = "admin",
-  projects?: string[],
+  applications?: string[],
 ): Promise<{ home: string; key: OperatorKeyFile }> {
   const home = await mkdtemp(join(tmpdir(), "scafo-rotate-"));
   homes.push(home);
@@ -541,7 +540,7 @@ async function registeredRemote(
     id: added.key.id,
     publicKey: { kty: "OKP", crv: "Ed25519", x: added.key.publicKey.x },
     role,
-    ...(projects === undefined ? {} : { projects }),
+    ...(applications === undefined ? {} : { applications }),
   });
   return { home, key: added.key };
 }
@@ -567,7 +566,7 @@ async function keyFileAt(path: string): Promise<OperatorKeyFile> {
 
 /** Calls that reach the app in this process; the app may answer synchronously. */
 function through(target: H3): typeof fetch {
-  return async (input, init) => target.request(String(input), init);
+  return async (input, init) => target.request(urlOf(input), init);
 }
 
 /**
@@ -583,7 +582,7 @@ function crashOn(target: H3, method: string): typeof fetch {
         detail: `the ${method} of the rotation was killed`,
       });
     }
-    return target.request(String(input), init);
+    return target.request(urlOf(input), init);
   };
 }
 
@@ -593,7 +592,7 @@ function nodeApp(): H3 {
     nodeId: "node-a",
     registry: clock.ctx,
     supervisor: idleSupervisor(),
-    version: VERSION,
+    versions: TEST_VERSIONS,
   });
 }
 
@@ -611,6 +610,8 @@ function daemonConfig(): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
+      portRangeEnd: 42_998,
+      portQuarantineMs: 600_000,
       bindHost: "127.0.0.1",
     },
     observability: { enabled: false },
@@ -624,6 +625,7 @@ function idleSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: () => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

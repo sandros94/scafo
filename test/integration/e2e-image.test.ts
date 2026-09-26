@@ -8,7 +8,7 @@ import { GenericContainer, type StartedTestContainer, Wait } from "testcontainer
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { OperatorKeyFile } from "../../src/cli/_operator-key.ts";
 import {
-  listBuilds,
+  listDeployments,
   nodeKey,
   readJson,
   type RegistryContext,
@@ -17,10 +17,9 @@ import type { NodeRecord } from "../../src/core/types/registry.ts";
 import {
   BOOT_DEADLINE_MS,
   type BucketSettings,
-  buildIdOf,
-  buildRepo,
   type CommandResult,
   DEADLINE_MS,
+  deploymentOf,
   FIXTURES,
   httpGet,
   registryAt,
@@ -95,8 +94,8 @@ const BUCKET: BucketSettings = {
 };
 
 const PLATFORM_DOMAIN = "scafo.test";
-const PROJECT = "app";
-const ENVIRONMENT = "production";
+/** The application this suite deploys, and the name its `wrangler.jsonc` carries. */
+const APPLICATION = "app";
 const NODE_ID = "node-e2e-image";
 
 /**
@@ -115,7 +114,7 @@ let apiPort: number;
 
 let registry: RegistryContext;
 let keyPath: string;
-let build: string;
+let deploymentVersion: string;
 
 const tmpDirs: string[] = [];
 /** Node output retained for failure context. */
@@ -125,8 +124,6 @@ const observed: Record<string, unknown> = {};
 
 describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () => {
   beforeAll(async () => {
-    await buildRepo();
-
     const started = Date.now();
     const image =
       PREBUILT_IMAGE === ""
@@ -299,10 +296,8 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
           await stageApp("v1", tmpDirs),
           "--node",
           `http://127.0.0.1:${String(apiPort)}`,
-          "--project",
-          PROJECT,
-          "--env",
-          ENVIRONMENT,
+          "--name",
+          APPLICATION,
           "--key",
           keyPath,
         ],
@@ -312,10 +307,10 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
 
       expectCleanExit(deploy);
       expect(deploy.output, nodeLogTail()).toContain("deployed");
-      build = buildIdOf(deploy.output);
-      expect(await listBuilds(registry, PROJECT)).toContain(build);
+      deploymentVersion = deploymentOf(deploy.output);
+      expect(await listDeployments(registry, APPLICATION)).toContain(deploymentVersion);
 
-      const host = `${PROJECT}--${ENVIRONMENT}.${PLATFORM_DOMAIN}`;
+      const host = `${APPLICATION}.${PLATFORM_DOMAIN}`;
       const answer = await until(`${host} to serve "v1"`, DEADLINE_MS, async () => {
         const served = await httpGet(caddyHttpPort, "/", { host });
         return served.status === 200 && served.body.includes(`"v1"`) ? served : null;
@@ -328,7 +323,12 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
       });
       expect(JSON.parse(runtimeHealth.body)).toEqual({ ok: true });
 
-      observed.served = { host, build, body: answer.body, celldHealth: runtimeHealth.status };
+      observed.served = {
+        host,
+        deployment: deploymentVersion,
+        body: answer.body,
+        celldHealth: runtimeHealth.status,
+      };
     },
     STEP_TIMEOUT_MS,
   );

@@ -1,10 +1,10 @@
-/* Deleting an environment from whichever node the operator happened to ask. */
+/* Deleting an application from whichever node the operator happened to ask. */
 
 import type { H3 } from "h3";
 import type { JWK_OKP_Private, JWK_OKP_Public } from "unjwt/jwk";
 import { generateJWK } from "unjwt/jwk";
 import { beforeEach, describe, expect, it } from "vitest";
-import { recordDeployment } from "../src/core/registry/_deployment.ts";
+import { recordRevision } from "../src/core/registry/_revision.ts";
 import { type DaemonContext, type DaemonState, createNodeApp } from "../src/daemon/app.ts";
 import type { DaemonConfig } from "../src/daemon/config.ts";
 import { type Coordinator, createCoordinator } from "../src/daemon/coordinator.ts";
@@ -12,14 +12,13 @@ import { signNodeToken } from "../src/core/auth/index.ts";
 import type { ProblemDetails } from "../src/core/error.ts";
 import {
   acquireLease,
-  createBuild,
-  createEnvironment,
-  createProject,
-  getEnvironment,
+  createApplication,
+  createDeployment,
+  getApplication,
   readJson,
   registerNode,
 } from "../src/core/registry/index.ts";
-import { coordinatorKey, environmentKey } from "../src/core/registry/paths.ts";
+import { applicationKey, coordinatorKey } from "../src/core/registry/paths.ts";
 import type { CoordinatorLease, NodeRecord } from "../src/core/types/registry.ts";
 import type { Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
@@ -28,15 +27,17 @@ import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
 const SELF = "node-a";
 const OTHER = "node-b";
 const OPERATOR = "operator-1";
-const PROJECT = "app";
-const ENVIRONMENT = "preview";
-const BUILD = "b1b1b1b1";
+const APPLICATION = "shop-preview";
+const VERSION = "b1b1b1b1";
 const TTL_MS = 15_000;
 
 /** Where node-b says it is reached; what a forwarded request must be addressed to. */
 const OTHER_ADDRESS = { internal: "10.0.0.5", apiPort: 7500 };
 
-const DELETE_PATH = `/v1/environments/${PROJECT}/${ENVIRONMENT}`;
+const DELETE_PATH = `/v1/applications/${APPLICATION}`;
+/* The application was never retired, so the deletions carried out here — rather
+   than forwarded — are the forced ones an operator asks for outright. */
+const FORCED_DELETE_PATH = `${DELETE_PATH}?force=1`;
 
 /** One forwarded request, as the stub recorded it. */
 interface Forwarded {
@@ -55,7 +56,7 @@ let answerWith: Response;
 beforeEach(async () => {
   clock = ctxWith(new MemoryCasStore());
   forwarded = [];
-  answerWith = jsonResponse(200, { deleted: [environmentKey(PROJECT, ENVIRONMENT)] });
+  answerWith = jsonResponse(200, { deleted: [applicationKey(APPLICATION)] });
 
   selfKeys = await generateJWK("EdDSA", { kid: SELF });
   operatorKeys = await generateJWK("EdDSA", { kid: OPERATOR });
@@ -63,40 +64,35 @@ beforeEach(async () => {
   await registerNode(clock.ctx, nodeRecord(OTHER, "b".repeat(43), OTHER_ADDRESS));
   await registerNode(clock.ctx, nodeRecord(OPERATOR, operatorKeys.publicKey.x, OTHER_ADDRESS));
 
-  await createProject(clock.ctx, { slug: PROJECT });
-  await createEnvironment(clock.ctx, PROJECT, {
-    name: ENVIRONMENT,
-    ephemeral: true,
-  });
-  await createBuild(clock.ctx, PROJECT, { id: BUILD });
-  await recordDeployment(clock.ctx, PROJECT, ENVIRONMENT, BUILD);
+  await createApplication(clock.ctx, { name: APPLICATION });
+  await createDeployment(clock.ctx, APPLICATION, { version: VERSION });
+  await recordRevision(clock.ctx, APPLICATION, VERSION);
 });
 
-describe("DELETE /v1/environments/:project/:env", () => {
+describe("DELETE /v1/applications/:name", () => {
   it("deletes on the spot when this node is the coordinator", async () => {
     const { app, coordinator } = await nodeApp();
     await coordinator.runOnce();
     expect(coordinator.status().holding).toBe(true);
 
-    const response = await app.request(DELETE_PATH, {
+    const response = await app.request(FORCED_DELETE_PATH, {
       method: "DELETE",
       headers: await operatorBearer(),
     });
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({
-      deleted: [environmentKey(PROJECT, ENVIRONMENT)],
-    });
+    const body = (await response.json()) as { deleted: string[] };
+    expect(body.deleted).toContain(applicationKey(APPLICATION));
     /* Nothing was forwarded: the node the operator asked was the right one. */
     expect(forwarded).toEqual([]);
-    await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, ENVIRONMENT), "not-found");
+    await rejectsWith(() => getApplication(clock.ctx, APPLICATION), "not-found");
   });
 
   it("takes the lease and does the work when nobody is coordinating yet", async () => {
     const { app } = await nodeApp();
     expect(await readJson<CoordinatorLease>(clock.ctx, coordinatorKey())).toBeNull();
 
-    const response = await app.request(DELETE_PATH, {
+    const response = await app.request(FORCED_DELETE_PATH, {
       method: "DELETE",
       headers: await operatorBearer(),
     });
@@ -107,7 +103,7 @@ describe("DELETE /v1/environments/:project/:env", () => {
     expect(forwarded).toEqual([]);
     const lease = await readJson<CoordinatorLease>(clock.ctx, coordinatorKey());
     expect(lease?.value.node).toBe(SELF);
-    await rejectsWith(() => getEnvironment(clock.ctx, PROJECT, ENVIRONMENT), "not-found");
+    await rejectsWith(() => getApplication(clock.ctx, APPLICATION), "not-found");
   });
 
   it("forwards to the coordinator with a token it signed itself", async () => {
@@ -122,7 +118,7 @@ describe("DELETE /v1/environments/:project/:env", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
-      deleted: [environmentKey(PROJECT, ENVIRONMENT)],
+      deleted: [applicationKey(APPLICATION)],
     });
 
     expect(forwarded).toHaveLength(1);
@@ -145,9 +141,9 @@ describe("DELETE /v1/environments/:project/:env", () => {
     expect(claimsOf(sent).sub).not.toBe(claimsOf(callerToken).sub);
     expect(claimsOf(sent).jti).not.toBe(claimsOf(callerToken).jti);
 
-    /* The environment is the coordinator's to delete; this node touched nothing. */
-    await expect(getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toMatchObject({
-      name: ENVIRONMENT,
+    /* The application is the coordinator's to delete; this node touched nothing. */
+    await expect(getApplication(clock.ctx, APPLICATION)).resolves.toMatchObject({
+      name: APPLICATION,
     });
   });
 
@@ -156,7 +152,7 @@ describe("DELETE /v1/environments/:project/:env", () => {
     await givenCoordinatorIs(OTHER);
     const problem: ProblemDetails = {
       type: "urn:scafo:invalid-input",
-      title: "Environment is not ephemeral",
+      title: "Application is not retired",
       status: 409,
       detail: "the coordinator's own words",
     };
@@ -202,8 +198,8 @@ describe("DELETE /v1/environments/:project/:env", () => {
        the caller is told so instead of getting a 200 that deleted nothing. */
     expect(response.status).toBe(503);
     expect(problem.type).toBe("urn:scafo:draining");
-    await expect(getEnvironment(clock.ctx, PROJECT, ENVIRONMENT)).resolves.toMatchObject({
-      name: ENVIRONMENT,
+    await expect(getApplication(clock.ctx, APPLICATION)).resolves.toMatchObject({
+      name: APPLICATION,
     });
   });
 
@@ -294,7 +290,7 @@ async function nodeApp(opts?: {
     nodeId: SELF,
     registry: clock.ctx,
     supervisor: idleSupervisor(),
-    version: "0.0.0-test",
+    versions: { scafo: "0.0.0-test", celld: "0.5.0" },
     fetchFn: stubFetch,
   };
   if (opts?.signingKey !== false) daemon.signingKey = selfKeys.privateKey;
@@ -373,6 +369,8 @@ function daemonConfig(): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
+      portRangeEnd: 42_998,
+      portQuarantineMs: 600_000,
       bindHost: "127.0.0.1",
     },
     observability: { enabled: false },
@@ -387,6 +385,7 @@ function idleSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: () => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

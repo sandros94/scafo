@@ -5,6 +5,7 @@ import type { DaemonConfig } from "../daemon/config.ts";
 import { advertisedAddress, parseHostPort } from "../daemon/config.ts";
 import { isScafoError, ScafoError } from "../core/error.ts";
 import { updateJson } from "../core/registry/cas.ts";
+import { hintingStore } from "../core/registry/changes.ts";
 import { nowIso, type RegistryContext } from "../core/registry/context.ts";
 import { drainNode, registerNode, registerNodeIfAbsent } from "../core/registry/nodes.ts";
 import { nodeKey } from "../core/registry/paths.ts";
@@ -15,7 +16,6 @@ import { createUns3Store } from "../drivers/store/uns3.ts";
 import { loadOrCreateNodeState, type NodeState } from "./_node-state.ts";
 import { loadOrCreateIngressToken, writeIngressToken } from "./_ingress-token.ts";
 import { resolveDefaultStateDir } from "./_utils.ts";
-import { readVarsetKeyFile } from "./_varset-key.ts";
 import {
   readWireguardKeys,
   resolveWireguardSettings,
@@ -24,23 +24,33 @@ import {
   wireguardStateDir,
 } from "./_wireguard.ts";
 
-/** The registry this node reads and writes, as configured. */
+/**
+ * The registry this node reads and writes, as configured.
+ *
+ * Every context is built here, for the daemon and for the CLI alike, and every
+ * one of them HINTS: a write under an application, placement or domain prefix
+ * mints a fresh change token, so a `scafo app retire` run straight against the
+ * bucket reaches the fleet within a reconcile pass exactly as a deploy through a
+ * node does. See {@link hintingStore} for what a lost hint costs.
+ */
 export function createRegistry(config: DaemonConfig): RegistryContext {
   return {
-    store: createUns3Store(
-      new S3Client({
-        endpoint: config.bucket.endpoint,
-        region: config.bucket.region,
-        credentials: {
-          accessKeyId: config.bucket.accessKey,
-          secretAccessKey: config.bucket.secretKey,
-        },
-        /* Self-hosted S3 implementations are addressed by path; virtual-host
-           style needs per-bucket DNS that a single store rarely has. */
-        bucketStyle: "path",
-        defaultBucket: config.bucket.bucket,
-      }),
-      { bucket: config.bucket.bucket, prefix: config.bucket.prefix },
+    store: hintingStore(
+      createUns3Store(
+        new S3Client({
+          endpoint: config.bucket.endpoint,
+          region: config.bucket.region,
+          credentials: {
+            accessKeyId: config.bucket.accessKey,
+            secretAccessKey: config.bucket.secretKey,
+          },
+          /* Self-hosted S3 implementations are addressed by path; virtual-host
+             style needs per-bucket DNS that a single store rarely has. */
+          bucketStyle: "path",
+          defaultBucket: config.bucket.bucket,
+        }),
+        { bucket: config.bucket.bucket, prefix: config.bucket.prefix },
+      ),
     ),
   };
 }
@@ -197,9 +207,9 @@ export interface RegisterNodeOptions extends NodeRecordOptions {
  * The VERSIONS it started with are written here for the same reason, and are
  * only ever written here: a heartbeat says a node is still there, not what it is
  * running, so a record's versions are what its daemon booted with until it boots
- * again. That is also what makes a rolling Celld upgrade visible — a node that
- * has been restarted says so, and one that has not still says what it started
- * with.
+ * again. That is also what the rest of the fleet reads to tell which machines
+ * are still on the old binary — a node that has been restarted says so, and one
+ * that has not still says what it started with.
  *
  * The node's LABELS are written here for the same reason, and REPLACED here for
  * a sharper one: they are boot configuration rather than runtime state, so the
@@ -250,7 +260,7 @@ export const DRAIN_ATTEMPTS: number = 3;
  * that crashed, and a crash is only noticed once the node's heartbeat has aged
  * past the liveness window — ninety seconds during which the coordinator still
  * counts it among the nodes it hands work to, and its single-replica
- * environments are placed on a process that is already gone. A node that writes
+ * applications are placed on a process that is already gone. A node that writes
  * this down is counted out on the coordinator's very next assignment pass.
  *
  * BEST EFFORT, and NEVER throws: the node is leaving either way, and a bucket
@@ -318,16 +328,6 @@ export async function publishWireguard(
     wireguard: opts.wireguard,
   }));
   return updated.value;
-}
-
-/**
- * The key this node opens its environments' variables with, or undefined when no
- * key file is configured. A node without one may only serve environments that
- * point at no varset.
- */
-export async function loadVarsetKey(config: DaemonConfig): Promise<CryptoKey | undefined> {
-  const keyFile = config.varsets?.keyFile;
-  return keyFile === undefined ? undefined : readVarsetKeyFile(keyFile);
 }
 
 /** The specifics a scafo failure carries are the useful half; keep both. */

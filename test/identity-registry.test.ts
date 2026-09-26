@@ -10,7 +10,14 @@ import {
 } from "../src/core/registry/operators.ts";
 import { identityKey, nodeKey, operatorKey } from "../src/core/registry/paths.ts";
 import type { IdentityReservation, NodeRecord } from "../src/core/types/registry.ts";
-import type { ByteRange, CasHeaders, CasStore, StoredObject } from "../src/core/types/store.ts";
+import type {
+  ByteRange,
+  CasHeaders,
+  CasStore,
+  StoredEntry,
+  StoredHead,
+  StoredObject,
+} from "../src/core/types/store.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
 import { ctxWith, rejectsWith } from "./_helpers.ts";
 
@@ -21,8 +28,11 @@ describe("identity reservations", () => {
     const store = new MemoryCasStore();
     const { ctx } = ctxWith(store);
     const admin = operator("admin-a", "admin");
-    const peer = operator("peer-a", "operator", { projects: ["acme"] });
-    const caller = operator("caller-a", "operator", { projects: ["acme"], supersedes: "admin-a" });
+    const peer = operator("peer-a", "operator", { applications: ["acme"] });
+    const caller = operator("caller-a", "operator", {
+      applications: ["acme"],
+      supersedes: "admin-a",
+    });
 
     for (const record of [admin, peer, caller]) await trustOperator(ctx, record);
     const before = new Map<string, Uint8Array>();
@@ -33,7 +43,7 @@ describe("identity reservations", () => {
     await expect(trustOperator(ctx, admin)).resolves.toEqual(admin);
     for (const changed of [
       { ...admin, publicKey: key("changed-admin") },
-      { ...peer, projects: ["globex"] },
+      { ...peer, applications: ["globex"] },
       { ...caller, supersedes: "peer-a" },
     ]) {
       await rejectsWith(() => trustOperator(ctx, changed), "reference-held");
@@ -198,6 +208,9 @@ class ReservationBarrierStore implements CasStore {
   getBytes(key: string, opts?: { range: ByteRange }): Promise<Uint8Array | null> {
     return this.#inner.getBytes(key, opts);
   }
+  head(key: string): Promise<StoredHead | null> {
+    return this.#inner.head(key);
+  }
   async put(key: string, body: string | Uint8Array, cas?: CasHeaders): Promise<{ etag: string }> {
     if (key === identityKey(ID) && cas?.ifNoneMatch === "*") {
       this.#arrived++;
@@ -211,5 +224,8 @@ class ReservationBarrierStore implements CasStore {
   }
   list(prefix: string): Promise<string[]> {
     return this.#inner.list(prefix);
+  }
+  listEntries(prefix: string): Promise<StoredEntry[]> {
+    return this.#inner.listEntries(prefix);
   }
 }

@@ -2,28 +2,21 @@
 
 import { S3Client } from "uns3";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { recordDeployment } from "../../src/core/registry/_deployment.ts";
+import { recordRevision } from "../../src/core/registry/_revision.ts";
 import {
   acquireLease,
   checkDomain,
   claimDomain,
-  createBuild,
-  createEnvironment,
-  createProject,
-  getVarsetEnvelope,
-  importVarsetKey,
+  createApplication,
+  createDeployment,
   initRegistry,
   type LeaseHandle,
-  listProjects,
-  openVarset,
+  listApplications,
   probeStore,
-  putVarset,
   readMeta,
   type RegistryContext,
   releaseDomain,
   renewLease,
-  sealVarset,
-  setEnvironmentVarset,
 } from "../../src/core/registry/index.ts";
 import type { CasStore } from "../../src/core/types/store.ts";
 import { createUns3Store } from "../../src/drivers/store/uns3.ts";
@@ -134,8 +127,8 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
     });
 
     it("answers a ranged read with that range and nothing else", async () => {
-      /* What celld asks of the bucket since 0.4.1: a bucket that ignores
-         `Range` and hands back the whole object stops the runtime process. */
+      /* What celld asks of the bucket: one that ignores `Range` and hands back
+         the whole object stops the runtime process. */
       const key = `v1/range-${randomHex(4)}.json`;
       await store.put(key, `{"probe":3}`);
 
@@ -156,6 +149,62 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
         `v1/list-${run}/b.json`,
         `v1/list-${run}/nested/c.json`,
       ]);
+    });
+
+    it("says when each listed object was written, which is the only age prune has", async () => {
+      const run = randomHex(4);
+      const wroteAt = Date.now();
+      await store.put(`v1/aged-${run}/a.json`, "{}");
+
+      const entries = await store.listEntries(`v1/aged-${run}/`);
+
+      expect(entries.map((entry) => entry.key)).toEqual([`v1/aged-${run}/a.json`]);
+      const at = entries[0]?.lastModified?.getTime();
+      expect(at, "the store reported no usable modification time").toBeDefined();
+      /* Bucket clocks are their own; a minute either way is still this write. */
+      expect(Math.abs((at ?? 0) - wroteAt)).toBeLessThan(60_000);
+    });
+
+    it("answers a HEAD for a key it lists, and nothing for one it does not", async () => {
+      /* The third read, and the only one that asks the store ABOUT an object
+         rather than for it. `scafo app lease` exists because those answers can
+         disagree — a key listed and HEAD-able whose GET is a 404 — and it can
+         only report the disagreement against a store that answers this at all. */
+      const run = randomHex(4);
+      const key = `v1/head-${run}/a.json`;
+      const written = await store.put(key, `{"n":1}`);
+
+      const head = await store.head(key);
+
+      expect(head, "the store answered no HEAD for a key it had just written").not.toBeNull();
+      expect(head?.etag).toBe(written.etag);
+      expect(head?.size).toBe(7);
+      expect(Math.abs((head?.lastModified?.getTime() ?? 0) - Date.now())).toBeLessThan(60_000);
+
+      await expect(store.head(`v1/head-${run}/missing.json`)).resolves.toBeNull();
+    });
+
+    it("lists the same ETag a read answers with, and moves it only on a rewrite", async () => {
+      /* The whole of change detection rests on this: a pass holding a listing and
+         a cache of ETags reads only the keys whose ETag moved. A store that
+         listed a different spelling of the same ETag would make every record
+         look changed on every pass; one that never moved it would hide writes. */
+      const run = randomHex(4);
+      const key = `v1/etag-${run}/a.json`;
+      const written = await store.put(key, `{"n":1}`);
+
+      const listed = await store.listEntries(`v1/etag-${run}/`);
+      expect(listed.map((entry) => entry.key)).toEqual([key]);
+      expect(listed[0]?.etag).toBe(written.etag);
+      expect(listed[0]?.etag).toBe((await store.get(key))?.etag);
+
+      /* Listed again with nothing written in between: the same value. */
+      expect((await store.listEntries(`v1/etag-${run}/`))[0]?.etag).toBe(written.etag);
+
+      const rewritten = await store.put(key, `{"n":2}`);
+      const after = await store.listEntries(`v1/etag-${run}/`);
+      expect(after[0]?.etag).toBe(rewritten.etag);
+      expect(after[0]?.etag).not.toBe(written.etag);
     });
   });
 
@@ -215,39 +264,25 @@ describe.skipIf(ENDPOINT === "")("the uns3 store against a live bucket", () => {
     it(
       "bootstraps, deploys, configures and releases",
       async () => {
-        const project = `smoke${randomHex(3)}`;
-        const buildId = randomHex(8);
-        const host = `${project}.example.test`;
+        const application = `smoke${randomHex(3)}`;
+        const version = randomHex(8);
+        const host = `${application}.example.test`;
 
         const meta = await initRegistry(ctx, { platformDomains: ["apps.example.test"] });
         expect(meta.platformDomains).toEqual(["apps.example.test"]);
         await expect(readMeta(ctx)).resolves.toMatchObject({ v: 1 });
 
-        await createProject(ctx, { slug: project });
-        await expect(listProjects(ctx)).resolves.toContain(project);
+        await createApplication(ctx, { name: application });
+        await expect(listApplications(ctx)).resolves.toContain(application);
 
-        const build = await createBuild(ctx, project, { id: buildId });
-        expect(build.id).toBe(buildId);
+        const deployment = await createDeployment(ctx, application, { version });
+        expect(deployment.version).toBe(version);
 
-        await createEnvironment(ctx, project, { name: "prod" });
-        const flipped = await recordDeployment(ctx, project, "prod", buildId);
-        expect(flipped.environment.deployment).toMatchObject({ revision: 1 });
+        const flipped = await recordRevision(ctx, application, version);
+        expect(flipped.application.deployment).toMatchObject({ revision: 1 });
 
-        const key = await importVarsetKey(crypto.getRandomValues(new Uint8Array(32)));
-        const sealed = await sealVarset({ TOKEN: { value: "s3cr3t", secret: true } }, key);
-        await putVarset(ctx, project, sealed);
-        await expect(
-          openVarset(await getVarsetEnvelope(ctx, project, sealed.id), key),
-        ).resolves.toEqual({ TOKEN: { value: "s3cr3t", secret: true } });
-
-        const configured = await setEnvironmentVarset(ctx, project, "prod", sealed.id);
-        expect(configured.varset).toBe(sealed.id);
-
-        await claimDomain(ctx, host, project, "prod");
-        await expect(checkDomain(ctx, host)).resolves.toMatchObject({
-          project,
-          environment: "prod",
-        });
+        await claimDomain(ctx, host, application);
+        await expect(checkDomain(ctx, host)).resolves.toMatchObject({ application });
 
         await releaseDomain(ctx, host);
         await expect(checkDomain(ctx, host)).resolves.toBeNull();

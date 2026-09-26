@@ -47,7 +47,7 @@ const NODE_B = "node-b";
 const NODE_C = "node-c";
 
 /** What a booting daemon has just read about itself and about the binary it runs. */
-const VERSIONS = { scafo: "0.0.0", celld: "0.4.1" };
+const VERSIONS = { scafo: "0.0.0", celld: "0.5.0" };
 
 const roots: string[] = [];
 
@@ -298,11 +298,16 @@ describe("what `scafo sail` reads back, and what it will not do", () => {
 });
 
 describe("the addresses a tunnelled node uses", () => {
-  it("binds its runtime processes to the tunnel and advertises itself there", async () => {
+  it("binds its runtime processes to the tunnel and advertises itself there, on the port the operator configured", async () => {
     const config = await tunnelConfig({ SCAFO_LISTEN: "0.0.0.0:7400" });
 
     expect(config.runtime.bindHost).toBe("10.83.0.1");
     expect(config.node.advertise).toBe("10.83.0.1:7400");
+
+    /* The port comes from the listener, not from the default. */
+    const moved = await tunnelConfig({ SCAFO_LISTEN: "0.0.0.0:7401" });
+
+    expect(moved.node.advertise).toBe("10.83.0.1:7401");
   });
 
   it("puts the daemon listener on the tunnel too, so what it advertises is bound", async () => {
@@ -324,12 +329,6 @@ describe("the addresses a tunnelled node uses", () => {
       );
       expect(error.detail, address).toContain("wireguard.address");
     }
-  });
-
-  it("takes the port from the listener the operator configured, not the default", async () => {
-    const config = await tunnelConfig({ SCAFO_LISTEN: "0.0.0.0:7401" });
-
-    expect(config.node.advertise).toBe("10.83.0.1:7401");
   });
 
   it("still lets the operator say otherwise, on either", async () => {

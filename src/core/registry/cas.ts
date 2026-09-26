@@ -1,5 +1,6 @@
 /* JSON documents over the conditional-write store: read, create, update, delete. */
 
+import { safeJsonParse } from "unsecure/sanitize";
 import { ScafoError } from "../error.ts";
 import type { CasHeaders } from "../types/store.ts";
 import { type RetryOptions, withRetry } from "../utils/backoff.ts";
@@ -25,7 +26,9 @@ export async function readJson<T>(ctx: RegistryContext, key: string): Promise<Ve
 
   let value: T;
   try {
-    value = JSON.parse(object.body) as T;
+    /* A stored document is text from the bucket, and every record here is keyed
+       by data: it is read without the keys an object answers for on its own. */
+    value = safeJsonParse<T>(object.body);
   } catch (error) {
     throw new ScafoError("store-nonconforming", "Stored object is not valid JSON", {
       detail: `"${key}" could not be parsed`,

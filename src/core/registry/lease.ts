@@ -13,11 +13,23 @@ export interface LeaseHandle {
   etag: string;
 }
 
-export const DEFAULT_LEASE_TTL_MS: number = 15_000;
+/**
+ * How long a lease claims authority for when the caller states nothing.
+ *
+ * FORTY-FIVE SECONDS BUYS BACK NO FAILOVER TIME AND CUTS THE IDLE WRITES TO A
+ * THIRD. What a dead coordinator held is only reassigned once the fleet has
+ * decided the node is gone, and that decision is the liveness window —
+ * ninety seconds of missed heartbeats. Both clocks start at the same death, so
+ * any lease lifetime up to that window expires while the fleet is still waiting
+ * to notice, and shortening it only makes the holder write more often: the lease
+ * is renewed at a third of this, forever, on an installation where nothing is
+ * happening.
+ */
+export const DEFAULT_LEASE_TTL_MS: number = 45_000;
 
 /**
  * What long lease-gated work calls at its safe points — between two
- * environments, before a deletion — to keep the lease from expiring under it.
+ * applications, before a deletion — to keep the lease from expiring under it.
  * Answers the handle to fence and verify with from then on: the same one when
  * no renewal was due, a renewed one otherwise. Throws `ScafoError("lease-lost")`
  * when the renewal fails, at which point the work must stop writing.
@@ -45,42 +57,49 @@ export async function acquireLease(
 ): Promise<LeaseHandle | null> {
   const key = coordinatorKey();
   const ttlMs = opts?.ttlMs ?? DEFAULT_LEASE_TTL_MS;
+  /* What this call wrote, kept so a refusal can be checked against the record. */
+  let written: CoordinatorLease | undefined;
 
   try {
     const current = await readJson<CoordinatorLease>(ctx, key);
     if (current === null) {
-      const lease: CoordinatorLease = {
-        v: 1,
-        node: nodeId,
-        acquiredAt: nowIso(ctx),
-        ttlMs,
-        fence: 1,
-      };
-      const { etag } = await createJson(ctx, key, lease);
-      return { lease, etag };
+      written = { v: 1, node: nodeId, acquiredAt: nowIso(ctx), ttlMs, fence: 1 };
+      const { etag } = await createJson(ctx, key, written);
+      return { lease: written, etag };
     }
 
     const held = current.value;
     if (held.node !== nodeId && !isLeaseExpired(held, nowDate(ctx))) return null;
 
-    const lease: CoordinatorLease = {
-      v: 1,
-      node: nodeId,
-      acquiredAt: nowIso(ctx),
-      ttlMs,
-      fence: held.fence + 1,
-    };
-    const { etag } = await putJson(ctx, key, lease, { ifMatch: current.etag });
-    return { lease, etag };
+    written = { v: 1, node: nodeId, acquiredAt: nowIso(ctx), ttlMs, fence: held.fence + 1 };
+    const { etag } = await putJson(ctx, key, written, { ifMatch: current.etag });
+    return { lease: written, etag };
   } catch (error) {
-    if (isCasConflict(error)) return null;
-    throw error;
+    if (!isCasConflict(error)) throw error;
+    if (written === undefined) return null;
+
+    /* A refusal may be the repeat of a write that landed unanswered: the store
+       driver repeats a write the store did not answer, and the repeat is refused
+       by its own precondition. Node, fence and moment together name the write. */
+    const after = await readJson<CoordinatorLease>(ctx, key);
+    if (after === null) return null;
+    const stored = after.value;
+    const ours =
+      stored.node === written.node &&
+      stored.fence === written.fence &&
+      stored.acquiredAt === written.acquiredAt;
+    return ours ? { lease: stored, etag: after.etag } : null;
   }
 }
 
 /**
  * Extends the lease in place: same fence, fresh `acquiredAt`. Throws
  * `ScafoError("lease-lost")` when someone else has written the lease since.
+ *
+ * A refused write is not on its own proof of that. The store driver repeats a
+ * write the store failed to answer, and a repeat of one that had silently landed
+ * is refused by its own precondition — so the record, not the answer to the
+ * write, is what says whether this node is still the coordinator.
  */
 export async function renewLease(ctx: RegistryContext, handle: LeaseHandle): Promise<LeaseHandle> {
   const lease: CoordinatorLease = { ...handle.lease, acquiredAt: nowIso(ctx) };
@@ -89,9 +108,29 @@ export async function renewLease(ctx: RegistryContext, handle: LeaseHandle): Pro
     const { etag } = await putJson(ctx, coordinatorKey(), lease, { ifMatch: handle.etag });
     return { lease, etag };
   } catch (error) {
-    if (isCasConflict(error)) throw leaseLost(handle, error);
-    throw error;
+    if (!isCasConflict(error)) throw error;
+    const held = await stillHeld(ctx, handle);
+    if (held === null) throw leaseLost(handle, error);
+    return held;
   }
+}
+
+/**
+ * The lease as it stands when it is still this handle's — the same node at the
+ * same fence — or null when anyone else has written it.
+ *
+ * Node and fence together name one tenancy: every acquisition raises the fence,
+ * so no other holder, and no later run of this one, can ever write the pair this
+ * handle carries. The ETag cannot answer the question: a renewal that landed
+ * without being acknowledged left an ETag this caller was never told.
+ */
+async function stillHeld(ctx: RegistryContext, handle: LeaseHandle): Promise<LeaseHandle | null> {
+  const current = await readJson<CoordinatorLease>(ctx, coordinatorKey());
+  if (current === null) return null;
+
+  const lease = current.value;
+  if (lease.node !== handle.lease.node || lease.fence !== handle.lease.fence) return null;
+  return { lease, etag: current.etag };
 }
 
 /**
@@ -108,10 +147,19 @@ export async function releaseLease(ctx: RegistryContext, handle: LeaseHandle): P
   }
 }
 
-/** True while `handle` is still the lease's current version. */
+/**
+ * True while the TENANCY `handle` names still holds the lease: the same node, at
+ * the same fence, and not run out.
+ *
+ * A renewal rewrites the record and keeps the tenancy, so work that was handed
+ * the lease before one — a deletion walking a large application — goes on
+ * holding it; judged by the record's version instead, anything outlasting a
+ * coordinator tick would be refused by the very node carrying it out. Taking
+ * the lease — by another node once it has run out, or by this one again — moves
+ * the fence, and that is what ends a tenancy.
+ */
 export async function verifyLease(ctx: RegistryContext, handle: LeaseHandle): Promise<boolean> {
-  const current = await readJson<CoordinatorLease>(ctx, coordinatorKey());
-  return current !== null && current.etag === handle.etag;
+  return (await stillHeld(ctx, handle)) !== null;
 }
 
 function leaseLost(handle: LeaseHandle, cause: unknown): ScafoError {

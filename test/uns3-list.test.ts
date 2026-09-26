@@ -3,7 +3,7 @@
 import { S3Error, type S3Client } from "uns3";
 import { describe, expect, it } from "vitest";
 import { createUns3Store } from "../src/drivers/store/uns3.ts";
-import { rejectsWith } from "./_helpers.ts";
+import { rejectionOf, rejectsWith } from "./_helpers.ts";
 
 type GetParams = Parameters<S3Client["get"]>[0];
 type ListParams = Parameters<S3Client["list"]>[0];
@@ -11,10 +11,38 @@ type ListPage = Awaited<ReturnType<S3Client["list"]>>;
 
 function pageOf(keys: string[], more: Partial<ListPage> = {}): ListPage {
   return {
-    contents: keys.map((key) => ({ key, size: 0, etag: undefined, lastModified: "" })),
+    contents: keys.map((key) => ({ key, size: 0, etag: `e-${key}`, lastModified: "" })),
     commonPrefixes: [],
     isTruncated: false,
     ...more,
+  } as ListPage;
+}
+
+/** A page whose objects carry the times the store reported for them. */
+function agedPage(times: Record<string, string>): ListPage {
+  return {
+    contents: Object.entries(times).map(([key, lastModified]) => ({
+      key,
+      size: 0,
+      etag: `e-${key}`,
+      lastModified,
+    })),
+    commonPrefixes: [],
+    isTruncated: false,
+  } as ListPage;
+}
+
+/** A page whose objects carry exactly the ETags the store sent, warts included. */
+function etaggedPage(etags: Record<string, string | undefined>): ListPage {
+  return {
+    contents: Object.entries(etags).map(([key, etag]) => ({
+      key,
+      size: 0,
+      etag,
+      lastModified: "2026-01-01T00:00:00.000Z",
+    })),
+    commonPrefixes: [],
+    isTruncated: false,
   } as ListPage;
 }
 
@@ -61,10 +89,92 @@ describe("listing across pages", () => {
   it("refuses a truncated page it has no way to walk past, rather than answering short", async () => {
     const { client } = scripted([pageOf(["p/a.json"], { isTruncated: true })]);
 
-    await rejectsWith(
-      () => createUns3Store(client, { bucket: "b", prefix: "p" }).list(""),
+    const error = await rejectionOf(() =>
+      createUns3Store(client, { bucket: "b", prefix: "p" }).list(""),
+    );
+
+    expect(error.code).toBe("store-nonconforming");
+  });
+});
+
+describe("listing what the store said about each object", () => {
+  it("carries the modification time of every key, across pages and without the prefix", async () => {
+    const { client } = scripted([
+      {
+        ...agedPage({ "p/a.json": "2026-01-01T00:00:00.000Z" }),
+        isTruncated: true,
+        nextContinuationToken: "t1",
+      } as ListPage,
+      agedPage({ "p/b.json": "2026-01-02T03:04:05.000Z" }),
+    ]);
+
+    const entries = await createUns3Store(client, { bucket: "b", prefix: "p" }).listEntries("");
+
+    expect(entries).toEqual([
+      {
+        key: "a.json",
+        etag: `"e-p/a.json"`,
+        lastModified: new Date("2026-01-01T00:00:00.000Z"),
+        size: 0,
+      },
+      {
+        key: "b.json",
+        etag: `"e-p/b.json"`,
+        lastModified: new Date("2026-01-02T03:04:05.000Z"),
+        size: 0,
+      },
+    ]);
+  });
+
+  it("leaves the time out rather than inventing one the store did not send", async () => {
+    const { client } = scripted([agedPage({ "p/a.json": "", "p/b.json": "whenever" })]);
+
+    const entries = await createUns3Store(client, { bucket: "b", prefix: "p" }).listEntries("");
+
+    expect(entries).toEqual([
+      { key: "a.json", etag: `"e-p/a.json"`, size: 0 },
+      { key: "b.json", etag: `"e-p/b.json"`, size: 0 },
+    ]);
+  });
+
+  it("quotes a listed ETag the way a header carries one, weak marker taken off", async () => {
+    /* The XML listing hands over the value with its quotes already stripped, and
+       a weak marker `If-Match` would refuse. Both are normalized to the one form
+       `get` and `put` answer with, so a cached listing entry is a precondition. */
+    const { client } = scripted([
+      etaggedPage({
+        "p/bare.json": "abc123",
+        "p/quoted.json": `"abc124"`,
+        "p/weak.json": `W/abc125`,
+      }),
+    ]);
+
+    const entries = await createUns3Store(client, { bucket: "b", prefix: "p" }).listEntries("");
+
+    expect(entries.map((entry) => entry.etag)).toEqual([`"abc123"`, `"abc124"`, `"abc125"`]);
+  });
+
+  it("refuses a listing that named no ETag, because nothing could tell a change from none", async () => {
+    const { client } = scripted([etaggedPage({ "p/a.json": undefined })]);
+
+    const error = await rejectsWith(
+      () => createUns3Store(client, { bucket: "b", prefix: "p" }).listEntries(""),
       "store-nonconforming",
     );
+    expect(error.detail).toContain("p/a.json");
+  });
+
+  it("skips the folder phantoms a file-backed store lists, exactly as the keys do", async () => {
+    const { client } = scripted([
+      agedPage({
+        "p/nested/": "2026-01-01T00:00:00.000Z",
+        "p/nested/a.json": "2026-01-01T00:00:00.000Z",
+      }),
+    ]);
+
+    const entries = await createUns3Store(client, { bucket: "b", prefix: "p" }).listEntries("");
+
+    expect(entries.map((entry) => entry.key)).toEqual(["nested/a.json"]);
   });
 });
 

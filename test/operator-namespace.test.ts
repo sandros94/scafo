@@ -19,15 +19,14 @@ import { listFleetNodes } from "../src/cli/_nodes.ts";
 import type { OperatorRecord } from "../src/core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
+import { ctxWith, type ManualClock, rejectsWith, TEST_VERSIONS } from "./_helpers.ts";
 
 const NODE_ID = "node-a";
 /** Where the machine answers. Nothing an operator-facing refusal may ever say. */
 const NODE_ADDRESS = "10.42.7.19";
 const OPERATOR_ID = "op-aaaa1111";
 const SECOND_ID = "op-bbbb2222";
-const PROJECT = "acme";
-const VERSION = "0.0.0-test";
+const APPLICATION = "acme";
 
 let clock: ManualClock;
 
@@ -202,7 +201,7 @@ describe("the record a fleet trusts", () => {
       publicKey: publicHalf(),
       role: "operator",
       supersedes: OPERATOR_ID,
-      projects: [PROJECT],
+      applications: [APPLICATION],
     };
     await trustOperator(clock.ctx, wanted);
 
@@ -242,7 +241,7 @@ function nodeApp(): ReturnType<typeof createNodeApp> {
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: idleSupervisor(),
-    version: VERSION,
+    versions: TEST_VERSIONS,
   });
 }
 
@@ -260,6 +259,8 @@ function daemonConfig(): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
+      portRangeEnd: 42_998,
+      portQuarantineMs: 600_000,
       bindHost: "127.0.0.1",
     },
     observability: { enabled: false },
@@ -273,6 +274,7 @@ function idleSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: (): ProcessStatus[] => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

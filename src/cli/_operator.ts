@@ -1,8 +1,8 @@
 /* Resolves an operator remote and signing key. Ambiguity prompts interactively
    and is refused otherwise. */
 
-import { type JSONCParseError, parseJSONC } from "confbox";
 import { DEFAULT_CONFIG_PATHS } from "../daemon/config.ts";
+import { parseJsoncDocument } from "../daemon/_jsonc.ts";
 import { ScafoError } from "../core/error.ts";
 import { getRemote, readRemoteKey, readRemotes } from "./_remotes.ts";
 import {
@@ -148,12 +148,13 @@ export async function resolveRemote(
     detail:
       `this operator's home holds ${String(names.length)} remotes (${names.join(", ")}) and ` +
       `nothing said which one to act on: pass --remote <name>, set ${SCAFO_REMOTE_ENV}, or pin ` +
-      `one for this project with { "remote": "<name>" } in ./scafo.config.jsonc — that pin ` +
+      `one for this project directory with { "remote": "<name>" } in ./scafo.config.jsonc — ` +
+      `that pin ` +
       `holds no secret and belongs in the repository`,
   });
 }
 
-/** The remote a project pinned, read out of the config file beside it. */
+/** The remote a project directory pinned, read out of the config file beside it. */
 export async function readRemotePin(opts: ResolveOperatorOptions): Promise<string | undefined> {
   const read = opts.readFile ?? readTextFile;
   const explicit = text(opts.flags.config);
@@ -162,9 +163,9 @@ export async function readRemotePin(opts: ResolveOperatorOptions): Promise<strin
     const contents = await read(path);
     if (contents === null) continue;
 
-    const errors: JSONCParseError[] = [];
-    const parsed: unknown = parseJSONC(contents, { errors, allowTrailingComma: true });
-    if (errors.length > 0) return undefined;
+    const document = parseJsoncDocument(contents);
+    if ("error" in document) return undefined;
+    const parsed = document.value;
     if (typeof parsed !== "object" || parsed === null) return undefined;
 
     const pinned = (parsed as { remote?: unknown }).remote;

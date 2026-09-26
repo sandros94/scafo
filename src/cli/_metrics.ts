@@ -9,10 +9,9 @@ import {
 import { counterRecords, type ObserveRecord } from "../daemon/observe-records.ts";
 import type { ObserveWindow } from "./_observe-read.ts";
 
-/** What one environment was served over the window. */
+/** What one application was served over the window. */
 export interface MetricsRow {
-  project: string;
-  env: string;
+  application: string;
   requests: number;
   /** Response body bytes, as the ingress reported them. */
   bytes: number;
@@ -28,7 +27,7 @@ export interface MetricsSummary {
   /** Window read, as ISO-8601 instants. */
   since: string;
   until: string;
-  /** One row per {project, environment}, sorted by project then environment. */
+  /** One row per application, sorted by name. */
   rows: MetricsRow[];
   /** Every row added up. */
   totals: MetricsRow;
@@ -39,19 +38,16 @@ export interface MetricsSummary {
 }
 
 export interface MetricsFilter {
-  project?: string;
-  env?: string;
+  application?: string;
 }
 
 /** Reserved non-slug row for hosts not held by this installation. */
 export const UNMATCHED: string = "(unmatched)";
 
-/** Registry names used to verify counted project/environment attribution. */
+/** Registry names used to verify counted attribution. */
 export interface MetricsNaming {
-  /** Every project the registry holds. */
-  projects: ReadonlySet<string>;
-  /** The environments of each project, by project. */
-  environments: ReadonlyMap<string, ReadonlySet<string>>;
+  /** Every application the registry holds. */
+  applications: ReadonlySet<string>;
 }
 
 export interface MetricsOptions extends MetricsFilter {
@@ -59,28 +55,21 @@ export interface MetricsOptions extends MetricsFilter {
   naming?: MetricsNaming;
 }
 
-/** Counted project names, excluding {@link UNATTRIBUTED}. */
-export function projectsCounted(records: readonly ObserveRecord[]): string[] {
+/** Counted application names, excluding {@link UNATTRIBUTED}. */
+export function applicationsCounted(records: readonly ObserveRecord[]): string[] {
   const named = new Set<string>();
   for (const record of counterRecords(records)) {
-    if (record.project !== UNATTRIBUTED) named.add(record.project);
+    if (record.application !== UNATTRIBUTED) named.add(record.application);
   }
   return [...named].sort(compare);
 }
 
-/** Resolves counted attribution; unknown names map to {@link UNMATCHED}. */
-export function attributionOf(
-  counted: { project: string; env: string },
-  naming: MetricsNaming,
-): { project: string; env: string } {
-  /* Never promote an unknown project name. */
-  if (!naming.projects.has(counted.project)) return { project: UNMATCHED, env: UNMATCHED };
-
-  if (naming.environments.get(counted.project)?.has(counted.env) === true) return counted;
-  return { project: UNMATCHED, env: UNMATCHED };
+/** Resolves counted attribution; a name the registry does not hold is {@link UNMATCHED}. */
+export function attributionOf(counted: string, naming: MetricsNaming): string {
+  return naming.applications.has(counted) ? counted : UNMATCHED;
 }
 
-/** Reduces window counters to one row per resolved project/environment. */
+/** Reduces window counters to one row per resolved application. */
 export function summarizeMetrics(
   records: readonly ObserveRecord[],
   window: ObserveWindow,
@@ -91,9 +80,11 @@ export function summarizeMetrics(
   let samples = 0;
 
   for (const record of counterRecords(records)) {
-    const named = opts.naming === undefined ? record : attributionOf(record, opts.naming);
-    if (opts.project !== undefined && named.project !== opts.project) continue;
-    if (opts.env !== undefined && named.env !== opts.env) continue;
+    const named =
+      opts.naming === undefined
+        ? record.application
+        : attributionOf(record.application, opts.naming);
+    if (opts.application !== undefined && named !== opts.application) continue;
 
     samples++;
     nodes.add(record.node);
@@ -101,11 +92,10 @@ export function summarizeMetrics(
        landing in one row are still differenced apart: each is its own monotonic
        series on that node, and subtracting one from the other would be
        arithmetic across two counters. */
-    const key = [record.node, record.project, record.env, record.since].join("\u0000");
+    const key = [record.node, record.application, record.since].join("\u0000");
     const sample: MetricsSample = {
       node: record.node,
-      project: named.project,
-      env: named.env,
+      application: named,
       requests: record.requests,
       bytes: record.bytes,
       status: record.status,
@@ -126,22 +116,19 @@ export function summarizeMetrics(
     /* A run that BEGAN inside the window has no baseline outside it: everything
        it counted, it counted here. Anything else is the difference. */
     const baseline = run.since >= window.sinceMs ? null : run.first;
-    const row = rowFor(rows, run.last.project, run.last.env);
+    const row = rowFor(rows, run.last.application);
     addDelta(row, run.last, baseline);
 
-    const seen = contributors.get(`${row.project}/${row.env}`) ?? new Set<string>();
+    const seen = contributors.get(row.application) ?? new Set<string>();
     seen.add(run.last.node);
-    contributors.set(`${row.project}/${row.env}`, seen);
+    contributors.set(row.application, seen);
   }
 
   const ordered = [...rows.values()]
-    .map((row) => ({
-      ...row,
-      nodes: [...(contributors.get(`${row.project}/${row.env}`) ?? [])].sort(),
-    }))
-    .sort((a, b) => compare(`${a.project}/${a.env}`, `${b.project}/${b.env}`));
+    .map((row) => ({ ...row, nodes: [...(contributors.get(row.application) ?? [])].sort() }))
+    .sort((a, b) => compare(a.application, b.application));
 
-  const totals = emptyRow("", "");
+  const totals = emptyRow("");
   for (const row of ordered) addRow(totals, row);
   totals.nodes = [...nodes].sort();
 
@@ -156,16 +143,16 @@ export function summarizeMetrics(
 }
 
 /**
- * The summary as a table: one line per environment, then the totals.
+ * The summary as a table: one line per application, then the totals.
  *
  * The latency columns are BANDS rather than interpolated percentiles, because
  * bands are what was counted — `<=100ms` says the median request finished inside
  * the 100ms band and nothing more precise is knowable from seven counters.
  */
 export function formatMetrics(summary: MetricsSummary): string {
-  const header = ["PROJECT", "ENV", "REQUESTS", "BYTES", "2XX", "3XX", "4XX", "5XX", "P50", "P95"];
-  const body = summary.rows.map((row) => cells(row.project, row.env, row));
-  const totals = cells("TOTAL", "", summary.totals);
+  const header = ["APPLICATION", "REQUESTS", "BYTES", "2XX", "3XX", "4XX", "5XX", "P50", "P95"];
+  const body = summary.rows.map((row) => cells(row.application, row));
+  const totals = cells("TOTAL", summary.totals);
 
   const rows = [header, ...body, totals];
   const widths = header.map((_, column) =>
@@ -174,15 +161,15 @@ export function formatMetrics(summary: MetricsSummary): string {
   const rendered = rows.map((row) =>
     row
       .map((cell, column) =>
-        /* The two name columns read left to right; every number is compared
-           against the one above it, which only works right-aligned. */
-        column < 2 ? cell.padEnd(widths[column]) : cell.padStart(widths[column]),
+        /* The name column reads left to right; every number is compared against
+           the one above it, which only works right-aligned. */
+        column === 0 ? cell.padEnd(widths[column]) : cell.padStart(widths[column]),
       )
       .join("  ")
       .trimEnd(),
   );
 
-  /* A rule before the totals, so a fleet with one environment cannot be misread
+  /* A rule before the totals, so a fleet with one application cannot be misread
      as having its total counted twice. */
   rendered.splice(rendered.length - 1, 0, "-".repeat(rendered[0].length));
   return rendered.join("\n");
@@ -228,11 +215,10 @@ export function bandAt(durations: readonly number[], share: number): string {
 
 /* ------------------------------------------------------------------ internal */
 
-/** One node's totals for one environment at one moment. */
+/** One node's totals for one application at one moment. */
 interface MetricsSample {
   node: string;
-  project: string;
-  env: string;
+  application: string;
   requests: number;
   bytes: number;
   status: StatusClassCounts;
@@ -241,10 +227,9 @@ interface MetricsSample {
 
 const STATUS_CLASSES: (keyof StatusClassCounts)[] = ["2xx", "3xx", "4xx", "5xx", "other"];
 
-function emptyRow(project: string, env: string): MetricsRow {
+function emptyRow(application: string): MetricsRow {
   return {
-    project,
-    env,
+    application,
     requests: 0,
     bytes: 0,
     status: { "2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0, "other": 0 },
@@ -253,13 +238,12 @@ function emptyRow(project: string, env: string): MetricsRow {
   };
 }
 
-function rowFor(rows: Map<string, MetricsRow>, project: string, env: string): MetricsRow {
-  const key = `${project}/${env}`;
-  const found = rows.get(key);
+function rowFor(rows: Map<string, MetricsRow>, application: string): MetricsRow {
+  const found = rows.get(application);
   if (found !== undefined) return found;
 
-  const created = emptyRow(project, env);
-  rows.set(key, created);
+  const created = emptyRow(application);
+  rows.set(application, created);
   return created;
 }
 
@@ -293,10 +277,9 @@ function addRow(into: MetricsRow, row: MetricsRow): void {
   }
 }
 
-function cells(project: string, env: string, row: MetricsRow): string[] {
+function cells(application: string, row: MetricsRow): string[] {
   return [
-    project,
-    env,
+    application,
     String(row.requests),
     bytes(row.bytes),
     String(row.status["2xx"]),

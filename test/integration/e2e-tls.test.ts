@@ -1,6 +1,12 @@
 /*
  * End-to-end TLS storage: Caddy uses only the node storage URL and token; shared storage reuses
  * the certificate. The user-defined network resolves the challenge hostname to Caddy.
+ *
+ * THE SITE IS THE FLEET'S OWN NAME. The storage module routes a certificate to
+ * the fleet whose routing document names its domain and writes a name nobody
+ * owns nowhere, so the site is this node's platform apex: the one host a node
+ * publishes with nothing deployed. The ACME account names no domain and stays
+ * on each Caddy's own disk.
  */
 
 import { X509Certificate } from "node:crypto";
@@ -27,7 +33,6 @@ import {
   NODE_IMAGE,
   BOOT_DEADLINE_MS,
   type BucketSettings,
-  buildRepo,
   type CommandResult,
   DEADLINE_MS,
   registryAt,
@@ -106,7 +111,8 @@ const BUCKET: BucketSettings = {
   region: "us-east-1",
 };
 
-const PLATFORM_DOMAIN = "scafo.test";
+/** The site itself, so that the fleet's routing document names it. */
+const PLATFORM_DOMAIN = SITE;
 const NODE_ID = "node-e2e-tls";
 
 /** How certmagic's key space names the two things this suite looks for. */
@@ -152,8 +158,6 @@ interface Caddy {
 
 describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () => {
   beforeAll(async () => {
-    await buildRepo();
-
     network = await new Network().start();
     store = await startStore(BUCKET);
     registry = registryAt(store.fromHost, BUCKET);
@@ -190,7 +194,7 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
     daemon = await new GenericContainer(NODE_IMAGE)
       .withNetwork(network)
       .withNetworkAliases(NODE_ALIAS)
-      .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "rw" }])
+      .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "ro" }])
       .withWorkingDir("/work")
       .withEnvironment({
         ...storeEnv(store.fromContainers, BUCKET),
@@ -220,6 +224,25 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
 
     apiPort = daemon.getMappedPort(NODE_PORT);
     ingressToken = await readIngressToken();
+
+    /* Caddy starts issuing for the site at boot, and a name no document it
+       holds yet names is a name its storage refuses to write: wait out the
+       node's first reconcile pass, the one window it answers 503. */
+    await until(
+      "the node to publish its routing document",
+      DEADLINE_MS,
+      async () => {
+        const routes = await send(
+          apiPort,
+          "/v1/ingress/routes",
+          "GET",
+          { authorization: `Bearer ${ingressToken}` },
+          undefined,
+        );
+        return routes.status === 200 ? true : null;
+      },
+      { context: () => daemonLogTail() },
+    );
 
     caddies.push(await startCaddy("caddy-a", SITE));
   }, SETUP_TIMEOUT_MS);
@@ -290,7 +313,7 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
   );
 
   it(
-    "kept every byte of that issuance in the bucket, through the node",
+    "kept every byte of that certificate in the bucket, through the node, and no ACME account",
     async () => {
       const keys = await storageList();
       const certificates = keys.filter((key) => key.startsWith(CERTIFICATES_PREFIX));
@@ -298,7 +321,9 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
 
       expect(certificates.some((key) => key.endsWith(".crt"))).toBe(true);
       expect(certificates.some((key) => key.endsWith(".key"))).toBe(true);
-      expect(account.some((key) => key.endsWith(".key"))).toBe(true);
+      /* The account is the ingress's, not the fleet's: in a fleet's bucket it
+         would let that fleet act as this ingress towards its CA. */
+      expect(account, JSON.stringify(keys)).toEqual([]);
 
       const certKey = certificates.find((key) => key.endsWith(".crt"));
       expect(certKey, `no certificate among ${JSON.stringify(keys)}`).toBeDefined();
@@ -384,13 +409,13 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
          logged IS the evidence — and the presence of a Caddy that provisioned at
          all is the evidence that both modules resolved.
 
-         Exactly one failure is expected here, and it is correct: a node refuses
+         At most one failure is expected here, and it is correct: a node refuses
          both routing routes with 503 `urn:scafo:draining` until its first
          reconcile pass has finished, because `{"v":1,"routes":[]}` would tell a
-         poller the fleet answers on nothing. This Caddy polls every second and
-         starts beside a node that has just booted, so its first poll may land
-         inside that window — the cold line, once, carrying that 503, and then
-         the recovery line as soon as the pass lands.
+         poller the fleet answers on nothing. The suite waits that window out
+         before starting Caddy, but a poll that still lands inside it is the cold
+         line, once, carrying that 503, and then the recovery line as soon as the
+         pass lands.
 
          Anything else fails: a warm failure is a document that WAS known and a
          later poll refused, and a cold failure that is not that 503 is the
@@ -487,7 +512,8 @@ async function startCaddy(name: string, alias: string): Promise<Caddy> {
  * both ports, but leaving the HTTP one enabled means the first attempt goes to a
  * port this server does not listen on, which costs a retry and proves nothing.
  *
- * BOTH MODULES, ON ONE TOKEN AND ONE ENDPOINT. The routing half is here not
+ * BOTH MODULES, ON ONE FLEET DECLARED ONCE in the `scafo` app, which is the
+ * only place an endpoint and a token are written. The routing half is here not
  * because this suite deploys anything — it deploys nothing — but because that is
  * the whole shape an operator runs, and provisioning it beside the storage half
  * is what proves the two coexist against one daemon rather than only apart.
@@ -496,12 +522,19 @@ function caddyConfig(name: string): string {
   return JSON.stringify(
     {
       /* No admin block: nothing calls Caddy's admin API here, or anywhere. */
-      storage: {
-        module: "scafo",
-        endpoint: `http://${NODE_ALIAS}:${String(NODE_PORT)}`,
-        token_file: TOKEN_IN_CADDY,
-      },
+      storage: { module: "scafo" },
       apps: {
+        scafo: {
+          fleets: [
+            {
+              name: "default",
+              endpoint: `http://${NODE_ALIAS}:${String(NODE_PORT)}`,
+              token_file: TOKEN_IN_CADDY,
+              prefer: "self",
+              poll_interval: "1s",
+            },
+          ],
+        },
         http: {
           servers: {
             scafo: {
@@ -518,13 +551,7 @@ function caddyConfig(name: string): string {
                   handle: [
                     {
                       handler: "reverse_proxy",
-                      dynamic_upstreams: {
-                        source: "scafo",
-                        endpoint: `http://${NODE_ALIAS}:${String(NODE_PORT)}`,
-                        token_file: TOKEN_IN_CADDY,
-                        prefer: "self",
-                        poll_interval: "1s",
-                      },
+                      dynamic_upstreams: { source: "scafo" },
                       load_balancing: { selection_policy: { policy: "first" }, retries: 2 },
                     },
                   ],

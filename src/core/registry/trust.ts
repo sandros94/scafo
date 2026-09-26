@@ -1,32 +1,66 @@
-/* Which CI issuers may deploy a project, and which of their subjects. */
+/* Which CI issuers may deploy an application, and which of their subjects. */
 
 import type { TrustIssuer, TrustPolicy } from "../types/registry.ts";
 import { isCasConflict } from "./_shared.ts";
-import { createJson, requireJson, updateJson } from "./cas.ts";
+import { createJson, readJson, requireJson, updateJson } from "./cas.ts";
 import type { RegistryContext } from "./context.ts";
 import { trustKey } from "./paths.ts";
 
-/** Replaces the project's trust policy, creating it when absent. */
+/** The policy every application starts with: no issuer is trusted. */
+export const EMPTY_TRUST_POLICY: TrustPolicy = { v: 1, issuers: [] };
+
+/**
+ * Replaces the application's trust policy, creating it when absent.
+ *
+ * The policy may be written before the application exists: an admin pre-grants
+ * a name, and the first deploy under it creates the application.
+ */
 export async function setTrustPolicy(
   ctx: RegistryContext,
-  project: string,
+  application: string,
   policy: TrustPolicy,
 ): Promise<TrustPolicy> {
-  const key = trustKey(project);
-
-  try {
-    await createJson(ctx, key, policy);
-    return policy;
-  } catch (error) {
-    if (!isCasConflict(error)) throw error;
-
-    const updated = await updateJson<TrustPolicy>(ctx, key, () => policy);
-    return updated.value;
-  }
+  return updateTrustPolicy(ctx, application, () => policy);
 }
 
-export async function getTrustPolicy(ctx: RegistryContext, project: string): Promise<TrustPolicy> {
-  const found = await requireJson<TrustPolicy>(ctx, trustKey(project));
+/**
+ * Edits the application's trust policy as it stands NOW, creating it when absent.
+ *
+ * `mutate` is handed the stored policy — an empty one when there is none — and
+ * is run again on whatever is there if another edit lands first, so two
+ * operators changing different issuers at once both keep their change. What it
+ * throws refuses the edit and writes nothing.
+ */
+export async function updateTrustPolicy(
+  ctx: RegistryContext,
+  application: string,
+  mutate: (current: TrustPolicy) => TrustPolicy,
+): Promise<TrustPolicy> {
+  const key = trustKey(application);
+
+  /* Read before creating: an edit that refuses an empty policy — taking out an
+     issuer nobody trusted — has to be judged against what is stored, not
+     against the nothing a create would start from. */
+  if ((await readJson<TrustPolicy>(ctx, key)) === null) {
+    try {
+      const created = mutate(EMPTY_TRUST_POLICY);
+      await createJson(ctx, key, created);
+      return created;
+    } catch (error) {
+      /* Someone wrote one in between; edit theirs. */
+      if (!isCasConflict(error)) throw error;
+    }
+  }
+
+  const updated = await updateJson<TrustPolicy>(ctx, key, mutate);
+  return updated.value;
+}
+
+export async function getTrustPolicy(
+  ctx: RegistryContext,
+  application: string,
+): Promise<TrustPolicy> {
+  const found = await requireJson<TrustPolicy>(ctx, trustKey(application));
   return found.value;
 }
 

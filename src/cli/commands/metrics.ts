@@ -1,8 +1,7 @@
 /*
- * `scafo metrics`: what the fleet served over a window, per project and
- * environment.
+ * `scafo metrics`: what the fleet served over a window, per application.
  *
- * Read STRAIGHT OUT OF THE BUCKET, like `scafo trust` and `scafo varset` and for
+ * Read STRAIGHT OUT OF THE BUCKET, like `scafo trust` and for
  * the same reason: the numbers were flushed there by whichever nodes were
  * running at the time, and the nodes that wrote them may well be gone. No node
  * is asked and none has to be up.
@@ -16,8 +15,10 @@ import { type ArgsDef, type CommandDef, defineCommand } from "citty";
 import { loadDaemonConfig } from "../../daemon/config.ts";
 import { counterRecords } from "../../daemon/observe-records.ts";
 import type { RegistryContext } from "../../core/registry/context.ts";
+import { resolveApplication } from "../_application.ts";
 import { createRegistry } from "../_bootstrap.ts";
-import { formatMetrics, noCounters, projectsCounted, summarizeMetrics } from "../_metrics.ts";
+import { configFlags } from "../_flags.ts";
+import { applicationsCounted, formatMetrics, noCounters, summarizeMetrics } from "../_metrics.ts";
 import { readMetricsNaming } from "../_metrics-names.ts";
 import { nothingRecorded, readObservations, windowFrom } from "../_observe-read.ts";
 import { readTextFile, reportFailure } from "../_utils.ts";
@@ -35,8 +36,8 @@ const bucketArgs: ArgsDef = {
 
 const metricsArgs: ArgsDef = {
   ...bucketArgs,
-  project: { type: "string", description: "Only this project" },
-  env: { type: "string", description: "Only this environment" },
+  name: { type: "string", description: "Only this application" },
+  env: { type: "string", description: "Narrow to the application <name>-<env> instead" },
   since: {
     type: "string",
     description: "How far back to read: a duration (90s, 15m, 1h, 7d) or an ISO-8601 instant (1h)",
@@ -45,7 +46,7 @@ const metricsArgs: ArgsDef = {
 };
 
 export const metrics: CommandDef = defineCommand({
-  meta: { name: "metrics", description: "What the fleet served, per project and environment" },
+  meta: { name: "metrics", description: "What the fleet served, per application" },
   args: metricsArgs,
   async run({ args }): Promise<void> {
     try {
@@ -63,13 +64,14 @@ async function runMetrics(flags: Record<string, unknown>): Promise<void> {
 
   const found = await readObservations(registry, { window });
   /* What the counted names ARE, rather than what the counting node guessed they
-     were: a label no project or environment answers to is nobody's. Only the
-     projects this window named are looked up. */
-  const naming = await readMetricsNaming(registry, projectsCounted(found.records));
+     were: a label no application answers to is nobody's. Only the applications
+     this window named are looked up. */
+  const naming = await readMetricsNaming(registry, applicationsCounted(found.records));
   const summary = summarizeMetrics(found.records, window, {
     naming,
-    ...(text(flags.project) === undefined ? {} : { project: text(flags.project) as string }),
-    ...(text(flags.env) === undefined ? {} : { env: text(flags.env) as string }),
+    ...(text(flags.name) === undefined
+      ? {}
+      : { application: resolveApplication({ name: text(flags.name), env: text(flags.env) }) }),
   });
 
   if (flags.json === true) {
@@ -110,7 +112,7 @@ async function runMetrics(flags: Record<string, unknown>): Promise<void> {
 async function registryFor(flags: Record<string, unknown>): Promise<RegistryContext> {
   const config = await loadDaemonConfig({
     configPath: text(flags.config),
-    flags: stringFlags(flags),
+    flags: configFlags(flags),
     env: process.env,
     readFile: readTextFile,
   });
@@ -121,13 +123,4 @@ function text(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed === "" ? undefined : trimmed;
-}
-
-/** The declared flags that were actually given; anything else the parser adds is not configuration. */
-function stringFlags(flags: Record<string, unknown>): Record<string, string | undefined> {
-  const given: Record<string, string | undefined> = {};
-  for (const [name, value] of Object.entries(flags)) {
-    if (typeof value === "string") given[name] = value;
-  }
-  return given;
 }

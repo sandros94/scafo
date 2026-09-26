@@ -12,9 +12,19 @@ STATE=/var/lib/scafo
 LOGS=/var/log/scafo-ingress
 
 echo "== stop the previous roll"
+# STOPPED, then removed: `docker rm -f` alone is a SIGKILL, and a node killed
+# while its runtime processes are writing to the bucket leaves them no chance to
+# finish. The 50 seconds are the shutdown grace every recipe allows.
+docker stop --time 50 scafo-node >/dev/null 2>&1 || true
 docker rm -f scafo-node scafo-caddy >/dev/null 2>&1 || true
 wg-quick down wg0 >/dev/null 2>&1 || true
-rm -rf "$STATE" /etc/wireguard/wg0.conf
+# The tunnel material is the only thing a roll mints again. THE REST OF THE
+# STATE DIRECTORY STAYS: each supervised runtime process keeps its work
+# directory under it, and that directory is the local half of the fleet's
+# durability — a write is acknowledged once a peer holds it there, before the
+# bucket has it, and the process recovers it at boot from the directory its
+# predecessor of the same node name left. Removing it loses those writes.
+rm -f "$STATE/wg-private.key" "$STATE/wg-public.key" /etc/wireguard/wg0.conf
 # The image runs as uid 10001 and both directories are written from inside it.
 install -d -m 0700 "$STATE" && chown 10001:10001 "$STATE"
 install -d -m 0755 "$LOGS" && chown 10001:10001 "$LOGS"
@@ -28,8 +38,11 @@ wg pubkey <"$STATE/wg-private.key" >"$STATE/wg-public.key"
 chown 10001:10001 "$STATE"/wg-*.key
 
 echo "== pull images"
-docker pull -q "$IMAGE"
-docker pull -q "$CADDY_IMAGE"
+# An image no registry has — built here, or loaded with `docker load` — is used as
+# it stands; anything else that cannot be pulled and is not present stops the roll.
+for image in "$IMAGE" "$CADDY_IMAGE"; do
+  docker pull -q "$image" || docker image inspect "$image" >/dev/null
+done
 
 echo "== scafo wg init"
 # Publishes this node's public key and endpoint in the registry and renders an

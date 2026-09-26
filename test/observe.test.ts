@@ -27,20 +27,20 @@ describe("what an event is stamped with", () => {
     const clock = manualClock();
     const observe = createObservability({ enabled: true, now: clock.now });
 
-    observe.emit({ type: "runtime.started", processId: "shop--one" });
+    observe.emit({ type: "runtime.started", application: "shop-one" });
     clock.tick(2_500);
-    observe.emit({ type: "runtime.started", processId: "shop--two" });
+    observe.emit({ type: "runtime.started", application: "shop-two" });
 
     expect(observe.snapshot().events).toEqual([
       {
         at: new Date(CLOCK_START_MS).toISOString(),
         type: "runtime.started",
-        processId: "shop--one",
+        application: "shop-one",
       },
       {
         at: new Date(CLOCK_START_MS + 2_500).toISOString(),
         type: "runtime.started",
-        processId: "shop--two",
+        application: "shop-two",
       },
     ]);
     /* The same clock a span is measured against, so a `durationMs` and the `at`
@@ -53,18 +53,40 @@ describe("what an event is stamped with", () => {
 
     observe.emit({
       type: "placement.pending",
-      project: "shop",
-      env: "preview",
+      application: "shop-preview",
       reason: "placement-unavailable",
     });
 
     expect(observe.snapshot().events[0]).toEqual({
       at: new Date(CLOCK_START_MS).toISOString(),
       type: "placement.pending",
-      project: "shop",
-      env: "preview",
+      application: "shop-preview",
       reason: "placement-unavailable",
     });
+  });
+
+  it("records an administrative block as who acted and the application it was about", () => {
+    const observe = createObservability({ enabled: true, now: manualClock().now });
+
+    observe.emit({ type: "application.blocked", actor: "op-aaaa1111", application: "shop" });
+    /* An application that was never blocked emits the undoing too: an audit
+       records what somebody did, not what it changed. */
+    observe.emit({ type: "application.unblocked", actor: "op-bbbb2222", application: "archive" });
+
+    expect(observe.snapshot().events).toEqual([
+      {
+        at: new Date(CLOCK_START_MS).toISOString(),
+        type: "application.blocked",
+        actor: "op-aaaa1111",
+        application: "shop",
+      },
+      {
+        at: new Date(CLOCK_START_MS).toISOString(),
+        type: "application.unblocked",
+        actor: "op-bbbb2222",
+        application: "archive",
+      },
+    ]);
   });
 });
 
@@ -73,7 +95,7 @@ describe("the ring", () => {
     const observe = createObservability({ enabled: true, ringSize: 4, now: manualClock().now });
 
     for (let index = 0; index < 6; index++) {
-      observe.emit({ type: "runtime.started", processId: `id-${String(index)}` });
+      observe.emit({ type: "runtime.started", application: `id-${String(index)}` });
     }
     const snapshot = observe.snapshot();
 
@@ -87,13 +109,13 @@ describe("the ring", () => {
   it("says nothing was dropped while it has not filled up", () => {
     const observe = createObservability({ enabled: true, ringSize: 4, now: manualClock().now });
 
-    observe.emit({ type: "runtime.started", processId: "one" });
-    observe.emit({ type: "runtime.started", processId: "two" });
+    observe.emit({ type: "runtime.started", application: "one" });
+    observe.emit({ type: "runtime.started", application: "two" });
 
     expect(observe.snapshot()).toEqual({
       events: [
-        { at: new Date(CLOCK_START_MS).toISOString(), type: "runtime.started", processId: "one" },
-        { at: new Date(CLOCK_START_MS).toISOString(), type: "runtime.started", processId: "two" },
+        { at: new Date(CLOCK_START_MS).toISOString(), type: "runtime.started", application: "one" },
+        { at: new Date(CLOCK_START_MS).toISOString(), type: "runtime.started", application: "two" },
       ],
       dropped: 0,
     });
@@ -101,14 +123,14 @@ describe("the ring", () => {
 
   it("does not consume what it hands out: two readers see the same events", () => {
     const observe = createObservability({ enabled: true, ringSize: 4, now: manualClock().now });
-    observe.emit({ type: "runtime.started", processId: "one" });
+    observe.emit({ type: "runtime.started", application: "one" });
 
     const first = observe.snapshot();
     const second = observe.snapshot();
 
     expect(ids(second.events)).toEqual(ids(first.events));
     /* And a snapshot is a copy: pushing to one must not grow the ring. */
-    first.events.push({ at: "", type: "runtime.started", processId: "forged" });
+    first.events.push({ at: "", type: "runtime.started", application: "forged" });
     expect(ids(observe.snapshot().events)).toEqual(["one"]);
   });
 
@@ -116,7 +138,7 @@ describe("the ring", () => {
     const observe = createObservability({ enabled: true, now: manualClock().now });
 
     for (let index = 0; index < OBSERVED_RING_SIZE + 3; index++) {
-      observe.emit({ type: "runtime.started", processId: String(index) });
+      observe.emit({ type: "runtime.started", application: String(index) });
     }
 
     expect(observe.snapshot().events).toHaveLength(OBSERVED_RING_SIZE);
@@ -127,20 +149,20 @@ describe("the ring", () => {
 describe("draining, which is the flusher's reader", () => {
   it("takes what has been emitted since the last drain, and only that", () => {
     const observe = createObservability({ enabled: true, ringSize: 8, now: manualClock().now });
-    observe.emit({ type: "runtime.started", processId: "one" });
-    observe.emit({ type: "runtime.started", processId: "two" });
+    observe.emit({ type: "runtime.started", application: "one" });
+    observe.emit({ type: "runtime.started", application: "two" });
 
     expect(ids(observe.drain().events)).toEqual(["one", "two"]);
     /* Consumed: a second drain of the same events would write them twice. */
     expect(observe.drain().events).toEqual([]);
 
-    observe.emit({ type: "runtime.started", processId: "three" });
+    observe.emit({ type: "runtime.started", application: "three" });
     expect(ids(observe.drain().events)).toEqual(["three"]);
   });
 
   it("leaves the window alone: a snapshot still shows what was drained", () => {
     const observe = createObservability({ enabled: true, ringSize: 8, now: manualClock().now });
-    observe.emit({ type: "runtime.started", processId: "one" });
+    observe.emit({ type: "runtime.started", application: "one" });
 
     observe.drain();
 
@@ -152,7 +174,7 @@ describe("draining, which is the flusher's reader", () => {
   it("counts what fell out of the ring before it could be read, since the last drain", () => {
     const observe = createObservability({ enabled: true, ringSize: 4, now: manualClock().now });
     for (let index = 0; index < 6; index++) {
-      observe.emit({ type: "runtime.started", processId: `id-${String(index)}` });
+      observe.emit({ type: "runtime.started", application: `id-${String(index)}` });
     }
 
     const first = observe.drain();
@@ -163,7 +185,7 @@ describe("draining, which is the flusher's reader", () => {
     /* Since the last DRAIN, never since the seam was made: the flusher records
        each flush's own loss, and a total would be counted again every time. */
     for (let index = 6; index < 11; index++) {
-      observe.emit({ type: "runtime.started", processId: `id-${String(index)}` });
+      observe.emit({ type: "runtime.started", application: `id-${String(index)}` });
     }
     const second = observe.drain();
 
@@ -175,7 +197,7 @@ describe("draining, which is the flusher's reader", () => {
     const observe = createObservability({ enabled: true, ringSize: 4, now: manualClock().now });
 
     for (let round = 0; round < 5; round++) {
-      observe.emit({ type: "runtime.started", processId: `round-${String(round)}` });
+      observe.emit({ type: "runtime.started", application: `round-${String(round)}` });
       expect(observe.drain().dropped).toBe(0);
     }
     /* And the ring itself has forgotten a few by now, which is a different
@@ -189,7 +211,7 @@ describe("a seam that is off", () => {
     const observe = createObservability({ enabled: false, now: manualClock().now });
 
     observe.emit({ type: "reconcile.pass.start", kicked: true });
-    observe.emit({ type: "runtime.started", processId: "one" });
+    observe.emit({ type: "runtime.started", application: "one" });
 
     expect(observe.enabled).toBe(false);
     expect(observe.snapshot()).toEqual({ events: [], dropped: 0 });
@@ -211,5 +233,5 @@ describe("a seam that is off", () => {
 
 /** The identities of the events a case emitted, in order. */
 function ids(events: ObservedEvent[]): string[] {
-  return events.map((event) => ("processId" in event ? event.processId : event.type));
+  return events.map((event) => ("application" in event ? event.application : event.type));
 }

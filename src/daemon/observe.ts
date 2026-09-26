@@ -17,12 +17,11 @@ export type ObservedEvent =
   /* A pass beginning. `kicked` distinguishes an explicitly requested pass from
      one the timer started. */
   | { at: string; type: "reconcile.pass.start"; kicked: boolean }
-  /** A coordinator newly could not place an environment on an eligible live node. */
+  /** A coordinator newly could not place an application on an eligible live node. */
   | {
       at: string;
       type: "placement.pending";
-      project: string;
-      env: string;
+      application: string;
       reason: "placement-unavailable";
     }
   | {
@@ -38,7 +37,7 @@ export type ObservedEvent =
       listOps: number;
       durationMs: number;
     }
-  | { at: string; type: "runtime.started"; processId: string }
+  | { at: string; type: "runtime.started"; application: string }
   /**
    * A key the fleet now trusts, and who said so. THE AUDIT PAIR: `actor` is the
    * key the request was signed with, `subject` the key it was about, and `role`
@@ -65,23 +64,23 @@ export type ObservedEvent =
       role: OperatorRole;
     }
   /**
-   * A project an admin has stopped, and who stopped it. THE OTHER AUDIT PAIR:
-   * `actor` is the key the request was signed with, and the SUBJECT is the
-   * project rather than another key, so it lands in the `project` column the
-   * counter records already use.
+   * An application an admin has stopped, and who stopped it. THE OTHER AUDIT
+   * PAIR: `actor` is the key the request was signed with, and the SUBJECT is the
+   * application rather than another key, so it lands in the `application` column
+   * the counter records already use.
    *
-   * Emitted by the `/v1/projects` routes and by nothing else. A block written
-   * straight to the bucket has no daemon in the picture and is covered by the
-   * bucket's own access log, exactly as the operator ceremony is.
+   * Emitted by the `/v1/applications` routes and by nothing else. A block
+   * written straight to the bucket has no daemon in the picture and is covered
+   * by the bucket's own access log, exactly as the operator ceremony is.
    *
    * WHY it was blocked is not recorded, because core is not told: the policy
    * that decided lives downstream, and a reason field here would be a place for
    * one platform's invoice numbers to end up in another's audit trail.
    */
-  | { at: string; type: "project.blocked"; actor: string; project: string }
-  /** The same act undone. A project that was never blocked emits one too: the
-      call was made, and what an audit records is what somebody did. */
-  | { at: string; type: "project.unblocked"; actor: string; project: string };
+  | { at: string; type: "application.blocked"; actor: string; application: string }
+  /** The same act undone. An application that was never blocked emits one too:
+      the call was made, and what an audit records is what somebody did. */
+  | { at: string; type: "application.unblocked"; actor: string; application: string };
 
 /** An event as a caller writes it; the emitter stamps {@link ObservedEvent.at}. */
 export type ObservedEventInput = WithoutAt<ObservedEvent>;

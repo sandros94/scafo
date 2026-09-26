@@ -13,7 +13,14 @@
  */
 
 import type { RegistryContext } from "./context.ts";
-import type { ByteRange, CasHeaders, CasStore, StoredObject } from "../types/store.ts";
+import type {
+  ByteRange,
+  CasHeaders,
+  CasStore,
+  StoredEntry,
+  StoredHead,
+  StoredObject,
+} from "../types/store.ts";
 
 /** Store operations dispatched, by kind, since the counter was created. */
 export interface StoreOpCounts {
@@ -64,6 +71,12 @@ export function createCountingStore(inner: CasStore): CountingStore {
       return inner.getBytes(key, opts);
     },
 
+    /* A metadata read is a round trip like any other, and costs what one costs. */
+    head(key: string): Promise<StoredHead | null> {
+      counts.get++;
+      return inner.head(key);
+    },
+
     put(key: string, body: string, cas?: CasHeaders): Promise<{ etag: string }> {
       counts.put++;
       return inner.put(key, body, cas);
@@ -77,6 +90,12 @@ export function createCountingStore(inner: CasStore): CountingStore {
     list(prefix: string): Promise<string[]> {
       counts.list++;
       return inner.list(prefix);
+    },
+
+    /* The same round trips a plain listing costs, and counted as one. */
+    listEntries(prefix: string): Promise<StoredEntry[]> {
+      counts.list++;
+      return inner.listEntries(prefix);
     },
 
     counts: (): StoreOpCounts => ({ ...counts }),

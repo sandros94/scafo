@@ -1,6 +1,21 @@
 import { S3Error, type S3Client } from "uns3";
 import { ScafoError } from "../../core/error.ts";
-import type { ByteRange, CasStore, StoredObject } from "../../core/types/store.ts";
+import type {
+  ByteRange,
+  CasStore,
+  StoredEntry,
+  StoredHead,
+  StoredObject,
+} from "../../core/types/store.ts";
+import { withRetry } from "../../core/utils/backoff.ts";
+
+/**
+ * How many tries a write gets, and the first step of the jittered wait between
+ * them, doubled at each one — the same range a read-modify-write gives a
+ * conditional write it lost.
+ */
+const WRITE_ATTEMPTS = 5;
+const WRITE_BASE_MS = 50;
 
 export interface Uns3StoreOptions {
   bucket: string;
@@ -43,6 +58,32 @@ export function createUns3Store(client: S3Client, opts: Uns3StoreOptions): CasSt
     }
   };
 
+  /** Every object under a prefix, fully paginated, sorted by key. */
+  const listEntries = async (keyPrefix: string): Promise<StoredEntry[]> => {
+    const entries: StoredEntry[] = [];
+    const prefix = toObjectKey(keyPrefix);
+    let next: { continuationToken: string } | { query: { marker: string } } | undefined;
+
+    do {
+      const page = await client.list({ bucket, prefix, ...next });
+      for (const object of page.contents) {
+        /* File-backed stores materialize the folders between keys and list
+           them as zero-byte entries ending in `/` — phantoms this store
+           never wrote, which a caller iterating keys must never meet. */
+        if (object.key.endsWith("/")) continue;
+        entries.push({
+          key: toStoreKey(object.key),
+          etag: listedEtag(object.etag, object.key),
+          ...modifiedAt(object.lastModified),
+          ...sizeOf(object.size),
+        });
+      }
+      next = nextPage(page, prefix);
+    } while (next !== undefined);
+
+    return entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  };
+
   return {
     async get(key: string): Promise<StoredObject | null> {
       const objectKey = toObjectKey(key);
@@ -59,21 +100,46 @@ export function createUns3Store(client: S3Client, opts: Uns3StoreOptions): CasSt
       return new Uint8Array(await response.arrayBuffer());
     },
 
+    async head(key: string): Promise<StoredHead | null> {
+      const objectKey = toObjectKey(key);
+      let response: Response;
+      try {
+        response = await client.head({ bucket, key: objectKey });
+      } catch (error) {
+        if (statusOf(error) === 404) return null;
+        throw error;
+      }
+
+      /* NOTHING IS DEMANDED OF THIS ANSWER. Every other read here refuses a
+         store that left an ETag out, because a write is conditioned on it; a
+         `HEAD` is asked only to find out what the store claims about a key whose
+         other reads disagree, and an answer missing a header is the finding. */
+      const etag = response.headers.get("etag");
+      const declared = response.headers.get("content-length");
+      return {
+        ...(etag === null ? {} : { etag: etag.startsWith("W/") ? etag.slice(2) : etag }),
+        ...sizeOf(declared === null ? undefined : Number(declared)),
+        ...modifiedAt(response.headers.get("last-modified") ?? undefined),
+      };
+    },
+
     async put(key, body, cas): Promise<{ etag: string }> {
       const objectKey = toObjectKey(key);
       let response: Response;
       try {
-        response = await client.put({
-          bucket,
-          key: objectKey,
-          body,
-          /* Every record this registry keeps is JSON; the one thing written as
-             bytes is an encoding that is not text at all, and claiming JSON for it
-             would be a lie the bucket then serves to whatever reads it. */
-          contentType: typeof body === "string" ? "application/json" : "application/octet-stream",
-          ifMatch: cas?.ifMatch,
-          ifNoneMatch: cas?.ifNoneMatch,
-        });
+        response = await repeatWrite("put", objectKey, () =>
+          client.put({
+            bucket,
+            key: objectKey,
+            body,
+            /* Every record this registry keeps is JSON; the one thing written as
+               bytes is an encoding that is not text at all, and claiming JSON for it
+               would be a lie the bucket then serves to whatever reads it. */
+            contentType: typeof body === "string" ? "application/json" : "application/octet-stream",
+            ifMatch: cas?.ifMatch,
+            ifNoneMatch: cas?.ifNoneMatch,
+          }),
+        );
       } catch (error) {
         /* Some S3-compatible stores answer create-conflicts with 409 instead of 412. */
         const status = statusOf(error);
@@ -87,33 +153,65 @@ export function createUns3Store(client: S3Client, opts: Uns3StoreOptions): CasSt
     },
 
     async del(key: string): Promise<void> {
+      const objectKey = toObjectKey(key);
       try {
-        await client.del({ bucket, key: toObjectKey(key) });
+        await repeatWrite("delete", objectKey, () => client.del({ bucket, key: objectKey }));
       } catch (error) {
         if (statusOf(error) !== 404) throw error;
       }
     },
 
     async list(keyPrefix: string): Promise<string[]> {
-      const keys: string[] = [];
-      const prefix = toObjectKey(keyPrefix);
-      let next: { continuationToken: string } | { query: { marker: string } } | undefined;
-
-      do {
-        const page = await client.list({ bucket, prefix, ...next });
-        for (const object of page.contents) {
-          /* File-backed stores materialize the folders between keys and list
-             them as zero-byte entries ending in `/` — phantoms this store
-             never wrote, which a caller iterating keys must never meet. */
-          if (object.key.endsWith("/")) continue;
-          keys.push(toStoreKey(object.key));
-        }
-        next = nextPage(page, prefix);
-      } while (next !== undefined);
-
-      return keys.sort();
+      return (await listEntries(keyPrefix)).map((entry) => entry.key);
     },
+
+    listEntries,
   };
+}
+
+/**
+ * A listed ETag in the form {@link etagOf} answers a response header with, so a
+ * listing and a `get` of the same key compare equal.
+ *
+ * TWO NORMALIZATIONS, because the two sources say the same value differently.
+ * The XML listing carries `<ETag>` with its quotes already taken off by the S3
+ * client, while a header keeps them; and either may carry a weak marker, which
+ * `If-Match` never accepts. Stripping the marker and putting the quoting back is
+ * what makes a cached listing entry usable as a precondition.
+ *
+ * Throws `ScafoError("store-nonconforming")` when the listing named no ETag at
+ * all: change detection is impossible without one, and a caller that took the
+ * absence for "unchanged" would never read a record again.
+ */
+function listedEtag(etag: string | undefined, objectKey: string): string {
+  if (etag === undefined || etag === "") {
+    throw new ScafoError("store-nonconforming", "The store listed an object without an ETag", {
+      detail: `"${objectKey}" was listed without an ETag, so a change to it cannot be detected`,
+    });
+  }
+  const strong = etag.startsWith("W/") ? etag.slice(2) : etag;
+  return strong.startsWith(`"`) && strong.endsWith(`"`) ? strong : `"${strong}"`;
+}
+
+/**
+ * The listing's own timestamp as a date, or nothing at all when the store sent
+ * one that does not read as a time. A missing age is not an old object: a caller
+ * that deletes past an age reads the absence as too young to touch.
+ */
+function modifiedAt(lastModified: string | undefined): { lastModified?: Date } {
+  if (lastModified === undefined) return {};
+  const at = Date.parse(lastModified);
+  return Number.isFinite(at) ? { lastModified: new Date(at) } : {};
+}
+
+/**
+ * The length the store declared, or nothing when it declared none or said
+ * something that is not a count of bytes. Nothing here acts on a size; it is
+ * shown to an operator, and a made-up number would be worse than a blank.
+ */
+function sizeOf(size: number | undefined): { size?: number } {
+  if (size === undefined || !Number.isSafeInteger(size) || size < 0) return {};
+  return { size };
 }
 
 /**
@@ -166,4 +264,79 @@ function casConflict(objectKey: string, cause?: unknown): ScafoError {
     detail: "the object changed since it was read",
     cause,
   });
+}
+
+/**
+ * Runs one write, repeating the failures the S3 client will not repeat itself.
+ *
+ * That client retries GET and HEAD and nothing else, which is the only safe
+ * default it can hold: it cannot know whether repeating a write is harmless.
+ * Here it is known. Every record this registry writes is written under a
+ * precondition, so a repeat of a write that had silently landed is refused by
+ * that precondition rather than applied twice, and a caller handed a refusal
+ * already reads the record back before it writes again. The single write that
+ * carries no precondition is the observation flush, whose bytes are
+ * last-writer-wins and say the same thing however often they land.
+ *
+ * A precondition failure is never repeated: that is the store answering, and the
+ * answer is final. Only a store that did not answer is asked again.
+ */
+async function repeatWrite<T>(
+  operation: string,
+  objectKey: string,
+  write: () => Promise<T>,
+): Promise<T> {
+  let tries = 0;
+  try {
+    return await withRetry(
+      async () => {
+        tries++;
+        return await write();
+      },
+      { attempts: WRITE_ATTEMPTS, baseMs: WRITE_BASE_MS, isRetryable: isUnanswered },
+    );
+  } catch (error) {
+    if (!isUnanswered(error)) throw error;
+    throw storeUnavailable(operation, objectKey, tries, error);
+  }
+}
+
+/**
+ * Whether the store failed to answer, rather than answered a refusal. The
+ * statuses are the transient ones — a rate limit, or a server-side failure other
+ * than the two that say the request is one this store will never serve.
+ */
+function isUnanswered(error: unknown): boolean {
+  if (error instanceof S3Error) {
+    if (error.status === 429) return true;
+    return error.status >= 500 && error.status !== 501 && error.status !== 505;
+  }
+  /* What `fetch` throws when nothing came back at all: a TypeError carrying the
+     transport failure underneath it, and never a status. */
+  return error instanceof TypeError && error.cause !== undefined;
+}
+
+function storeUnavailable(
+  operation: string,
+  objectKey: string,
+  tries: number,
+  cause: unknown,
+): ScafoError {
+  const answer =
+    cause instanceof S3Error
+      ? `HTTP ${String(cause.status)}${s3Specifics(cause)}`
+      : `no answer (${cause instanceof Error ? cause.message : String(cause)})`;
+
+  return new ScafoError("store-unavailable", "Store did not answer", {
+    detail: `${operation} of "${objectKey}" failed with ${answer} after ${String(tries)} attempts`,
+    cause,
+  });
+}
+
+/** What the store called the failure, for an operator reading its own logs. */
+function s3Specifics(error: S3Error): string {
+  const named: string[] = [];
+  if (error.code !== undefined) named.push(error.code);
+  if (error.requestId !== undefined) named.push(`request ${error.requestId}`);
+  return named.length === 0 ? "" : ` (${named.join(", ")})`;
 }

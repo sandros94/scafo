@@ -5,6 +5,18 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_PORT_QUARANTINE_MS,
+  DEFAULT_PORT_RANGE_START,
+  defaultPortRangeEnd,
+} from "../src/core/placement/ports.ts";
+import { DEFAULT_LEASE_TTL_MS } from "../src/core/registry/lease.ts";
+import {
+  DEFAULT_NODE_REFRESH_INTERVAL_MS,
+  DEFAULT_REGISTRY_RESYNC_MS,
+} from "../src/core/registry/view.ts";
+import { DEFAULT_REAP_INTERVAL_MS } from "../src/daemon/coordinator.ts";
+import {
+  type DaemonConfig,
   DEFAULT_JSON_BYTES,
   DEFAULT_BIND_HOST,
   DEFAULT_CONFIG_PATHS,
@@ -17,12 +29,13 @@ import {
   runtimeDialHost,
 } from "../src/daemon/config.ts";
 import { DEFAULT_ARCHIVE_ENTRIES, DEFAULT_ARTIFACT_BYTES } from "../src/core/types/deploy.ts";
+import { ENV_NAME_RULE, RESERVED_ENV_NAMES } from "../src/core/utils/env.ts";
 import {
   DEFAULT_ACTIVE_TASKS,
   DEFAULT_OUTPUT_BYTES,
-  DEFAULT_PROJECT_ACTIVE_TASKS,
-  DEFAULT_PROJECT_QUEUED_TASKS,
-  DEFAULT_PROJECT_STAGED_BYTES,
+  DEFAULT_APPLICATION_ACTIVE_TASKS,
+  DEFAULT_APPLICATION_QUEUED_TASKS,
+  DEFAULT_APPLICATION_STAGED_BYTES,
   DEFAULT_QUEUED_TASKS,
   DEFAULT_QUEUE_TIMEOUT_MS,
   DEFAULT_RECEIVE_TIMEOUT_MS,
@@ -44,11 +57,11 @@ const CONFIG_PATH = "/etc/scafo/scafo.config.jsonc";
 function schedulerValues(config: DeployConfig): number[] {
   return [
     config.activeTasks,
-    config.projectActiveTasks,
+    config.applicationActiveTasks,
     config.queuedTasks,
-    config.projectQueuedTasks,
+    config.applicationQueuedTasks,
     config.stagedBytes,
-    config.projectStagedBytes,
+    config.applicationStagedBytes,
     config.receiveTimeoutMs,
     config.queueTimeoutMs,
     config.taskTimeoutMs,
@@ -376,6 +389,15 @@ describe("platform domains", () => {
     expect(config.platformDomains).toEqual(["apps.test", "edge.example.com"]);
   });
 
+  it("takes one whole domain per --platform-domains, the flag repeating", async () => {
+    const config = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_PLATFORM_DOMAINS: "from.env" },
+      flags: { "platform-domains": ["apps.test", "edge.example.com"] },
+    });
+
+    expect(config.platformDomains).toEqual(["apps.test", "edge.example.com"]);
+  });
+
   it("reads a list written as an array in the config file", async () => {
     const config = await loadDaemonConfig({
       configPath: CONFIG_PATH,
@@ -422,6 +444,15 @@ describe("the labels a node carries", () => {
   it("reads the comma syntax a flag and an environment variable carry", async () => {
     const config = await loadDaemonConfig({
       env: { ...REQUIRED_ENV, SCAFO_NODE_LABELS: " tier=fast, region = eu-west-1 ,," },
+    });
+
+    expect(config.node.labels).toEqual({ tier: "fast", region: "eu-west-1" });
+  });
+
+  it("takes one whole pair per --node-labels, the flag repeating", async () => {
+    const config = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_NODE_LABELS: "tier=slow" },
+      flags: { "node-labels": ["tier=fast", "region=eu-west-1"] },
     });
 
     expect(config.node.labels).toEqual({ tier: "fast", region: "eu-west-1" });
@@ -538,11 +569,11 @@ describe("deploy resource limits", () => {
       artifactBytes: DEFAULT_ARTIFACT_BYTES,
       archiveEntries: DEFAULT_ARCHIVE_ENTRIES,
       activeTasks: DEFAULT_ACTIVE_TASKS,
-      projectActiveTasks: DEFAULT_PROJECT_ACTIVE_TASKS,
+      applicationActiveTasks: DEFAULT_APPLICATION_ACTIVE_TASKS,
       queuedTasks: DEFAULT_QUEUED_TASKS,
-      projectQueuedTasks: DEFAULT_PROJECT_QUEUED_TASKS,
+      applicationQueuedTasks: DEFAULT_APPLICATION_QUEUED_TASKS,
       stagedBytes: DEFAULT_STAGED_BYTES,
-      projectStagedBytes: DEFAULT_PROJECT_STAGED_BYTES,
+      applicationStagedBytes: DEFAULT_APPLICATION_STAGED_BYTES,
       receiveTimeoutMs: DEFAULT_RECEIVE_TIMEOUT_MS,
       queueTimeoutMs: DEFAULT_QUEUE_TIMEOUT_MS,
       taskTimeoutMs: DEFAULT_TASK_TIMEOUT_MS,
@@ -613,11 +644,11 @@ describe("deploy resource limits", () => {
       deploy: {
         artifactBytes: 5,
         activeTasks: 3,
-        projectActiveTasks: 2,
+        applicationActiveTasks: 2,
         queuedTasks: 6,
-        projectQueuedTasks: 3,
+        applicationQueuedTasks: 3,
         stagedBytes: 1000,
-        projectStagedBytes: 800,
+        applicationStagedBytes: 800,
         receiveTimeoutMs: 10,
         queueTimeoutMs: 20,
         taskTimeoutMs: 30,
@@ -627,11 +658,11 @@ describe("deploy resource limits", () => {
     const env = {
       ...REQUIRED_ENV,
       SCAFO_ACTIVE_TASKS: "5",
-      SCAFO_PROJECT_ACTIVE_TASKS: "4",
+      SCAFO_APPLICATION_ACTIVE_TASKS: "4",
       SCAFO_QUEUED_TASKS: "8",
-      SCAFO_PROJECT_QUEUED_TASKS: "6",
+      SCAFO_APPLICATION_QUEUED_TASKS: "6",
       SCAFO_STAGED_BYTES: "2000",
-      SCAFO_PROJECT_STAGED_BYTES: "1500",
+      SCAFO_APPLICATION_STAGED_BYTES: "1500",
       SCAFO_RECEIVE_TIMEOUT_MS: "100",
       SCAFO_QUEUE_TIMEOUT_MS: "200",
       SCAFO_TASK_TIMEOUT_MS: "300",
@@ -639,11 +670,11 @@ describe("deploy resource limits", () => {
     };
     const flags = {
       "active-tasks": "7",
-      "project-active-tasks": "6",
+      "application-active-tasks": "6",
       "queued-tasks": "10",
-      "project-queued-tasks": "8",
+      "application-queued-tasks": "8",
       "staged-bytes": "3000",
-      "project-staged-bytes": "2500",
+      "application-staged-bytes": "2500",
       "receive-timeout-ms": "1000",
       "queue-timeout-ms": "2000",
       "task-timeout-ms": "3000",
@@ -675,21 +706,43 @@ describe("deploy resource limits", () => {
 
   it("accepts zero only for queue counts and enforces cross-field bounds", async () => {
     const zero = await loadDaemonConfig({
-      env: { ...REQUIRED_ENV, SCAFO_QUEUED_TASKS: "0", SCAFO_PROJECT_QUEUED_TASKS: "0" },
+      env: { ...REQUIRED_ENV, SCAFO_QUEUED_TASKS: "0", SCAFO_APPLICATION_QUEUED_TASKS: "0" },
     });
-    expect(zero.deploy).toMatchObject({ queuedTasks: 0, projectQueuedTasks: 0 });
+    expect(zero.deploy).toMatchObject({ queuedTasks: 0, applicationQueuedTasks: 0 });
 
-    for (const env of [
-      { SCAFO_ACTIVE_TASKS: "1", SCAFO_PROJECT_ACTIVE_TASKS: "2" },
-      { SCAFO_QUEUED_TASKS: "1", SCAFO_PROJECT_QUEUED_TASKS: "2" },
-      { SCAFO_STAGED_BYTES: "1073741824", SCAFO_PROJECT_STAGED_BYTES: "1073741825" },
-      { SCAFO_ARTIFACT_BYTES: "100", SCAFO_STAGED_BYTES: "99" },
-      { SCAFO_ARTIFACT_BYTES: "100", SCAFO_PROJECT_STAGED_BYTES: "99" },
-    ]) {
-      await rejectsWith(
+    for (const [env, detail] of [
+      [
+        { SCAFO_ACTIVE_TASKS: "1", SCAFO_APPLICATION_ACTIVE_TASKS: "2" },
+        `"deploy.applicationActiveTasks" must not exceed "deploy.activeTasks"`,
+      ],
+      [
+        { SCAFO_QUEUED_TASKS: "1", SCAFO_APPLICATION_QUEUED_TASKS: "2" },
+        `"deploy.applicationQueuedTasks" must not exceed "deploy.queuedTasks"`,
+      ],
+      [
+        { SCAFO_STAGED_BYTES: "1073741824", SCAFO_APPLICATION_STAGED_BYTES: "1073741825" },
+        `"deploy.applicationStagedBytes" must not exceed "deploy.stagedBytes"`,
+      ],
+      [
+        {
+          SCAFO_ARTIFACT_BYTES: "100",
+          SCAFO_STAGED_BYTES: "99",
+          SCAFO_APPLICATION_STAGED_BYTES: "99",
+        },
+        `"deploy.stagedBytes" must be at least "deploy.artifactBytes"`,
+      ],
+      [
+        { SCAFO_ARTIFACT_BYTES: "100", SCAFO_APPLICATION_STAGED_BYTES: "99" },
+        `"deploy.applicationStagedBytes" must be at least "deploy.artifactBytes"`,
+      ],
+    ] as const) {
+      const error = await rejectsWith(
         () => loadDaemonConfig({ env: { ...REQUIRED_ENV, ...env } }),
         "invalid-input",
       );
+
+      /* The refusal names both sides, so an operator can see which one to move. */
+      expect(error.detail).toBe(detail);
     }
   });
 });
@@ -754,13 +807,178 @@ describe("JSON request limit", () => {
   });
 });
 
+describe("how often a node looks at the registry, and what it does while it coordinates", () => {
+  /** Every interval, by the three spellings it is written in. */
+  const SETTINGS = [
+    ["registry.resyncIntervalMs", "SCAFO_REGISTRY_RESYNC_MS", "registry-resync-ms"],
+    [
+      "registry.nodeRefreshIntervalMs",
+      "SCAFO_REGISTRY_NODE_REFRESH_MS",
+      "registry-node-refresh-ms",
+    ],
+    ["coordinator.leaseTtlMs", "SCAFO_COORDINATOR_LEASE_TTL_MS", "coordinator-lease-ttl-ms"],
+    [
+      "coordinator.reapIntervalMs",
+      "SCAFO_COORDINATOR_REAP_INTERVAL_MS",
+      "coordinator-reap-interval-ms",
+    ],
+  ] as const;
+
+  /** What the loader resolved for the dotted key `path`. */
+  function at(config: DaemonConfig, path: string): unknown {
+    const [section, key] = path.split(".") as ["registry" | "coordinator", string];
+    return (config[section] as unknown as Record<string, unknown>)[key];
+  }
+
+  it("supplies defaults suited to a small node when nothing configures them", async () => {
+    const config = await loadDaemonConfig({ env: REQUIRED_ENV });
+
+    expect(config.registry).toEqual({
+      resyncIntervalMs: DEFAULT_REGISTRY_RESYNC_MS,
+      nodeRefreshIntervalMs: DEFAULT_NODE_REFRESH_INTERVAL_MS,
+    });
+    expect(config.coordinator).toEqual({
+      leaseTtlMs: DEFAULT_LEASE_TTL_MS,
+      reapIntervalMs: DEFAULT_REAP_INTERVAL_MS,
+    });
+  });
+
+  it.each(SETTINGS)(
+    "takes %s from flag, environment, or file in that order",
+    async (path, variable, flag) => {
+      const [section, key] = path.split(".") as [string, string];
+      const file = JSON.stringify({ [section]: { [key]: 1000 } });
+      const read = fileAt(CONFIG_PATH, file);
+
+      const fromFile = await loadDaemonConfig({
+        configPath: CONFIG_PATH,
+        readFile: read,
+        env: REQUIRED_ENV,
+      });
+      const fromEnv = await loadDaemonConfig({
+        configPath: CONFIG_PATH,
+        readFile: read,
+        env: { ...REQUIRED_ENV, [variable]: "2000" },
+      });
+      const fromFlag = await loadDaemonConfig({
+        configPath: CONFIG_PATH,
+        readFile: read,
+        env: { ...REQUIRED_ENV, [variable]: "2000" },
+        flags: { [flag]: "3000" },
+      });
+
+      expect([at(fromFile, path), at(fromEnv, path), at(fromFlag, path)]).toEqual([
+        1000, 2000, 3000,
+      ]);
+    },
+  );
+
+  it.each(SETTINGS)("refuses a %s that is not a positive whole number", async (path, variable) => {
+    for (const written of ["0", "-1", "1.5", "NaN", "soon"]) {
+      const error = await rejectsWith(
+        () => loadDaemonConfig({ env: { ...REQUIRED_ENV, [variable]: written } }),
+        "invalid-input",
+      );
+      expect(error.detail, written).toContain(path);
+    }
+  });
+});
+
+describe("the ports a node gives its runtime processes", () => {
+  it("draws from the documented range and quarantines a released pair for ten minutes", async () => {
+    const config = await loadDaemonConfig({ env: REQUIRED_ENV });
+
+    expect(config.runtime.portRangeStart).toBe(DEFAULT_PORT_RANGE_START);
+    expect(config.runtime.portRangeEnd).toBe(defaultPortRangeEnd(DEFAULT_PORT_RANGE_START));
+    expect(config.runtime.portQuarantineMs).toBe(DEFAULT_PORT_QUARANTINE_MS);
+  });
+
+  it("spans the same number of ports from wherever the start was moved to", async () => {
+    const config = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_PORT_RANGE_START: "30000" },
+    });
+
+    expect(config.runtime.portRangeEnd).toBe(30_998);
+  });
+
+  it.each([
+    ["runtime.portRangeEnd", "SCAFO_PORT_RANGE_END", "port-range-end", 43_500, 44_000, 44_500],
+    [
+      "runtime.portQuarantineMs",
+      "SCAFO_PORT_QUARANTINE_MS",
+      "port-quarantine-ms",
+      1000,
+      2000,
+      3000,
+    ],
+  ] as const)(
+    "takes %s from flag, environment, or file in that order",
+    async (path, variable, flag, inFile, inEnv, onFlag) => {
+      const key = path.split(".")[1] as string;
+      const read = fileAt(CONFIG_PATH, JSON.stringify({ runtime: { [key]: inFile } }));
+
+      const fromFile = await loadDaemonConfig({
+        configPath: CONFIG_PATH,
+        readFile: read,
+        env: REQUIRED_ENV,
+      });
+      const fromEnv = await loadDaemonConfig({
+        configPath: CONFIG_PATH,
+        readFile: read,
+        env: { ...REQUIRED_ENV, [variable]: String(inEnv) },
+      });
+      const fromFlag = await loadDaemonConfig({
+        configPath: CONFIG_PATH,
+        readFile: read,
+        env: { ...REQUIRED_ENV, [variable]: String(inEnv) },
+        flags: { [flag]: String(onFlag) },
+      });
+
+      const read_ = (config: DaemonConfig): unknown =>
+        (config.runtime as unknown as Record<string, unknown>)[key];
+      expect([read_(fromFile), read_(fromEnv), read_(fromFlag)]).toEqual([inFile, inEnv, onFlag]);
+    },
+  );
+
+  it("refuses a range that reaches below the unprivileged ports", async () => {
+    const error = await rejectsWith(
+      () => loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_PORT_RANGE_START: "80" } }),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("runtime.portRangeStart");
+  });
+
+  it("refuses a range that cannot hold two ports", async () => {
+    for (const end of ["24000", "23000"]) {
+      const error = await rejectsWith(
+        () => loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_PORT_RANGE_END: end } }),
+        "invalid-input",
+      );
+
+      expect(error.detail, end).toContain("runtime.portRangeEnd");
+    }
+  });
+
+  it("refuses a quarantine that is not a positive whole number", async () => {
+    for (const written of ["0", "-1", "1.5", "NaN", "later"]) {
+      const error = await rejectsWith(
+        () => loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_PORT_QUARANTINE_MS: written } }),
+        "invalid-input",
+      );
+
+      expect(error.detail, written).toContain("runtime.portQuarantineMs");
+    }
+  });
+});
+
 describe("the variables an operator hands every runtime process", () => {
   it("reads the comma syntax a flag and an environment variable carry", async () => {
     const config = await loadDaemonConfig({
-      env: { ...REQUIRED_ENV, SCAFO_CELLD_ENV: " CELLD_OTEL=1, CELLD_OTEL_SINK = bucket ,," },
+      env: { ...REQUIRED_ENV, SCAFO_CELLD_ENV: " CELLD_OTEL=1, CELLD_IDLE_EVICT_S = 900 ,," },
     });
 
-    expect(config.runtime.celldEnv).toEqual({ CELLD_OTEL: "1", CELLD_OTEL_SINK: "bucket" });
+    expect(config.runtime.celldEnv).toEqual({ CELLD_OTEL: "1", CELLD_IDLE_EVICT_S: "900" });
   });
 
   it("reads the object the config file writes them as", async () => {
@@ -774,6 +992,25 @@ describe("the variables an operator hands every runtime process", () => {
     });
 
     expect(config.runtime.celldEnv).toEqual({ CELLD_OTEL: "1", OTEL_HEADERS: "a=1,b=2" });
+  });
+
+  it("takes one whole pair per --celld-env, a comma inside a value included", async () => {
+    /* The flag repeats, so nothing about a value is separator-shaped: the
+       environment variable is the one form whose entries commas divide. */
+    const config = await loadDaemonConfig({
+      env: REQUIRED_ENV,
+      flags: { "celld-env": ["OTEL_HEADERS=a=1,b=2", "RUST_LOG=debug"] },
+    });
+
+    expect(config.runtime.celldEnv).toEqual({ OTEL_HEADERS: "a=1,b=2", RUST_LOG: "debug" });
+  });
+
+  it("reads a variable per comma-separated entry of SCAFO_CELLD_ENV, which carries no comma in a value", async () => {
+    const config = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_CELLD_ENV: "OTEL_HEADERS=a=1,RUST_LOG=debug" },
+    });
+
+    expect(config.runtime.celldEnv).toEqual({ OTEL_HEADERS: "a=1", RUST_LOG: "debug" });
   });
 
   it("keeps everything after the first equals sign as the value", async () => {
@@ -793,7 +1030,7 @@ describe("the variables an operator hands every runtime process", () => {
         JSON.stringify({ runtime: { celldEnv: { CELLD_OTEL: "0", RUST_BACKTRACE: "1" } } }),
       ),
       env: { ...REQUIRED_ENV, SCAFO_CELLD_ENV: "CELLD_OTEL=1" },
-      flags: { "celld-env": "CELLD_OTEL=1,RUST_LOG=debug" },
+      flags: { "celld-env": ["CELLD_OTEL=1", "RUST_LOG=debug"] },
     });
 
     expect(config.runtime.celldEnv).toEqual({ CELLD_OTEL: "1", RUST_LOG: "debug" });
@@ -806,7 +1043,17 @@ describe("the variables an operator hands every runtime process", () => {
   });
 
   it("REFUSES a name the runtime driver writes itself, naming the variable", async () => {
-    for (const name of ["AWS_REGION", "CELLD_ADDR"]) {
+    for (const name of [
+      "AWS_REGION",
+      "CELLD_ADDR",
+      /* Derived per process from this node's id and its state directory: what
+         makes an acknowledged write recoverable is that scafo, and not an
+         operator, decides the name a process comes back under and the
+         directory it comes back to. */
+      "CELLD_NODE",
+      "CELLD_WATCH",
+      "CELLD_ASSET_CACHE_DIR",
+    ]) {
       const error = await rejectsWith(
         () => loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_CELLD_ENV: `${name}=1` } }),
         "invalid-input",
@@ -816,6 +1063,19 @@ describe("the variables an operator hands every runtime process", () => {
       expect(error.detail, name).toContain("runtime.celldEnv");
     }
   });
+
+  it.each(RESERVED_ENV_NAMES)(
+    "refuses %s under the one rule every variable name is read by, naming what a name may be",
+    async (name) => {
+      const error = await rejectsWith(
+        () => loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_CELLD_ENV: `${name}=1` } }),
+        "invalid-input",
+      );
+
+      expect(error.detail, name).toContain(name);
+      expect(error.detail, name).toContain(ENV_NAME_RULE);
+    },
+  );
 
   it("passes upstream Celld policy through without Scafo defaults", async () => {
     const config = await loadDaemonConfig({
@@ -833,22 +1093,45 @@ describe("the variables an operator hands every runtime process", () => {
     });
   });
 
-  it.each(["CELLD_VARS_FILE"])("refuses reserved %s written in the config file", async (name) => {
+  it.each(["AWS_ACCESS_KEY_ID", "CELLD_TRUST_FORWARDED_HEADERS", "CELLD_WATCH"])(
+    "refuses reserved %s written in the config file",
+    async (name) => {
+      const error = await rejectsWith(
+        () =>
+          loadDaemonConfig({
+            configPath: CONFIG_PATH,
+            readFile: fileAt(
+              CONFIG_PATH,
+              JSON.stringify({ runtime: { celldEnv: { [name]: "unsafe" } } }),
+            ),
+            env: REQUIRED_ENV,
+          }),
+        "invalid-input",
+      );
+
+      expect(error.detail).toContain(name);
+      expect(error.detail).toContain("runtime.celldEnv");
+    },
+  );
+
+  it("takes no setting from a key the config file makes an object answer for", async () => {
+    /* The document names the bucket only under a member the parser would turn
+       into a prototype. Read as a document it holds nothing, so the required
+       settings are missing rather than inherited. */
     const error = await rejectsWith(
       () =>
         loadDaemonConfig({
           configPath: CONFIG_PATH,
           readFile: fileAt(
             CONFIG_PATH,
-            JSON.stringify({ runtime: { celldEnv: { [name]: "unsafe" } } }),
+            `{"__proto__": ${JSON.stringify({ bucket: { endpoint: "http://x", bucket: "b", accessKey: "a", secretKey: "s" } })}}`,
           ),
-          env: REQUIRED_ENV,
+          env: {},
         }),
       "invalid-input",
     );
 
-    expect(error.detail).toContain(name);
-    expect(error.detail).toContain("runtime.celldEnv");
+    expect(error.detail).toContain("bucket");
   });
 
   it("passes celld's own memory limits through to every runtime", async () => {
@@ -1206,13 +1489,13 @@ describe("the runtime telemetry switch the node's own composes", () => {
       configPath: CONFIG_PATH,
       readFile: fileAt(
         CONFIG_PATH,
-        JSON.stringify({ runtime: { celldEnv: { CELLD_OTEL: "2", CELLD_OTEL_SINK: "bucket" } } }),
+        JSON.stringify({ runtime: { celldEnv: { CELLD_OTEL: "2", CELLD_IDLE_EVICT_S: "900" } } }),
       ),
       env: { ...REQUIRED_ENV, SCAFO_OBSERVABILITY: "1" },
     });
 
     expect(turnedOff.runtime.celldEnv).toEqual({ CELLD_OTEL: "0" });
-    expect(tuned.runtime.celldEnv).toEqual({ CELLD_OTEL: "2", CELLD_OTEL_SINK: "bucket" });
+    expect(tuned.runtime.celldEnv).toEqual({ CELLD_OTEL: "2", CELLD_IDLE_EVICT_S: "900" });
   });
 
   it("adds nothing at all while the switch is off", async () => {
@@ -1321,6 +1604,15 @@ describe("the Traefik entryPoints the routers attach to", () => {
     expect(config.ingress).toEqual({ entryPoints: ["websecure"] });
   });
 
+  it("takes one whole entryPoint per --traefik-entrypoints, the flag repeating", async () => {
+    const config = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_TRAEFIK_ENTRYPOINTS: "from-env" },
+      flags: { "traefik-entrypoints": ["web", "websecure"] },
+    });
+
+    expect(config.ingress).toEqual({ entryPoints: ["web", "websecure"] });
+  });
+
   it("reads the array the file carries, which is what the text parses into", async () => {
     const config = await loadDaemonConfig({
       configPath: CONFIG_PATH,
@@ -1349,6 +1641,156 @@ describe("the Traefik entryPoints the routers attach to", () => {
   });
 });
 
+describe("the certificate resolver the published Traefik routers name", () => {
+  it("reads it from the flag, the environment or the file alike", async () => {
+    const fromFlag = await loadDaemonConfig({
+      env: REQUIRED_ENV,
+      flags: { "traefik-cert-resolver": "letsencrypt" },
+    });
+    const fromEnv = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_TRAEFIK_CERT_RESOLVER: "letsencrypt" },
+    });
+    const fromFile = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(
+        CONFIG_PATH,
+        JSON.stringify({ ingress: { traefikCertResolver: "letsencrypt" } }),
+      ),
+      env: REQUIRED_ENV,
+    });
+
+    for (const config of [fromFlag, fromEnv, fromFile]) {
+      expect(config.ingress).toEqual({ traefikCertResolver: "letsencrypt" });
+    }
+  });
+
+  it("lets the flag outrank the environment, and the environment the file", async () => {
+    const overriddenByEnv = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { traefikCertResolver: "file" } })),
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_TRAEFIK_CERT_RESOLVER: "env" },
+    });
+    const overriddenByFlag = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { traefikCertResolver: "file" } })),
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_TRAEFIK_CERT_RESOLVER: "env" },
+      flags: { "traefik-cert-resolver": "flag" },
+    });
+
+    expect(overriddenByEnv.ingress?.traefikCertResolver).toBe("env");
+    expect(overriddenByFlag.ingress?.traefikCertResolver).toBe("flag");
+  });
+
+  it("leaves it absent when nothing names one, so the document mentions no TLS", async () => {
+    const config = await loadDaemonConfig({ env: REQUIRED_ENV });
+
+    expect(config.ingress?.traefikCertResolver).toBeUndefined();
+  });
+
+  it("refuses anything that is not a name Traefik's own configuration could carry", async () => {
+    for (const written of ["le@internal", "two words", "resolver!", "x".repeat(65)]) {
+      const error = await rejectionOf(() =>
+        loadDaemonConfig({
+          env: { ...REQUIRED_ENV, SCAFO_INGRESS_TRAEFIK_CERT_RESOLVER: written },
+        }),
+      );
+
+      expect(error.code, written).toBe("invalid-input");
+      expect(error.detail, written).toContain("ingress.traefikCertResolver");
+      expect(error.detail, written).toContain("--traefik-cert-resolver");
+      expect(error.detail, written).toContain("SCAFO_INGRESS_TRAEFIK_CERT_RESOLVER");
+    }
+  });
+
+  it("takes the names Traefik admits: letters, digits, hyphens and underscores", async () => {
+    for (const written of ["le", "my-resolver_2", "x".repeat(64)]) {
+      const config = await loadDaemonConfig({
+        env: { ...REQUIRED_ENV, SCAFO_INGRESS_TRAEFIK_CERT_RESOLVER: written },
+      });
+
+      expect(config.ingress?.traefikCertResolver, written).toBe(written);
+    }
+  });
+});
+
+describe("the name this installation solves DNS-01 at", () => {
+  const DELEGATION = "acme.example.com";
+
+  it("reads it from the flag, the environment or the file alike", async () => {
+    const fromFlag = await loadDaemonConfig({
+      env: REQUIRED_ENV,
+      flags: { "ingress-acme-delegation": DELEGATION },
+    });
+    const fromEnv = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_ACME_DELEGATION: DELEGATION },
+    });
+    const fromFile = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { acmeDelegation: DELEGATION } })),
+      env: REQUIRED_ENV,
+    });
+
+    for (const config of [fromFlag, fromEnv, fromFile]) {
+      expect(config.ingress).toEqual({ acmeDelegation: DELEGATION });
+    }
+  });
+
+  it("lets the flag outrank the environment, and the environment the file", async () => {
+    const overriddenByEnv = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { acmeDelegation: "file.test" } })),
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_ACME_DELEGATION: "env.test" },
+    });
+    const overriddenByFlag = await loadDaemonConfig({
+      configPath: CONFIG_PATH,
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { acmeDelegation: "file.test" } })),
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_ACME_DELEGATION: "env.test" },
+      flags: { "ingress-acme-delegation": "flag.test" },
+    });
+
+    expect(overriddenByEnv.ingress?.acmeDelegation).toBe("env.test");
+    expect(overriddenByFlag.ingress?.acmeDelegation).toBe("flag.test");
+  });
+
+  it("leaves it absent when nothing names one, and says nothing about issuance", async () => {
+    const config = await loadDaemonConfig({ env: REQUIRED_ENV });
+
+    expect(config.ingress?.acmeDelegation).toBeUndefined();
+  });
+
+  it("refuses anything that is not a host, whichever source carried it", async () => {
+    for (const written of ["https://acme.example.com", "acme.example.com.", "ACME.example.com"]) {
+      const error = await rejectionOf(() =>
+        loadDaemonConfig({ env: { ...REQUIRED_ENV, SCAFO_INGRESS_ACME_DELEGATION: written } }),
+      );
+
+      expect(error.code, written).toBe("invalid-input");
+      expect(error.detail, written).toContain("ingress.acmeDelegation");
+      expect(error.detail, written).toContain("--ingress-acme-delegation");
+      expect(error.detail, written).toContain("SCAFO_INGRESS_ACME_DELEGATION");
+    }
+  });
+
+  it("carries both ingress settings beside the token and the entryPoints", async () => {
+    const config = await loadDaemonConfig({
+      env: {
+        ...REQUIRED_ENV,
+        SCAFO_INGRESS_TOKEN: "shared",
+        SCAFO_TRAEFIK_ENTRYPOINTS: "websecure",
+        SCAFO_INGRESS_ACME_DELEGATION: DELEGATION,
+        SCAFO_INGRESS_TRAEFIK_CERT_RESOLVER: "letsencrypt",
+      },
+    });
+
+    expect(config.ingress).toEqual({
+      token: ["shared"],
+      entryPoints: ["websecure"],
+      acmeDelegation: DELEGATION,
+      traefikCertResolver: "letsencrypt",
+    });
+  });
+});
+
 describe("the tokens guarding what the ingress reads", () => {
   it("reads the comma-separated list an operator shares with their ingress", async () => {
     const config = await loadDaemonConfig({
@@ -1367,10 +1809,10 @@ describe("the tokens guarding what the ingress reads", () => {
     expect(config.ingress).toEqual({ token: ["from-flag"] });
   });
 
-  it("takes a plain string or an array from the file, the array carrying entries whole", async () => {
+  it("takes a plain string or an array from the file, both carrying tokens whole", async () => {
     const asString = await loadDaemonConfig({
       configPath: CONFIG_PATH,
-      readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { token: "new,old" } })),
+      readFile: fileAt(CONFIG_PATH, JSON.stringify({ ingress: { token: "one,token" } })),
       env: REQUIRED_ENV,
     });
     const asArray = await loadDaemonConfig({
@@ -1382,8 +1824,17 @@ describe("the tokens guarding what the ingress reads", () => {
       env: REQUIRED_ENV,
     });
 
-    expect(asString.ingress).toEqual({ token: ["new", "old"] });
+    expect(asString.ingress).toEqual({ token: ["one,token"] });
     expect(asArray.ingress).toEqual({ token: ["new", "with,comma"] });
+  });
+
+  it("takes one whole token per --ingress-token, primary first", async () => {
+    const config = await loadDaemonConfig({
+      env: { ...REQUIRED_ENV, SCAFO_INGRESS_TOKEN: "from-env" },
+      flags: { "ingress-token": ["new-token", "old,token"] },
+    });
+
+    expect(config.ingress).toEqual({ token: ["new-token", "old,token"] });
   });
 
   it("leaves the node minting its own when nothing names any", async () => {

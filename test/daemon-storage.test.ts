@@ -30,10 +30,16 @@ import {
 import type { ProcessStatus, Supervisor } from "../src/core/types/supervisor.ts";
 import { fromBase64Url } from "../src/core/utils/base64.ts";
 import { MemoryCasStore } from "../src/drivers/store/memory.ts";
-import { CLOCK_START_MS, ctxWith, type ManualClock, rejectsWith } from "./_helpers.ts";
+import {
+  CLOCK_START_MS,
+  ctxWith,
+  type ManualClock,
+  rejectionOf,
+  rejectsWith,
+  TEST_VERSIONS,
+} from "./_helpers.ts";
 
 const NODE_ID = "node-a";
-const VERSION = "0.0.0-test";
 const TOKEN = "SdUvvcE1nlEQm4iJ4Nx6BdxUjHZ2Uzt4vPXH0cQnJKk";
 const FOREIGN = "someone-else";
 
@@ -85,7 +91,7 @@ beforeEach(() => {
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
-    version: VERSION,
+    versions: TEST_VERSIONS,
   };
   storage = createStorageService(agent, {
     tokens: [TOKEN],
@@ -147,7 +153,7 @@ describe("the token every request must present", () => {
       nodeId: NODE_ID,
       registry: clock.ctx,
       supervisor: fakeSupervisor(),
-      version: VERSION,
+      versions: TEST_VERSIONS,
     });
 
     /* No route at all, rather than the `401` the same call gets from a node that
@@ -172,7 +178,7 @@ describe("the several tokens an operator may supply instead", () => {
       nodeId: NODE_ID,
       registry: clock.ctx,
       supervisor: fakeSupervisor(),
-      version: VERSION,
+      versions: TEST_VERSIONS,
     };
     agent.storage = createStorageService(agent, {
       tokens: SUPPLIED,
@@ -607,7 +613,7 @@ describe("the token file guarding the surface", () => {
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, INGRESS_TOKEN_FILE), "\n  \n");
 
-    await rejectsWith(() => loadOrCreateIngressToken(dir), "invalid-input");
+    expect((await rejectionOf(() => loadOrCreateIngressToken(dir))).code).toBe("invalid-input");
   });
 });
 
@@ -759,7 +765,7 @@ async function boot(dir: string, token?: string): Promise<H3> {
     nodeId: NODE_ID,
     registry: clock.ctx,
     supervisor: fakeSupervisor(),
-    version: VERSION,
+    versions: TEST_VERSIONS,
   };
   agent.storage = createStorageService(agent, {
     tokens: await loadIngressTokens(config),
@@ -829,6 +835,8 @@ function daemonConfig(): DaemonConfig {
     runtime: {
       binPath: "celld",
       portRangeStart: 42_000,
+      portRangeEnd: 42_998,
+      portQuarantineMs: 600_000,
       bindHost: "127.0.0.1",
     },
     observability: { enabled: false },
@@ -843,6 +851,7 @@ function fakeSupervisor(): Supervisor {
     stop: () => Promise.resolve(),
     status: () => null,
     list: (): ProcessStatus[] => [],
+    forget: () => {},
     onExit: () => {},
   };
 }

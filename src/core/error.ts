@@ -9,7 +9,8 @@ export type ScafoErrorCode =
   | "cas-conflict"
   | "capability-missing"
   | "placement-unavailable"
-  | "project-blocked"
+  | "application-blocked"
+  | "deploys-frozen"
   | "draining"
   | "deploy-overloaded"
   | "deploy-timeout"
@@ -20,8 +21,11 @@ export type ScafoErrorCode =
   | "reference-held"
   | "resource-limit"
   | "invalid-slug"
-  | "invalid-varset"
-  | "invalid-input";
+  | "invalid-input"
+  | "version-skew"
+  | "store-unavailable"
+  | "publish-failed"
+  | "internal";
 
 /** RFC 9457 problem document, as produced by {@link ScafoError.toProblem}. */
 export interface ProblemDetails {
@@ -37,6 +41,16 @@ export interface ScafoErrorOptions extends ErrorOptions {
   status?: number;
   /** Human-readable specifics safe to expose to API clients. */
   detail?: string;
+  /**
+   * How long the answering node asked the caller to wait before trying again,
+   * in milliseconds, read off its `Retry-After`.
+   *
+   * NOT PART OF THE PROBLEM DOCUMENT, and never rendered into one: it is a
+   * transport header, it is the answering node's to set, and it is carried here
+   * only so a client that retries has the number the node named rather than one
+   * it invented.
+   */
+  retryAfterMs?: number;
 }
 
 const DEFAULT_STATUS: Record<ScafoErrorCode, number> = {
@@ -46,10 +60,15 @@ const DEFAULT_STATUS: Record<ScafoErrorCode, number> = {
   "cas-conflict": 409,
   "capability-missing": 409,
   "placement-unavailable": 409,
-  /* An admin of the fleet has stopped the project. A CONFLICT rather than a
+  /* An admin of the fleet has stopped the application. A CONFLICT rather than a
      forbidden: nothing is wrong with the caller or with its key, and the same
      request works unchanged the moment the block is lifted. */
-  "project-blocked": 409,
+  "application-blocked": 409,
+  /* An admin of the fleet has stopped deploy intake, for a maintenance or an
+     upgrade. A CONFLICT rather than a forbidden, for the same reason a blocked
+     application is one: nothing is wrong with the caller or with its key, and the
+     same request works unchanged the moment the freeze is lifted. */
+  "deploys-frozen": 409,
   "draining": 503,
   "deploy-overloaded": 429,
   "deploy-timeout": 408,
@@ -60,8 +79,24 @@ const DEFAULT_STATUS: Record<ScafoErrorCode, number> = {
   "reference-held": 409,
   "resource-limit": 413,
   "invalid-slug": 400,
-  "invalid-varset": 400,
   "invalid-input": 400,
+  /* Two Celld versions over one application's fleet. A CONFLICT rather than a
+     capability that is missing: every binary involved is one scafo runs, and
+     what is wrong is the fleet's state rather than the caller or its node. */
+  "version-skew": 409,
+  /* The store stopped answering, and the write that wanted it was repeated until
+     there was nothing left to repeat. UNAVAILABLE rather than a bucket that
+     misbehaves: nothing about the answer was wrong, there was no answer. */
+  "store-unavailable": 503,
+  /* Celld's publish command ended badly, and an exit code plus prose is all it
+     says about why. A BAD GATEWAY rather than a bad request: the artifact, the
+     engine and the bucket are all possible causes, and naming the caller for
+     every one of them would be a guess. Its own output is kept as the detail. */
+  "publish-failed": 502,
+  /* Something failed that scafo has no name for. It is the node's own, never
+     the caller's: a failure nobody can name is not one to blame on the request,
+     and what it was is in the node's log rather than in the answer. */
+  "internal": 500,
 };
 
 /**
@@ -72,6 +107,8 @@ export class ScafoError extends Error {
   readonly code: ScafoErrorCode;
   readonly status: number;
   readonly detail?: string;
+  /** See {@link ScafoErrorOptions.retryAfterMs}; absent when nothing said one. */
+  readonly retryAfterMs?: number;
 
   constructor(code: ScafoErrorCode, message: string, opts?: ScafoErrorOptions) {
     super(message, opts);
@@ -79,6 +116,7 @@ export class ScafoError extends Error {
     this.code = code;
     this.status = opts?.status ?? DEFAULT_STATUS[code];
     this.detail = opts?.detail;
+    this.retryAfterMs = opts?.retryAfterMs;
   }
 
   /** Serializes the error into an RFC 9457 `application/problem+json` body. */
@@ -138,6 +176,7 @@ export function describeError(error: unknown): string {
 export function fromProblem(
   problem: ProblemDetails,
   fallback: ScafoErrorCode = "invalid-input",
+  opts?: { retryAfterMs?: number },
 ): ScafoError {
   const type = typeof problem.type === "string" ? problem.type : "";
   const named = type.startsWith(PROBLEM_TYPE_PREFIX) ? type.slice(PROBLEM_TYPE_PREFIX.length) : "";
@@ -152,5 +191,6 @@ export function fromProblem(
   return new ScafoError(code, title, {
     status,
     ...(typeof problem.detail === "string" ? { detail: problem.detail } : {}),
+    ...(opts?.retryAfterMs === undefined ? {} : { retryAfterMs: opts.retryAfterMs }),
   });
 }

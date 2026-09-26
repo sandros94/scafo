@@ -1,5 +1,5 @@
 # Pin the runtime by tag and multi-architecture digest.
-FROM ghcr.io/denoland/celld:0.4.1@sha256:ce8bbc3c26a16c9ee00e3ce0501f36bfea2663b5af8285a08fc16a54568060a5 AS celld
+FROM ghcr.io/denoland/celld:0.5.0@sha256:df8e74bb9a059df5779644368984933eba76acd6a2d196672732f4368f760fc8 AS celld
 
 # Build stage.
 FROM node:24-slim AS build
@@ -9,7 +9,9 @@ RUN corepack enable
 
 WORKDIR /app
 
-# Keep dependency installation cacheable across source changes.
+# Keep dependency installation cacheable across source changes. `patches/` is
+# part of the manifest: an install without it cannot resolve a patched package.
+COPY patches ./patches
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile --ignore-scripts
 
@@ -65,7 +67,8 @@ COPY --from=build /app/dist ./dist
 # The daemon reads the package version at runtime.
 COPY package.json ./
 
-# Persist the node identity in a private, non-login user's home directory.
+# The node identity, the ingress token and the work directory of every runtime
+# process this node supervises, in a private, non-login user's home directory.
 RUN groupadd --gid 10001 scafo \
   && useradd --uid 10001 --gid scafo --home-dir /var/lib/scafo \
   --shell /usr/sbin/nologin scafo \

@@ -83,19 +83,21 @@
     "lint": "oxlint . && oxfmt --check .",
     "fmt": "automd && oxlint --fix . && oxfmt .",
     "prepack": "pnpm build",
+    "scale": "node scripts/scale-report.ts",
+    "scale:real": "node scripts/scale-real.ts",
     "test": "vitest run --slowTestThreshold=1000",
     "test:coverage": "vitest run --coverage --slowTestThreshold=1000",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "citty": "^0.2.2",
     "confbox": "^0.2.4",
     "consola": "^3.4.2",
     "h3": "2.0.1-rc.26",
     "tar": "^7.5.22",
     "tavolato": "^0.0.1",
     "unjwt": "^0.7.3",
-    "uns3": "^0.0.8"
+    "uns3": "^0.0.8",
+    "unsecure": "^0.3.1"
   },
   "devDependencies": {
     "@kubernetes/client-node": "^2.0.0",
@@ -103,6 +105,7 @@
     "@types/node": "^24",
     "@vitest/coverage-v8": "^4.1.10",
     "automd": "^0.4.3",
+    "citty": "0.2.2",
     "esbuild": "^0.28.2",
     "obuild": "^0.4.38",
     "oxfmt": "^0.63.0",

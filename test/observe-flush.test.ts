@@ -67,11 +67,11 @@ async function written(from: CasStore = store): Promise<ObserveRecord[]> {
 
 describe("what a flush carries", () => {
   it("writes the drained events, one record each, under the node that saw them", async () => {
-    observe.emit({ type: "runtime.started", processId: "archive--old" });
+    observe.emit({ type: "runtime.started", application: "archive-old" });
     clock.tick(10);
     observe.emit({
       type: "runtime.started",
-      processId: "shop--prod",
+      application: "shop-prod",
     });
 
     expect(await flusherWith().flush()).toBe(true);
@@ -83,7 +83,7 @@ describe("what a flush carries", () => {
         node: NODE,
         at: new Date(CLOCK_START_MS).toISOString(),
         type: "runtime.started",
-        processId: "archive--old",
+        application: "archive-old",
       },
       {
         v: OBSERVE_RECORD_VERSION,
@@ -91,13 +91,31 @@ describe("what a flush carries", () => {
         node: NODE,
         at: new Date(CLOCK_START_MS + 10).toISOString(),
         type: "runtime.started",
-        processId: "shop--prod",
+        application: "shop-prod",
+      },
+    ]);
+  });
+
+  it("carries an administrative block out whole, actor and application together", async () => {
+    observe.emit({ type: "application.blocked", actor: "op-aaaa1111", application: "shop" });
+
+    expect(await flusherWith().flush()).toBe(true);
+
+    expect(eventRecords(await written())).toEqual([
+      {
+        v: OBSERVE_RECORD_VERSION,
+        record: "event",
+        node: NODE,
+        at: new Date(CLOCK_START_MS).toISOString(),
+        type: "application.blocked",
+        actor: "op-aaaa1111",
+        application: "shop",
       },
     ]);
   });
 
   it("heads the file with what it carried and what it lost", async () => {
-    observe.emit({ type: "runtime.started", processId: "shop--prod" });
+    observe.emit({ type: "runtime.started", application: "shop-prod" });
 
     await flusherWith().flush();
 
@@ -122,7 +140,7 @@ describe("what a flush carries", () => {
       now: (): Date => new Date(clock.nowMs()),
     });
     for (let index = 0; index < 5; index++)
-      observe.emit({ type: "runtime.started", processId: `shop--env-${String(index)}` });
+      observe.emit({ type: "runtime.started", application: `shop-drop-${String(index)}` });
 
     await flusherWith().flush();
 
@@ -133,26 +151,28 @@ describe("what a flush carries", () => {
     });
   });
 
-  it("takes a counters snapshot beside them, one record per environment", async () => {
+  it("takes a counters snapshot beside them, one record per application", async () => {
     const counters = createIngressCounters({
       platformDomains: [DOMAIN],
       now: (): Date => new Date(clock.nowMs()),
     });
     counters.ingest(caddyLine(`shop.${DOMAIN}`, 200, 1200, 0.02));
     counters.ingest(caddyLine(`shop.${DOMAIN}`, 500, 30, 2.5));
-    counters.ingest(caddyLine(`shop--preview.${DOMAIN}`, 200, 90, 0.005));
+    counters.ingest(caddyLine(`shop-preview.${DOMAIN}`, 200, 90, 0.005));
 
     await flusherWith({ counters }).flush();
 
     const records = counterRecords(await written());
-    expect(records.map((record) => [record.project, record.env, record.requests])).toEqual([
-      ["shop", "preview", 1],
-      ["shop", "production", 2],
+    /* One bucket per application name, and a name that merely starts with
+       another's is a bucket of its own rather than part of it. */
+    expect(records.map((record) => [record.application, record.requests])).toEqual([
+      ["shop", 2],
+      ["shop-preview", 1],
     ]);
-    expect(records[1].since).toBe(new Date(CLOCK_START_MS).toISOString());
-    expect(records[1].status).toEqual({ "2xx": 1, "3xx": 0, "4xx": 0, "5xx": 1, "other": 0 });
-    expect(records[1].durations).toHaveLength(DURATION_BANDS_MS.length + 1);
-    expect(records[1].bytes).toBe(1230);
+    expect(records[0].since).toBe(new Date(CLOCK_START_MS).toISOString());
+    expect(records[0].status).toEqual({ "2xx": 1, "3xx": 0, "4xx": 0, "5xx": 1, "other": 0 });
+    expect(records[0].durations).toHaveLength(DURATION_BANDS_MS.length + 1);
+    expect(records[0].bytes).toBe(1230);
   });
 
   it("puts the adapter's own totals on the header rather than on every bucket", async () => {
@@ -202,7 +222,7 @@ describe("where a flush lands", () => {
   it("files it under the node, the UTC calendar and the moment it was written", async () => {
     clock = ctxWith(store, Date.parse("2026-03-04T05:06:07.008Z"));
     observe = createObservability({ enabled: true, now: (): Date => new Date(clock.nowMs()) });
-    observe.emit({ type: "runtime.started", processId: "shop--prod" });
+    observe.emit({ type: "runtime.started", application: "shop-prod" });
 
     await flusherWith().flush();
 
@@ -220,9 +240,9 @@ describe("where a flush lands", () => {
 
   it("never writes two flushes to one key, even in the same millisecond", async () => {
     const flusher = flusherWith();
-    observe.emit({ type: "runtime.started", processId: "shop--one" });
+    observe.emit({ type: "runtime.started", application: "shop-one" });
     await flusher.flush();
-    observe.emit({ type: "runtime.started", processId: "shop--two" });
+    observe.emit({ type: "runtime.started", application: "shop-two" });
     await flusher.flush();
 
     expect(await store.list("_scafo/observe/")).toHaveLength(2);
@@ -248,7 +268,7 @@ describe("the encoder seam", () => {
       node: NODE,
       at: new Date(CLOCK_START_MS).toISOString(),
       type: "runtime.started",
-      processId: "shop--production",
+      application: "shop-prod",
     },
     {
       v: OBSERVE_RECORD_VERSION,
@@ -256,8 +276,7 @@ describe("the encoder seam", () => {
       node: NODE,
       at: new Date(CLOCK_START_MS).toISOString(),
       since: new Date(CLOCK_START_MS).toISOString(),
-      project: "shop",
-      env: "production",
+      application: "shop",
       requests: 2,
       bytes: 30,
       status: { "2xx": 2, "3xx": 0, "4xx": 0, "5xx": 0, "other": 0 },
@@ -280,7 +299,7 @@ describe("the encoder seam", () => {
   });
 
   it("puts the codec's bytes at the codec's extension, and puts them WHOLE", async () => {
-    observe.emit({ type: "runtime.started", processId: "shop--prod" });
+    observe.emit({ type: "runtime.started", application: "shop-prod" });
     const counters = createIngressCounters({
       platformDomains: [DOMAIN],
       now: (): Date => new Date(clock.nowMs()),
@@ -304,7 +323,7 @@ describe("the encoder seam", () => {
   });
 
   it("compresses the flush, and reads it back only because the codec is registered", async () => {
-    observe.emit({ type: "runtime.started", processId: "shop--prod" });
+    observe.emit({ type: "runtime.started", application: "shop-prod" });
 
     await flusherWith().flush();
 
@@ -320,7 +339,7 @@ describe("the cadence", () => {
   it("flushes on the interval and not before it", async () => {
     const flusher = flusherWith({ intervalMs: 60_000, drainIntervalMs: 5_000 });
     flusher.start();
-    observe.emit({ type: "runtime.started", processId: "shop--prod" });
+    observe.emit({ type: "runtime.started", application: "shop-prod" });
 
     clock.tick(30_000);
     await flusher.tick();
@@ -337,7 +356,7 @@ describe("the cadence", () => {
     flusher.start();
 
     for (let index = 0; index < 3; index++)
-      observe.emit({ type: "runtime.started", processId: `shop--${String(index)}` });
+      observe.emit({ type: "runtime.started", application: `shop-${String(index)}` });
     clock.tick(5_000);
     await flusher.tick();
 
@@ -355,7 +374,7 @@ describe("the cadence", () => {
     flusher.start();
 
     for (let round = 0; round < 4; round++) {
-      observe.emit({ type: "runtime.started", processId: `shop--round-${String(round)}` });
+      observe.emit({ type: "runtime.started", application: `shop-round-${String(round)}` });
       clock.tick(5_000);
       await flusher.tick();
     }
@@ -377,13 +396,13 @@ describe("a flush that does not land", () => {
   it("keeps the events for the next attempt rather than losing them", async () => {
     const faults = new FaultStore(store);
     const flusher = flusherWith({}, faults);
-    observe.emit({ type: "runtime.started", processId: "shop--one" });
+    observe.emit({ type: "runtime.started", application: "shop-one" });
 
     faults.failAfter(0);
     expect(await flusher.flush()).toBe(false);
     expect(flusher.status().pending).toBe(1);
 
-    observe.emit({ type: "runtime.started", processId: "shop--two" });
+    observe.emit({ type: "runtime.started", application: "shop-two" });
     faults.clearFaults();
     expect(await flusher.flush()).toBe(true);
 
@@ -401,7 +420,7 @@ describe("a flush that does not land", () => {
     const flusher = flusherWith({ intervalMs: 60_000, drainIntervalMs: 5_000 }, faults);
     flusher.start();
     faults.failAfter(0);
-    observe.emit({ type: "runtime.started", processId: "shop--one" });
+    observe.emit({ type: "runtime.started", application: "shop-one" });
 
     clock.tick(60_000);
     await flusher.tick();
@@ -425,7 +444,7 @@ describe("a flush that does not land", () => {
     faults.failAfter(0);
 
     for (let index = 0; index < 6; index++) {
-      observe.emit({ type: "runtime.started", processId: `shop--id-${String(index)}` });
+      observe.emit({ type: "runtime.started", application: `shop-id-${String(index)}` });
       await flusher.flush();
     }
 
@@ -436,10 +455,10 @@ describe("a flush that does not land", () => {
     await flusher.flush();
 
     const records = eventRecords(await written());
-    expect(records.map((record) => ("processId" in record ? record.processId : ""))).toEqual([
-      "shop--id-3",
-      "shop--id-4",
-      "shop--id-5",
+    expect(records.map((record) => ("application" in record ? record.application : ""))).toEqual([
+      "shop-id-3",
+      "shop-id-4",
+      "shop-id-5",
     ]);
     expect(flushRecords(await written())[0].pendingDropped).toBe(3);
   });
@@ -501,12 +520,12 @@ describe("retention", () => {
   it("runs on the flush cadence rather than on every flush", async () => {
     const flusher = flusherWith({ sweepEveryFlushes: 3 });
 
-    observe.emit({ type: "runtime.started", processId: "shop--one" });
+    observe.emit({ type: "runtime.started", application: "shop-one" });
     await flusher.flush();
     expect(flusher.status().swept).toBe(2);
 
     for (const id of ["two", "three"]) {
-      observe.emit({ type: "runtime.started", processId: `shop--${id}` });
+      observe.emit({ type: "runtime.started", application: `shop-${id}` });
       clock.tick(1);
       await flusher.flush();
     }

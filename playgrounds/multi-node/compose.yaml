@@ -36,7 +36,9 @@ services:
       # The node API is local; Caddy shares the node namespace.
       - "127.0.0.1:${SCAFO_A_NODE_PORT:-7401}:7400"
     volumes:
-      # Each node needs a distinct persistent keypair and identity.
+      # Each node needs a distinct persistent keypair and identity, and its own
+      # runtime work directories: a write is acknowledged once the other node
+      # holds it on the follower disk kept here, before the bucket has it.
       - state-a:/var/lib/scafo
       - ingress-log-a:/var/log/scafo-ingress
       - ./scafo.config.jsonc:/etc/scafo/scafo.config.jsonc:ro

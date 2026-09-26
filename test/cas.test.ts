@@ -46,6 +46,17 @@ describe("readJson", () => {
     expect(error.status).toBe(500);
   });
 
+  it("reads a document back without a key an object answers for on its own", async () => {
+    const store = new MemoryCasStore();
+    const { ctx } = ctxWith(store);
+    await store.put(KEY, '{"a": 1, "__proto__": {"a": 99}, "constructor": "no", "b": 0}');
+
+    const found = await readJson<Counter>(ctx, KEY);
+
+    expect(Object.keys(found?.value ?? {})).toEqual(["a", "b"]);
+    expect(found?.value).toEqual({ a: 1, b: 0 });
+  });
+
   it("throws not-found from requireJson only", async () => {
     const { ctx } = ctxWith(new MemoryCasStore());
     const error = await rejectsWith(() => requireJson(ctx, KEY), "not-found");

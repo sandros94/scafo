@@ -1,24 +1,35 @@
 /* Runtime-agnostic daemon configuration; flags override environment, then JSONC. */
 
-import { type JSONCParseError, parseJSONC } from "confbox";
 import { ScafoError } from "../core/error.ts";
 import { assertPositiveSafeInteger } from "../core/utils/number.ts";
 import { DEFAULT_ARCHIVE_ENTRIES, DEFAULT_ARTIFACT_BYTES } from "../core/types/deploy.ts";
-import { DEFAULT_PORT_RANGE_START } from "../core/placement/ports.ts";
+import {
+  assertPortRange,
+  DEFAULT_PORT_QUARANTINE_MS,
+  DEFAULT_PORT_RANGE_START,
+  defaultPortRangeEnd,
+} from "../core/placement/ports.ts";
 import { assertNodeId } from "../core/registry/paths.ts";
+import { DEFAULT_LEASE_TTL_MS } from "../core/registry/lease.ts";
+import {
+  DEFAULT_NODE_REFRESH_INTERVAL_MS,
+  DEFAULT_REGISTRY_RESYNC_MS,
+} from "../core/registry/view.ts";
+import { DEFAULT_REAP_INTERVAL_MS } from "./coordinator.ts";
 import type { TransportConfig, TransportMode } from "../core/types/transport.ts";
-import { assertEnvVars, parseEnvVars } from "../core/utils/env.ts";
+import { assertEnvVars, parseEnvVarEntries } from "../core/utils/env.ts";
 import { assertHost, formatHostPort, isHost, parseInterfaceAddress } from "../core/utils/host.ts";
-import { assertLabels, parseLabels } from "../core/utils/labels.ts";
+import { assertLabels, parseLabelEntries } from "../core/utils/labels.ts";
 /* Import the driver's reserved names instead of duplicating that contract. */
 import { OPERATOR_RESERVED_ENV, TELEMETRY_ENV } from "../drivers/runtime/celld.ts";
+import { parseJsoncDocument } from "./_jsonc.ts";
 import { DEFAULT_JSON_BYTES } from "./_json.ts";
 import {
   DEFAULT_ACTIVE_TASKS,
   DEFAULT_OUTPUT_BYTES,
-  DEFAULT_PROJECT_ACTIVE_TASKS,
-  DEFAULT_PROJECT_QUEUED_TASKS,
-  DEFAULT_PROJECT_STAGED_BYTES,
+  DEFAULT_APPLICATION_ACTIVE_TASKS,
+  DEFAULT_APPLICATION_QUEUED_TASKS,
+  DEFAULT_APPLICATION_STAGED_BYTES,
   DEFAULT_QUEUED_TASKS,
   DEFAULT_QUEUE_TIMEOUT_MS,
   DEFAULT_RECEIVE_TIMEOUT_MS,
@@ -52,8 +63,15 @@ export interface DaemonConfig {
   };
   /** Apex domains the platform serves wildcard subdomains under. */
   platformDomains: string[];
-  /** How this node runs and gates the processes that serve its environments. */
+  /** How this node runs and gates the processes that serve its applications. */
   runtime: RuntimeConfig;
+  /**
+   * How often this node re-reads the registry it holds a view of. Absent leaves
+   * every interval at its default, exactly as {@link DaemonConfig.deploy} does.
+   */
+  registry?: RegistryViewConfig;
+  /** How the node behaves on the ticks it spends holding the coordinator lease. */
+  coordinator?: CoordinatorConfig;
   /** Resource bounds applied independently while receiving and expanding deploys. */
   deploy?: DeployConfig;
   /** Whether this node reports on itself at all. Off unless it was turned on. */
@@ -66,12 +84,6 @@ export interface DaemonConfig {
    * not reachable from outside the node.
    */
   ingress?: IngressConfig;
-  /**
-   * Where this node reads the key that opens its environments' sealed variable
-   * sets. Absent means it holds none, and may only serve environments that point
-   * at no varset at all.
-   */
-  varsets?: VarsetsConfig;
   /**
    * What carries traffic between this node and its peers. Absent is only legal
    * for a node that stays on loopback: see {@link TransportConfig}.
@@ -91,11 +103,11 @@ export interface DeployConfig {
   /** Maximum entries in one tar archive. */
   archiveEntries: number;
   activeTasks: number;
-  projectActiveTasks: number;
+  applicationActiveTasks: number;
   queuedTasks: number;
-  projectQueuedTasks: number;
+  applicationQueuedTasks: number;
   stagedBytes: number;
-  projectStagedBytes: number;
+  applicationStagedBytes: number;
   receiveTimeoutMs: number;
   queueTimeoutMs: number;
   taskTimeoutMs: number;
@@ -128,12 +140,6 @@ export interface ApiConfig {
   jsonBytes: number;
 }
 
-/** How this node gets at the variables its environments are configured with. */
-export interface VarsetsConfig {
-  /** File holding the 32-byte AES-256 key, raw or as base64url or hex text. */
-  keyFile: string;
-}
-
 /**
  * Ingress configuration.
  *
@@ -154,14 +160,64 @@ export interface IngressConfig {
   token?: [string, ...string[]];
   /** Traefik entry points; never empty because omission attaches to all of them. */
   entryPoints?: string[];
+  /**
+   * The ONE name this installation's ingress solves DNS-01 at, so somebody who
+   * claims a host with its subdomains delegates the challenge to it:
+   * `_acme-challenge.<base> CNAME <this>`.
+   *
+   * SCAFO DOES NOTHING WITH IT BUT SAY IT. Issuance is the ingress's, and this
+   * is the sentence an operator would otherwise have to write down somewhere:
+   * the claim routes answer with it, and `scafo app domain add --wildcard`
+   * checks the record and names the one to create.
+   */
+  acmeDelegation?: string;
+  /**
+   * Name of a certificate resolver the operator defined in Traefik's STATIC
+   * configuration. Set, the published routers ask it for their certificates —
+   * one wildcard per base rather than one certificate per host. Absent, the
+   * document says nothing about TLS and the operator's own configuration does.
+   */
+  traefikCertResolver?: string;
+}
+
+/**
+ * How often a node looks at the registry beyond the change hint it reads once a
+ * pass. Both are bounds on how stale a view may get, never on correctness.
+ */
+export interface RegistryViewConfig {
+  /** Full re-read interval, whatever the hint says: the bound on a lost hint. */
+  resyncIntervalMs: number;
+  /** Node re-read interval; liveness is an age, and no write announces a death. */
+  nodeRefreshIntervalMs: number;
+}
+
+/** What the node does while it holds the coordinator lease. */
+export interface CoordinatorConfig {
+  /** Lifetime written into the lease; it is renewed at a third of it. */
+  leaseTtlMs: number;
+  /** Time between two reap passes while holding. */
+  reapIntervalMs: number;
 }
 
 /** Every runtime setting, with the defaults already applied. */
 export interface RuntimeConfig {
-  /** Executable that runs one environment; resolved against `PATH` unless it is a path. */
+  /** Executable that runs one application; resolved against `PATH` unless it is a path. */
   binPath: string;
   /** First port of the range runtime processes are given pairs from. */
   portRangeStart: number;
+  /**
+   * Last port of that range, both ends included.
+   *
+   * Worth sizing on a node that shares the host's network namespace, where these
+   * ports are the HOST's and the machine's own services live among them.
+   */
+  portRangeEnd: number;
+  /**
+   * How long a port released here is kept from a different application, so a
+   * peer or an ingress still routing to it cannot reach another application's
+   * process.
+   */
+  portQuarantineMs: number;
   /** Runtime listener address. Non-loopback requires an explicit transport. */
   bindHost: string;
   /** Variables for every runtime process. Driver-derived names are rejected. */
@@ -171,8 +227,12 @@ export interface RuntimeConfig {
 export interface LoadConfigOptions {
   /** Config file to read; defaults to {@link DEFAULT_CONFIG_PATHS}, first readable wins. */
   configPath?: string;
-  /** Command-line flags, keyed by their kebab-case name (`access-key`). */
-  flags?: Record<string, string | undefined>;
+  /**
+   * Command-line flags, keyed by their kebab-case name (`access-key`). A
+   * list-valued setting arrives as the array its flag was repeated into; every
+   * other setting arrives as text.
+   */
+  flags?: Record<string, string | string[] | undefined>;
   /** Environment to read; pass `process.env`. Defaults to no environment at all. */
   env?: Record<string, string | undefined>;
   /** Reads a file as text, resolving null when it does not exist. */
@@ -188,7 +248,7 @@ export const DEFAULT_REGION: string = "us-east-1";
 /** Loopback by default: the node API is only safe on a trusted network. */
 export const DEFAULT_LISTEN: string = "127.0.0.1:7400";
 
-/** Command that runs an environment when none is configured. */
+/** Command that runs an application when none is configured. */
 export const DEFAULT_RUNTIME_BIN: string = "celld";
 
 /** Address runtime processes bind to when none is configured: loopback only. */
@@ -249,7 +309,6 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
   const ingressAccessLog = resolveIngressAccessLog(sources, observing);
   /* Operator runtime config overrides the observability telemetry default. */
   const celldEnv = withTelemetry(resolveCelldEnv(sources), observing);
-  const keyFile = resolve("varsetKeyFile", sources);
   const transport = resolveTransport(sources);
   const wireguard = resolveWireguard(sources);
 
@@ -288,9 +347,38 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
     platformDomains: resolvePlatformDomains(sources),
     runtime: {
       binPath: resolve("celldBin", sources) ?? DEFAULT_RUNTIME_BIN,
-      portRangeStart: resolvePort("portRangeStart", sources, DEFAULT_PORT_RANGE_START),
+      ...resolvePortRange(sources),
+      portQuarantineMs: resolvePositiveSafeInteger(
+        "portQuarantineMs",
+        sources,
+        DEFAULT_PORT_QUARANTINE_MS,
+      ),
       bindHost: resolveBindHost(sources) ?? defaultBindHost(transport, tunnelHost),
       ...(celldEnv === undefined ? {} : { celldEnv }),
+    },
+    registry: {
+      resyncIntervalMs: resolvePositiveSafeInteger(
+        "registryResyncMs",
+        sources,
+        DEFAULT_REGISTRY_RESYNC_MS,
+      ),
+      nodeRefreshIntervalMs: resolvePositiveSafeInteger(
+        "registryNodeRefreshMs",
+        sources,
+        DEFAULT_NODE_REFRESH_INTERVAL_MS,
+      ),
+    },
+    coordinator: {
+      leaseTtlMs: resolvePositiveSafeInteger(
+        "coordinatorLeaseTtlMs",
+        sources,
+        DEFAULT_LEASE_TTL_MS,
+      ),
+      reapIntervalMs: resolvePositiveSafeInteger(
+        "coordinatorReapIntervalMs",
+        sources,
+        DEFAULT_REAP_INTERVAL_MS,
+      ),
     },
     deploy: resolveDeploy(sources),
     observability: {
@@ -302,7 +390,6 @@ export async function loadDaemonConfig(opts?: LoadConfigOptions): Promise<Daemon
       jsonBytes: resolvePositiveSafeInteger("jsonBytes", sources, DEFAULT_JSON_BYTES),
     },
     ...(ingress === undefined ? {} : { ingress }),
-    ...(keyFile === undefined ? {} : { varsets: { keyFile } }),
     ...(transport === undefined ? {} : { transport }),
     ...(wireguard === undefined ? {} : { wireguard }),
   };
@@ -417,7 +504,37 @@ const ORIGINS = {
     env: ["SCAFO_PORT_RANGE_START"],
     file: "runtime.portRangeStart",
   },
+  portRangeEnd: {
+    flag: "port-range-end",
+    env: ["SCAFO_PORT_RANGE_END"],
+    file: "runtime.portRangeEnd",
+  },
+  portQuarantineMs: {
+    flag: "port-quarantine-ms",
+    env: ["SCAFO_PORT_QUARANTINE_MS"],
+    file: "runtime.portQuarantineMs",
+  },
   bindHost: { flag: "bind-host", env: ["SCAFO_BIND_HOST"], file: "runtime.bindHost" },
+  registryResyncMs: {
+    flag: "registry-resync-ms",
+    env: ["SCAFO_REGISTRY_RESYNC_MS"],
+    file: "registry.resyncIntervalMs",
+  },
+  registryNodeRefreshMs: {
+    flag: "registry-node-refresh-ms",
+    env: ["SCAFO_REGISTRY_NODE_REFRESH_MS"],
+    file: "registry.nodeRefreshIntervalMs",
+  },
+  coordinatorLeaseTtlMs: {
+    flag: "coordinator-lease-ttl-ms",
+    env: ["SCAFO_COORDINATOR_LEASE_TTL_MS"],
+    file: "coordinator.leaseTtlMs",
+  },
+  coordinatorReapIntervalMs: {
+    flag: "coordinator-reap-interval-ms",
+    env: ["SCAFO_COORDINATOR_REAP_INTERVAL_MS"],
+    file: "coordinator.reapIntervalMs",
+  },
   artifactBytes: {
     flag: "artifact-bytes",
     env: ["SCAFO_ARTIFACT_BYTES"],
@@ -429,22 +546,22 @@ const ORIGINS = {
     file: "deploy.archiveEntries",
   },
   activeTasks: { flag: "active-tasks", env: ["SCAFO_ACTIVE_TASKS"], file: "deploy.activeTasks" },
-  projectActiveTasks: {
-    flag: "project-active-tasks",
-    env: ["SCAFO_PROJECT_ACTIVE_TASKS"],
-    file: "deploy.projectActiveTasks",
+  applicationActiveTasks: {
+    flag: "application-active-tasks",
+    env: ["SCAFO_APPLICATION_ACTIVE_TASKS"],
+    file: "deploy.applicationActiveTasks",
   },
   queuedTasks: { flag: "queued-tasks", env: ["SCAFO_QUEUED_TASKS"], file: "deploy.queuedTasks" },
-  projectQueuedTasks: {
-    flag: "project-queued-tasks",
-    env: ["SCAFO_PROJECT_QUEUED_TASKS"],
-    file: "deploy.projectQueuedTasks",
+  applicationQueuedTasks: {
+    flag: "application-queued-tasks",
+    env: ["SCAFO_APPLICATION_QUEUED_TASKS"],
+    file: "deploy.applicationQueuedTasks",
   },
   stagedBytes: { flag: "staged-bytes", env: ["SCAFO_STAGED_BYTES"], file: "deploy.stagedBytes" },
-  projectStagedBytes: {
-    flag: "project-staged-bytes",
-    env: ["SCAFO_PROJECT_STAGED_BYTES"],
-    file: "deploy.projectStagedBytes",
+  applicationStagedBytes: {
+    flag: "application-staged-bytes",
+    env: ["SCAFO_APPLICATION_STAGED_BYTES"],
+    file: "deploy.applicationStagedBytes",
   },
   receiveTimeoutMs: {
     flag: "receive-timeout-ms",
@@ -479,10 +596,15 @@ const ORIGINS = {
     env: ["SCAFO_TRAEFIK_ENTRYPOINTS"],
     file: "ingress.entryPoints",
   },
-  varsetKeyFile: {
-    flag: "varset-key-file",
-    env: ["SCAFO_VARSET_KEY_FILE"],
-    file: "varsets.keyFile",
+  ingressAcmeDelegation: {
+    flag: "ingress-acme-delegation",
+    env: ["SCAFO_INGRESS_ACME_DELEGATION"],
+    file: "ingress.acmeDelegation",
+  },
+  traefikCertResolver: {
+    flag: "traefik-cert-resolver",
+    env: ["SCAFO_INGRESS_TRAEFIK_CERT_RESOLVER"],
+    file: "ingress.traefikCertResolver",
   },
   /* `SCAFO_STORAGE_TOKEN` is the name this had when the token only guarded storage. */
   ingressToken: {
@@ -510,9 +632,36 @@ export function describeWireguardSetting(setting: "address" | "endpoint" | "port
 type Setting = keyof typeof ORIGINS;
 
 interface Sources {
-  flags: Record<string, string | undefined>;
+  flags: Record<string, string | string[] | undefined>;
   env: Record<string, string | undefined>;
   file: Record<string, unknown> | undefined;
+}
+
+/**
+ * Every entry a list-valued setting names on the command line or in the
+ * environment, unread and untrimmed, or undefined when neither source states it.
+ *
+ * THIS IS THE ONE PLACE THE TWO SPELLINGS OF A LIST DIFFER. A flag repeats, and
+ * each occurrence is one whole entry — nothing is split, so an entry may hold a
+ * comma. An environment variable cannot repeat, so it carries the entries as
+ * comma-separated text and an entry there may hold no comma. The config file has
+ * a third spelling of its own, a JSON array, which each setting reads for itself
+ * once neither of these answered.
+ *
+ * A repeated flag nobody wrote reaches the loader as an empty array, which says
+ * nothing and lets the environment answer; a flag written empty says an empty
+ * entry, which is a setting's own to refuse.
+ */
+function listFlagOrEnv(origin: Origin, sources: Sources): string[] | undefined {
+  const flag = sources.flags[origin.flag];
+  if (typeof flag === "string") return [flag];
+  if (Array.isArray(flag) && flag.length > 0) return flag;
+
+  for (const variable of origin.env) {
+    const value = sources.env[variable];
+    if (value !== undefined) return value.split(",");
+  }
+  return undefined;
 }
 
 function resolve(setting: Setting, sources: Sources): string | undefined {
@@ -557,6 +706,24 @@ function resolvePort(setting: Setting, sources: Sources, fallback: number): numb
   return value;
 }
 
+/**
+ * The range this node draws port pairs from.
+ *
+ * The end defaults to a span from whatever start was configured, never past the
+ * last port there is, so an operator who moves only the start still gets a
+ * usable range. Both ends are then weighed together: a range that cannot hold
+ * two ports places nothing.
+ */
+function resolvePortRange(sources: Sources): { portRangeStart: number; portRangeEnd: number } {
+  const start = resolvePort("portRangeStart", sources, DEFAULT_PORT_RANGE_START);
+  const end = resolvePort("portRangeEnd", sources, defaultPortRangeEnd(start));
+  assertPortRange(
+    { start, end },
+    { start: ORIGINS.portRangeStart.file, end: ORIGINS.portRangeEnd.file },
+  );
+  return { portRangeStart: start, portRangeEnd: end };
+}
+
 function resolvePositiveSafeInteger(setting: Setting, sources: Sources, fallback: number): number {
   const origin: Origin = ORIGINS[setting];
   const raw = flagOrEnv(origin, sources) ?? fileValue(sources.file, origin.file);
@@ -588,22 +755,22 @@ function resolveDeploy(sources: Sources): DeployConfig {
     artifactBytes: resolvePositiveSafeInteger("artifactBytes", sources, DEFAULT_ARTIFACT_BYTES),
     archiveEntries: resolvePositiveSafeInteger("archiveEntries", sources, DEFAULT_ARCHIVE_ENTRIES),
     activeTasks: resolvePositiveSafeInteger("activeTasks", sources, DEFAULT_ACTIVE_TASKS),
-    projectActiveTasks: resolvePositiveSafeInteger(
-      "projectActiveTasks",
+    applicationActiveTasks: resolvePositiveSafeInteger(
+      "applicationActiveTasks",
       sources,
-      DEFAULT_PROJECT_ACTIVE_TASKS,
+      DEFAULT_APPLICATION_ACTIVE_TASKS,
     ),
     queuedTasks: resolveNonNegativeSafeInteger("queuedTasks", sources, DEFAULT_QUEUED_TASKS),
-    projectQueuedTasks: resolveNonNegativeSafeInteger(
-      "projectQueuedTasks",
+    applicationQueuedTasks: resolveNonNegativeSafeInteger(
+      "applicationQueuedTasks",
       sources,
-      DEFAULT_PROJECT_QUEUED_TASKS,
+      DEFAULT_APPLICATION_QUEUED_TASKS,
     ),
     stagedBytes: resolvePositiveSafeInteger("stagedBytes", sources, DEFAULT_STAGED_BYTES),
-    projectStagedBytes: resolvePositiveSafeInteger(
-      "projectStagedBytes",
+    applicationStagedBytes: resolvePositiveSafeInteger(
+      "applicationStagedBytes",
       sources,
-      DEFAULT_PROJECT_STAGED_BYTES,
+      DEFAULT_APPLICATION_STAGED_BYTES,
     ),
     receiveTimeoutMs: resolvePositiveSafeInteger(
       "receiveTimeoutMs",
@@ -615,18 +782,18 @@ function resolveDeploy(sources: Sources): DeployConfig {
     outputBytes: resolvePositiveSafeInteger("outputBytes", sources, DEFAULT_OUTPUT_BYTES),
   };
 
-  for (const [project, global] of [
-    ["projectActiveTasks", "activeTasks"],
-    ["projectQueuedTasks", "queuedTasks"],
-    ["projectStagedBytes", "stagedBytes"],
+  for (const [application, global] of [
+    ["applicationActiveTasks", "activeTasks"],
+    ["applicationQueuedTasks", "queuedTasks"],
+    ["applicationStagedBytes", "stagedBytes"],
   ] as const) {
-    if (deploy[project] > deploy[global]) {
+    if (deploy[application] > deploy[global]) {
       throw new ScafoError("invalid-input", "Invalid deploy limits", {
-        detail: `"deploy.${project}" must not exceed "deploy.${global}"`,
+        detail: `"deploy.${application}" must not exceed "deploy.${global}"`,
       });
     }
   }
-  for (const field of ["stagedBytes", "projectStagedBytes"] as const) {
+  for (const field of ["stagedBytes", "applicationStagedBytes"] as const) {
     if (deploy[field] < deploy.artifactBytes) {
       throw new ScafoError("invalid-input", "Invalid deploy byte limits", {
         detail: `"deploy.${field}" must be at least "deploy.artifactBytes"`,
@@ -699,16 +866,16 @@ function resolveBindHost(sources: Sources): string | undefined {
  * What this node says it is, or undefined when the operator said nothing.
  *
  * Two spellings, because the sources can carry two shapes: a flag and an
- * environment variable can only hold text, so they are written `k=v,k2=v2`,
- * while the config file holds the object that text parses into. The inline form
- * wins whole rather than merging with the file's — labels describe one machine,
- * and a set half-stated in two places is one nobody can read off either.
+ * environment variable state one `k=v` pair per entry, while the config file
+ * holds the object those pairs parse into. The inline form wins whole rather
+ * than merging with the file's — labels describe one machine, and a set
+ * half-stated in two places is one nobody can read off either.
  */
 function resolveNodeLabels(sources: Sources): Record<string, string> | undefined {
   const origin: Origin = ORIGINS.nodeLabels;
 
-  const inline = flagOrEnv(origin, sources);
-  if (inline !== undefined) return parseLabels(inline, `"${origin.file}"`);
+  const inline = listFlagOrEnv(origin, sources);
+  if (inline !== undefined) return parseLabelEntries(inline, `"${origin.file}"`);
 
   const value = fileValue(sources.file, origin.file);
   if (value === undefined || value === null) return undefined;
@@ -721,13 +888,13 @@ function resolveNodeLabels(sources: Sources): Record<string, string> | undefined
  * The variables an operator hands every runtime process, or undefined when they
  * handed over none.
  *
- * Two spellings, as the node labels have: a flag and an environment variable can
- * only carry text, written `NAME=value,NAME2=value2`, while the config file
- * carries the object that text parses into. A VALUE MAY NOT CONTAIN A COMMA in
- * the inline form — the separator wins — so a value that needs one is written in
- * the config file, which has no such limit. The inline form replaces the file's
- * whole set rather than merging into it, for the reason labels do: a set
- * half-stated in two places is one nobody can read off either.
+ * Two spellings, as the node labels have: a flag and an environment variable
+ * state one `NAME=value` pair per entry, while the config file carries the
+ * object those pairs parse into. A VALUE HOLDING A COMMA is written by repeating
+ * the flag, or in the config file; the environment variable is the one form that
+ * cannot carry one, because its entries are separated by commas. The inline form
+ * replaces the file's whole set rather than merging into it, for the reason
+ * labels do: a set half-stated in two places is one nobody can read off either.
  *
  * A name the runtime driver derives for itself is refused here, naming the
  * variable, because this is the last moment an operator is still looking at
@@ -735,7 +902,7 @@ function resolveNodeLabels(sources: Sources): Record<string, string> | undefined
  */
 function resolveCelldEnv(sources: Sources): Record<string, string> | undefined {
   const origin: Origin = ORIGINS.celldEnv;
-  const inline = flagOrEnv(origin, sources);
+  const inline = listFlagOrEnv(origin, sources);
 
   let vars: Record<string, string>;
   if (inline === undefined) {
@@ -745,7 +912,7 @@ function resolveCelldEnv(sources: Sources): Record<string, string> | undefined {
     assertEnvVars(value, `"${origin.file}"`);
     vars = { ...value };
   } else {
-    vars = parseEnvVars(inline, `"${origin.file}"`);
+    vars = parseEnvVarEntries(inline, `"${origin.file}"`);
   }
 
   for (const name of Object.keys(vars)) {
@@ -754,26 +921,33 @@ function resolveCelldEnv(sources: Sources): Record<string, string> | undefined {
     throw new ScafoError("invalid-input", "Reserved environment variable", {
       detail:
         `"${origin.file}" sets "${name}", which the runtime driver writes itself from this ` +
-        `node's configuration and from the listeners its processes bind — a value set here ` +
-        `would be overwritten. Drop it from the Celld policy`,
+        `node's configuration, from the listeners its processes bind and from the private ` +
+        `directories it keeps for them — a value set here would be overwritten. Drop it from ` +
+        `the Celld policy`,
     });
   }
   return Object.keys(vars).length === 0 ? undefined : vars;
 }
 
-/** Resolves explicit ingress tokens. Text uses comma separation; JSON arrays
- * retain entries verbatim. An explicit empty value is rejected, not treated as absent. */
+/**
+ * Resolves explicit ingress tokens, in the order the source states them, primary
+ * first. An explicit empty value is rejected, not treated as absent.
+ *
+ * A file holding one token writes it as the string it is; several are an array,
+ * and each entry is one whole token.
+ */
 function resolveIngressTokens(sources: Sources): [string, ...string[]] | undefined {
   const origin: Origin = ORIGINS.ingressToken;
-  const written = suppliedFlagOrEnv(origin, sources) ?? fileValue(sources.file, origin.file);
+  const inFile: unknown = fileValue(sources.file, origin.file);
+  const written: unknown =
+    listFlagOrEnv(origin, sources) ?? (typeof inFile === "string" ? [inFile] : inFile);
   if (written === undefined || written === null) return undefined;
 
-  const spellings: unknown = typeof written === "string" ? written.split(",") : written;
-  if (!Array.isArray(spellings) || spellings.some((entry) => typeof entry !== "string")) {
+  if (!Array.isArray(written) || written.some((entry) => typeof entry !== "string")) {
     throw refuseIngressTokens(written, "must be a token, or a list of them");
   }
 
-  const tokens = (spellings as string[]).map((entry) => entry.trim());
+  const tokens = (written as string[]).map((entry) => entry.trim());
   const [primary, ...rest] = tokens;
   if (tokens.length === 0 || tokens.some((token) => token === "")) {
     throw refuseIngressTokens(
@@ -790,34 +964,19 @@ function refuseIngressTokens(written: unknown, why: string): ScafoError {
   return new ScafoError("invalid-input", "Invalid configuration value", {
     detail:
       `"${origin.file}" (--${origin.flag}, or ${origin.env.join(" or ")}) ${why}, got ` +
-      `${JSON.stringify(written)}. Write one token, several separated by commas, or an array of ` +
-      `them with the one in use first; leave the setting out altogether to have this node mint ` +
-      `its own instead`,
+      `${JSON.stringify(written)}. Write one token, several by repeating --${origin.flag} or ` +
+      `separating them with commas in the environment, or an array of them in the config file, ` +
+      `with the one in use first; leave the setting out altogether to have this node mint its ` +
+      `own instead`,
   });
-}
-
-/** Returns the first explicitly supplied flag or environment value, including blank. */
-function suppliedFlagOrEnv(origin: Origin, sources: Sources): string | undefined {
-  const flag = sources.flags[origin.flag];
-  if (flag !== undefined) return flag;
-
-  for (const variable of origin.env) {
-    const value = sources.env[variable];
-    if (value !== undefined) return value;
-  }
-  return undefined;
 }
 
 function resolvePlatformDomains(sources: Sources): string[] {
   const origin: Origin = ORIGINS.platformDomains;
-  const inline = flagOrEnv(origin, sources);
-  const domains =
-    inline === undefined
-      ? fileStringList(sources.file, origin.file)
-      : inline
-          .split(",")
-          .map((entry) => entry.trim())
-          .filter((entry) => entry !== "");
+  const inline = listFlagOrEnv(origin, sources);
+  const domains = (inline ?? fileStringList(sources.file, origin.file))
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
 
   for (const domain of domains) assertHost(domain);
   return domains;
@@ -830,33 +989,80 @@ function resolvePlatformDomains(sources: Sources): string[] {
 function resolveIngress(sources: Sources): IngressConfig | undefined {
   const entryPoints = resolveEntryPoints(sources);
   const token = resolveIngressTokens(sources);
+  const acmeDelegation = resolveAcmeDelegation(sources);
+  const traefikCertResolver = resolveCertResolver(sources);
 
-  if (entryPoints === undefined) return token === undefined ? undefined : { token };
-  return { ...(token === undefined ? {} : { token }), entryPoints };
+  const ingress: IngressConfig = {
+    ...(token === undefined ? {} : { token }),
+    ...(entryPoints === undefined ? {} : { entryPoints }),
+    ...(acmeDelegation === undefined ? {} : { acmeDelegation }),
+    ...(traefikCertResolver === undefined ? {} : { traefikCertResolver }),
+  };
+  return Object.keys(ingress).length === 0 ? undefined : ingress;
 }
 
-/** Resolves Traefik entry points from comma text or JSON. Empty is rejected:
- * Traefik otherwise attaches routers to every entry point. */
+/** Resolves the DNS-01 name customers delegate to; anything but a host is refused. */
+function resolveAcmeDelegation(sources: Sources): string | undefined {
+  const origin: Origin = ORIGINS.ingressAcmeDelegation;
+  const written = resolve("ingressAcmeDelegation", sources);
+  if (written === undefined) return undefined;
+
+  if (!isHost(written)) {
+    throw new ScafoError("invalid-input", "Invalid configuration value", {
+      detail:
+        `"${origin.file}" (--${origin.flag}, or ${origin.env.join(" or ")}) must be the one host ` +
+        `this installation's ingress answers DNS-01 at, such as "acme.example.com", so a claimed ` +
+        `base delegates "_acme-challenge.<base>" to it with a CNAME; got ` +
+        `${JSON.stringify(written)}`,
+    });
+  }
+  return written;
+}
+
+/**
+ * A certificate resolver is named, never described: what it does lives in
+ * Traefik's static configuration, which scafo neither reads nor writes.
+ */
+const CERT_RESOLVER_RE = /^[A-Za-z\d_-]{1,64}$/;
+
+/** Resolves the Traefik certificate resolver the published routers name. */
+function resolveCertResolver(sources: Sources): string | undefined {
+  const origin: Origin = ORIGINS.traefikCertResolver;
+  const written = resolve("traefikCertResolver", sources);
+  if (written === undefined) return undefined;
+
+  if (!CERT_RESOLVER_RE.test(written)) {
+    throw new ScafoError("invalid-input", "Invalid configuration value", {
+      detail:
+        `"${origin.file}" (--${origin.flag}, or ${origin.env.join(" or ")}) must name a ` +
+        `certificate resolver of Traefik's own static configuration — up to 64 letters, digits, ` +
+        `hyphens and underscores, such as "letsencrypt" — got ${JSON.stringify(written)}`,
+    });
+  }
+  return written;
+}
+
+/** Resolves Traefik entry points from a repeated flag, comma text or JSON. Empty
+ * is rejected: Traefik otherwise attaches routers to every entry point. */
 function resolveEntryPoints(sources: Sources): string[] | undefined {
   const origin: Origin = ORIGINS.traefikEntryPoints;
-  const inline = flagOrEnv(origin, sources);
+  const inline = listFlagOrEnv(origin, sources);
 
   if (inline === undefined) {
     const written = fileValue(sources.file, origin.file);
     if (written === undefined || written === null) return undefined;
   }
 
-  const names = (
-    inline === undefined ? fileStringList(sources.file, origin.file) : inline.split(",")
-  )
+  const names = (inline ?? fileStringList(sources.file, origin.file))
     .map((entry) => entry.trim())
     .filter((entry) => entry !== "");
 
   if (names.length === 0) {
     throw new ScafoError("invalid-input", "Invalid configuration value", {
       detail:
-        `"${origin.file}" must name at least one Traefik entryPoint, such as "web" or ` +
-        `"web,websecure": routers attached to none are attached to all of them`,
+        `"${origin.file}" must name at least one Traefik entryPoint, such as "web", or both ` +
+        `with "--${origin.flag} web --${origin.flag} websecure": routers attached to none are ` +
+        `attached to all of them`,
     });
   }
   return names;
@@ -912,14 +1118,13 @@ async function readConfigFile(
     const text = await readFile(path);
     if (text === null) continue;
 
-    const errors: JSONCParseError[] = [];
-    const parsed: unknown = parseJSONC(text, { errors, allowTrailingComma: true });
-    const failure = errors[0];
-    if (failure !== undefined) {
+    const document = parseJsoncDocument(text);
+    if ("error" in document) {
       throw new ScafoError("invalid-input", "Config file is not valid JSONC", {
-        detail: `"${path}" has a syntax error at character ${String(failure.offset)}`,
+        detail: `"${path}" has a syntax error at character ${String(document.error.offset)}`,
       });
     }
+    const parsed = document.value;
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
       throw new ScafoError("invalid-input", "Config file is not a JSON object", {
         detail: `"${path}" must hold an object of settings`,
@@ -937,11 +1142,17 @@ async function readConfigFile(
   return undefined;
 }
 
-/** Walks a dotted key path (`bucket.endpoint`) through the parsed config file. */
+/**
+ * Walks a dotted key path (`bucket.endpoint`) through the parsed config file.
+ *
+ * Every step reads a key the file itself wrote: a document can name a setting
+ * only by holding it, never by what it inherits.
+ */
 function fileValue(file: Record<string, unknown> | undefined, path: string): unknown {
   let current: unknown = file;
   for (const segment of path.split(".")) {
     if (typeof current !== "object" || current === null) return undefined;
+    if (!Object.hasOwn(current, segment)) return undefined;
     current = (current as Record<string, unknown>)[segment];
   }
   return current;

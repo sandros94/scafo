@@ -20,9 +20,9 @@ rm -rf .env .scafo
 
 Bucket credentials are fleet-root authority. Trust keys with `--register` for bootstrap/recovery or through an admin-authenticated node API. Admins manage the fleet's keys; operators can grant no higher tier and revoke only their replacement lineage.
 
-Operator keys require project scope. `--projects "*"` grants all projects and requires an admin. Keep bucket credentials out of tenant workflows.
+Operator-tier keys require application scope, given by `--apps` when the key is enrolled over the wire. The flag repeats, one entry each: an exact application name, a prefix glob such as `shop-*`, or `*`; `--apps "*"` grants every application and requires an admin. Keep bucket credentials out of tenant workflows.
 
-Scoped callers see only their key lineage and reachable projects.
+Scoped callers see only their key lineage and reachable applications.
 
 ## Prerequisites
 
@@ -41,4 +41,4 @@ The Caddy image includes `caddy.storage.scafo` for TLS material and the `scafo` 
 
 [`../examples/`](../examples/) contains production-shaped Compose and Kubernetes configurations. Playgrounds use fake credentials, local bucket containers, and overridable ports. Both retain the 50-second stop grace, shared ingress/node namespace, and one-bucket-prefix-per-fleet boundary.
 
-The playgrounds use plain HTTP because `*.scafo.test` has no DNS or certificate authority. They omit custom domains, varsets, and CI deploys.
+The playgrounds use plain HTTP because `*.scafo.test` has no DNS or certificate authority. They omit custom domains and CI deploys.

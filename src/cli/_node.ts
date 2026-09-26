@@ -49,7 +49,7 @@ export interface NodeOptions {
  *
  * The problem document's own code is kept rather than replaced. It is the stable
  * half of the contract, and a caller acts on it: `trust-mismatch` says the token
- * is fine and the project does not admit it — a policy to fix — while
+ * is fine and the application does not admit it — a policy to fix — while
  * `auth-invalid` says the token itself did not hold up. Flattening both into one
  * code here would hand the caller the one thing the API is careful to keep
  * distinguishable, already thrown away.
@@ -71,6 +71,11 @@ export async function nodeRequest(
   const response = await fetchFn(url, { ...init, headers });
   if (response.ok) return response;
 
+  /* Carried onto the failure rather than dropped: a node that refuses a deploy
+     because its queue is full says how long to wait, and a caller that retried
+     on a number of its own would be ignoring the only party that knows. */
+  const retryAfterMs = retryAfterOf(response.headers.get("retry-after"));
+
   /* Whatever answered may not have been a node at all — a proxy, a gateway, an
      error page — so the body is only used when it looks like a problem
      document, and is otherwise the bare status it really is. */
@@ -80,9 +85,31 @@ export async function nodeRequest(
     throw new ScafoError("invalid-input", `Node answered ${String(response.status)}`, {
       status: response.status,
       detail: `${init.method ?? "GET"} ${url}`,
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
     });
   }
-  throw fromProblem({ ...(problem as ProblemDetails), status: response.status });
+  throw fromProblem(
+    { ...(problem as ProblemDetails), status: response.status },
+    undefined,
+    retryAfterMs === undefined ? {} : { retryAfterMs },
+  );
+}
+
+/**
+ * A `Retry-After` header as milliseconds, or undefined when there was none or it
+ * said nothing usable.
+ *
+ * Both spellings HTTP allows: a number of seconds, and an absolute date. A date
+ * already in the past is no wait at all rather than a negative one.
+ */
+export function retryAfterOf(header: string | null): number | undefined {
+  if (header === null) return undefined;
+
+  const seconds = Number(header.trim());
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+
+  const at = Date.parse(header);
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
 }
 
 /** Strips the trailing separator an operator's `--node` often carries. */

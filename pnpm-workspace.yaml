@@ -21,3 +21,6 @@ minimumReleaseAgeExclude:
 
 onlyBuiltDependencies:
   - simple-git-hooks
+
+patchedDependencies:
+  citty@0.2.2: patches/citty@0.2.2.patch

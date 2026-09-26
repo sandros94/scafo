@@ -1,35 +1,35 @@
-/* Choosing which nodes serve an environment, and how many. */
+/* Choosing which nodes serve an application, and how many. */
 
 import { describe, expect, it } from "vitest";
 import {
   assignNodes,
   assertReplicas,
-  defaultReplicas,
+  DEFAULT_REPLICAS,
   eligibleNodes,
   parseReplicas,
   rendezvousOrder,
   resolveReplicas,
 } from "../src/core/placement/index.ts";
 import type {
-  EnvironmentRecord,
+  ApplicationRecord,
   NodeRecord,
   NodeSelector,
   ReplicaCount,
 } from "../src/core/types/registry.ts";
+import { sha256Hex } from "../src/core/utils/hash.ts";
 import { randomSlug, rejectsWith, seededRng } from "./_helpers.ts";
 
-const PROJECT = "shop";
+const APPLICATION = "shop";
 
 /** Seeds the property run replays from; a failure is reproducible by its number. */
 const SEEDS = [1, 7, 42, 1337, 90_210];
 
-/** The label half the property run's fleet carries and half its environments select. */
+/** The label half the property run's fleet carries and half its applications select. */
 const FAST = "fast";
 
-/** One environment to place, with the constraint it places under. */
+/** One application to place, with the constraint it places under. */
 interface Target {
-  project: string;
-  env: string;
+  name: string;
   selector?: NodeSelector;
 }
 
@@ -37,36 +37,45 @@ describe("rendezvousOrder", () => {
   it("ranks the same nodes the same way however they arrive", async () => {
     const nodes = ["node-a", "node-b", "node-c", "node-d"];
 
-    const forward = await rendezvousOrder(PROJECT, "prod", nodes);
-    const backward = await rendezvousOrder(PROJECT, "prod", [...nodes].reverse());
-    const shuffled = await rendezvousOrder(PROJECT, "prod", [
-      "node-c",
-      "node-a",
-      "node-d",
-      "node-b",
-    ]);
+    const forward = await rendezvousOrder(APPLICATION, nodes);
+    const backward = await rendezvousOrder(APPLICATION, [...nodes].reverse());
+    const shuffled = await rendezvousOrder(APPLICATION, ["node-c", "node-a", "node-d", "node-b"]);
 
     expect(backward).toEqual(forward);
     expect(shuffled).toEqual(forward);
     expect([...forward].sort()).toEqual([...nodes].sort());
   });
 
-  it("ranks two environments of one project independently", async () => {
+  it("ranks two applications independently", async () => {
     const nodes = ["node-a", "node-b", "node-c", "node-d", "node-e"];
 
-    const first = await rendezvousOrder(PROJECT, "prod", nodes);
-    const second = await rendezvousOrder(PROJECT, "staging", nodes);
-
-    expect(second).not.toEqual(first);
-  });
-
-  it("gives one project's environment and another's the same name different answers", async () => {
-    const nodes = ["node-a", "node-b", "node-c", "node-d", "node-e"];
-
-    const here = await rendezvousOrder("shop", "prod", nodes);
-    const there = await rendezvousOrder("blog", "prod", nodes);
+    const here = await rendezvousOrder("shop", nodes);
+    const there = await rendezvousOrder("blog", nodes);
 
     expect(there).not.toEqual(here);
+  });
+
+  it("ranks an application whose name merely shares a prefix independently", async () => {
+    const nodes = ["node-a", "node-b", "node-c", "node-d", "node-e"];
+
+    const shop = await rendezvousOrder("shop", nodes);
+    const preview = await rendezvousOrder("shop-preview", nodes);
+
+    expect(preview).not.toEqual(shop);
+  });
+
+  it("scores each node by the digest of the application name and the node id", async () => {
+    /* The digest input is what makes the ranking reproducible outside this
+       process: `<application>\n<node>`, and nothing else about either. */
+    const nodes = ["node-a", "node-b", "node-c", "node-d", "node-e"];
+    const scored = await Promise.all(
+      nodes.map(async (id) => ({ id, score: await sha256Hex(`${APPLICATION}\n${id}`) })),
+    );
+    const expected = scored
+      .sort((a, b) => (a.score === b.score ? 0 : a.score < b.score ? 1 : -1))
+      .map((entry) => entry.id);
+
+    expect(await rendezvousOrder(APPLICATION, nodes)).toEqual(expected);
   });
 });
 
@@ -74,34 +83,32 @@ describe("assignNodes", () => {
   const nodes = ["node-a", "node-b", "node-c", "node-d", "node-e"];
 
   it('gives "all" every candidate there is', async () => {
-    const chosen = await assignNodes({ project: PROJECT, env: "prod", nodes, replicas: "all" });
+    const chosen = await assignNodes({ application: APPLICATION, nodes, replicas: "all" });
 
     expect(chosen).toEqual([...nodes].sort());
   });
 
   it("gives a count fewer than the fleet exactly that many, in the ranked order", async () => {
-    const ranked = await rendezvousOrder(PROJECT, "prod", nodes);
+    const ranked = await rendezvousOrder(APPLICATION, nodes);
 
-    const chosen = await assignNodes({ project: PROJECT, env: "prod", nodes, replicas: 2 });
+    const chosen = await assignNodes({ application: APPLICATION, nodes, replicas: 2 });
 
     expect(chosen).toHaveLength(2);
     expect(chosen).toEqual(ranked.slice(0, 2).sort());
   });
 
   it("gives a count larger than the fleet everything the fleet has", async () => {
-    const chosen = await assignNodes({ project: PROJECT, env: "prod", nodes, replicas: 99 });
+    const chosen = await assignNodes({ application: APPLICATION, nodes, replicas: 99 });
 
     expect(chosen).toEqual([...nodes].sort());
   });
 
   it("answers an empty fleet with an empty assignment rather than inventing a node", async () => {
-    expect(await assignNodes({ project: PROJECT, env: "prod", nodes: [], replicas: 1 })).toEqual(
-      [],
-    );
+    expect(await assignNodes({ application: APPLICATION, nodes: [], replicas: 1 })).toEqual([]);
   });
 
   it("sorts what it chose, so two decisions compare without caring who ranked first", async () => {
-    const chosen = await assignNodes({ project: PROJECT, env: "prod", nodes, replicas: 3 });
+    const chosen = await assignNodes({ application: APPLICATION, nodes, replicas: 3 });
 
     expect(chosen).toEqual([...chosen].sort());
   });
@@ -109,48 +116,45 @@ describe("assignNodes", () => {
 
 describe("the stability property", () => {
   it.each(SEEDS)(
-    "moves only the environments a removed node was serving (seed %i)",
+    "moves only the applications a removed node was serving (seed %i)",
     async (seed) => {
       const rng = seededRng(seed);
       const fleet = Array.from({ length: 5 }, (_, i) =>
         node(`node-${String(i)}-${randomSlug(rng, 6)}`, { tier: i < 3 ? FAST : "slow" }),
       );
-      const environments: Target[] = Array.from({ length: 40 }, (_, i) => ({
-        project: randomSlug(rng, 8),
-        env: randomSlug(rng, 8),
+      const applications: Target[] = Array.from({ length: 40 }, (_, i) => ({
+        name: `${randomSlug(rng, 8)}-${String(i)}`,
         ...(i % 2 === 0 ? { selector: { tier: FAST } } : {}),
       }));
       const replicas: ReplicaCount = 2;
 
       const place = async (candidates: NodeRecord[], target: Target): Promise<string[]> =>
         assignNodes({
-          project: target.project,
-          env: target.env,
+          application: target.name,
           nodes: eligibleNodes(candidates, target.selector).map((record) => record.id),
           replicas,
         });
 
       const before = new Map<string, string[]>();
-      for (const target of environments) {
-        before.set(`${target.project}/${target.env}`, await place(fleet, target));
+      for (const target of applications) {
+        before.set(target.name, await place(fleet, target));
       }
 
       const leaving = fleet[2].id;
       const remaining = fleet.filter((record) => record.id !== leaving);
 
       const seen: Array<{
-        key: string;
+        name: string;
         was: string[];
         now: string[];
         held: boolean;
         selector?: NodeSelector;
         eligible: number;
       }> = [];
-      for (const target of environments) {
-        const key = `${target.project}/${target.env}`;
-        const was = before.get(key) as string[];
+      for (const target of applications) {
+        const was = before.get(target.name) as string[];
         seen.push({
-          key,
+          name: target.name,
           was,
           now: await place(remaining, target),
           held: was.includes(leaving),
@@ -160,14 +164,14 @@ describe("the stability property", () => {
       }
 
       const untouched = seen.filter((entry) => !entry.held);
-      expect(untouched.map((entry) => ({ env: entry.key, nodes: entry.now }))).toEqual(
-        untouched.map((entry) => ({ env: entry.key, nodes: entry.was })),
+      expect(untouched.map((entry) => ({ application: entry.name, nodes: entry.now }))).toEqual(
+        untouched.map((entry) => ({ application: entry.name, nodes: entry.was })),
       );
 
       const disturbed = seen.filter((entry) => entry.held);
       expect(
         disturbed.map((entry) => ({
-          env: entry.key,
+          application: entry.name,
           keptTheRest: entry.was
             .filter((id) => id !== leaving)
             .every((id) => entry.now.includes(id)),
@@ -176,7 +180,7 @@ describe("the stability property", () => {
         })),
       ).toEqual(
         disturbed.map((entry) => ({
-          env: entry.key,
+          application: entry.name,
           keptTheRest: true,
           stillThere: false,
           count: Math.min(replicas, entry.eligible),
@@ -189,7 +193,7 @@ describe("the stability property", () => {
       for (const entry of seen.filter((candidate) => candidate.selector !== undefined)) {
         expect(
           [...entry.was, ...entry.now].every((id) => fast.has(id)),
-          entry.key,
+          entry.name,
         ).toBe(true);
       }
 
@@ -198,15 +202,14 @@ describe("the stability property", () => {
     },
   );
 
-  it("spreads environments over the fleet rather than piling them on one node", async () => {
+  it("spreads applications over the fleet rather than piling them on one node", async () => {
     const rng = seededRng(20_260_818);
     const nodes = ["node-a", "node-b", "node-c", "node-d", "node-e"];
     const held = new Map(nodes.map((id) => [id, 0]));
 
     for (let i = 0; i < 250; i++) {
       const [chosen] = await assignNodes({
-        project: PROJECT,
-        env: randomSlug(rng, 10),
+        application: `${randomSlug(rng, 10)}-${String(i)}`,
         nodes,
         replicas: 1,
       });
@@ -232,8 +235,7 @@ describe("a selector and a replica count together", () => {
 
   it('gives "all" every MATCHING node, and not every node', async () => {
     const chosen = await assignNodes({
-      project: PROJECT,
-      env: "prod",
+      application: APPLICATION,
       nodes: eligibleNodes(fleet, selector).map((record) => record.id),
       replicas: "all",
     });
@@ -243,8 +245,7 @@ describe("a selector and a replica count together", () => {
 
   it("gives a count that many OF the matching nodes", async () => {
     const chosen = await assignNodes({
-      project: PROJECT,
-      env: "prod",
+      application: APPLICATION,
       nodes: eligibleNodes(fleet, selector).map((record) => record.id),
       replicas: 1,
     });
@@ -255,8 +256,7 @@ describe("a selector and a replica count together", () => {
 
   it("narrows BEFORE it ranks, so the best ineligible node costs nothing", async () => {
     const ranked = await rendezvousOrder(
-      PROJECT,
-      "prod",
+      APPLICATION,
       fleet.map((record) => record.id),
     );
     const excluded = ranked[0];
@@ -266,14 +266,13 @@ describe("a selector and a replica count together", () => {
 
     const candidates = eligibleNodes(labelled, selector).map((record) => record.id);
     const chosen = await assignNodes({
-      project: PROJECT,
-      env: "prod",
+      application: APPLICATION,
       nodes: candidates,
       replicas: 1,
     });
 
     expect(candidates).not.toContain(excluded);
-    expect(chosen).toEqual([(await rendezvousOrder(PROJECT, "prod", candidates))[0]]);
+    expect(chosen).toEqual([(await rendezvousOrder(APPLICATION, candidates))[0]]);
     expect(chosen).toHaveLength(1);
   });
 
@@ -282,25 +281,20 @@ describe("a selector and a replica count together", () => {
 
     expect(candidates).toEqual([]);
     expect(
-      await assignNodes({ project: PROJECT, env: "prod", nodes: candidates, replicas: "all" }),
+      await assignNodes({ application: APPLICATION, nodes: candidates, replicas: "all" }),
     ).toEqual([]);
   });
 });
 
-describe("how many replicas an environment asks for", () => {
-  it("serves a long-lived environment everywhere, exactly as it was served before", async () => {
-    expect(defaultReplicas(false)).toBe("all");
-    expect(resolveReplicas(environment({ ephemeral: false }))).toBe("all");
+describe("how many replicas an application asks for", () => {
+  it("serves an application that never said on every node that may serve it", () => {
+    expect(DEFAULT_REPLICAS).toBe("all");
+    expect(resolveReplicas(application({}))).toBe("all");
   });
 
-  it("serves an ephemeral one on a single node", async () => {
-    expect(defaultReplicas(true)).toBe(1);
-    expect(resolveReplicas(environment({ ephemeral: true }))).toBe(1);
-  });
-
-  it("takes what the record says over what its kind would imply", async () => {
-    expect(resolveReplicas(environment({ ephemeral: false, replicas: 2 }))).toBe(2);
-    expect(resolveReplicas(environment({ ephemeral: true, replicas: "all" }))).toBe("all");
+  it("takes what the record says over the default", () => {
+    expect(resolveReplicas(application({ replicas: 2 }))).toBe(2);
+    expect(resolveReplicas(application({ replicas: "all" }))).toBe("all");
   });
 });
 
@@ -358,14 +352,12 @@ function node(id: string, labels: Record<string, string>): NodeRecord {
   };
 }
 
-function environment(opts: { ephemeral: boolean; replicas?: ReplicaCount }): EnvironmentRecord {
+function application(opts: { replicas?: ReplicaCount }): ApplicationRecord {
   return {
     v: 1,
-    name: "prod",
-    prefix: `fleets/${PROJECT}/prod`,
+    name: APPLICATION,
     deployment: null,
     domains: [],
-    ephemeral: opts.ephemeral,
     ...(opts.replicas === undefined ? {} : { replicas: opts.replicas }),
     createdAt: "2026-01-01T00:00:00.000Z",
   };

@@ -50,15 +50,15 @@ This mints an admin-tier operator key under `.scafo/` and registers its public h
 
 ## 4. Deploy the application
 
-`app/` contains a small Worker with `/` and a durable `/count` endpoint.
+`app/` contains a small Worker with `/` and a durable `/count` endpoint. Its [`wrangler.jsonc`](app/wrangler.jsonc) names it `shop`, which is the application the deploy creates and the name it is served under; `--name` overrides that, and `--env preview` would address `shop-preview` instead.
 
 ```sh
-scafo deploy ./app --project shop --env production
+scafo deploy ./app
 ```
 
-The command progresses through `accepted`, `uploading`, and `deployed`, then prints the immutable build id recorded by Scafo. Celld publishes that deployment as the environment's current one; no activation flag is needed.
+The command progresses through `accepted`, `uploading`, and `deployed`, then prints the immutable build id recorded by Scafo. Celld publishes that deployment as the application's current one; no activation flag is needed.
 
-The node bundles the Worker entry with esbuild before Celld publishes it. Pass `--no-bundle` when the entry is already a self-contained module (bundled by your own toolchain, no bare imports); the node then records `no_bundle` in the Celld config and skips esbuild.
+Celld bundles the Worker entry with esbuild before it publishes it. Declare `"no_bundle": true` in the app's `wrangler.jsonc` when the entry is already a self-contained module (bundled by your own toolchain, no bare imports), or pass `--no-bundle`, which writes that setting into the config the deploy packs.
 
 ## 5. Reach Scafo and Celld
 
@@ -66,8 +66,6 @@ Nothing resolves `*.scafo.test`, so these requests supply `Host` explicitly:
 
 ```sh
 curl -H 'Host: shop.scafo.test' \
-  http://127.0.0.1/
-curl -H 'Host: shop--production.scafo.test' \
   http://127.0.0.1/
 curl -H 'Host: shop.scafo.test' \
   http://127.0.0.1/count
@@ -77,7 +75,7 @@ curl -H 'Host: shop.scafo.test' \
   http://127.0.0.1/.well-known/celld/health
 ```
 
-The first two names reach the same environment: `production` also owns the short project host. The counter increases across requests. The last response is Celld's application health endpoint; it is distinct from `/.well-known/scafo/health` on the node/API listener.
+An application is served at one name, `<name>.scafo.test`. The counter increases across requests. The last response is Celld's application health endpoint; it is distinct from `/.well-known/scafo/health` on the node/API listener.
 
 ## 6. Inspect the ingress boundary
 
@@ -89,7 +87,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: nothing.scafo.test' \
   http://127.0.0.1/
 ```
 
-That document is what Caddy polls every five seconds: the environment host and the production short host, each with the node addresses running it, then the platform API apex as its own entry carrying the prefixes an ingress must never proxy. Caddy keeps no route list of its own, so nothing writes to [`caddy.json`](caddy.json) and the `operator_authored` route in it — matched before the catch-all that consults the document — stays exactly as written. An unclaimed host resolves to no upstream and the error route answers 404; there is no wildcard fallback.
+That document is what Caddy polls every five seconds: one entry per application host, each with the node addresses running it, then the platform API apex as its own entry carrying the prefixes an ingress must never proxy. Caddy keeps no route list of its own, so nothing writes to [`caddy.json`](caddy.json) and the `operator_authored` route in it — matched before the catch-all that consults the document — stays exactly as written. An unclaimed host resolves to no upstream and the error route answers 404; there is no wildcard fallback.
 
 ## 7. Use the platform apex safely
 
@@ -109,20 +107,20 @@ The first request reaches the node API through the platform apex. The second is 
 Change `APP_VERSION` in [`app/wrangler.jsonc`](app/wrangler.jsonc) from `v1` to `v2`, then run:
 
 ```sh
-scafo deploy ./app --project shop --env production
+scafo deploy ./app
 curl -H 'Host: shop.scafo.test' http://127.0.0.1/
 curl -H 'Host: shop.scafo.test' http://127.0.0.1/count
 ```
 
-The deploy prints a different build id and the host begins serving `v2`. The durable counter continues because the environment's Celld fleet did not change.
+The deploy prints a different build id and the host begins serving `v2`. The durable counter continues because the application's Celld fleet did not change.
 
-Celld 0.4.1 exposes one current application deployment per fleet. Previous artifacts may remain in the bucket, but Scafo does not provide an old-build host or historical deployment selector. Track the upstream lifecycle discussion in [Celld issue #181](https://github.com/denoland/celld/issues/181).
+Celld 0.5.0 exposes one current application deployment per fleet. Previous artifacts may remain in the bucket, but Scafo does not provide an old-build host or historical deployment selector. Track the upstream lifecycle discussion in [Celld issue #181](https://github.com/denoland/celld/issues/181).
 
 ## 9. Read observations
 
 ```sh
 scafo metrics --since 30m
-scafo traces --since 30m --project shop
+scafo traces --since 30m --name shop
 ```
 
 Metrics come from the ingress access log and flush every 60 seconds. Traces show non-periodic node events by default; `--all` also includes reconcile passes.

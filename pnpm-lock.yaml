@@ -203,13 +203,13 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  citty@0.2.2: 24c57c383378e5de0f0b955a987077b0d3ab2cc2f1d3919c5193e801c7afadac
+
 importers:
 
   .:
     dependencies:
-      citty:
-        specifier: ^0.2.2
-        version: 0.2.2
       confbox:
         specifier: ^0.2.4
         version: 0.2.4
@@ -231,6 +231,9 @@ importers:
       uns3:
         specifier: ^0.0.8
         version: 0.0.8
+      unsecure:
+        specifier: ^0.3.1
+        version: 0.3.1
     devDependencies:
       '@kubernetes/client-node':
         specifier: ^2.0.0
@@ -247,6 +250,9 @@ importers:
       automd:
         specifier: ^0.4.3
         version: 0.4.3(magicast@0.5.4)
+      citty:
+        specifier: 0.2.2
+        version: 0.2.2(patch_hash=24c57c383378e5de0f0b955a987077b0d3ab2cc2f1d3919c5193e801c7afadac)
       esbuild:
         specifier: ^0.28.2
         version: 0.28.2
@@ -2439,6 +2445,9 @@ packages:
     resolution: {integrity: sha512-MMrWaNeRAVU+AdLnKtWllBhlJIBaLbKRLnAECrQsoK/Zug14/xaRsDAEqgRPJ4LuSXTFxd5sXUXslsEmV6vYUg==}
     engines: {node: ^22.12 || >=24}
 
+  unsecure@0.3.1:
+    resolution: {integrity: sha512-jOTdGOo7vEKI3qrXRZBQK0N2HUkKZNDZxZGxQEPHVHc8zIk3j9LNIFMGqDhyk5QKYxc2WFP0rjqG2WofITBhXg==}
+
   untyped@2.0.0:
     resolution: {integrity: sha512-nwNCjxJTjNuLCgFr42fEak5OcLuB3ecca+9ksPFNvtfYSLpjf+iJqSIaSnIile6ZPbKYxI5k2AfXqeopGudK/g==}
     hasBin: true
@@ -3353,7 +3362,7 @@ snapshots:
     dependencies:
       '@parcel/watcher': 2.6.0
       c12: 3.3.4(magicast@0.5.4)
-      citty: 0.2.2
+      citty: 0.2.2(patch_hash=24c57c383378e5de0f0b955a987077b0d3ab2cc2f1d3919c5193e801c7afadac)
       consola: 3.4.2
       defu: 6.1.7
       destr: 2.0.5
@@ -3488,7 +3497,7 @@ snapshots:
     dependencies:
       consola: 3.4.2
 
-  citty@0.2.2: {}
+  citty@0.2.2(patch_hash=24c57c383378e5de0f0b955a987077b0d3ab2cc2f1d3919c5193e801c7afadac): {}
 
   cliui@8.0.1:
     dependencies:
@@ -4458,6 +4467,8 @@ snapshots:
       h3: 2.0.1-rc.26(crossws@0.4.10(srvx@0.12.5))
 
   uns3@0.0.8: {}
+
+  unsecure@0.3.1: {}
 
   untyped@2.0.0:
     dependencies:

@@ -1,14 +1,14 @@
 /*
- * WHICH nodes an environment is allowed to run on, decided by the labels an
+ * WHICH nodes an application is allowed to run on, decided by the labels an
  * operator set on each node.
  *
  * This runs BEFORE `rendezvous.ts`, and the two answer different questions. This
- * one narrows the CANDIDATES to the nodes an environment may use at all;
+ * one narrows the CANDIDATES to the nodes an application may use at all;
  * rendezvous then picks `replicas` of those. So the two compose rather than
  * compete — `replicas: "all"` under a selector means every MATCHING node — and
  * every property rendezvous has continues to hold, now within the eligible set:
  * the same eligible set always gives the same answer, and a node leaving that
- * set only moves the environments it was serving.
+ * set only moves the applications it was serving.
  *
  * Pure: nothing here reads the registry or knows what is live.
  */
@@ -42,12 +42,12 @@ export function matchesSelector(
 }
 
 /**
- * The nodes of `candidates` that may serve an environment selecting `selector`,
+ * The nodes of `candidates` that may serve an application selecting `selector`,
  * in the order they arrived.
  *
  * An EMPTY answer is a real outcome — an operator selecting labels no live node
  * carries — and it is the caller's job never to write it down as a placement:
- * see the coordinator's assignment pass for why an environment with no eligible
+ * see the coordinator's assignment pass for why an application with no eligible
  * node keeps the placement it already had.
  */
 export function eligibleNodes(candidates: NodeRecord[], selector?: NodeSelector): NodeRecord[] {
@@ -72,7 +72,7 @@ export function assertSelector(value: unknown): asserts value is NodeSelector {
     throw new ScafoError("invalid-input", "Invalid node selector", {
       detail:
         `an empty node selector constrains nothing, which is not the same as storing one: ` +
-        `clear the selector instead to let the environment run on every node`,
+        `clear the selector instead to let the application run on every node`,
     });
   }
 }

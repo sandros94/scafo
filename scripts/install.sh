@@ -1,11 +1,12 @@
 #!/bin/sh
 # Installs verified scafo, Celld, Caddy, and esbuild binaries.
 # Root on a systemd host also writes, but does not start, node and ingress units.
-# The ingress is `scafo-caddy`, and only `scafo-caddy`: it carries the two modules
-# this install depends on — `caddy.storage.scafo`, which keeps TLS material in the
-# bucket through the node's storage API without a bucket credential, and the
-# `scafo` dynamic-upstreams source, which PULLS the fleet's routing off this node.
-# Upstream Caddy has neither, so it cannot route for scafo at all.
+# The ingress is `scafo-caddy`, and only `scafo-caddy`: it carries the modules
+# this install depends on — the `scafo` app that names the fleet, the storage
+# that keeps TLS material in the bucket through the node's storage API without a
+# bucket credential, the dynamic-upstreams source that PULLS the fleet's routing
+# off this node, and the permission module that decides which names get a
+# certificate. Upstream Caddy has none of them, so it cannot route for scafo at all.
 # The ingress receives a systemd credential copy of the ingress token; do not widen
 # the token's source-file permissions.
 #
@@ -25,9 +26,9 @@ set -eu
 
 # Keep these install targets aligned with `scripts/uninstall.sh`; its manifest is optional.
 
-CELLD_VERSION='0.4.1'
-CELLD_SHA256_amd64='7b42a410e340bca4dbadd08ecb7f8983854aa855aa7467c29ab0e08b8b7f2007'
-CELLD_SHA256_arm64='5cc2281493a896b2cc7c7b6c46b2188753832d6b028457338c8eea774a1dd9a1'
+CELLD_VERSION='0.5.0'
+CELLD_SHA256_amd64='1039eee3737bb432ca0cd399fc55cc0aab4e653b2beae26009e455fea4e5334c'
+CELLD_SHA256_arm64='bd3965f78f96c755b64b0280746a7c26116fa9df01a9e57c5930e9752945c993'
 
 ESBUILD_VERSION='0.28.2'
 ESBUILD_SHA256_amd64='9573bb2233aab0f9ea7647d5cca9726113cc1768de61d66b17267f4db84488f6'
@@ -291,9 +292,8 @@ fetch_caddy() {
     "could not download ${base}/${name}
 
   Check that the release asset exists and this host can access it. There is no
-  fallback: upstream Caddy carries neither caddy.storage.scafo nor the scafo
-  dynamic-upstreams source, so it cannot hold this fleet's TLS material and
-  cannot answer for a single deployed name.
+  fallback: upstream Caddy carries none of the scafo modules, so it cannot
+  hold this fleet's TLS material and cannot answer for a single deployed name.
 
   SCAFO_CADDY_BASE selects another compatible artifact base. Provide
   ${name}.sha256 there or set SCAFO_CADDY_SHA256."
@@ -372,8 +372,7 @@ SCAFO_S3_REGION=us-east-1
 # Optional: keeps this installation inside one prefix of a shared bucket.
 #SCAFO_S3_PREFIX=
 
-# The names applications are served under: <project>.<domain> and
-# <project>--<env>.<domain>. Comma-separated.
+# The names applications are served under: <name>.<domain>. Comma-separated.
 SCAFO_PLATFORM_DOMAINS=
 
 # The node API. Loopback needs no further statement about the network; widening
@@ -386,7 +385,7 @@ SCAFO_LISTEN=127.0.0.1:7400
 # The ingress is not configured from here. It READS the fleet's routing off this
 # node's API, at /v1/ingress/routes behind the ingress token, and follows it.
 
-# What this machine IS, for environments that ask for a class of node.
+# What this machine IS, for applications that ask for a class of node.
 #SCAFO_NODE_LABELS=tier=fast,region=eu-west-1
 
 # Upstream Celld policy for every runtime process, comma-separated. Scafo adds
@@ -421,15 +420,13 @@ EOF
 # and Caddy's own default (localhost:2019) is what the unit's ExecReload needs.
 # The readable access log supports opt-in counters.
 render_caddy_json() {
-  # Every block naming the node reads the private systemd credential copy of the
-  # ingress token, never the source file.
+  # The fleet is declared ONCE, in the "scafo" app, and it is the only place an
+  # endpoint and a token are written: the storage, the upstreams source and the
+  # on-demand permission all read it. The token is the private systemd
+  # credential copy, never the source file.
   cat <<EOF
 {
-  "storage": {
-    "module": "scafo",
-    "endpoint": "${STORAGE_ENDPOINT}",
-    "token_file": "{env.CREDENTIALS_DIRECTORY}/${INGRESS_TOKEN_NAME}"
-  },
+  "storage": { "module": "scafo" },
   "logging": {
     "logs": {
       "default": { "exclude": ["http.log.access.scafo"] },
@@ -445,30 +442,38 @@ render_caddy_json() {
     }
   },
   "apps": {
+    "scafo": {
+      "fleets": [
+        {
+          "name": "default",
+          "endpoint": "${STORAGE_ENDPOINT}",
+          "token_file": "{env.CREDENTIALS_DIRECTORY}/${INGRESS_TOKEN_NAME}",
+          "prefer": "self"
+        }
+      ]
+    },
 EOF
 
   # This ingress answers on :443 for names it only learns at request time, so
-  # every certificate is on demand — and the node, not Caddy, decides which names
-  # deserve one. Without this the server would listen and serve nothing.
+  # every certificate is on demand — and only a name the fleet's routing
+  # document names exactly gets one. Without this the server would listen and
+  # serve nothing.
   cat <<EOF
     "tls": {
       "automation": {
         "policies": [{ "on_demand": true }],
         "on_demand": {
-          "permission": {
-            "module": "http",
-            "endpoint": "${STORAGE_ENDPOINT}/v1/ingress/ask"
-          }
+          "permission": { "module": "scafo" }
         }
       }
     },
 EOF
 
-  # One catch-all route. The upstreams source polls this node, caches the routing
-  # document, and resolves the request's Host to that name's upstreams. The list
-  # is a PRIORITY, not a weighting — this node first, hence "first" rather than a
-  # balancing policy — and passive health checks step down the list when the head
-  # of it keeps failing.
+  # One catch-all route. The upstreams source resolves the request's Host from
+  # the routing document the app polls off this node. The list is a PRIORITY,
+  # not a weighting — this node first, hence "first" rather than a balancing
+  # policy — and passive health checks step down the list when the head of it
+  # keeps failing.
   cat <<EOF
     "http": {
       "servers": {
@@ -479,12 +484,7 @@ EOF
               "handle": [
                 {
                   "handler": "reverse_proxy",
-                  "dynamic_upstreams": {
-                    "source": "scafo",
-                    "endpoint": "${STORAGE_ENDPOINT}",
-                    "token_file": "{env.CREDENTIALS_DIRECTORY}/${INGRESS_TOKEN_NAME}",
-                    "prefer": "self"
-                  },
+                  "dynamic_upstreams": { "source": "scafo" },
                   "load_balancing": {
                     "selection_policy": { "policy": "first" },
                     "retries": 2,
@@ -609,9 +609,9 @@ Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=5s
 
-# Caddy's own state directory. The certificates and the ACME account are NOT
-# here — they are in the bucket, reached through the node — so this holds little
-# more than scratch. Set anyway, so nothing Caddy writes has nowhere to land.
+# Caddy's own state directory. The certificates are NOT here — they are in the
+# bucket, reached through the node — but the ACME account is: it is this
+# ingress's, not the fleet's, and losing it only means registering again.
 StateDirectory=caddy
 Environment=XDG_DATA_HOME=${CADDY_STATE_DIR}
 Environment=XDG_CONFIG_HOME=${CADDY_STATE_DIR}
@@ -697,25 +697,25 @@ explain_manual_setup() {
   say "  ${BIN_DIR}/caddy run --config ./caddy.json"
   say ''
   # A hand-run ingress reads the SOURCE token: there is no systemd credential
-  # directory to point at, so both blocks name the file the node minted.
-  say 'THAT CADDY IS scafo-caddy, and BOTH of its scafo modules have to name this'
-  say 'node — one for the TLS material, one for the routing it follows. Write'
+  # directory to point at, so the fleet names the file the node minted.
+  say 'THAT CADDY IS scafo-caddy, and its "scafo" app has to name this node,'
+  say 'once: the TLS storage and the routing it follows both read it. Write'
   say './caddy.json with:'
   say ''
-  say '  "storage": {'
-  say '    "module": "scafo",'
-  say "    \"endpoint\": \"${STORAGE_ENDPOINT}\","
-  say "    \"token_file\": \"${STATE_DIR}/${INGRESS_TOKEN_NAME}\""
-  say '  },'
+  say '  "storage": { "module": "scafo" },'
+  say '  "apps": {'
+  say '    "scafo": {'
+  say '      "fleets": [{'
+  say '        "name": "default",'
+  say "        \"endpoint\": \"${STORAGE_ENDPOINT}\","
+  say "        \"token_file\": \"${STATE_DIR}/${INGRESS_TOKEN_NAME}\","
+  say '        "prefer": "self"'
+  say '      }]'
+  say '    },'
   say ''
   say '  ... and, inside the reverse_proxy handler that answers for everything:'
   say ''
-  say '  "dynamic_upstreams": {'
-  say '    "source": "scafo",'
-  say "    \"endpoint\": \"${STORAGE_ENDPOINT}\","
-  say "    \"token_file\": \"${STATE_DIR}/${INGRESS_TOKEN_NAME}\","
-  say '    "prefer": "self"'
-  say '  }'
+  say '  "dynamic_upstreams": { "source": "scafo" }'
   say ''
   say 'The token is minted 0600 by whoever runs the node. Under systemd this'
   say 'script hands it over with LoadCredential= and nothing is loosened;'
@@ -766,14 +766,14 @@ next_steps() {
     printf '   looks for it. Back it up: nothing can reissue it.\n\n'
     printf '4. Deploy something:\n\n'
     printf '     scafo deploy ./my-app --node http://127.0.0.1:7400 \\\n'
-    printf '       --project shop --env production\n\n'
+    printf '       --name shop\n\n'
   else
     printf '1. Run the node and the ingress as described above.\n'
     printf '2. Mint an operator key with the same bucket settings exported:\n\n'
     printf '     scafo operator keygen --register\n\n'
     printf '3. Deploy something:\n\n'
     printf '     scafo deploy ./my-app --node http://127.0.0.1:7400 \\\n'
-    printf '       --project shop --env production\n\n'
+    printf '       --name shop\n\n'
   fi
 
   printf 'WHERE THINGS ARE\n\n'
@@ -793,7 +793,7 @@ next_steps() {
 
   printf '\nWHAT THIS INSTALL IS NOT\n\n'
   printf '  * THE INGRESS HAS NO BUCKET CREDENTIAL, AND MUST NOT GET ONE. scafo-caddy\n'
-  printf '    keeps its certificates, their keys and its ACME account in the bucket by\n'
+  printf '    keeps its certificates and their keys in the bucket by\n'
   printf '    asking THIS NODE for them over %s — a loopback URL\n' "$STORAGE_ENDPOINT"
   printf '    and a bearer token, nothing more. That is the point of it: every node in\n'
   printf '    the fleet serves the one certificate, and the most exposed process on the\n'

@@ -22,7 +22,7 @@ export interface ObserveFlushRecord {
   at: string;
   /** Event records in this file. */
   events: number;
-  /** Counter records in this file: one per {project, environment}. */
+  /** Counter records in this file: one per application. */
   counters: number;
   /** Events the ring dropped before the flusher could drain them. */
   ringDropped: number;
@@ -44,7 +44,7 @@ export interface ObserveFlushRecord {
 export type ObserveEventRecord = { v: number; record: "event"; node: string } & ObservedEvent;
 
 /**
- * What one environment had been served on one node, in TOTAL since `since`. See
+ * What one application had been served on one node, in TOTAL since `since`. See
  * the file header: windows are differences between two of these, never a value
  * read out of one.
  */
@@ -56,8 +56,7 @@ export interface ObserveCountersRecord {
   at: string;
   /** When this node's counters were made; every total below is from then. */
   since: string;
-  project: string;
-  env: string;
+  application: string;
   requests: number;
   bytes: number;
   status: StatusClassCounts;

@@ -15,7 +15,7 @@ import {
   revokeOperator,
   type TrustedOperator,
   trustOperator,
-  WILDCARD_PROJECT,
+  WILDCARD_APPLICATION,
 } from "../core/registry/operators.ts";
 import type { DaemonContext } from "./app.ts";
 import { nodeIdentity, operatorIdentity } from "./middleware.ts";
@@ -26,15 +26,15 @@ export const OPERATORS_PATH: string = "/v1/operators";
 
 /** What a registration asks for, over and above the key itself. */
 interface TrustRequest {
-  key: Omit<TrustedOperator, "role" | "projects">;
+  key: Omit<TrustedOperator, "role" | "applications">;
   /** Tier the caller named, or undefined to take the surface's default. */
   role?: OperatorRole;
   /**
-   * Projects the caller asked to scope the key to, or undefined to take the
+   * Applications the caller asked to scope the key to, or undefined to take the
    * caller's own scope — which an admin has none of, so an admin enrolling an
    * operator-tier key has to name one.
    */
-  projects?: string[];
+  applications?: string[];
 }
 
 /** Body of `GET /v1/operators`: the keys the fleet trusts that the caller may see, in id order. */
@@ -99,22 +99,22 @@ export function registerOperatorRoutes(app: H3, daemon: DaemonContext, guard: Mi
       }
 
       /* Omitted scope inherits caller reach and cannot widen it. */
-      const projects = request.projects ?? caller.projects;
-      if (!canGrantScope(caller, projects)) {
-        throw new ScafoError("auth-scope", "Beyond this key's projects", {
+      const applications = request.applications ?? caller.applications;
+      if (!canGrantScope(caller, applications)) {
+        throw new ScafoError("auth-scope", "Beyond this key's applications", {
           detail:
-            `"${caller.id}" is scoped to the projects it was enrolled for, and cannot register ` +
-            `a key that reaches past them; an admin of this fleet can`,
+            `"${caller.id}" is scoped to the applications it was enrolled for, and cannot ` +
+            `register a key that reaches past them; an admin of this fleet can`,
         });
       }
 
       /* Replacements carry existing reach; only fresh keys are new grants. */
-      if (supersedes !== caller.id) assertFreshGrant(caller, { role, projects });
+      if (supersedes !== caller.id) assertFreshGrant(caller, { role, applications });
 
       const operator = await trustOperator(daemon.registry, {
         ...request.key,
         role,
-        ...(projects === undefined ? {} : { projects }),
+        ...(applications === undefined ? {} : { applications }),
       });
       daemon.observability?.emit({
         type: "operator.trusted",
@@ -175,16 +175,16 @@ function inLineageOf(caller: TrustedOperator, key: TrustedOperator): boolean {
 /** Validates a fresh grant: scope is required and only admin grants wildcard. */
 function assertFreshGrant(
   caller: TrustedOperator,
-  granted: Pick<TrustedOperator, "role" | "projects">,
+  granted: Pick<TrustedOperator, "role" | "applications">,
 ): void {
   assertGrantableScope(granted);
 
-  if (isWildcardScope(granted.projects) && caller.role !== "admin") {
-    throw new ScafoError("auth-scope", "Only an admin grants every project", {
+  if (isWildcardScope(granted.applications) && caller.role !== "admin") {
+    throw new ScafoError("auth-scope", "Only an admin grants every application", {
       detail:
-        `"${WILDCARD_PROJECT}" reaches every project of this fleet, and "${caller.id}" is an ` +
-        `${caller.role}-tier key: it may replace itself with one, and may not hand one out ` +
-        `beside itself; name the projects this key is for, or ask an admin of this fleet`,
+        `"${WILDCARD_APPLICATION}" reaches every application of this fleet, and "${caller.id}" ` +
+        `is an ${caller.role}-tier key: it may replace itself with one, and may not hand one out ` +
+        `beside itself; name the applications this key is for, or ask an admin of this fleet`,
     });
   }
 }
@@ -215,7 +215,7 @@ async function readTrustRequest(event: H3Event, maxBytes: number): Promise<Trust
     publicKey?: unknown;
     role?: unknown;
     supersedes?: unknown;
-    projects?: unknown;
+    applications?: unknown;
   };
   if (typeof body.id !== "string" || body.id === "") throw malformed(`"id" must be given`);
 
@@ -234,10 +234,14 @@ async function readTrustRequest(event: H3Event, maxBytes: number): Promise<Trust
   }
   /* Registry owns scope policy; this boundary validates only JSON shape. */
   if (
-    body.projects !== undefined &&
-    (!Array.isArray(body.projects) || body.projects.some((entry) => typeof entry !== "string"))
+    body.applications !== undefined &&
+    (!Array.isArray(body.applications) ||
+      body.applications.some((entry) => typeof entry !== "string"))
   ) {
-    throw malformed(`"projects" must be a list of project slugs, or ["${WILDCARD_PROJECT}"]`);
+    throw malformed(
+      `"applications" must be a list of application names or prefix globs, or ` +
+        `["${WILDCARD_APPLICATION}"]`,
+    );
   }
 
   /* Persist only JWK public material; never copy an accidental private `d`. */
@@ -248,7 +252,7 @@ async function readTrustRequest(event: H3Event, maxBytes: number): Promise<Trust
       ...(body.supersedes === undefined ? {} : { supersedes: body.supersedes }),
     },
     ...(body.role === undefined ? {} : { role: body.role }),
-    ...(body.projects === undefined ? {} : { projects: body.projects as string[] }),
+    ...(body.applications === undefined ? {} : { applications: body.applications as string[] }),
   };
 }
 

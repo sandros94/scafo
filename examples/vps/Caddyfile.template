@@ -2,28 +2,36 @@
 	# ACME contact address. @DOMAIN@, @NODE@ and @LOGS@ are filled in per host by
 	# roll-node.sh; this line and the `dns` one below are yours to edit.
 	email you@example.com
-	storage scafo {
-		endpoint http://@NODE@
-		token {env.SCAFO_INGRESS_TOKEN}
+	# The fleet, declared once: every scafo module below reads it from here.
+	# `{env.…}` is resolved at provisioning, so the token never lands in the
+	# adapted configuration.
+	scafo {
+		fleet default {
+			endpoint http://@NODE@
+			token {env.SCAFO_INGRESS_TOKEN}
+			prefer self
+		}
 	}
-	# Whether a customer domain belongs to this fleet is the node's decision, so
-	# this is the one scafo path Caddy calls without a token.
+	# Certificates and locks go to the fleet's bucket through the node. The ACME
+	# account is the ingress's own and stays under /data.
+	storage scafo
+	# A customer domain is issued for only once the fleet's routing names it.
 	on_demand_tls {
-		ask http://@NODE@/v1/ingress/ask
+		permission scafo
 	}
 }
 
 (scafo) {
 	log {
-		output file @LOGS@/access.log
+		# Readable by the node, which runs as another user and counts requests from
+		# it: Caddy creates its log files 0600 otherwise.
+		output file @LOGS@/access.log {
+			mode 0644
+		}
 		format json
 	}
 	reverse_proxy {
-		dynamic scafo {
-			endpoint http://@NODE@
-			token {env.SCAFO_INGRESS_TOKEN}
-			prefer self
-		}
+		dynamic scafo
 		# The node returns upstreams in priority order, this node's own first, so
 		# `first` keeps a request on the machine it arrived at. `max_fails 1` is
 		# what lets a retry move on: `first` skips only upstreams already marked
@@ -53,8 +61,8 @@
 	import scafo
 }
 
-# Customer domains pointed at this fleet, issued per name once the node's `ask`
-# endpoint has agreed to them.
+# Customer domains pointed at this fleet, issued per name once the fleet's
+# routing document names them.
 https:// {
 	tls {
 		on_demand

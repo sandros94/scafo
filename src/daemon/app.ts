@@ -1,51 +1,52 @@
 /* The daemon's HTTP API: what a node exposes to its peers and to operators. */
 
-import { H3, type H3Event } from "h3";
+import { H3 } from "h3";
 import { createNodeVerifier, type NodeSigningKey } from "../core/auth/node-token.ts";
 import { createOidcVerifier } from "../core/auth/oidc.ts";
 import { ScafoError } from "../core/error.ts";
-import { APEX_ENVIRONMENT } from "../core/placement/routes.ts";
-import { deploymentRevision } from "../core/registry/_deployment.ts";
 import { readJson } from "../core/registry/cas.ts";
 import { nowDate, type RegistryContext } from "../core/registry/context.ts";
-import { checkDomain } from "../core/registry/domains.ts";
-import { isProjectBlocked } from "../core/registry/projects.ts";
+import type { RegistryView } from "../core/registry/view.ts";
 import { isLeaseExpired } from "../core/registry/lease.ts";
-import { coordinatorKey, environmentKey, nodeKey } from "../core/registry/paths.ts";
-import { setNodeSelector } from "../core/registry/placement.ts";
-import { retireEnvironment, unretireEnvironment } from "../core/registry/retirement.ts";
+import {
+  abandonedDeploy,
+  getDeployRecord,
+  isDeployIdle,
+  isDeployTerminal,
+} from "../core/registry/deploys.ts";
+import { coordinatorKey, nodeKey, parseDeployId } from "../core/registry/paths.ts";
 import type { IngressFormat } from "../core/types/ingress.ts";
 import {
   DEFAULT_ARTIFACT_BYTES,
   type ArtifactStager,
   type StagedArtifact,
 } from "../core/types/deploy.ts";
-import type { CoordinatorLease, EnvironmentRecord, NodeRecord } from "../core/types/registry.ts";
+import type {
+  CoordinatorLease,
+  DeployRecord,
+  NodeRecord,
+  NodeVersions,
+} from "../core/types/registry.ts";
 import type { ProcessStatus, Supervisor } from "../core/types/supervisor.ts";
-import { isHost } from "../core/utils/host.ts";
-import { assertSlug, parseHostLabel } from "../core/utils/slug.ts";
+import type { ProcessHealthTracker, ProcessHealthView } from "./_process-health.ts";
+import { assertSlug } from "../core/utils/slug.ts";
 import type { AssignmentFailure } from "./_assign.ts";
-import { deleteEnvironmentRequest } from "./_environments.ts";
 import { registerIngressRoutes } from "./_ingress-routes.ts";
-import {
-  type DeployVerifiers,
-  readDeployMetadata,
-  readSelectorRequest,
-  verifyCaller,
-} from "./_intake.ts";
+import { type DeployVerifiers, readDeployMetadata, verifyCaller } from "./_intake.ts";
 import type { IngressCounters } from "./access-counters.ts";
 import type { DaemonConfig } from "./config.ts";
 import type { Coordinator } from "./coordinator.ts";
-import type { DeployService, DeployStatus } from "./deploys.ts";
+import { deployStatusOf, type DeployService, type DeployStatus } from "./deploys.ts";
 import {
   nodeIdentity,
   renderProblem,
   requireNodeToken,
   requireOperatorToken,
 } from "./middleware.ts";
-import { assertProjectScope, scopedState } from "./_scope.ts";
+import { scopedState } from "./_scope.ts";
 import { registerOperatorRoutes } from "./_operator-routes.ts";
-import { registerProjectRoutes } from "./_project-routes.ts";
+import { registerFleetRoutes } from "./_fleet-routes.ts";
+import { registerApplicationRoutes } from "./_application-routes.ts";
 import type { Heartbeat } from "./heartbeat.ts";
 import type { Observability } from "./observe.ts";
 import type { PlacementView, Reconciler, ReconcileStatus } from "./reconcile.ts";
@@ -58,13 +59,30 @@ export interface DaemonContext {
   /** Persistent node identity; configuration may only pin it. */
   nodeId: string;
   registry: RegistryContext;
+  /**
+   * The registry view this node's loops share: the reconcile pass, the
+   * coordinator and deploy intake's version-skew gate all read it rather than
+   * listing the installation each for themselves. Built on first use by
+   * `registryView`, so a caller that wants one on its own clock supplies it.
+   */
+  view?: RegistryView;
   supervisor: Supervisor;
-  /** Build of the daemon, reported by `GET /.well-known/scafo/health`. */
-  version: string;
+  /**
+   * What this node knows about the processes it supervises: how often each has
+   * exited, when it last did, and what it said on the way out. Absent on a node
+   * that supervises nothing, and every surface that reads it treats that as
+   * "nothing to report" rather than "everything is fine".
+   */
+  processHealth?: ProcessHealthTracker;
+  /**
+   * The binaries this daemon booted with, and what its node record reports. The
+   * Scafo half is what `GET /.well-known/scafo/health` answers with, and the
+   * Celld half is what every other node's is measured against before this one
+   * starts a process for an application or takes a deploy into it.
+   */
+  versions: NodeVersions;
   /** Node private key used for peer tokens; its public half is in the registry. */
   signingKey?: NodeSigningKey;
-  /** Opens the environments' sealed varsets; without it they cannot be served. */
-  varsetKey?: CryptoKey;
   /** The reconcile loop, when this node runs one. */
   reconciler?: Reconciler;
   /**
@@ -81,7 +99,7 @@ export interface DaemonContext {
   fetchFn?: typeof fetch;
   /** Optional observability seam. Its absence avoids event-object allocation. */
   observability?: Observability;
-  /** Optional ingress counters, updated with routing after reconciliation. */
+  /** Optional ingress counters, told what the registry holds by each pass. */
   ingressCounters?: IngressCounters;
   /**
    * The formats this node renders the fleet's routing in for an ingress that
@@ -95,6 +113,15 @@ export interface DaemonContext {
   /** Optional token-protected local TLS storage surface. */
   storage?: StorageService;
 }
+
+/* The application routes' own bodies are part of the node's public surface, and
+   they are declared beside the routes that answer with them. */
+export type {
+  ApplicationDeleted,
+  ApplicationDomain,
+  ApplicationResult,
+  ApplicationsResult,
+} from "./_application-routes.ts";
 
 /** Body of `GET /.well-known/scafo/health`. */
 export interface DaemonHealth {
@@ -111,8 +138,35 @@ export interface CoordinatorView {
   fence: number;
   /** True when the node answering is the one coordinating. */
   self: boolean;
-  /** Unplaced environments from this coordinator's last pass; absent otherwise. */
+  /** Unplaced applications from this coordinator's last pass; absent otherwise. */
   unplaced?: AssignmentFailure[];
+}
+
+/**
+ * One supervised process as `GET /v1/state` reports it: what the supervisor
+ * holds, and what this node's health tracker has watched it do.
+ *
+ * The health half is absent only for a process the tracker has never been told
+ * about — one adopted by a daemon that restarted under it — and a reader takes
+ * that for "not known" rather than for "healthy".
+ */
+export interface SupervisedProcess extends ProcessStatus {
+  /** The word every surface reports this process with. */
+  health?: ProcessHealthView["health"];
+  /**
+   * Whether the run now going has answered its own health endpoint. Only a ready
+   * process is in the node record's `serving`, so this is what says WHY an
+   * application a node is running is not being routed to it.
+   */
+  ready?: boolean;
+  /** When it answered, ISO-8601; absent for a process that has not. */
+  readyAt?: string;
+  /** Exits in a row with no run between them that served. */
+  restarts?: number;
+  /** The last exit, when there has been one. */
+  lastExit?: ProcessHealthView["lastExit"];
+  /** When a start is being held back, until when. */
+  retryAt?: string;
 }
 
 /** Body of `GET /v1/state`: what this node believes about itself right now. */
@@ -123,30 +177,19 @@ export interface DaemonState {
   lease: CoordinatorLease | null;
   /** Effective coordinator election result; expired lease records produce null. */
   coordinator: CoordinatorView | null;
-  processes: ProcessStatus[];
+  processes: SupervisedProcess[];
   /** Placement views. Missing placement is pending, never implicit assignment. */
   placements: PlacementView[];
   /** Last pass of the reconcile loop; absent on a node that runs no loop. */
   reconcile?: ReconcileStatus;
-  /** `true` when operator scope filtered this document, even if scope grants all projects. */
+  /** `true` when operator scope filtered this document, even if scope grants all applications. */
   scoped?: true;
-}
-
-/** Body of `DELETE /v1/environments/:project/:env`: the store keys it removed. */
-export interface EnvironmentDeleted {
-  deleted: string[];
-}
-
-/** Body of an environment configuration route. */
-export interface EnvironmentResult {
-  environment: EnvironmentRecord;
 }
 
 /**
  * Builds the node app. Every route answers failures as RFC 9457 problem
- * documents, and every route but health and the on-demand-TLS ask requires a
- * token: a node, operator or workload token, or on the storage and routing
- * surfaces the ingress token.
+ * documents, and every route but health requires a token: a node, operator or
+ * workload token, or on the storage and routing surfaces the ingress token.
  */
 export function createNodeApp(daemon: DaemonContext): H3 {
   /* Reuse verifiers: node replay detection and OIDC key caches are app-wide. */
@@ -166,22 +209,12 @@ export function createNodeApp(daemon: DaemonContext): H3 {
   /* Public health endpoint for ingress and process supervision. */
   app.get("/.well-known/scafo/health", (): DaemonHealth => ({
     ok: true,
-    version: daemon.version,
+    version: daemon.versions.scafo,
     node: daemon.nodeId,
   }));
 
-  /* Public certificate-issuance check: answers only whether a public host is served. */
-  app.get("/v1/ingress/ask", async (event): Promise<Response> => {
-    const domain = event.url.searchParams.get("domain") ?? "";
-    if (await servesHost(daemon, domain)) return new Response(null, { status: 200 });
-
-    throw new ScafoError("not-found", "Host is not served here", {
-      detail: `"${domain}" is neither a claimed domain nor a label under a platform domain`,
-    });
-  });
-
-  /* Operator tokens receive project-scoped state; peer and admin tokens receive
-     the whole document. */
+  /* Operator tokens receive application-scoped state; peer and admin tokens
+     receive the whole document. */
   app.get(
     "/v1/state",
     async (event): Promise<DaemonState> => {
@@ -194,7 +227,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
         node: node?.value ?? null,
         lease: lease?.value ?? null,
         coordinator: coordinatorView(daemon, lease?.value ?? null),
-        processes: daemon.supervisor.list(),
+        processes: supervisedProcesses(daemon),
         /* Reuse reconciliation's placement snapshot. */
         placements: reconcile?.placements ?? [],
         ...(reconcile === undefined ? {} : { reconcile }),
@@ -207,64 +240,17 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     { middleware: [authenticated] },
   );
 
-  /* Retirement is one CAS update, so it does not require coordinator authority. */
-  app.post(
-    "/v1/environments/:project/:env/retire",
-    async (event): Promise<EnvironmentResult> => ({
-      environment: await retireEnvironment(daemon.registry, ...(await scopedTarget(daemon, event))),
-    }),
-    { middleware: [authenticated] },
-  );
-
-  /* Retirement remains reversible during its grace period. */
-  app.post(
-    "/v1/environments/:project/:env/unretire",
-    async (event): Promise<EnvironmentResult> => ({
-      environment: await unretireEnvironment(
-        daemon.registry,
-        ...(await scopedTarget(daemon, event)),
-      ),
-    }),
-    { middleware: [authenticated] },
-  );
-
-  /* Selectors are CAS-updated intent. Unsatisfied selectors remain valid and
-     are reported by assignment rather than rejected here. */
-  app.post(
-    "/v1/environments/:project/:env/selector",
-    async (event): Promise<EnvironmentResult> => {
-      const [project, name] = await scopedTarget(daemon, event);
-      const request = await readSelectorRequest(event, { maxBytes: daemon.config.api.jsonBytes });
-      return {
-        environment: await setNodeSelector(daemon.registry, project, name, request.selector),
-      };
-    },
-    { middleware: [authenticated] },
-  );
-
-  /* Deletion is coordinator-gated and transparently forwarded. `force=1` skips
-     ephemeral and retirement-grace checks. */
-  app.delete(
-    "/v1/environments/:project/:env",
-    async (event): Promise<Response | EnvironmentDeleted> => {
-      /* Check operator scope before forwarding under a node token. */
-      await scopedTarget(daemon, event);
-      return deleteEnvironmentRequest(daemon, event);
-    },
-    { middleware: [authenticated] },
-  );
-
-  app.post("/v1/projects/:project/deploys", async (event): Promise<Response> => {
-    const project = event.context.params?.project ?? "";
-    assertSlug(project);
-    /* Authenticate project access before reading deployment metadata or body. */
-    const caller = await verifyCaller(verifiers, event, project);
-    const meta = readDeployMetadata(event, project);
+  app.post("/v1/applications/:name/deploys", async (event): Promise<Response> => {
+    const application = event.context.params?.name ?? "";
+    assertSlug(application);
+    /* Authenticate application access before reading deployment metadata or body. */
+    const caller = await verifyCaller(verifiers, event, application);
+    const meta = readDeployMetadata(event, application);
     if (caller.kind === "workload") meta.oidc = caller.identity.actor;
 
     const service = deployService(daemon);
     const stager = artifactStager(daemon);
-    const reservation = service.reserve(project);
+    const reservation = service.reserve(application);
     let artifact: StagedArtifact | undefined;
     let status: DeployStatus;
     try {
@@ -279,7 +265,7 @@ export function createNodeApp(daemon: DaemonContext): H3 {
         maxBytes: daemon.config.deploy?.artifactBytes ?? DEFAULT_ARTIFACT_BYTES,
         signal: AbortSignal.any([event.req.signal, reservation.signal]),
       });
-      status = admission.start(artifact, reservation);
+      status = await admission.start(artifact, reservation);
     } catch (error) {
       if (artifact === undefined) reservation.cancel(error);
       else await reservation.discard(artifact, error);
@@ -291,26 +277,49 @@ export function createNodeApp(daemon: DaemonContext): H3 {
     });
   });
 
+  /* Any node answers a poll: the deploy's state is a registry record, and behind
+     an apex that several nodes answer for the poll lands wherever the ingress
+     sends it. The accepting node still answers from memory, which is the same
+     record a moment sooner. */
   app.get("/v1/deploys/:id", async (event): Promise<DeployStatus> => {
     const id = event.context.params?.id ?? "";
-    const status = daemon.deploys?.get(id) ?? null;
+    const parsed = parseDeployId(id);
 
-    /* Unknown ids have no project to authenticate, so do not disclose existence. */
-    await verifyCaller(verifiers, event, status?.project ?? null);
-    if (status === null) {
+    /* The application in the id is what the caller is authenticated against,
+       exactly as the upload was: an operator's scope is applied to it and a
+       workload token is verified against its trust policy. An id that is no id
+       of ours names no application, so there is nothing to authenticate and
+       nothing to disclose. */
+    await verifyCaller(verifiers, event, parsed?.application ?? null);
+    if (parsed === null) {
       throw new ScafoError("not-found", "No such deploy", {
-        detail: `this node has no deploy "${id}"; a restarted daemon forgets the ones it accepted`,
+        detail: `"${id}" is not a deploy id this installation mints`,
       });
     }
-    return status;
+
+    const local = daemon.deploys?.get(id) ?? null;
+    if (local !== null) return local;
+
+    const record = await getDeployRecord(daemon.registry, parsed.application, id);
+    /* A record that disagrees with the id it is filed under is not the one the
+       caller was authenticated for. */
+    if (record.application !== parsed.application) {
+      throw new ScafoError("not-found", "No such deploy", {
+        detail: `"${id}" is not a deploy of application "${parsed.application}"`,
+      });
+    }
+    return deployStatusOf(await judgeAbandoned(daemon, record));
   });
 
   /* Trusted-key administration requires an operator token, never a node token. */
   const operatorGuard = requireOperatorToken(nodeVerifier, daemon.registry);
   registerOperatorRoutes(app, daemon, operatorGuard);
 
-  /* Project administration uses the same operator-only boundary. */
-  registerProjectRoutes(app, daemon, operatorGuard);
+  /* Application administration uses the same operator-only boundary. */
+  registerApplicationRoutes(app, daemon, { operator: operatorGuard, peer: authenticated });
+
+  /* So does what an admin says about the installation itself. */
+  registerFleetRoutes(app, daemon, operatorGuard);
 
   /* TLS storage carries private keys: serve it only when configured, and never
      expose it through a public ingress. */
@@ -321,6 +330,75 @@ export function createNodeApp(daemon: DaemonContext): H3 {
   }
 
   return app;
+}
+
+/**
+ * The record as it stands, or the failure a deploy nobody is carrying out any
+ * more has already suffered.
+ *
+ * JUDGED AT READ TIME rather than waited for. The state of a deploy lives in the
+ * daemon that accepted it, so a node that stopped answering has taken it with
+ * it; the record it left says `uploading` and will say so until a coordinator
+ * sweeps. A caller polling for an answer gets one now instead — `deploy-timeout`,
+ * the same code and the same detail the sweep will eventually write down.
+ *
+ * It costs ONE extra read and only for a deploy that is both unfinished and has
+ * not moved for a whole liveness window, which is the only case where the
+ * question can have a different answer. Nothing is written: a poll is a read.
+ */
+/**
+ * The supervisor's own list, each entry carrying what the health tracker has
+ * watched that process do.
+ *
+ * A PROCESS THE TRACKER KNOWS AND THE SUPERVISOR DOES NOT IS STILL REPORTED: a
+ * crash-looping process spends most of its life exited and waiting for its next
+ * start, and a document that listed only what is running this instant would show
+ * nothing at all for exactly the application somebody is asking about.
+ */
+function supervisedProcesses(daemon: DaemonContext): SupervisedProcess[] {
+  const views = daemon.processHealth?.views() ?? {};
+  const processes: SupervisedProcess[] = daemon.supervisor.list().map((status) => ({
+    ...status,
+    ...healthOf(views[status.id]),
+  }));
+
+  const listed = new Set(processes.map((process) => process.id));
+  for (const [application, view] of Object.entries(views)) {
+    if (listed.has(application)) continue;
+    processes.push({
+      id: application,
+      state: "exited",
+      startedAt: view.startedAt ?? view.lastExit?.at ?? "",
+      ...(view.lastError === undefined ? {} : { lastError: view.lastError }),
+      ...healthOf(view),
+    });
+  }
+  return processes.sort((a, b) => (a.id === b.id ? 0 : a.id < b.id ? -1 : 1));
+}
+
+/** The health half of one process's entry, or nothing when it is not tracked. */
+function healthOf(view: ProcessHealthView | undefined): Partial<SupervisedProcess> {
+  if (view === undefined) return {};
+  return {
+    health: view.health,
+    ready: view.ready,
+    ...(view.readyAt === undefined ? {} : { readyAt: view.readyAt }),
+    restarts: view.restarts,
+    ...(view.lastExit === undefined ? {} : { lastExit: view.lastExit }),
+    ...(view.retryAt === undefined ? {} : { retryAt: view.retryAt }),
+    /* The tracker's tail outlives the supervisor id, so it is what a caller
+       reads once the process it came from has been forgotten. */
+    ...(view.lastError === undefined ? {} : { lastError: view.lastError }),
+  };
+}
+
+async function judgeAbandoned(daemon: DaemonContext, record: DeployRecord): Promise<DeployRecord> {
+  const now = nowDate(daemon.registry);
+  if (!isDeployIdle(record, now) || isDeployTerminal(record.state)) return record;
+
+  const node = await readJson<NodeRecord>(daemon.registry, nodeKey(record.node));
+  const failure = abandonedDeploy(record, { now, node: node?.value ?? null });
+  return failure === null ? record : { ...record, ...failure };
 }
 
 /** Where the status of a deploy is polled. */
@@ -351,70 +429,6 @@ function coordinatorView(
           unplaced: unplaced.map((entry) => ({ ...entry })),
         }),
   };
-}
-
-/** Returns whether a host is currently certificate-eligible. Retired, missing,
- * and blocked project environments are refused. */
-async function servesHost(daemon: DaemonContext, host: string): Promise<boolean> {
-  if (!isHost(host)) return false;
-
-  /* Wildcard certificates exclude the bare platform apex, which serves the API
-     only while explicitly public. */
-  if (daemon.config.api.public && daemon.config.platformDomains.includes(host)) return true;
-
-  /* Require a deployed, unretired environment before certificate issuance. */
-  for (const domain of daemon.config.platformDomains) {
-    const suffix = `.${domain}`;
-    if (!host.endsWith(suffix)) continue;
-
-    const label = host.slice(0, -suffix.length);
-    const parsed = parseHostLabel(label);
-    if (parsed === null) return false;
-    if (await isProjectBlocked(daemon.registry, parsed.project)) return false;
-
-    const environment = await readJson<EnvironmentRecord>(
-      daemon.registry,
-      environmentKey(parsed.project, parsed.ref ?? APEX_ENVIRONMENT),
-    );
-    return servesEnvironment(environment?.value);
-  }
-
-  const claim = await checkDomain(daemon.registry, host);
-  if (claim === null) return false;
-  if (await isProjectBlocked(daemon.registry, claim.project)) return false;
-
-  const environment = await readJson<EnvironmentRecord>(
-    daemon.registry,
-    environmentKey(claim.project, claim.environment),
-  );
-  return servesEnvironment(environment?.value);
-}
-
-/** Whether an environment owns a currently serviceable public host. */
-function servesEnvironment(environment?: EnvironmentRecord): boolean {
-  return (
-    environment !== undefined &&
-    environment.retiredAt === undefined &&
-    deploymentRevision(environment) !== null
-  );
-}
-
-/** The `:project` and `:env` a route was matched on, as a positional pair. */
-function target(event: H3Event): [project: string, env: string] {
-  return [event.context.params?.project ?? "", event.context.params?.env ?? ""];
-}
-
-/** Returns the target after applying operator project scope before I/O. */
-async function scopedTarget(
-  daemon: DaemonContext,
-  event: H3Event,
-): Promise<[project: string, env: string]> {
-  const pair = target(event);
-  const caller = nodeIdentity(event);
-  if (caller !== undefined) {
-    assertProjectScope(caller, pair[0]);
-  }
-  return pair;
 }
 
 function deployService(daemon: DaemonContext): DeployService {
