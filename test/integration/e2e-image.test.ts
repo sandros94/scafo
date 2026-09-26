@@ -3,7 +3,6 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Readable } from "node:stream";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { OperatorKeyFile } from "../../src/cli/_operator-key.ts";
@@ -17,6 +16,7 @@ import type { NodeRecord } from "../../src/core/types/registry.ts";
 import {
   BOOT_DEADLINE_MS,
   type BucketSettings,
+  collectLogs,
   type CommandResult,
   DEADLINE_MS,
   deploymentOf,
@@ -165,10 +165,7 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
         SCAFO_LISTEN: `0.0.0.0:${String(NODE_PORT)}`,
       })
       .withCommand(["sail"])
-      .withLogConsumer((stream: Readable) => {
-        stream.on("data", (chunk) => nodeLog.push(String(chunk)));
-        stream.on("err", (chunk) => nodeLog.push(String(chunk)));
-      })
+      .withLogConsumer(collectLogs(nodeLog))
       .withWaitStrategy(Wait.forLogMessage(/listening on/))
       .withStartupTimeout(BOOT_DEADLINE_MS)
       .start();

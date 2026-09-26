@@ -5,6 +5,7 @@ import { cp, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { S3Client } from "uns3";
@@ -302,6 +303,22 @@ export async function until<T>(
 /** A failure as a message, whether or not the thrown value was an `Error`. */
 export function describeFailure(error: unknown): string {
   return error instanceof Error ? error.message : JSON.stringify(error);
+}
+
+/**
+ * A container log consumer that appends everything the container writes to
+ * `into`, for a suite to print when an assertion fails.
+ *
+ * `"error"` IS SUBSCRIBED because a Readable that emits it with no listener
+ * throws it as an uncaught exception: a log stream that breaks — the container
+ * removed under it, the engine connection dropped — must end up as a line of
+ * the log it was collecting, never as a crash of the whole run.
+ */
+export function collectLogs(into: string[]): (stream: Readable) => void {
+  return (stream) => {
+    stream.on("data", (chunk) => into.push(String(chunk)));
+    stream.on("error", (error) => into.push(`log stream failed: ${describeFailure(error)}\n`));
+  };
 }
 
 export interface CommandResult {

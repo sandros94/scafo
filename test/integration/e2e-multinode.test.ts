@@ -13,7 +13,6 @@ import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Readable } from "node:stream";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { S3Client } from "uns3";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -37,7 +36,7 @@ import type { FleetRouting } from "../../src/core/types/ingress.ts";
 import type { NodeRecord } from "../../src/core/types/registry.ts";
 import type { ProcessStatus } from "../../src/core/types/supervisor.ts";
 import { createUns3Store } from "../../src/drivers/store/uns3.ts";
-import { ADOPTION_BOUND_MS } from "./_harness.ts";
+import { ADOPTION_BOUND_MS, collectLogs } from "./_harness.ts";
 
 const env = process.env;
 const E2E = env.SCAFO_E2E === "1";
@@ -1450,10 +1449,7 @@ async function startNode(id: string, labels?: string): Promise<Node> {
       ...(labels === undefined ? {} : { SCAFO_NODE_LABELS: labels }),
     })
     .withCommand(["node", "dist/cli/index.mjs", "sail", "--listen", `0.0.0.0:${String(NODE_PORT)}`])
-    .withLogConsumer((stream: Readable) => {
-      stream.on("data", (chunk) => log.push(String(chunk)));
-      stream.on("err", (chunk) => log.push(String(chunk)));
-    })
+    .withLogConsumer(collectLogs(log))
     .withWaitStrategy(Wait.forLogMessage(/listening on/))
     .withStartupTimeout(BOOT_DEADLINE_MS)
     .start();
