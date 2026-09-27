@@ -37,4 +37,22 @@ describe("the deploy process environment", () => {
     expect(runtimeBaseEnv({ PATH: "/usr/bin" })).not.toHaveProperty("DOCKER_HOST");
     expect(deployBaseEnv({ PATH: "/usr/bin" })).not.toHaveProperty("DOCKER_HOST");
   });
+
+  it("carries the engine client and image platform an operator named to the publish alone", () => {
+    const named = {
+      PATH: "/usr/bin",
+      CELLD_DOCKER: "podman",
+      CELLD_CONTAINER_PLATFORM: "linux/arm64",
+    };
+
+    expect(deployBaseEnv(named)).toEqual(named);
+    expect(runtimeBaseEnv(named)).toEqual({ PATH: "/usr/bin" });
+  });
+
+  it("names no engine client or platform when the daemon was given none", () => {
+    const base = deployBaseEnv({ PATH: "/usr/bin" });
+
+    expect(base).not.toHaveProperty("CELLD_DOCKER");
+    expect(base).not.toHaveProperty("CELLD_CONTAINER_PLATFORM");
+  });
 });

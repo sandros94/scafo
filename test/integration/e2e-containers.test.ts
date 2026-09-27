@@ -167,6 +167,22 @@ const NODE_ENGINE = "node-e2e-containers-engine";
  */
 const ENGINE_LABEL = "containers=true";
 
+/**
+ * The engine client the node with no engine is told to run instead of `docker`.
+ * The image ships no such binary, so the publish can only fail by naming it —
+ * which is the proof that `CELLD_DOCKER` crossed from the daemon to the publish.
+ */
+const ENGINE_CLI_ELSEWHERE = "podman";
+
+/**
+ * The platform the engine node's publish is told to build for, on an amd64
+ * engine host only. 386 IS THE ONE PLATFORM THAT PROVES THE KNOB CROSSED THE
+ * PUBLISH WITHOUT EMULATION: an amd64 kernel runs 386 binaries natively, so the
+ * image builds and the container still answers, yet its architecture is not the
+ * `linux/amd64` Celld builds for when it is told nothing.
+ */
+const EXERCISED_PLATFORM = "linux/386";
+
 /** Deployed through the labelled node, and served from it. */
 const APP_SERVED = "sidecar";
 /** Deployed through the node with no engine, where Celld cannot build the image. */
@@ -193,6 +209,8 @@ let plainApiPort: number;
 let engineApiPort: number;
 /** Where this process reaches that same listener, through a forwarder. */
 let engineHostPort: number;
+/** The engine host's architecture, which decides whether {@link EXERCISED_PLATFORM} is exercised. */
+let engineArch: string;
 /** The bridge gateway, which is the engine host seen from a container on it. */
 let gateway: string;
 const forwarders: StartedTestContainer[] = [];
@@ -238,6 +256,7 @@ describe.skipIf(!E2E || !MOUNTABLE)("container classes, on a node given the host
     plain = await new GenericContainer(IMAGE_REF)
       .withEnvironment({
         ...nodeEnvironment(NODE_PLAIN, store.fromContainers),
+        CELLD_DOCKER: ENGINE_CLI_ELSEWHERE,
         SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
         SCAFO_LISTEN: `0.0.0.0:${String(NODE_PORT)}`,
       })
@@ -265,6 +284,7 @@ describe.skipIf(!E2E || !MOUNTABLE)("container classes, on a node given the host
         "{{(index .IPAM.Config 0).Gateway}}",
       ])
     ).output.trim();
+    engineArch = (await docker(["version", "--format", "{{.Server.Arch}}"])).output.trim();
     engineApiPort = await freePort();
     const runtimePort = await freePort();
     engine = await new GenericContainer(IMAGE_REF)
@@ -277,6 +297,7 @@ describe.skipIf(!E2E || !MOUNTABLE)("container classes, on a node given the host
         SCAFO_LISTEN: `0.0.0.0:${String(engineApiPort)}`,
         SCAFO_BIND_HOST: "0.0.0.0",
         SCAFO_PORT_RANGE_START: String(runtimePort),
+        ...(engineArch === "amd64" ? { CELLD_CONTAINER_PLATFORM: EXERCISED_PLATFORM } : {}),
       })
       /* The operator's grant, and the whole of it. */
       .withBindMounts([{ source: ENGINE_SOCKET, target: ENGINE_SOCKET, mode: "rw" }])
@@ -408,6 +429,20 @@ describe.skipIf(!E2E || !MOUNTABLE)("container classes, on a node given the host
         `"ok"`,
       );
 
+      /* The image the class runs was built for the platform the daemon was
+         given, which only the publish reads: the knob crossed to it. On any
+         other engine host nothing was asked of the publish, and nothing is
+         read back. */
+      const classImage = manifest.containers.find(
+        (entry) => entry.class_name === CONTAINER_CLASS,
+      )?.image;
+      expect(classImage, `the manifest names no image for ${CONTAINER_CLASS}`).toBeDefined();
+      const exercised = engineArch === "amd64";
+      const wanted = exercised ? EXERCISED_PLATFORM : `not exercised (${engineArch})`;
+      const platform = exercised ? await imagePlatform(classImage as string) : wanted;
+      observed.platform = platform;
+      expect(platform).toBe(wanted);
+
       /* And the engine says so too: one running container of this class,
          carrying the labels Celld puts on what it starts, and naming the Celld
          node of this application's fleet that runs on the labelled machine —
@@ -465,10 +500,11 @@ describe.skipIf(!E2E || !MOUNTABLE)("container classes, on a node given the host
       /* Scafo adds nothing of its own here: the publish it ran failed, which is
          `publish-failed` whatever the cause, and what is kept is the tail of
          what Celld said about the image it could not build. Only the fragment
-         that is Celld's contract is asserted. */
+         that is Celld's contract is asserted: it names the client it tried to
+         run, which is the one the daemon was given and not `docker`. */
       expect(record.code).toBe("publish-failed");
       expect(record.detail).toContain("build container image");
-      expect(record.detail).toContain("docker");
+      expect(record.detail).toContain(`run \`${ENGINE_CLI_ELSEWHERE}\``);
 
       /* Nothing was published: no deployment of this application came of it,
          and nothing at all sits under its deploy prefix. */
@@ -666,6 +702,18 @@ async function readManifest(version: string): Promise<CelldManifest> {
   const object = await registry.store.get(key);
   if (object === null) throw new Error(`manifest "${key}" disappeared`);
   return JSON.parse(object.body) as CelldManifest;
+}
+
+/** The `os/architecture` the engine holds `image` for, or what it said instead. */
+async function imagePlatform(image: string): Promise<string> {
+  const inspected = await docker([
+    "image",
+    "inspect",
+    image,
+    "--format",
+    "{{.Os}}/{{.Architecture}}",
+  ]);
+  return inspected.code === 0 ? inspected.output.trim() : inspected.output;
 }
 
 /** One engine command, run the way an operator runs it. */
