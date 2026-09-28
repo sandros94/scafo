@@ -289,10 +289,12 @@ jobs:
         include:
           # Every shard runs daemons out of the `probe` image; only this one
           # also exercises the product image, so only it loads that archive.
+          # The container suite rides here for the same image, and mounts the
+          # runner's own engine socket into it.
           - shard: product-image
             node-image: scafo-e2e-image
             files: >-
-              test/integration/e2e.test.ts test/integration/e2e-image.test.ts
+              test/integration/e2e.test.ts test/integration/e2e-image.test.ts test/integration/e2e-containers.test.ts
           - shard: traefik-tls
             node-image: ""
             files: >-

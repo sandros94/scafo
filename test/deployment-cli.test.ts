@@ -58,11 +58,12 @@ describe("the surface `scafo deployment` presents", () => {
     }
   });
 
-  it("says in its own help what becomes of the shared asset blobs", () => {
+  it("says in its own help what becomes of the shared asset blobs and container images", () => {
     const prune = (deployment.subCommands as Record<string, CommandDef>).prune;
     const description = (prune.meta as { description?: string }).description ?? "";
 
     expect(description).toContain("deploy-blobs/");
+    expect(description).toContain("deploy/images/");
     expect(description).toContain("no kept deployment references");
     expect(description).toContain("older than the window");
   });
@@ -242,8 +243,9 @@ describe("what the command prints", () => {
       `delete app/aaaa1111: 2 objects and its deployment record`,
       `delete worker/ffff6666: 1 object and no deployment record`,
       `delete 4 asset blobs no kept deployment references`,
-      `scafo: pruned 2 deployments (3 objects, 1 deployment record, 4 asset blobs) of ` +
-        `"shop-production", kept 3; ${BLOBS_SENTENCE}`,
+      `delete 2 container images no kept deployment references`,
+      `scafo: pruned 2 deployments (3 objects, 1 deployment record, 4 asset blobs, ` +
+        `2 container images) of "shop-production", kept 3; ${BLOBS_SENTENCE}`,
     ]);
 
     /* A dry run says what WOULD go, and only that. */
@@ -253,47 +255,83 @@ describe("what the command prints", () => {
       `would delete app/aaaa1111: 2 objects and its deployment record`,
       `would delete worker/ffff6666: 1 object and no deployment record`,
       `would delete 4 asset blobs no kept deployment references`,
+      `would delete 2 container images no kept deployment references`,
     ]);
     expect(dry.at(-1)).toBe(
-      `scafo: would prune 2 deployments (3 objects, 1 deployment record, 4 asset blobs) of ` +
-        `"shop-production", kept 3; ${BLOBS_SENTENCE}`,
+      `scafo: would prune 2 deployments (3 objects, 1 deployment record, 4 asset blobs, ` +
+        `2 container images) of "shop-production", kept 3; ${BLOBS_SENTENCE}`,
     );
 
     const nothing = describePrune({
-      plan: { ...PLAN, delete: [], blobs: { keep: 12, delete: [] } },
+      plan: {
+        ...PLAN,
+        delete: [],
+        blobs: { keep: 12, delete: [] },
+        images: { keep: 6, delete: [] },
+      },
       keep: 3,
       olderThan: "12h",
     });
 
-    expect(nothing.slice(-2)).toEqual([
+    expect(nothing.slice(-3)).toEqual([
       `keep 12 asset blobs, referenced or younger than 12h`,
+      `keep 6 container images, referenced or younger than 12h`,
       `scafo: nothing to prune in "shop-production", kept 3; ${BLOBS_SENTENCE}`,
     ]);
   });
 
-  it("says nothing of the blobs in an application that has none", () => {
+  it("says nothing of the blobs or the images in an application that has neither", () => {
     const lines = describePrune({
-      plan: { ...PLAN, delete: [], blobs: { keep: 0, delete: [] } },
+      plan: {
+        ...PLAN,
+        delete: [],
+        blobs: { keep: 0, delete: [] },
+        images: { keep: 0, delete: [] },
+      },
       keep: 3,
       olderThan: "12h",
     });
 
     /* The summary always names the rule; the plan above it says nothing. */
     expect(lines.slice(0, -1).filter((line) => line.includes("asset blob"))).toEqual([]);
+    expect(lines.slice(0, -1).filter((line) => line.includes("container image"))).toEqual([]);
   });
 
-  it("counts the blobs it collects beside a deployment nothing selected", () => {
+  it("counts the blobs and the images it collects beside a deployment nothing selected", () => {
     const lines = describePrune({
-      plan: { ...PLAN, delete: [], blobs: { keep: 8, delete: BLOB_KEYS } },
+      plan: {
+        ...PLAN,
+        delete: [],
+        blobs: { keep: 8, delete: BLOB_KEYS },
+        images: { keep: 3, delete: IMAGE_KEYS },
+      },
       keep: 3,
       olderThan: "12h",
     });
 
-    expect(lines.at(-2)).toBe(`delete 4 asset blobs no kept deployment references`);
+    expect(lines.slice(-3, -1)).toEqual([
+      `delete 4 asset blobs no kept deployment references`,
+      `delete 2 container images no kept deployment references`,
+    ]);
     expect(lines.at(-1)).toBe(
-      `scafo: pruned 0 deployments (0 objects, 0 deployment records, 4 asset blobs) of ` +
-        `"shop-production", kept 3; ${BLOBS_SENTENCE}`,
+      `scafo: pruned 0 deployments (0 objects, 0 deployment records, 4 asset blobs, ` +
+        `2 container images) of "shop-production", kept 3; ${BLOBS_SENTENCE}`,
     );
+  });
+
+  it("says what becomes of the images alone in an application whose blobs all stay", () => {
+    const lines = describePrune({
+      plan: {
+        ...PLAN,
+        delete: [],
+        blobs: { keep: 0, delete: [] },
+        images: { keep: 1, delete: [] },
+      },
+      keep: 3,
+      olderThan: "12h",
+    });
+
+    expect(lines.at(-2)).toBe(`keep 1 container image, referenced or younger than 12h`);
   });
 });
 
@@ -304,11 +342,12 @@ describe("asking before anything is deleted", () => {
     await run.go();
 
     expect(run.asked).toEqual([
-      `Delete 2 deployments (3 objects) and 4 asset blobs of "shop-production"? [y/N] `,
+      `Delete 2 deployments (3 objects), 4 asset blobs and 2 container images of ` +
+        `"shop-production"? [y/N] `,
     ]);
     /* Every line but the summary was already on the terminal when the question
        was put: an operator answers having read what would go. */
-    expect(run.saidWhenAsked()).toBe(6);
+    expect(run.saidWhenAsked()).toBe(7);
     expect(run.pruned()).toBe(1);
     expect(run.said).toEqual(describePrune({ plan: PLAN, keep: 10, olderThan: "24h" }));
   });
@@ -376,7 +415,14 @@ describe("asking before anything is deleted", () => {
   });
 
   it("asks nothing when the plan names nothing to delete", async () => {
-    const run = session({ plan: { ...PLAN, delete: [], blobs: { keep: 12, delete: [] } } });
+    const run = session({
+      plan: {
+        ...PLAN,
+        delete: [],
+        blobs: { keep: 12, delete: [] },
+        images: { keep: 6, delete: [] },
+      },
+    });
 
     await run.go();
 
@@ -388,12 +434,34 @@ describe("asking before anything is deleted", () => {
   it("asks about the blobs alone when they are all the plan selected", async () => {
     const run = session({
       answer: "y",
-      plan: { ...PLAN, delete: [], blobs: { keep: 8, delete: BLOB_KEYS } },
+      plan: {
+        ...PLAN,
+        delete: [],
+        blobs: { keep: 8, delete: BLOB_KEYS },
+        images: { keep: 3, delete: [] },
+      },
     });
 
     await run.go();
 
     expect(run.asked).toEqual([`Delete 4 asset blobs of "shop-production"? [y/N] `]);
+    expect(run.pruned()).toBe(1);
+  });
+
+  it("asks about the images alone when they are all the plan selected", async () => {
+    const run = session({
+      answer: "y",
+      plan: {
+        ...PLAN,
+        delete: [],
+        blobs: { keep: 8, delete: [] },
+        images: { keep: 3, delete: IMAGE_KEYS },
+      },
+    });
+
+    await run.go();
+
+    expect(run.asked).toEqual([`Delete 2 container images of "shop-production"? [y/N] `]);
     expect(run.pruned()).toBe(1);
   });
 });
@@ -466,6 +534,11 @@ const BLOB_KEYS = ["0a", "1b", "2c", "3d"].map(
   (fanout) => `fleets/shop-production/deploy-blobs/assets/sha256/${fanout}/${fanout.repeat(32)}`,
 );
 
+/** Two container image tars no deployment that stays references, as Celld saves them. */
+const IMAGE_KEYS = ["4e", "5f"].map(
+  (head) => `fleets/shop-production/deploy/images/${head.repeat(32)}.tar`,
+);
+
 /** One plan of each kept reason and of both kinds of doomed deployment. */
 const PLAN: PrunePlan = {
   application: "shop-production",
@@ -480,12 +553,13 @@ const PLAN: PrunePlan = {
     storedDeployment("worker", "ffff6666", { objects: 1 }),
   ],
   blobs: { keep: 12, delete: BLOB_KEYS },
+  images: { keep: 6, delete: IMAGE_KEYS },
 };
 
 /** The sentence every summary ends on, and the help says too. */
 const BLOBS_SENTENCE =
-  `shared asset blobs under deploy-blobs/ that no kept deployment references go once they are ` +
-  `older than the window`;
+  `shared asset blobs under deploy-blobs/ and container images under deploy/images/ that no ` +
+  `kept deployment references go once they are older than the window`;
 
 function storedDeployment(
   script: string,

@@ -3,7 +3,7 @@
  * protects, what age and count select, and what is never touched.
  */
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEPLOYMENT_FEATURES,
   VERIFIED_CELLD_RELEASES,
@@ -13,6 +13,7 @@ import { NODE_LIVENESS_WINDOW_MS } from "../src/core/registry/nodes.ts";
 import {
   deploymentKey,
   deployBlobsPrefix,
+  deployImagesPrefix,
   deployPointerKey,
   deployQueuesPrefix,
   fleetPrefix,
@@ -41,6 +42,15 @@ const PINNED = digestOf("c");
 
 /** The one blob every publication of the fixture references. */
 const SHARED_BLOB = blobKey(SHARED);
+
+/*
+ * Image content keys, as Celld writes them: a digest over the image's layers
+ * and config, so two deployments of one image name one tar. The fence image is
+ * one of these too — it rides with every deployment that has a container.
+ */
+const IMAGE_APP = digestOf("1");
+const IMAGE_SIDE = digestOf("2");
+const FENCE = digestOf("e");
 
 /** Four versions, published an hour apart in this order. */
 const V1 = "aaaa1111aaaa1111";
@@ -737,6 +747,164 @@ describe("the shared asset blobs", () => {
   });
 });
 
+/*
+ * The container image tars an application's deployments share. Celld saves one
+ * tar per image content key under `deploy/images/`, so two deployments of one
+ * image share it, and every deployment that has a container also names the
+ * `celld-fence` image its node runs before the first container starts. They are
+ * collected the way the asset blobs are: by reference, against what stays.
+ */
+describe("the shared container images", () => {
+  it("deletes an image only a deleted deployment named, once it is older than the window", async () => {
+    await putImage(IMAGE_APP);
+    await putImage(IMAGE_SIDE);
+    await putImage(FENCE);
+    await publish(V1, { containers: [IMAGE_APP, IMAGE_SIDE] });
+    await publish(V2, { containers: [IMAGE_APP] });
+    await publish(V3);
+    await publish(V4);
+    await pointAt(V4);
+
+    const made = await plan({ keep: 3, olderThanMs: 2 * HOUR_MS });
+
+    expect(names(made.delete)).toEqual([`${SCRIPT}/${V1}`]);
+    /* V2 still runs the application image, and the fence rides with it. */
+    expect(made.images.delete).toEqual([imageKey(IMAGE_SIDE)]);
+    expect(made.images.keep).toBe(2);
+  });
+
+  it("keeps an image a kept deployment names, however old the image is", async () => {
+    await putImage(IMAGE_APP);
+    await putImage(FENCE);
+    await publish(V1, { containers: [IMAGE_APP] });
+    await publish(V2);
+    await pointAt(V1);
+    clock.tick(365 * DAY_MS);
+
+    const made = await plan({ keep: 0, olderThanMs: HOUR_MS });
+
+    expect(names(made.delete)).toEqual([`${SCRIPT}/${V2}`]);
+    expect(made.images).toEqual({ keep: 2, delete: [] });
+  });
+
+  it("keeps the fence image while a kept deployment carries a container", async () => {
+    await putImage(IMAGE_APP);
+    await putImage(FENCE);
+    await publish(V1, { containers: [IMAGE_APP] });
+    await publish(V2);
+    await pointAt(V2);
+
+    /* V1 stays, so the image it runs and the fence that rides with it stay. */
+    expect((await plan({ keep: 2, olderThanMs: 0 })).images).toEqual({ keep: 2, delete: [] });
+
+    const without = await plan({ keep: 1, olderThanMs: 0 });
+
+    expect(names(without.delete)).toEqual([`${SCRIPT}/${V1}`]);
+    expect(without.images).toEqual({
+      keep: 0,
+      delete: [imageKey(IMAGE_APP), imageKey(FENCE)],
+    });
+  });
+
+  it("keeps an image nobody names while it is younger than the window", async () => {
+    await publish(V1);
+    await publish(V2);
+    await pointAt(V2);
+    /* Saved a moment ago: a deploy in flight uploads its images before anything
+       makes them visible, and that is what an unreferenced tar looks like here. */
+    await putImage(IMAGE_APP);
+
+    expect((await plan({ keep: 0, olderThanMs: HOUR_MS })).images).toEqual({ keep: 1, delete: [] });
+    expect((await plan({ keep: 0, olderThanMs: 0 })).images).toEqual({
+      keep: 0,
+      delete: [imageKey(IMAGE_APP)],
+    });
+  });
+
+  it("plans no image at all in a fleet that has none", async () => {
+    await publishAll();
+    await pointAt(V4);
+
+    expect((await plan({ keep: 0, olderThanMs: 0 })).images).toEqual({ keep: 0, delete: [] });
+  });
+
+  it("leaves an object under deploy/images/ it cannot read as a content key where it is", async () => {
+    await publishAll();
+    await pointAt(V4);
+    const images = deployImagesPrefix(APPLICATION);
+    await store.put(`${images}notes.txt`, "not an image this can reference-count");
+    await store.put(`${images}layers/${IMAGE_APP}.tar`, "not where Celld saves one");
+
+    const made = await plan({ keep: 0, olderThanMs: 0 });
+
+    expect(made.images).toEqual({ keep: 2, delete: [] });
+  });
+
+  it("never weighs an image tar as a deployment of its own", async () => {
+    await putImage(IMAGE_APP);
+    await publishAll();
+    await pointAt(V4);
+
+    const made = await plan({ keep: 0, olderThanMs: 0 });
+    const planned = [...made.keep, ...made.delete].flatMap((one) => one.keys);
+
+    expect(planned.filter((key) => key.startsWith(deployImagesPrefix(APPLICATION)))).toEqual([]);
+  });
+
+  /* A manifest that is no manifest at all is the format gate's refusal, before
+     any image is weighed; these are manifests the gate reads and whose image
+     references are still not ones Celld writes. */
+  it.each([
+    ["names containers that are not a list", { containers: {} }],
+    ["names a container with no image", { containers: [{ class_name: "Side" }] }],
+    [
+      "names an image reference Celld would not write",
+      { containers: [{ class_name: "Side", image: "docker.io/library/nginx:1" }] },
+    ],
+    ["names a fence image that is no reference", { fence_image: 7 }],
+  ])("refuses the whole plan when a kept deployment's manifest %s", async (_case, fields) => {
+    await putImage(IMAGE_APP);
+    await publishAll();
+    await pointAt(V4);
+    await store.put(
+      `${DEPLOY}${SCRIPT}/${V4}/manifest.json`,
+      JSON.stringify({ schema_version: 2, version: V4, script_name: SCRIPT, ...fields }),
+    );
+
+    const error = await rejectsWith(() => plan({ keep: 0, olderThanMs: 0 }), "store-nonconforming");
+
+    expect(error.detail).toContain(`${V4}/manifest.json`);
+  });
+
+  it("never refuses over the image references of a deployment it is deleting anyway", async () => {
+    await putImage(IMAGE_APP);
+    await putImage(FENCE);
+    await publish(V1);
+    await publish(V2);
+    await publish(V3);
+    await publish(V4, { containers: [IMAGE_APP] });
+    await pointAt(V4);
+    await store.put(
+      `${DEPLOY}${SCRIPT}/${V1}/manifest.json`,
+      JSON.stringify({ schema_version: 2, version: V1, script_name: SCRIPT, containers: {} }),
+    );
+    const reads = vi.spyOn(store, "get");
+
+    const made = await plan({ keep: 1, olderThanMs: 0 });
+
+    expect(names(made.delete)).toContain(`${SCRIPT}/${V1}`);
+    expect(made.images).toEqual({ keep: 2, delete: [] });
+    /* One GET per manifest per plan: the image references a kept deployment
+       names are read out of what the format gate already read. */
+    const manifests = reads.mock.calls
+      .map(([key]) => key)
+      .filter((key) => key.endsWith("/manifest.json"));
+    expect([...manifests].sort()).toEqual(
+      [V1, V2, V3, V4].map((version) => `${DEPLOY}${SCRIPT}/${version}/manifest.json`),
+    );
+  });
+});
+
 describe("executePrune", () => {
   it("deletes exactly what the plan named, and leaves a referenced blob alone", async () => {
     await publishAll();
@@ -813,6 +981,30 @@ describe("executePrune", () => {
     expect(left).toContain(SHARED_BLOB);
   });
 
+  it("deletes the images after the blobs, and both after the deployments that named them", async () => {
+    await putBlob(ORPHAN);
+    await putImage(IMAGE_APP);
+    await putImage(FENCE);
+    await publish(V1, { assets: [SHARED, ORPHAN], containers: [IMAGE_APP] });
+    await publish(V2);
+    await pointAt(V2);
+    const made = await plan({ keep: 1, olderThanMs: 0 });
+
+    const result = await executePrune(clock.ctx, made);
+
+    /* Deployments, then blobs, then images: a run that dies halfway has already
+       deleted everything that was still referencing what it had not reached. */
+    expect(result.deleted.slice(-3)).toEqual([
+      blobKey(ORPHAN),
+      imageKey(IMAGE_APP),
+      imageKey(FENCE),
+    ]);
+
+    const left = await store.list("");
+    expect(left).not.toContain(imageKey(FENCE));
+    expect(left).toContain(SHARED_BLOB);
+  });
+
   it("does nothing at all for a plan that names nothing", async () => {
     await publishAll();
     await pointAt(V4);
@@ -868,6 +1060,8 @@ async function publish(
     assets?: string[];
     /** Fields overriding the manifest's own, or `false` for a version directory with none. */
     manifest?: Record<string, unknown> | false;
+    /** Image content keys its manifest names; none at all is a deployment with no container. */
+    containers?: string[];
   } = {},
 ): Promise<void> {
   const script = opts.script ?? SCRIPT;
@@ -875,6 +1069,7 @@ async function publish(
 
   const prefix = `${DEPLOY}${script}/${version}/`;
   const assets = opts.assets ?? [SHARED];
+  const containers = opts.containers ?? [];
   await store.put(`${prefix}modules/index.js`, "export default {};");
   if (assets.length > 0) await store.put(`${prefix}assets.json`, assetIndex(assets));
   /* Written last, as Celld writes it: the manifest is what makes a version
@@ -886,7 +1081,8 @@ async function publish(
         schema_version: assets.length > 0 ? 2 : 1,
         version,
         script_name: script,
-        ...(assets.length > 0 ? { required_features: ["assets-v1"] } : {}),
+        ...requiredFeatures(assets, containers),
+        ...containerFields(containers),
         ...opts.manifest,
       }),
     );
@@ -894,6 +1090,38 @@ async function publish(
   if (opts.record !== false) {
     await createDeployment(clock.ctx, APPLICATION, { version });
   }
+}
+
+/** The features a manifest requires, as `celld deploy` names them for what it ships. */
+function requiredFeatures(assets: string[], images: string[]): Record<string, unknown> {
+  const features = [
+    ...(assets.length > 0 ? ["assets-v1"] : []),
+    ...(images.length > 0 ? ["containers-v1"] : []),
+  ];
+  return features.length > 0 ? { required_features: features } : {};
+}
+
+/**
+ * The fields of Celld's `manifest.json` that name images: one `containers`
+ * entry per class, each naming the image reference the engine holds it under,
+ * and the `celld-fence` image that rides with any deployment that has one.
+ */
+function containerFields(images: string[]): Record<string, unknown> {
+  if (images.length === 0) return {};
+
+  return {
+    containers: images.map((image, index) => ({
+      class_name: `Sidecar${String(index)}`,
+      image: reference(image),
+      instance_type: "dev",
+    })),
+    fence_image: reference(FENCE),
+  };
+}
+
+/** The name an engine holds one image under, from its content key. */
+function reference(key: string): string {
+  return `celld-image:${key}`;
 }
 
 /** Celld's `assets.json`: a schema version and one entry per path, each naming its digest. */
@@ -963,6 +1191,16 @@ async function answeringNode(
     }),
   );
   return id;
+}
+
+/** One saved image tar, written at the clock's current moment. */
+async function putImage(key: string): Promise<void> {
+  await store.put(imageKey(key), "image-tar-bytes");
+}
+
+/** Where Celld saves the image of `key`: `deploy/images/<content key>.tar`. */
+function imageKey(key: string): string {
+  return `${deployImagesPrefix(APPLICATION)}${key}.tar`;
 }
 
 /** A full digest made of one repeated hex character, readable in a failure message. */

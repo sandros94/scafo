@@ -513,11 +513,25 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
   });
 }
 
-/** The one upstream build setting a deploy may share with the daemon's environment. */
+/**
+ * The environment a publish runs with: the runtime's, plus Celld's own build
+ * settings, each handed through unread when the daemon has it.
+ *
+ * `CELLD_ESBUILD`, `CELLD_DOCKER` and `CELLD_CONTAINER_PLATFORM` ARE BUILD-TIME
+ * KNOBS OF CELLD'S, and the node that accepts the deploy is the machine they
+ * describe: the bundler to run, the engine client that builds and pulls a
+ * container class's image in place of `docker` on `PATH`, and the platform that
+ * image is built for in place of `linux/amd64`. An operator who set them for the
+ * daemon set them for the publish. Celld reads the last two in `celld deploy`
+ * alone — a runtime process reaches its engine through the socket, never the
+ * client — so they travel here and not with {@link runtimeBaseEnv}.
+ */
 export function deployBaseEnv(env: Record<string, string | undefined>): Record<string, string> {
   const base = runtimeBaseEnv(env);
-  const esbuild = env.CELLD_ESBUILD;
-  if (esbuild !== undefined) base.CELLD_ESBUILD = esbuild;
+  for (const name of ["CELLD_ESBUILD", "CELLD_DOCKER", "CELLD_CONTAINER_PLATFORM"]) {
+    const value = env[name];
+    if (value !== undefined) base[name] = value;
+  }
   return base;
 }
 

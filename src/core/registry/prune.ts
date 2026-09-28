@@ -14,7 +14,9 @@
  * the shared asset blobs are collected BY REFERENCE: they are content
  * addressed, so a blob is deleted only once no deployment that stays names its
  * digest, and an asset index that cannot be read refuses the whole plan rather
- * than being read as a deployment that references nothing.
+ * than being read as a deployment that references nothing. The saved container
+ * images are collected the same way, against the image references a kept
+ * deployment's manifest names.
  *
  * Both of those read formats Celld owns and changes between releases, so the
  * whole module is PINNED: it plans nothing — a dry run included — unless the
@@ -61,6 +63,12 @@ export interface StoredDeployment {
   createdAt?: string;
   /** Key of that deployment record, when there is one to delete alongside the objects. */
   recordKey?: string;
+  /**
+   * Its `manifest.json`, read ONCE by the format gate and kept for the life of
+   * the plan; absent for a version directory with none, which is a deploy in
+   * flight.
+   */
+  manifest?: Record<string, unknown>;
 }
 
 /** Why a deployment survived the plan it was weighed in. */
@@ -86,6 +94,8 @@ export interface PrunePlan {
   delete: StoredDeployment[];
   /** The shared asset blobs the same weighing selected: how many stay, and which keys go. */
   blobs: PrunedBlobs;
+  /** The shared container images the same weighing selected, read the same way. */
+  images: PrunedImages;
 }
 
 /** What becomes of the content-addressed asset blobs an application shares. */
@@ -93,6 +103,14 @@ export interface PrunedBlobs {
   /** How many objects under `deploy-blobs/` the plan leaves where they are. */
   keep: number;
   /** Keys of the blobs no deployment that stays references, and old enough to go. */
+  delete: string[];
+}
+
+/** What becomes of the content-addressed container images an application shares. */
+export interface PrunedImages {
+  /** How many objects under `deploy/images/` the plan leaves where they are. */
+  keep: number;
+  /** Keys of the images no deployment that stays references, and old enough to go. */
   delete: string[];
 }
 
@@ -153,6 +171,7 @@ export async function planPrune(ctx: RegistryContext, opts: PlanPruneOptions): P
     keep: [],
     delete: [],
     blobs: { keep: 0, delete: [] },
+    images: { keep: 0, delete: [] },
   };
   const named = new Set(current);
   const nowMs = opts.now.getTime();
@@ -169,9 +188,10 @@ export async function planPrune(ctx: RegistryContext, opts: PlanPruneOptions): P
     }
   }
 
-  /* After the deployments and not before: what a blob is measured against is
-     the set that STAYS, which only the weighing above decides. */
+  /* After the deployments and not before: what a blob or an image is measured
+     against is the set that STAYS, which only the weighing above decides. */
   plan.blobs = await planBlobs(ctx, opts, plan.keep, nowMs);
+  plan.images = await planImages(ctx, opts, plan.keep, nowMs);
   return plan;
 }
 
@@ -213,6 +233,14 @@ export async function executePrune(ctx: RegistryContext, plan: PrunePlan): Promi
     await deleteKey(ctx, key);
     deleted.push(key);
   }
+
+  /* And the images after the blobs, for the same reason and in the same way:
+     nothing re-read, and last of everything, so a run that stops halfway has
+     already deleted every deployment that was still naming one. */
+  for (const key of plan.images.delete) {
+    await deleteKey(ctx, key);
+    deleted.push(key);
+  }
   return { deleted };
 }
 
@@ -246,7 +274,40 @@ async function planBlobs(
   for (const entry of entries) {
     const digest = blobDigest(entry.key, prefix);
     if (digest === undefined || referenced.has(digest)) continue;
-    if (!isBlobOlderThan(entry, nowMs, opts.olderThanMs)) continue;
+    if (!isEntryOlderThan(entry, nowMs, opts.olderThanMs)) continue;
+    doomed.push(entry.key);
+  }
+  return { keep: entries.length - doomed.length, delete: doomed };
+}
+
+/**
+ * Which saved container images no deployment that stays has a use for.
+ *
+ * The blobs' rule, applied to the other thing deployments share: reference
+ * counted against the KEPT deployments, gated by the same age window, and for
+ * the same reason — a deploy saves its images before the manifest that names
+ * them exists, so during that window an image nobody wants and an image about
+ * to be wanted look exactly alike.
+ */
+async function planImages(
+  ctx: RegistryContext,
+  opts: Pick<PlanPruneOptions, "application" | "olderThanMs">,
+  kept: KeptDeployment[],
+  nowMs: number,
+): Promise<PrunedImages> {
+  const referenced = new Set<string>();
+  for (const deployment of kept) {
+    for (const key of imageKeysOf(deployment)) referenced.add(key);
+  }
+
+  const prefix = deployImagesPrefix(opts.application);
+  const entries = await ctx.store.listEntries(prefix);
+  const doomed: string[] = [];
+
+  for (const entry of entries) {
+    const key = imageContentKey(entry.key, prefix);
+    if (key === undefined || referenced.has(key)) continue;
+    if (!isEntryOlderThan(entry, nowMs, opts.olderThanMs)) continue;
     doomed.push(entry.key);
   }
   return { keep: entries.length - doomed.length, delete: doomed };
@@ -316,12 +377,112 @@ function assetIndexProblem(key: string, wrong: string): ScafoError {
 }
 
 /**
- * A full asset digest, exactly as Celld writes one: lowercase hexadecimal, and
- * the `sha256` of every entry of an asset index.
+ * The content key of every image one deployment runs: one per container class,
+ * and the fence image that rides with any deployment that has a class at all.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L40-L50 (v0.5.0)
+ *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L40-L50 (v0.5.1)
+ *
+ * Read out of the manifest the format gate already read and verified, never out
+ * of the bucket again, and only for a deployment that stays: a reference that
+ * is not one Celld writes throws `ScafoError("store-nonconforming")` naming the
+ * manifest's key, for the reason the asset index does — a deployment whose
+ * references cannot be read is not one to delete images beside. A deployment
+ * with no container, or with no manifest yet, names none.
+ */
+function imageKeysOf(deployment: StoredDeployment): string[] {
+  const manifest = deployment.manifest;
+  if (manifest === undefined) return [];
+
+  const key = `${deployment.prefix}${MANIFEST_FILE}`;
+  const keys: string[] = [];
+  const fence = manifest.fence_image;
+  if (fence !== undefined && fence !== null) {
+    const content = imageReferenceKey(fence);
+    if (content === undefined) throw manifestProblem(key, `names no usable "fence_image"`);
+    keys.push(content);
+  }
+
+  const containers = manifest.containers;
+  if (containers === undefined || containers === null) return keys;
+  if (!Array.isArray(containers)) throw manifestProblem(key, `has a "containers" that is no list`);
+
+  for (const [index, container] of containers.entries()) {
+    const content = imageReferenceKey((container as { image?: unknown } | null)?.image);
+    if (content === undefined) {
+      throw manifestProblem(key, `names no usable image for container ${String(index)}`);
+    }
+    keys.push(content);
+  }
+  return keys;
+}
+
+function manifestProblem(key: string, wrong: string): ScafoError {
+  return new ScafoError("store-nonconforming", "Deployment manifest is not a manifest", {
+    detail:
+      `"${key}" ${wrong}, so it cannot say which saved container images the deployment needs; ` +
+      `scafo will not delete an image beside a deployment whose references it cannot read`,
+  });
+}
+
+/**
+ * The prefix of every image reference Celld writes into a manifest; the rest of
+ * the reference is the content key its tar is filed under.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/container.rs#L60-L73 (v0.5.0)
+ *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/container.rs#L60-L73 (v0.5.1)
+ */
+const IMAGE_REFERENCE_PREFIX = "celld-image:";
+
+/**
+ * The content key an image reference names, or nothing when the reference is
+ * not one Celld writes: its prefix, then a sha256 in lowercase hexadecimal.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L742 (v0.5.0)
+ *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L809 (v0.5.1)
+ * REFUSED RATHER THAN READ LOOSELY: a reference this cannot map onto a tar
+ * would count as naming nothing, and free exactly the image it runs.
+ */
+function imageReferenceKey(reference: unknown): string | undefined {
+  if (typeof reference !== "string" || !reference.startsWith(IMAGE_REFERENCE_PREFIX)) {
+    return undefined;
+  }
+  const content = reference.slice(IMAGE_REFERENCE_PREFIX.length);
+  return DIGEST_RE.test(content) ? content : undefined;
+}
+
+/**
+ * The content key an image key names, or nothing when the key is not one Celld
+ * wrote.
+ *
+ * Celld's layout is `deploy/images/<content key>.tar`, flat.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/container.rs#L67-L73 (v0.5.0)
+ *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/container.rs#L67-L73 (v0.5.1)
+ * ANYTHING ELSE UNDER THE PREFIX IS LEFT ALONE, as it is under the blobs': an
+ * object this cannot read as a content key is one nothing here can
+ * reference-count.
+ */
+function imageContentKey(key: string, prefix: string): string | undefined {
+  const rest = key.slice(prefix.length).split("/");
+  if (rest.length !== 1) return undefined;
+
+  const name = rest[0];
+  if (name === undefined || !name.endsWith(IMAGE_SUFFIX)) return undefined;
+
+  const content = name.slice(0, -IMAGE_SUFFIX.length);
+  return DIGEST_RE.test(content) ? content : undefined;
+}
+
+/** What Celld saves an image as; the rest of the name is its content key. */
+const IMAGE_SUFFIX = ".tar";
+
+/**
+ * A full asset digest or image content key, exactly as Celld writes one:
+ * lowercase hexadecimal, the `sha256` of every entry of an asset index, and the
+ * hash an image reference is tagged with.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L390-L397 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L390-L397 (v0.5.1)
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L433-L448 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L433-L448 (v0.5.1)
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L742 (v0.5.0)
+ *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L809 (v0.5.1)
  */
 const DIGEST_RE = /^[a-f\d]{64}$/;
 
@@ -350,11 +511,12 @@ function blobDigest(key: string, prefix: string): string | undefined {
 }
 
 /**
- * Whether a blob is old enough to delete. A window of zero is the gate lifted,
- * as it is for a deployment; a blob whose age the store did not report reads as
- * too young to touch, which is the direction that cannot break what is running.
+ * Whether a shared object — a blob or a saved image — is old enough to delete.
+ * A window of zero is the gate lifted, as it is for a deployment; an object
+ * whose age the store did not report reads as too young to touch, which is the
+ * direction that cannot break what is running.
  */
-function isBlobOlderThan(entry: StoredEntry, nowMs: number, olderThanMs: number): boolean {
+function isEntryOlderThan(entry: StoredEntry, nowMs: number, olderThanMs: number): boolean {
   if (olderThanMs === 0) return true;
 
   const at = entry.lastModified?.getTime();
@@ -394,27 +556,29 @@ async function assertUnnamed(
 const MANIFEST_FILE = "manifest.json";
 
 /**
- * Refuses unless one deployment's manifest carries only markers this build
- * knows: a schema version, and the features the deployment requires.
+ * One deployment's manifest, once it is verified to carry only markers this
+ * build knows: a schema version, and the features the deployment requires.
+ * Refuses otherwise.
  *
- * READ FOR EVERY DEPLOYMENT THE PLAN LISTS, kept and deleted alike. What a kept
- * deployment references is what decides which shared blobs survive, so a
- * manifest this cannot read is a plan this cannot make — not a deployment to
- * quietly weigh as referencing nothing.
+ * READ FOR EVERY DEPLOYMENT THE PLAN LISTS, kept and deleted alike, and ONCE:
+ * what it returns is kept with the deployment, and the image references are
+ * read out of that. What a kept deployment references is what decides which
+ * shared blobs and images survive, so a manifest this cannot read is a plan
+ * this cannot make — not a deployment to quietly weigh as referencing nothing.
  *
  * A VERSION DIRECTORY WITH NO MANIFEST IS A DEPLOY IN FLIGHT, not an unknown
- * format: upstream writes the blobs, the modules and `assets.json` before the
- * manifest, and the pointers after it, so a directory can exist without one
+ * format: upstream writes the images, the blobs, the modules and `assets.json`
+ * before the manifest, and the pointers after it, so a directory can exist without one
  * only while a deploy is happening or after one died. It carries no marker to
  * check, and the age window — the same thing that protects a young blob — is
  * what keeps it. See the write order in `_celld-contract.ts`.
  */
-async function assertManifestVerified(
+async function readVerifiedManifest(
   ctx: RegistryContext,
   deployment: StoredDeployment,
-): Promise<void> {
+): Promise<Record<string, unknown> | undefined> {
   const key = `${deployment.prefix}${MANIFEST_FILE}`;
-  if (!deployment.keys.includes(key)) return;
+  if (!deployment.keys.includes(key)) return undefined;
 
   let manifest: unknown;
   try {
@@ -448,6 +612,7 @@ async function assertManifestVerified(
         `knows ${DEPLOYMENT_FEATURES.join(", ")}`,
     );
   }
+  return record;
 }
 
 /** The structural refusal: a bucket marker outside what this build was verified on. */
@@ -585,7 +750,8 @@ async function readDeployments(
   }
 
   for (const deployment of found.values()) {
-    await assertManifestVerified(ctx, deployment);
+    const manifest = await readVerifiedManifest(ctx, deployment);
+    if (manifest !== undefined) deployment.manifest = manifest;
     /* Every version that got this far is one scafo could have filed a record
        under, so the read needs no guard of its own. A version with no record is
        still a deployment Celld published — one scafo never filed — and stays a

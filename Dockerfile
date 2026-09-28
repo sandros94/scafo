@@ -1,3 +1,9 @@
+# The container engine's client the runtime stage carries, pinned by release and
+# by each architecture's checksum, the way scripts/install.sh pins Celld.
+ARG DOCKER_VERSION=29.8.1
+ARG DOCKER_SHA256_AMD64=d8db66739d2e28d4933786d73e918d9be643a67fbd835db1bf740d650a259e70
+ARG DOCKER_SHA256_ARM64=667395fbffab52901b80181dfbb39ea76da2fbd7642c4fbddd24e42146b07b48
+
 # Pin the runtime by tag and multi-architecture digest.
 FROM ghcr.io/denoland/celld:0.5.1@sha256:9df15352bcbb92a8d73dabadc349383ccd3d7851b2ba4ccffe2c956f2f9fc93f AS celld
 
@@ -31,6 +37,29 @@ RUN set -eux; \
 # Keep only runtime dependencies.
 RUN pnpm prune --prod --ignore-scripts
 
+# The engine client's download. The architecture is read off the stage itself
+# rather than from a build argument, because this file is also built by builders
+# that fill none; the bundle carries a whole engine, and only the client binary
+# leaves here.
+FROM node:24-slim AS client
+ARG DOCKER_VERSION
+ARG DOCKER_SHA256_AMD64
+ARG DOCKER_SHA256_ARM64
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl \
+  && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+  case "$(dpkg --print-architecture)" in \
+  amd64) arch='x86_64'; expected="$DOCKER_SHA256_AMD64" ;; \
+  arm64) arch='aarch64'; expected="$DOCKER_SHA256_ARM64" ;; \
+  *) echo "no container client is pinned for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+  esac; \
+  curl -fsSL -o /tmp/client.tgz \
+  "https://download.docker.com/linux/static/stable/${arch}/docker-${DOCKER_VERSION}.tgz"; \
+  echo "${expected}  /tmp/client.tgz" | sha256sum -c -; \
+  tar -xzf /tmp/client.tgz -C /tmp docker/docker; \
+  install -D -m 0755 /tmp/docker/docker /out/docker
+
 # Test host stage: the same Celld and esbuild the image ships, with no
 # application, for suites that bind-mount a worktree's build into a container.
 # Not part of the default build; build it with `--target probe -t scafo-probe`.
@@ -57,6 +86,13 @@ RUN apt-get update \
 
 COPY --from=celld /usr/local/bin/celld /usr/local/bin/celld
 COPY --from=build /out/esbuild /usr/local/bin/esbuild
+
+# The engine's client, and no engine. `celld deploy` builds or pulls a container
+# image through this CLI on the node that accepts the deploy, so a node that
+# takes a deployment with a container class needs it on PATH. The binary grants
+# nothing on its own: it reaches an engine only through a socket the operator
+# mounts, and mounting one is their decision.
+COPY --from=client /out/docker /usr/local/bin/docker
 
 # Default Celld source builds to the bundled esbuild binary.
 ENV CELLD_ESBUILD=/usr/local/bin/esbuild

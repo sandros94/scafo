@@ -43,9 +43,12 @@
  *     https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L433-L448 (v0.5.1)
  *     https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L998-L1008 (v0.5.0)
  *     https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L1065-L1075 (v0.5.1)
- *   `deploy/images/<id>.tar`
- *     https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/container.rs#L67-L73 (v0.5.0)
- *     https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/container.rs#L67-L73 (v0.5.1)
+ *   `deploy/images/<content key>.tar`, named `celld-image:<content key>` by a
+ *   manifest's `containers[].image` and `fence_image`
+ *     https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/container.rs#L60-L73 (v0.5.0)
+ *     https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/container.rs#L60-L73 (v0.5.1)
+ *     https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L40-L50 (v0.5.0)
+ *     https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L40-L50 (v0.5.1)
  *   `deploy/queues/<queue>/consumer.json`
  *     https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L138-L141 (v0.5.0)
  *     https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L138-L141 (v0.5.1)
@@ -57,10 +60,11 @@
  *
  * THE WRITE ORDER of that layout, which is what makes a version directory with
  * no `manifest.json` a deploy in flight rather than a format this cannot read:
- * the shared blobs, then the modules, then `assets.json`, then `manifest.json`,
- * then the queue attachments, then the named pointer, then the fleet-wide one.
- *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L800-L848 (v0.5.0)
- *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L867-L915 (v0.5.1)
+ * the saved images, then the shared blobs, then the modules, then `assets.json`,
+ * then `manifest.json`, then the queue attachments, then the named pointer, then
+ * the fleet-wide one.
+ *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L789-L848 (v0.5.0)
+ *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L856-L915 (v0.5.1)
  *
  * `DeployPointer`, the two `current.json` objects prune reads to know what an
  * application serves; `script_name` is optional, and older named pointers omit it.
