@@ -139,6 +139,7 @@ export interface PruneResult {
  * and a named pointer written by an older Celld may not.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L450-L460 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L450-L460 (v0.5.1)
+ *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L450-L460 (v0.6.0)
  */
 interface DeployPointer {
   version: string;
@@ -317,6 +318,7 @@ async function planImages(
  * Celld's own name for a deployment's asset index, and the only one it serves.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L811-L818 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L878-L885 (v0.5.1)
+ *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L878-L885 (v0.6.0)
  */
 const ASSET_INDEX_FILE = "assets.json";
 
@@ -381,6 +383,7 @@ function assetIndexProblem(key: string, wrong: string): ScafoError {
  * and the fence image that rides with any deployment that has a class at all.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L40-L50 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L40-L50 (v0.5.1)
+ *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L40-L50 (v0.6.0)
  *
  * Read out of the manifest the format gate already read and verified, never out
  * of the bucket again, and only for a deployment that stays: a reference that
@@ -429,6 +432,7 @@ function manifestProblem(key: string, wrong: string): ScafoError {
  * the reference is the content key its tar is filed under.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/container.rs#L60-L73 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/container.rs#L60-L73 (v0.5.1)
+ *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/container.rs#L60-L73 (v0.6.0)
  */
 const IMAGE_REFERENCE_PREFIX = "celld-image:";
 
@@ -437,6 +441,7 @@ const IMAGE_REFERENCE_PREFIX = "celld-image:";
  * not one Celld writes: its prefix, then a sha256 in lowercase hexadecimal.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L742 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L809 (v0.5.1)
+ *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L809 (v0.6.0)
  * REFUSED RATHER THAN READ LOOSELY: a reference this cannot map onto a tar
  * would count as naming nothing, and free exactly the image it runs.
  */
@@ -455,6 +460,7 @@ function imageReferenceKey(reference: unknown): string | undefined {
  * Celld's layout is `deploy/images/<content key>.tar`, flat.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/container.rs#L67-L73 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/container.rs#L67-L73 (v0.5.1)
+ *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/container.rs#L67-L73 (v0.6.0)
  * ANYTHING ELSE UNDER THE PREFIX IS LEFT ALONE, as it is under the blobs': an
  * object this cannot read as a content key is one nothing here can
  * reference-count.
@@ -479,10 +485,13 @@ const IMAGE_SUFFIX = ".tar";
  * hash an image reference is tagged with.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L390-L397 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L390-L397 (v0.5.1)
+ *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L390-L397 (v0.6.0)
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L433-L448 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L433-L448 (v0.5.1)
+ *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L433-L448 (v0.6.0)
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L742 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L809 (v0.5.1)
+ *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L809 (v0.6.0)
  */
 const DIGEST_RE = /^[a-f\d]{64}$/;
 
@@ -492,8 +501,10 @@ const DIGEST_RE = /^[a-f\d]{64}$/;
  * Celld's layout is `deploy-blobs/assets/sha256/<first two hex>/<digest>`.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L433-L448 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L433-L448 (v0.5.1)
+ *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L433-L448 (v0.6.0)
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L998-L1008 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L1065-L1075 (v0.5.1)
+ *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L1065-L1075 (v0.6.0)
  * ANYTHING ELSE UNDER THE PREFIX IS LEFT ALONE: a key this cannot read as a
  * digest is one nothing here can reference-count, and an object of unknown
  * shape is not one to delete on a guess.
@@ -552,6 +563,7 @@ async function assertUnnamed(
  * into a version, and the first thing that says what format wrote it.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L819-L824 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L886-L891 (v0.5.1)
+ *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L886-L891 (v0.6.0)
  */
 const MANIFEST_FILE = "manifest.json";
 
@@ -668,6 +680,7 @@ async function readPointers(
  * Filename of both pointers Celld keeps: the fleet's, and each script's.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L842-L848 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L909-L915 (v0.5.1)
+ *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L909-L915 (v0.6.0)
  */
 const POINTER_FILE = "current.json";
 
@@ -708,6 +721,7 @@ function pointerProblem(key: string, wrong: string): ScafoError {
  * rather than a deployment, and is skipped here.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L575 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L642 (v0.5.1)
+ *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L642 (v0.6.0)
  */
 async function readDeployments(
   ctx: RegistryContext,
@@ -721,8 +735,10 @@ async function readDeployments(
      `abcdef0123456789` is still a queue.
        https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/container.rs#L67-L73 (v0.5.0)
        https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/container.rs#L67-L73 (v0.5.1)
+       https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/container.rs#L67-L73 (v0.6.0)
        https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L138-L141 (v0.5.0)
-       https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L138-L141 (v0.5.1) */
+       https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L138-L141 (v0.5.1)
+       https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L138-L141 (v0.6.0) */
   const protocols = [deployImagesPrefix(opts.application), deployQueuesPrefix(opts.application)];
 
   for (const key of keys) {
@@ -772,6 +788,7 @@ async function readDeployments(
  * beginning and ending on a letter or a digit.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L2055-L2068 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L2253-L2266 (v0.5.1)
+ *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L2253-L2266 (v0.6.0)
  */
 const SCRIPT_NAME_RE = /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/;
 
@@ -784,8 +801,10 @@ const SCRIPT_NAME_RE = /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/;
  * nothing else under `deploy/<script>/` is ever named in hexadecimal.
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L467-L500 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L467-L500 (v0.5.1)
+ *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L467-L500 (v0.6.0)
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L570-L575 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L637-L642 (v0.5.1)
+ *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L637-L642 (v0.6.0)
  */
 const VERSION_RE = /^[a-f\d]{16,64}$/;
 
