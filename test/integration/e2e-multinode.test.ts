@@ -1587,13 +1587,16 @@ async function tookItOutAndTheLeaseDropPutItBack(opts: {
   );
   expect(withoutBroken).toEqual([healthy.id]);
 
-  /* And nothing anywhere in the document routes to the port that answers nothing. */
+  /* And nothing anywhere in the document routes to the port that answers nothing.
+     Matched with the broken node's address: each node draws its ports on its own,
+     so the peer may serve a healthy application on the same port number. */
   const document = await routingOf(healthy);
   const addresses = document.routes.flatMap((route) =>
     route.upstreams.map((upstream) => upstream.address),
   );
+  const deadAddress = `${broken.bridgeAddress}:${String(opts.brokenPort)}`;
   expect(
-    addresses.filter((address) => address.endsWith(`:${String(opts.brokenPort)}`)),
+    addresses.filter((address) => address === deadAddress),
     "a dead port is still routed to",
   ).toEqual([]);
 
