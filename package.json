@@ -90,7 +90,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "confbox": "^0.2.4",
+    "confbox": "^0.3.1",
     "consola": "^3.4.2",
     "h3": "2.0.1-rc.32",
     "tar": "^7.5.22",

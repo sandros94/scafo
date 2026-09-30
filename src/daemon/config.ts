@@ -22,7 +22,7 @@ import { assertHost, formatHostPort, isHost, parseInterfaceAddress } from "../co
 import { assertLabels, parseLabelEntries } from "../core/utils/labels.ts";
 /* Import the driver's reserved names instead of duplicating that contract. */
 import { OPERATOR_RESERVED_ENV, TELEMETRY_ENV } from "../drivers/runtime/celld.ts";
-import { parseJsoncDocument } from "./_jsonc.ts";
+import { describeJsoncError, parseJsoncDocument } from "./_jsonc.ts";
 import { DEFAULT_JSON_BYTES } from "./_json.ts";
 import {
   DEFAULT_ACTIVE_TASKS,
@@ -1121,7 +1121,7 @@ async function readConfigFile(
     const document = parseJsoncDocument(text);
     if ("error" in document) {
       throw new ScafoError("invalid-input", "Config file is not valid JSONC", {
-        detail: `"${path}" has a syntax error at character ${String(document.error.offset)}`,
+        detail: `"${path}" has ${describeJsoncError(document.error)}`,
       });
     }
     const parsed = document.value;

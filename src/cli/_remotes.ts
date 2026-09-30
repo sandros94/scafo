@@ -1,7 +1,7 @@
 /* Local remote registry: endpoints and private-key references. The registry
    contains no key material. */
 
-import { parseJsoncDocument } from "../daemon/_jsonc.ts";
+import { describeJsoncError, parseJsoncDocument } from "../daemon/_jsonc.ts";
 import { rm } from "node:fs/promises";
 import { ScafoError } from "../core/error.ts";
 import {
@@ -69,7 +69,7 @@ export async function readRemotes(home: string): Promise<RemotesFile> {
 
   const document = parseJsoncDocument(text);
   if ("error" in document) {
-    throw unusable(home, `it has a syntax error at character ${String(document.error.offset)}`);
+    throw unusable(home, `it has ${describeJsoncError(document.error)}`);
   }
   const parsed = document.value;
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {

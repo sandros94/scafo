@@ -224,6 +224,43 @@ describe("reading the config file", () => {
     expect(error.detail).toContain(CONFIG_PATH);
   });
 
+  it("names where a malformed file breaks, counted in the file as written", async () => {
+    const jsonc = `{
+  // the store
+  "bucket": { "endpoint": "http://store.test:9000", },
+  /* no comma follows */ "platformDomains": ["apps.test"]
+  "node": {}
+}`;
+
+    const error = await rejectsWith(
+      () =>
+        loadDaemonConfig({
+          configPath: CONFIG_PATH,
+          readFile: fileAt(CONFIG_PATH, jsonc),
+          env: REQUIRED_ENV,
+        }),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("line 5, column 3");
+  });
+
+  it("never quotes a malformed file, which holds bucket credentials", async () => {
+    const error = await rejectsWith(
+      () =>
+        loadDaemonConfig({
+          configPath: CONFIG_PATH,
+          readFile: fileAt(CONFIG_PATH, '{ "bucket": { "secretKey": hunter2 } }'),
+          env: REQUIRED_ENV,
+        }),
+      "invalid-input",
+    );
+
+    expect(error.detail).toContain("syntax error");
+    expect(`${error.message} ${String(error.detail)}`).not.toContain("hunter2");
+    expect(error.cause).toBeUndefined();
+  });
+
   it("refuses a file that does not hold an object of settings", async () => {
     const error = await rejectsWith(
       () =>
