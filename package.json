@@ -103,7 +103,7 @@
     "@kubernetes/client-node": "^2.0.0",
     "@testcontainers/k3s": "12.2.0",
     "@types/node": "^24.19.0",
-    "@vitest/coverage-v8": "^4.1.11",
+    "@vitest/coverage-v8": "^5.0.2",
     "automd": "^0.4.3",
     "citty": "0.2.2",
     "esbuild": "^0.28.2",
@@ -114,7 +114,7 @@
     "simple-git-hooks": "^2.14.0",
     "testcontainers": "^12.2.0",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.2"
   },
   "simple-git-hooks": {
     "pre-commit": "pnpm build --stub && pnpm lint && pnpm typecheck"
