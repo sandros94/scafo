@@ -13,7 +13,7 @@ export interface VersionSkew {
 }
 
 export interface VersionSkewQuery {
-  /** The application, as it is keyed in a node's `serving`. */
+  /** The application, as it is keyed in a node's `serving` and `failing`. */
   application: string;
   /** The Celld this node booted with. */
   celld: string;
@@ -25,7 +25,7 @@ export interface VersionSkewQuery {
 }
 
 /**
- * Every other node still answering that serves `application` on a Celld that
+ * Every other node still answering that holds `application` on a Celld that
  * may not share a fleet with `celld`, in node order. Empty means this node may
  * serve the application.
  *
@@ -51,6 +51,12 @@ export interface VersionSkewQuery {
  * — reading it as "probably the same" is the one guess with a corrupt bucket on
  * the other side of it.
  *
+ * A FAILING PROCESS HOLDS THE APPLICATION TOO. A crash-looping process is
+ * published under `failing` rather than `serving`, yet every run of it takes a
+ * Celld lease in the fleet, so a node reporting either one counts. A process
+ * still `starting` is published in neither and is not seen here: that is the
+ * blind spot this check keeps.
+ *
  * A DRAINING NODE STILL COUNTS while it is answering: it is on its way out, and
  * until it is gone its process still holds a lease in the fleet. A node outside
  * the liveness window does not — nothing it says is current, and an installation
@@ -63,7 +69,10 @@ export function findVersionSkew(nodes: NodeRecord[], opts: VersionSkewQuery): Ve
 
   for (const record of nodes) {
     if (record.id === opts.selfId) continue;
-    if (record.serving?.[opts.application] === undefined) continue;
+    const holds =
+      record.serving?.[opts.application] !== undefined ||
+      record.failing?.[opts.application] !== undefined;
+    if (!holds) continue;
     if (!isNodeAnswering(record, opts.now, window)) continue;
 
     const celld = record.versions?.celld;

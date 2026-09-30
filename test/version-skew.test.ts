@@ -1,6 +1,6 @@
 /*
  * The gate on an application's Celld fleet: which other nodes are serving it
- * right now, and on which binary.
+ * or failing to right now, and on which binary.
  */
 
 import { describe, expect, it } from "vitest";
@@ -10,7 +10,7 @@ import {
   ROLLING_CELLD_RELEASES,
 } from "../src/core/registry/_celld-contract.ts";
 import { NODE_LIVENESS_WINDOW_MS } from "../src/core/registry/nodes.ts";
-import type { NodeRecord, NodeServing } from "../src/core/types/registry.ts";
+import type { NodeFailing, NodeRecord, NodeServing } from "../src/core/types/registry.ts";
 
 const NOW = new Date("2026-01-01T00:00:00.000Z");
 const SELF = "node-a";
@@ -86,6 +86,23 @@ describe("what counts as another version on the same application", () => {
     expect(skewFor(nodes).map((entry) => entry.nodeId)).toEqual(["node-b", "node-c", "node-d"]);
   });
 
+  it("names a live node whose process for it is failing on a different Celld", () => {
+    /* A crash-looping process is published under `failing`, not `serving`,
+       and every run of it still takes a lease in the fleet. */
+    expect(skewFor([node("node-b", { celld: "0.4.1", failing: fails(APPLICATION) })])).toEqual([
+      { nodeId: "node-b", celld: "0.4.1" },
+    ]);
+  });
+
+  it("says nothing about a failing process on the same Celld or the other half of a pair", () => {
+    expect(skewFor([node("node-b", { celld: CELLD, failing: fails(APPLICATION) })])).toEqual([]);
+    expect(skewFor([node("node-b", { celld: "0.5.1", failing: fails(APPLICATION) })])).toEqual([]);
+  });
+
+  it("ignores a node failing some other application on another version", () => {
+    expect(skewFor([node("node-b", { celld: "0.4.1", failing: fails("blog") })])).toEqual([]);
+  });
+
   it("tells one application from another whose name merely starts with it", () => {
     /* Serving is keyed by the exact name, so a sibling sharing a prefix holds
        its own fleet and never gates this one. */
@@ -149,6 +166,28 @@ describe("releases upstream declared may roll", () => {
     expect(celldReleasesMayShareFleet("0.5.0", "0.5.2")).toBe(false);
   });
 
+  it("lets 0.6.0 share a fleet with itself and with no earlier release", () => {
+    /* Celld 0.6.0's release notes: "Upgrading from v0.5.1 with fleet
+       durability requires stopping the whole fleet first." */
+    expect(celldReleasesMayShareFleet("0.6.0", "0.6.0")).toBe(true);
+    expect(celldReleasesMayShareFleet("0.5.1", "0.6.0")).toBe(false);
+    expect(celldReleasesMayShareFleet("0.5.0", "0.6.0")).toBe(false);
+  });
+
+  it("names a node on 0.5.1 or 0.5.0 to a node starting 0.6.0, and the reverse", () => {
+    for (const older of ["0.5.0", "0.5.1"]) {
+      expect(
+        skewFor([node("node-b", { celld: older, serving: serves(APPLICATION) })], "0.6.0"),
+      ).toEqual([{ nodeId: "node-b", celld: older }]);
+      expect(
+        skewFor([node("node-b", { celld: "0.6.0", serving: serves(APPLICATION) })], older),
+      ).toEqual([{ nodeId: "node-b", celld: "0.6.0" }]);
+    }
+    expect(
+      skewFor([node("node-b", { celld: "0.6.0", serving: serves(APPLICATION) })], "0.6.0"),
+    ).toEqual([]);
+  });
+
   it("names every node and the pairs this build allows in the refusal", () => {
     const error = versionSkewError(
       [
@@ -161,7 +200,7 @@ describe("releases upstream declared may roll", () => {
     expect(error.code).toBe("version-skew");
     expect(error.detail).toContain("node-b (celld 0.4.1)");
     expect(error.detail).toContain("node-c (celld unreported)");
-    expect(error.detail).toContain("rolling pairs this build allows: 0.5.0↔0.5.1");
+    expect(error.detail).toContain("rolling pairs this build allows: 0.5.0↔0.5.1)");
     expect(error.detail).toContain("stop every node of this installation");
   });
 });
@@ -172,9 +211,19 @@ function serves(application: string): NodeServing {
   return { [application]: { port: 42_000 } };
 }
 
+function fails(application: string): NodeFailing {
+  return { [application]: { since: NOW.toISOString(), restarts: 3 } };
+}
+
 function node(
   id: string,
-  opts: { celld?: string; serving?: NodeServing; seenMsAgo?: number; draining?: boolean },
+  opts: {
+    celld?: string;
+    serving?: NodeServing;
+    failing?: NodeFailing;
+    seenMsAgo?: number;
+    draining?: boolean;
+  },
 ): NodeRecord {
   return {
     v: 1,
@@ -185,5 +234,6 @@ function node(
     ...(opts.draining === true ? { drainingAt: NOW.toISOString() } : {}),
     ...(opts.celld === undefined ? {} : { versions: { scafo: "0.0.0", celld: opts.celld } }),
     ...(opts.serving === undefined ? {} : { serving: opts.serving }),
+    ...(opts.failing === undefined ? {} : { failing: opts.failing }),
   };
 }

@@ -133,7 +133,7 @@ describe("reading the fleet's own selector", () => {
 
 /*
  * The pin. Prune reads and deletes inside Celld's own keyspace, and Celld is
- * alpha, so nothing is planned — a dry run included — unless the installation
+ * beta, so nothing is planned — a dry run included — unless the installation
  * is answering on a release this build was verified against and every marker it
  * meets is one `_celld-contract.ts` names.
  */
@@ -178,6 +178,17 @@ describe("the Celld release the installation is answering on", () => {
     expect(error.detail).toContain("names no Celld version");
     expect(error.detail).toContain(NODE_ID);
   });
+
+  it.each(VERIFIED_CELLD_RELEASES)(
+    "plans for an installation answering on celld %s",
+    async (celld) => {
+      await answeringNode({ celld });
+
+      const made = await rawPlan({ keep: 1, olderThanMs: 0 });
+
+      expect(names(made.delete)).toEqual([`${SCRIPT}/${V3}`, `${SCRIPT}/${V2}`, `${SCRIPT}/${V1}`]);
+    },
+  );
 
   it("ignores the record of a machine that stopped answering on an old release", async () => {
     /* Node records are never reaped, so a machine retired on 0.4.1 would block

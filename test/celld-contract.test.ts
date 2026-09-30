@@ -48,6 +48,9 @@ describe("the permalinks the contract is read from", () => {
         "crates/logic/peer.rs",
         "crates/logic/drain.rs",
         "crates/logic/dead_node_reconciliation.rs",
+        /* What the version-skew gate rests on: upstream's word on which
+           releases may roll. */
+        "docs/README.md",
       ]),
     );
   });
@@ -75,6 +78,10 @@ describe("what the contract pins", () => {
     expect(VERIFIED_CELLD_RELEASES.length).toBeGreaterThan(0);
     for (const release of VERIFIED_CELLD_RELEASES) expect(release).toMatch(/^\d+\.\d+\.\d+$/);
     expect(verifiedReleaseList()).toBe(VERIFIED_CELLD_RELEASES.join(", "));
+  });
+
+  it("names every release prune was run end to end against", () => {
+    expect(verifiedReleaseList()).toBe("0.5.0, 0.5.1, 0.6.0");
   });
 
   it("reads an absent manifest schema version as one it knows", () => {
