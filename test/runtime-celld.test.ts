@@ -501,10 +501,10 @@ describe("asking a process whether it is serving", () => {
       /* Accepted, and left hanging: the shape of a process that is up and stuck. */
     });
 
-    const started = Date.now();
+    const started = performance.now();
     expect(await driver.ready({ application: "shop", host: "127.0.0.1", port })).toBe(false);
     /* Bounded well inside a reconcile interval, so a pass never waits on it. */
-    expect(Date.now() - started).toBeLessThan(4000);
+    expect(performance.now() - started).toBeLessThan(4000);
   }, 10_000);
 });
 
