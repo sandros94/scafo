@@ -123,14 +123,22 @@ export const ROLLING_CELLD_RELEASES: readonly (readonly string[])[] = [
      replacement to report healthy, then continue to the next node."
        https://github.com/denoland/celld/releases/tag/v0.5.1 */
   ["0.5.0", "0.5.1"],
-  /* 0.6.0 joins no set: upstream lets the step from 0.5.1 roll only under
-     `bucket` durability, and scafo sets none, so Celld's default, `fleet`,
+  /* 0.6.0 joins no set with 0.5.x: upstream lets the step from 0.5.1 roll only
+     under `bucket` durability, and scafo sets none, so Celld's default, `fleet`,
      applies.
        https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/main.rs#L4285 (v0.6.0)
      "Upgrading from v0.5.1 with fleet durability requires stopping the whole
      fleet first. A fleet with bucket durability can use a rolling update."
        https://github.com/denoland/celld/releases/tag/v0.6.0
        https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/docs/README.md#L876-L882 (v0.6.0) */
+  /* "Upgrading from v0.6.0 can use a rolling update."
+       https://github.com/denoland/celld/releases/tag/v0.6.1
+       https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/docs/README.md#L904-L916 (v0.6.1)
+     The release's caveat (a Python Worker, `CELLD_LTX_RETENTION_SECS`, or
+     `CELLD_MAX_ASSET_FILE_BYTES` above 25 MiB only once every node runs 0.6.1)
+     is the operator's to keep, with `scafo fleet freeze` while the roll is under
+     way; scafo does not enforce it. */
+  ["0.6.0", "0.6.1"],
 ];
 
 /**

@@ -188,6 +188,30 @@ describe("releases upstream declared may roll", () => {
     ).toEqual([]);
   });
 
+  it("lets 0.6.0 and 0.6.1 share a fleet, in either direction", () => {
+    /* Celld 0.6.1's release notes: "Upgrading from v0.6.0 can use a rolling
+       update." */
+    expect(celldReleasesMayShareFleet("0.6.0", "0.6.1")).toBe(true);
+    expect(
+      skewFor([node("node-b", { celld: "0.6.0", serving: serves(APPLICATION) })], "0.6.1"),
+    ).toEqual([]);
+    expect(
+      skewFor([node("node-b", { celld: "0.6.1", serving: serves(APPLICATION) })], "0.6.0"),
+    ).toEqual([]);
+  });
+
+  it("names a node on 0.5.x to a node starting 0.6.1, and the reverse", () => {
+    for (const older of ["0.5.0", "0.5.1"]) {
+      expect(celldReleasesMayShareFleet(older, "0.6.1")).toBe(false);
+      expect(
+        skewFor([node("node-b", { celld: older, serving: serves(APPLICATION) })], "0.6.1"),
+      ).toEqual([{ nodeId: "node-b", celld: older }]);
+      expect(
+        skewFor([node("node-b", { celld: "0.6.1", serving: serves(APPLICATION) })], older),
+      ).toEqual([{ nodeId: "node-b", celld: "0.6.1" }]);
+    }
+  });
+
   it("names every node and the pairs this build allows in the refusal", () => {
     const error = versionSkewError(
       [
@@ -200,7 +224,7 @@ describe("releases upstream declared may roll", () => {
     expect(error.code).toBe("version-skew");
     expect(error.detail).toContain("node-b (celld 0.4.1)");
     expect(error.detail).toContain("node-c (celld unreported)");
-    expect(error.detail).toContain("rolling pairs this build allows: 0.5.0↔0.5.1)");
+    expect(error.detail).toContain("rolling pairs this build allows: 0.5.0↔0.5.1, 0.6.0↔0.6.1)");
     expect(error.detail).toContain("stop every node of this installation");
   });
 });
