@@ -240,6 +240,21 @@ describe("the bucket formats prune was verified against", () => {
     expect(reasons(made)).toEqual({ [`${SCRIPT}/${V1}`]: "current" });
   });
 
+  it("plans over Python deployments, kept and deleted alike", async () => {
+    /* What celld 0.6.1 writes for a `.py` main with no assets. */
+    const python = { required_features: ["kv-v1", "wasm-v1", "python-workers-v1"] };
+    for (const version of [V1, V2, V3]) await publish(version, { assets: [], manifest: python });
+    await pointAt(V3);
+
+    const made = await plan({ keep: 2, olderThanMs: 0 });
+
+    expect(names(made.delete)).toEqual([`${SCRIPT}/${V1}`]);
+    expect(reasons(made)).toEqual({
+      [`${SCRIPT}/${V3}`]: "current",
+      [`${SCRIPT}/${V2}`]: "within-keep",
+    });
+  });
+
   it.each([
     ["a schema version nothing here reads", { schema_version: 3 }, "manifest schema version 3"],
     ["a schema version that is not a number", { schema_version: "2" }, "manifest schema version"],

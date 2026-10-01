@@ -14,6 +14,7 @@ const ROOT = "_scafo";
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L467-L500 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L467-L500 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L467-L500 (v0.6.0)
+ *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L473-L506 (v0.6.1)
  */
 export const ID_RE: RegExp = /^[a-f\d]{8,64}$/;
 
@@ -28,6 +29,7 @@ export const ID_RE: RegExp = /^[a-f\d]{8,64}$/;
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/logic/peer.rs#L18-L25 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/logic/peer.rs#L18-L25 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/logic/peer.rs#L18-L25 (v0.6.0)
+ *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/logic/peer.rs#L18-L25 (v0.6.1)
  */
 export const NODE_ID_RE: RegExp = /^[a-z\d_-]{1,128}$/;
 
@@ -392,6 +394,7 @@ export function fleetPrefix(application: string): string {
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L575 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L642 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L642 (v0.6.0)
+ *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L651 (v0.6.1)
  */
 export function deployPrefix(application: string): string {
   return `${fleetPrefix(application)}/deploy/`;
@@ -404,9 +407,11 @@ export function deployPrefix(application: string): string {
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L450-L460 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L450-L460 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L450-L460 (v0.6.0)
+ *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L456-L466 (v0.6.1)
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L842-L848 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L909-L915 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L909-L915 (v0.6.0)
+ *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L922-L928 (v0.6.1)
  */
 export function deployPointerKey(application: string): string {
   return `${deployPrefix(application)}current.json`;
@@ -420,9 +425,11 @@ export function deployPointerKey(application: string): string {
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L433-L448 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L433-L448 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L433-L448 (v0.6.0)
+ *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L439-L454 (v0.6.1)
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L998-L1008 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L1065-L1075 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L1065-L1075 (v0.6.0)
+ *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L1078-L1088 (v0.6.1)
  *
  * Only `scafo deployment prune` deletes under this prefix, and only by reference —
  * a blob every deployment that stays has stopped naming, once it is older than
@@ -445,6 +452,7 @@ export function deployBlobsPrefix(application: string): string {
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/container.rs#L67-L73 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/container.rs#L67-L73 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/container.rs#L67-L73 (v0.6.0)
+ *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/container.rs#L67-L73 (v0.6.1)
  */
 export function deployImagesPrefix(application: string): string {
   return `${deployPrefix(application)}images/`;
@@ -462,6 +470,7 @@ export function deployImagesPrefix(application: string): string {
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L119-L141 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L119-L141 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L119-L141 (v0.6.0)
+ *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L125-L147 (v0.6.1)
  */
 export function deployQueuesPrefix(application: string): string {
   return `${deployPrefix(application)}queues/`;
@@ -474,6 +483,7 @@ export function deployQueuesPrefix(application: string): string {
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/node_log.rs#L496-L498 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/node_log.rs#L523-L525 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/node_log.rs#L523-L525 (v0.6.0)
+ *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/node_log.rs#L523-L525 (v0.6.1)
  *
  * Only `scafo app lease` reads or deletes under this prefix, one key at a time
  * and only on an operator's word: a node's lease is the fence its peers judge it
