@@ -1,8 +1,8 @@
 /* The streamed tar+zstd artifact format shared by the CLI and deploy runner. */
 
-import { createWriteStream } from "node:fs";
+import { createWriteStream, type Stats } from "node:fs";
 import { stat } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { isAbsolute, posix } from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createZstdCompress, createZstdDecompress } from "node:zlib";
@@ -21,6 +21,16 @@ const GZIP_MAGIC: number[] = [0x1f, 0x8b];
 interface TarEntry {
   path: string;
   linkpath?: string;
+  type?: string;
+}
+
+/** What tar hands a `warn` listener: the error itself, or a record beside a message. */
+interface TarWarning {
+  code?: string;
+  syscall?: string;
+  name?: string;
+  entry?: TarEntry;
+  header?: TarEntry;
 }
 
 interface TarHeader {
@@ -43,7 +53,12 @@ interface TarPack extends NodeJS.ReadableStream {
 
 interface TarModule {
   create(
-    opts: { cwd: string; portable: boolean; gzip: false },
+    opts: {
+      cwd: string;
+      portable: boolean;
+      gzip: false;
+      filter(path: string, stat: Stats): boolean;
+    },
     entries: string[],
   ): NodeJS.ReadableStream;
   Pack: new (opts: {
@@ -57,6 +72,7 @@ interface TarModule {
   extract(opts: {
     cwd: string;
     filter(path: string, entry: TarEntry): boolean;
+    onwarn(code: string, message: string, data: TarWarning): void;
   }): NodeJS.WritableStream;
 }
 
@@ -101,7 +117,10 @@ export async function packDirectory(
   try {
     await pipeline(
       opts?.substitute === undefined
-        ? tar.create({ cwd: dir, portable: true, gzip: false }, ["."])
+        ? tar.create(
+            { cwd: dir, portable: true, gzip: false, filter: (_, stat) => packable(stat) },
+            ["."],
+          )
         : packSubstituted(tar, dir, opts.substitute),
       createZstdCompress(),
       createWriteStream(stage.path, { flags: "w", mode: 0o600 }),
@@ -132,7 +151,8 @@ function packSubstituted(tar: TarModule, dir: string, file: FileSubstitution): T
     cwd: dir,
     portable: true,
     gzip: false,
-    filter: (name, entry) => name !== path || entry instanceof tar.ReadEntry,
+    filter: (name, entry) =>
+      entry instanceof tar.ReadEntry || (name !== path && packable(entry as Stats)),
   });
 
   const entry = new tar.ReadEntry(
@@ -151,6 +171,15 @@ function packSubstituted(tar: TarModule, dir: string, file: FileSubstitution): T
   pack.add(".");
   pack.end();
   return pack;
+}
+
+/*
+ * Only what an artifact can carry is walked. tar's packer ends the entry of a
+ * socket, FIFO or device out of turn, which takes another entry's place in its
+ * queue: the archive comes out corrupt, or the pack never finishes.
+ */
+function packable(stat: Stats): boolean {
+  return stat.isFile() || stat.isDirectory() || stat.isSymbolicLink();
 }
 
 /** Streams a staged zstd or gzip tar into `dir`, enforcing expansion and entry caps. */
@@ -179,26 +208,48 @@ export async function unpackArchive(
   let decompressionFailed = false;
   decompressor.once("error", () => (decompressionFailed = true));
   let entries = 0;
-  let extractionFailure: ScafoError | undefined;
+  let failure: ScafoError | undefined;
+  /*
+   * The filter must never throw. It runs inside the parser's write(), and a pipe
+   * that sees write() throw answers with a destroy() tar's parser does not have:
+   * once the parser has pushed back, that is an uncaught TypeError on a later
+   * tick, and the process goes down. The first failure — a refused entry, or one
+   * tar could not write, which it reports only as a warning — is recorded
+   * instead; every entry after it is skipped, the archive drains through the
+   * byte cap, the unpacker finishes the writes already under way, and the
+   * failure is raised once the pipeline has settled.
+   */
   const extract = tar.extract({
     cwd: dir,
     filter(path, entry): boolean {
-      try {
-        assertArchivePath(path, entry.linkpath);
-        entries += 1;
-        if (entries > maxEntries) {
-          throw new ScafoError("resource-limit", "Artifact has too many entries", {
-            detail: `the archive exceeded the ${String(maxEntries)}-entry limit`,
-          });
-        }
-        return true;
-      } catch (error) {
-        if (isScafoError(error)) extractionFailure = error;
-        throw error;
-      }
+      if (failure !== undefined) return false;
+      entries += 1;
+      failure = refusalOf(path, {
+        linkpath: entry.linkpath,
+        type: entry.type,
+        entries,
+        maxEntries,
+      });
+      return failure === undefined;
+    },
+    onwarn(code, message, data): void {
+      failure ??= warningFailure(code, { message, data });
     },
   });
+  const closed = closedOf(extract);
+  /* Ignored before any filter sees it: a kind tar does not know, or a header too large to read. */
+  extract.on("ignoredEntry", (entry: TarEntry) => {
+    failure ??= uncarried(entry);
+  });
+  extract.on("error", (error: TarWarning & Error) => {
+    if (error.name !== "CwdError") return;
+    failure ??= new ScafoError("internal", "Artifact could not be unpacked", {
+      detail: `the extraction directory ${JSON.stringify(dir)} is missing or not a directory: ${String(error.code)}`,
+      cause: error,
+    });
+  });
   let expanded = 0;
+  let head = new Uint8Array(0);
   const meter = new Transform({
     transform(chunk: Buffer, _encoding, callback): void {
       const after = expanded + chunk.byteLength;
@@ -209,6 +260,22 @@ export async function unpackArchive(
           }),
         );
         return;
+      }
+      /*
+       * tar decompresses a gzip or zstd stream it is handed by itself, past this
+       * meter, and aborts in a way that never closes the file it was writing. The
+       * first bytes decide it, and they pass through here before tar sees them.
+       */
+      if (head.byteLength < ZSTD_MAGIC.length) {
+        head = new Uint8Array([...head, ...chunk.subarray(0, ZSTD_MAGIC.length - head.byteLength)]);
+        if (startsWith(head, GZIP_MAGIC) || startsWith(head, ZSTD_MAGIC)) {
+          callback(
+            unreadable(
+              "the decompressed bytes are compressed again; send one tar, compressed once",
+            ),
+          );
+          return;
+        }
       }
       expanded = after;
       callback(null, chunk);
@@ -224,7 +291,13 @@ export async function unpackArchive(
       ...(signal === undefined ? [] : [{ signal }]),
     );
   } catch (error) {
-    if (extractionFailure !== undefined) throw extractionFailure;
+    /* A failed pipeline leaves tar's unpacker as it was, its file open. Ending
+       it closes that file, and the rejection waits for it. What failed first is
+       what is raised, not a write the ending cut short. */
+    const first = failure;
+    extract.end();
+    await closed;
+    if (first !== undefined) throw first;
     if (isScafoError(error)) throw error;
     throwIfAborted(signal);
     throw unreadable(
@@ -234,6 +307,24 @@ export async function unpackArchive(
       error,
     );
   }
+  if (failure !== undefined) throw failure;
+}
+
+/**
+ * Settles once the unpacker has closed every file it opened: tar emits `end`
+ * only after its input has ended and no write is pending. Not `close`, which a
+ * failed pipeline emits on a stream it cannot destroy. The one exception is a
+ * destination that is not a directory, which tar reports as a `CwdError` before
+ * it opens anything, and after which it never ends. Listening for `error` also
+ * keeps an error raised by ending it from going unhandled.
+ */
+function closedOf(extract: NodeJS.WritableStream): Promise<void> {
+  return new Promise((resolve) => {
+    extract.once("end", () => resolve());
+    extract.on("error", (error: Error) => {
+      if (error.name === "CwdError") resolve();
+    });
+  });
 }
 
 async function readMagic(archive: StagedArtifact, signal?: AbortSignal): Promise<Uint8Array> {
@@ -272,15 +363,101 @@ function throwIfAborted(signal?: AbortSignal): void {
     : new ScafoError("invalid-input", "Artifact processing was cancelled");
 }
 
-function assertArchivePath(path: string, linkpath?: string): void {
-  for (const candidate of linkpath === undefined ? [path] : [path, linkpath]) {
-    const normalized = candidate.replaceAll("\\", "/");
-    if (isAbsolute(normalized) || normalized.split("/").includes("..")) {
-      throw unreadable(
-        `archive entry ${JSON.stringify(candidate)} escapes the extraction directory`,
-      );
-    }
+/** Why the entry at `path`, the `entries`-th of the archive, may not be extracted, if it may not. */
+function refusalOf(
+  path: string,
+  opts: {
+    linkpath: string | undefined;
+    type: string | undefined;
+    entries: number;
+    maxEntries: number;
+  },
+): ScafoError | undefined {
+  const { linkpath, type, entries, maxEntries } = opts;
+  if (escapes(path)) {
+    return unreadable(`archive entry ${JSON.stringify(path)} escapes the extraction directory`);
   }
+  if (linkpath !== undefined && linkEscapes(path, { linkpath, type })) {
+    return unreadable(
+      `archive entry ${JSON.stringify(path)} links to ${JSON.stringify(linkpath)}, outside the extraction directory`,
+    );
+  }
+  if (entries > maxEntries) {
+    return new ScafoError("resource-limit", "Artifact has too many entries", {
+      detail: `the archive exceeded the ${String(maxEntries)}-entry limit`,
+    });
+  }
+  return undefined;
+}
+
+/* Codes a write fails with when the archive itself is at odds with itself. */
+const CONFLICTS: ReadonlySet<string> = new Set(["EEXIST", "EISDIR", "ENOTDIR", "ENOTEMPTY"]);
+/* Entry kinds tar skips that hold no contents an artifact could miss. */
+const CONTENTLESS: ReadonlySet<string> = new Set(["FIFO", "CharacterDevice", "BlockDevice"]);
+
+/**
+ * Whether a warning tar raised while unpacking fails it, and whose fault it is:
+ * a write this node could not make is the node's (`internal`); anything about
+ * the archive's own entries is the archive's (`invalid-input`).
+ */
+function warningFailure(
+  code: string,
+  opts: { message: string; data: TarWarning },
+): ScafoError | undefined {
+  const { message, data } = opts;
+  const entry = data.entry ?? data.header;
+  const named = nameOf(entry);
+  const errno = data.code !== undefined && /^E[A-Z0-9]+$/.test(data.code) ? data.code : undefined;
+
+  if (code === "TAR_ENTRY_INFO") return undefined;
+  if (code === "TAR_ENTRY_UNSUPPORTED") {
+    return entry !== undefined && CONTENTLESS.has(entry.type ?? "") ? undefined : uncarried(entry);
+  }
+  if (code !== "TAR_ENTRY_ERROR") return unreadable(`${named} is malformed: ${message}`, data);
+  if (errno === undefined) return unreadable(`${named} could not be unpacked: ${message}`, data);
+  if (CONFLICTS.has(errno)) {
+    return unreadable(`${named} conflicts with an earlier entry: ${errno}`, data);
+  }
+  return new ScafoError("internal", "Artifact could not be unpacked", {
+    detail: `${named} could not be written on this node: ${errno}${data.syscall === undefined ? "" : ` (${data.syscall})`}`,
+    cause: data,
+  });
+}
+
+function nameOf(entry: TarEntry | undefined): string {
+  return entry?.path === undefined
+    ? "an archive entry"
+    : `archive entry ${JSON.stringify(entry.path)}`;
+}
+
+function uncarried(entry: TarEntry | undefined): ScafoError {
+  const named = nameOf(entry);
+  return unreadable(
+    `${named} is a ${entry?.type ?? "kind of"} entry, which an artifact cannot carry`,
+  );
+}
+
+function escapes(path: string): boolean {
+  const normalized = path.replaceAll("\\", "/");
+  return isAbsolute(normalized) || normalized.split("/").includes("..");
+}
+
+/*
+ * A symlink's target is read from the directory of the entry that carries it,
+ * so `node_modules/.bin/x -> ../pkg/bin/x` lands inside and is kept; only where
+ * it resolves to decides. A hard link's target is a path from the archive root,
+ * which tar refuses outright once it holds a `..`, so the entry-path rule is
+ * the one that applies to it. Writing an entry THROUGH a symlink is tar's own
+ * guard (`SymlinkError`), which is what keeps a chain of in-bounds links from
+ * adding up to an escape.
+ */
+function linkEscapes(path: string, opts: { linkpath: string; type: string | undefined }): boolean {
+  const { linkpath, type } = opts;
+  if (type !== "SymbolicLink") return escapes(linkpath);
+  const target = linkpath.replaceAll("\\", "/");
+  if (isAbsolute(target)) return true;
+  const landed = posix.normalize(posix.join(posix.dirname(path.replaceAll("\\", "/")), target));
+  return landed === ".." || landed.startsWith("../");
 }
 
 function unreadable(detail: string, cause?: unknown): ScafoError {
