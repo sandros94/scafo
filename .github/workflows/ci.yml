@@ -272,8 +272,10 @@ jobs:
           pnpm vitest run test/integration/store.test.ts --slowTestThreshold=1000
 
   test-docker-e2e:
-    # Three shards over the images `build-image` produced: only run them when
-    # something they read changed. See the `docker` filter for what that means.
+    # Every Docker suite, in one vitest command over the images `build-image`
+    # produced: they share one build of `dist/` (the global setup) and one load
+    # of both images, and run side by side. Only run when something they read
+    # changed; see the `docker` filter for what that means.
     needs: [test-pure, build-image]
     # success() is spelled out because a custom if replaces the implicit one a
     # "needs" would otherwise carry — a failed build must not reach the suites.
@@ -283,33 +285,12 @@ jobs:
       contents: read
     timeout-minutes: 30
 
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Every shard runs daemons out of the `probe` image; only this one
-          # also exercises the product image, so only it loads that archive.
-          # The container suite rides here for the same image, and mounts the
-          # runner's own engine socket into it.
-          - shard: product-image
-            node-image: scafo-e2e-image
-            files: >-
-              test/integration/e2e.test.ts test/integration/e2e-image.test.ts test/integration/e2e-containers.test.ts
-          - shard: traefik-tls
-            node-image: ""
-            files: >-
-              test/integration/e2e-traefik.test.ts test/integration/e2e-tls.test.ts
-          - shard: multinode
-            node-image: ""
-            files: test/integration/e2e-multinode.test.ts
-
-    name: test-docker-e2e (${{ matrix.shard }})
-
     env:
       SCAFO_E2E: "1"
-      # Empty for the shards that never start the product image, which is what
-      # tells the suite to build the Dockerfile itself, as a local run does.
-      SCAFO_E2E_IMAGE: ${{ matrix.node-image }}
+      # The product image, which the image and container suites start; every
+      # other suite runs its daemons out of the `probe` image. The container
+      # suite also mounts the runner's own engine socket into it.
+      SCAFO_E2E_IMAGE: scafo-e2e-image
 
     steps:
       - name: Checkout code
@@ -334,7 +315,6 @@ jobs:
           path: ${{ runner.temp }}/images
 
       - name: Download the node image
-        if: matrix.node-image != ''
         uses: actions/download-artifact@v4
         with:
           name: image-linux-amd64
@@ -343,7 +323,6 @@ jobs:
       - name: Load the images into the daemon
         env:
           IMAGES: ${{ runner.temp }}/images
-          NODE_IMAGE: ${{ matrix.node-image }}
         run: |
           set -euo pipefail
           # What arrives is an OCI layout, which `docker load` reads only with
@@ -358,13 +337,11 @@ jobs:
             rm "$IMAGES/load.tar"
           }
           load scafo-probe.tar scafo-probe
-          if [ -n "$NODE_IMAGE" ]; then
-            load scafo-linux-amd64.tar "$NODE_IMAGE"
-          fi
+          load scafo-linux-amd64.tar "$SCAFO_E2E_IMAGE"
 
       - name: Test Docker end to end
         run: >-
-          pnpm vitest run --config vitest.no-store.config.ts --slowTestThreshold=1000 ${{ matrix.files }}
+          pnpm vitest run --config vitest.no-store.config.ts --slowTestThreshold=1000 test/integration/e2e.test.ts test/integration/e2e-image.test.ts test/integration/e2e-containers.test.ts test/integration/e2e-traefik.test.ts test/integration/e2e-tls.test.ts test/integration/e2e-multinode.test.ts
 
   test-k3s-e2e:
     # The most expensive job in the workflow: a K3s cluster around the runtime

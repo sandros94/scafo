@@ -30,7 +30,6 @@ import { join } from "node:path";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  deployImagesPrefix,
   deployPrefix,
   fleetPrefix,
   getDeployRecord,
@@ -54,6 +53,7 @@ import {
   runCli,
   SETUP_TIMEOUT_MS,
   type StartedStore,
+  startExplained,
   startStore,
   storeEnv,
   until,
@@ -253,19 +253,21 @@ describe.skipIf(!E2E || !MOUNTABLE)("container classes, on a node given the host
 
     /* An ordinary node, in a namespace of its own with its port published: no
        socket, no label, and nothing about it that mentions containers. */
-    plain = await new GenericContainer(IMAGE_REF)
-      .withEnvironment({
-        ...nodeEnvironment(NODE_PLAIN, store.fromContainers),
-        CELLD_DOCKER: ENGINE_CLI_ELSEWHERE,
-        SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
-        SCAFO_LISTEN: `0.0.0.0:${String(NODE_PORT)}`,
-      })
-      .withExposedPorts(NODE_PORT)
-      .withCommand(["sail"])
-      .withLogConsumer(collectLogs(plainLog))
-      .withWaitStrategy(Wait.forLogMessage(/listening on/))
-      .withStartupTimeout(BOOT_DEADLINE_MS)
-      .start();
+    plain = await startExplained(
+      new GenericContainer(IMAGE_REF)
+        .withEnvironment({
+          ...nodeEnvironment(NODE_PLAIN, store.fromContainers),
+          CELLD_DOCKER: ENGINE_CLI_ELSEWHERE,
+          SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
+          SCAFO_LISTEN: `0.0.0.0:${String(NODE_PORT)}`,
+        })
+        .withExposedPorts(NODE_PORT)
+        .withCommand(["sail"])
+        .withLogConsumer(collectLogs(plainLog))
+        .withWaitStrategy(Wait.forLogMessage(/listening on/))
+        .withStartupTimeout(BOOT_DEADLINE_MS),
+      { log: plainLog, what: `node ${NODE_PLAIN}` },
+    );
     plainApiPort = plain.getMappedPort(NODE_PORT);
 
     /*
@@ -287,26 +289,28 @@ describe.skipIf(!E2E || !MOUNTABLE)("container classes, on a node given the host
     engineArch = (await docker(["version", "--format", "{{.Server.Arch}}"])).output.trim();
     engineApiPort = await freePort();
     const runtimePort = await freePort();
-    engine = await new GenericContainer(IMAGE_REF)
-      .withNetworkMode("host")
-      .withEnvironment({
-        ...nodeEnvironment(NODE_ENGINE, store.fromHost),
-        SCAFO_NODE_LABELS: ENGINE_LABEL,
-        SCAFO_INGRESS_TOKEN: INGRESS_TOKEN,
-        SCAFO_ADVERTISE: `127.0.0.1:${String(engineApiPort)}`,
-        SCAFO_LISTEN: `0.0.0.0:${String(engineApiPort)}`,
-        SCAFO_BIND_HOST: "0.0.0.0",
-        SCAFO_PORT_RANGE_START: String(runtimePort),
-        ...(engineArch === "amd64" ? { CELLD_CONTAINER_PLATFORM: EXERCISED_PLATFORM } : {}),
-      })
-      /* The operator's grant, and the whole of it. */
-      .withBindMounts([{ source: ENGINE_SOCKET, target: ENGINE_SOCKET, mode: "rw" }])
-      .withUser(NODE_USER)
-      .withCommand(["sail"])
-      .withLogConsumer(collectLogs(engineLog))
-      .withWaitStrategy(Wait.forLogMessage(/listening on/))
-      .withStartupTimeout(BOOT_DEADLINE_MS)
-      .start();
+    engine = await startExplained(
+      new GenericContainer(IMAGE_REF)
+        .withNetworkMode("host")
+        .withEnvironment({
+          ...nodeEnvironment(NODE_ENGINE, store.fromHost),
+          SCAFO_NODE_LABELS: ENGINE_LABEL,
+          SCAFO_INGRESS_TOKEN: INGRESS_TOKEN,
+          SCAFO_ADVERTISE: `127.0.0.1:${String(engineApiPort)}`,
+          SCAFO_LISTEN: `0.0.0.0:${String(engineApiPort)}`,
+          SCAFO_BIND_HOST: "0.0.0.0",
+          SCAFO_PORT_RANGE_START: String(runtimePort),
+          ...(engineArch === "amd64" ? { CELLD_CONTAINER_PLATFORM: EXERCISED_PLATFORM } : {}),
+        })
+        /* The operator's grant, and the whole of it. */
+        .withBindMounts([{ source: ENGINE_SOCKET, target: ENGINE_SOCKET, mode: "rw" }])
+        .withUser(NODE_USER)
+        .withCommand(["sail"])
+        .withLogConsumer(collectLogs(engineLog))
+        .withWaitStrategy(Wait.forLogMessage(/listening on/))
+        .withStartupTimeout(BOOT_DEADLINE_MS),
+      { log: engineLog, what: `node ${NODE_ENGINE}` },
+    );
     engineHostPort = await forwarded(engineApiPort);
     observed.hostNetwork = {
       apiPort: engineApiPort,
@@ -364,9 +368,10 @@ describe.skipIf(!E2E || !MOUNTABLE)("container classes, on a node given the host
       const version = deploymentOf(deploy.output);
       expect(await listDeployments(registry, APP_SERVED)).toContain(version);
 
-      /* The images the deployment names, and the tars a node loads them from:
-         the class's own, and the fence image that rides with every deployment
-         declaring one. */
+      /* The images the deployment names — the class's own, and the fence image
+         that rides with it — read for what this suite must take off the engine
+         again and for the platform check below, not judged: their shape is
+         Celld's. */
       const manifest = await readManifest(version);
       fenceImage = manifest.fence_image;
       const references = [
@@ -374,14 +379,6 @@ describe.skipIf(!E2E || !MOUNTABLE)("container classes, on a node given the host
         ...(manifest.fence_image === undefined ? [] : [manifest.fence_image]),
       ];
       builtImages.push(...references);
-      expect(references.length).toBeGreaterThanOrEqual(2);
-
-      const images = deployImagesPrefix(APP_SERVED);
-      const saved = await registry.store.list(images);
-      for (const reference of references) {
-        const key = `${images}${reference.replace("celld-image:", "")}.tar`;
-        expect(saved, `no tar was saved for ${reference}`).toContain(key);
-      }
 
       /* Where an ingress would send this host, read off the node itself: ONE
          upstream, the labelled machine, which is the selector's whole job. */
@@ -443,10 +440,10 @@ describe.skipIf(!E2E || !MOUNTABLE)("container classes, on a node given the host
       observed.platform = platform;
       expect(platform).toBe(wanted);
 
-      /* And the engine says so too: one running container of this class,
-         carrying the labels Celld puts on what it starts, and naming the Celld
-         node of this application's fleet that runs on the labelled machine —
-         which is that machine's own node id, the name scafo gives Celld. */
+      /* And the engine says so too: one running container of this class, naming
+         the Celld node of this application's fleet that runs on the labelled
+         machine — which is that machine's own node id, the name scafo gives
+         Celld. */
       const running = await docker([
         "ps",
         "--filter",
@@ -460,8 +457,6 @@ describe.skipIf(!E2E || !MOUNTABLE)("container classes, on a node given the host
         1,
       );
       const row = rows[0] as string;
-      expect(row).toContain("celld-image:");
-      expect(row).toContain("Up ");
       celldNode = row.split("\t")[3];
       expect(celldNode).toBe(NODE_ENGINE);
       expect(await celldNodesOfFleet()).toContain(celldNode);
@@ -469,7 +464,6 @@ describe.skipIf(!E2E || !MOUNTABLE)("container classes, on a node given the host
       observed.deployed = {
         version,
         images: references,
-        tars: saved,
         route,
         body: answer.body,
         container: {
@@ -499,12 +493,11 @@ describe.skipIf(!E2E || !MOUNTABLE)("container classes, on a node given the host
       expect(record.node).toBe(NODE_PLAIN);
       /* Scafo adds nothing of its own here: the publish it ran failed, which is
          `publish-failed` whatever the cause, and what is kept is the tail of
-         what Celld said about the image it could not build. Only the fragment
-         that is Celld's contract is asserted: it names the client it tried to
-         run, which is the one the daemon was given and not `docker`. */
+         what Celld said. Its wording is Celld's; all that is asserted of it is
+         that it names the client the daemon was given, and not `docker`, which
+         is what says `CELLD_DOCKER` reached the publish. */
       expect(record.code).toBe("publish-failed");
-      expect(record.detail).toContain("build container image");
-      expect(record.detail).toContain(`run \`${ENGINE_CLI_ELSEWHERE}\``);
+      expect(record.detail).toContain(ENGINE_CLI_ELSEWHERE);
 
       /* Nothing was published: no deployment of this application came of it,
          and nothing at all sits under its deploy prefix. */

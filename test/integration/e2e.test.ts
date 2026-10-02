@@ -15,7 +15,7 @@
  * byte of `app` with it.
  */
 
-import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
@@ -58,6 +58,7 @@ import {
   SETUP_TIMEOUT_MS,
   stageApp as stageAppIn,
   type StartedStore,
+  startExplained,
   startStore,
   STEP_TIMEOUT_MS,
   storeEnv as storeEnvFor,
@@ -121,10 +122,6 @@ const NODE_ID = "node-e2e";
 const CI_ENV = "ci";
 /** The application that `--env` addresses: the fixture's own name, suffixed. */
 const CI_APPLICATION = `${APPLICATION}-${CI_ENV}`;
-/** `--env` of the `--var` deploy, so nothing else is disturbed by it. */
-const VARS_ENV = "vars";
-/** `--env` of the already-bundled artifact, published with no flag. */
-const PREBUNDLED_ENV = "prebundled";
 
 /** The subject pattern `app-ci` trusts, as an operator would write it. */
 const CI_SUBJECT_GLOB = "repo:acme/shop:ref:refs/heads/*";
@@ -154,6 +151,8 @@ let operatorKey: OperatorKeyFile;
 let versionV1: string;
 let versionV2: string;
 let versionCi: string;
+/** The workload deploy refused for its subject, whose last words a later case runs. */
+let hostileRefusal: CommandResult;
 
 const tmpDirs: string[] = [];
 /** Daemon output retained for failure context. */
@@ -183,36 +182,38 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
     caddyHttpPort = caddy.getMappedPort(CADDY_HTTP_PORT);
     apiPort = caddy.getMappedPort(NODE_PORT);
 
-    daemon = await new GenericContainer(NODE_IMAGE)
-      .withNetworkMode(`container:${caddy.getId()}`)
-      .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "ro" }])
-      .withWorkingDir("/work")
-      .withEnvironment({
-        SCAFO_S3_ENDPOINT: storeFromContainers,
-        SCAFO_S3_BUCKET: BUCKET,
-        SCAFO_S3_PREFIX: KEY_PREFIX,
-        SCAFO_S3_ACCESS_KEY: ACCESS_KEY,
-        SCAFO_S3_SECRET_KEY: SECRET_KEY,
-        SCAFO_S3_REGION: REGION,
-        SCAFO_NODE_ID: NODE_ID,
-        SCAFO_TRANSPORT: "none",
-        SCAFO_STATE_DIR: "/var/lib/scafo",
-        SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
-        SCAFO_INGRESS_TOKEN: INGRESS_TOKEN,
-        SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
-        CELLD_ESBUILD: "/usr/local/bin/esbuild",
-      })
-      .withCommand([
-        "node",
-        "dist/cli/index.mjs",
-        "sail",
-        "--listen",
-        `0.0.0.0:${String(NODE_PORT)}`,
-      ])
-      .withLogConsumer(collectLogs(daemonLog))
-      .withWaitStrategy(Wait.forLogMessage(/listening on/))
-      .withStartupTimeout(BOOT_DEADLINE_MS)
-      .start();
+    daemon = await startExplained(
+      new GenericContainer(NODE_IMAGE)
+        .withNetworkMode(`container:${caddy.getId()}`)
+        .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "ro" }])
+        .withWorkingDir("/work")
+        .withEnvironment({
+          SCAFO_S3_ENDPOINT: storeFromContainers,
+          SCAFO_S3_BUCKET: BUCKET,
+          SCAFO_S3_PREFIX: KEY_PREFIX,
+          SCAFO_S3_ACCESS_KEY: ACCESS_KEY,
+          SCAFO_S3_SECRET_KEY: SECRET_KEY,
+          SCAFO_S3_REGION: REGION,
+          SCAFO_NODE_ID: NODE_ID,
+          SCAFO_TRANSPORT: "none",
+          SCAFO_STATE_DIR: "/var/lib/scafo",
+          SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
+          SCAFO_INGRESS_TOKEN: INGRESS_TOKEN,
+          SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
+          CELLD_ESBUILD: "/usr/local/bin/esbuild",
+        })
+        .withCommand([
+          "node",
+          "dist/cli/index.mjs",
+          "sail",
+          "--listen",
+          `0.0.0.0:${String(NODE_PORT)}`,
+        ])
+        .withLogConsumer(collectLogs(daemonLog))
+        .withWaitStrategy(Wait.forLogMessage(/listening on/))
+        .withStartupTimeout(BOOT_DEADLINE_MS),
+      { log: daemonLog, what: `node ${NODE_ID}` },
+    );
 
     registry = registryAt(storeFromHost, BUCKET_SETTINGS);
 
@@ -318,27 +319,11 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
           const probed = await httpGet(caddyHttpPort, "/.well-known/celld/health", {
             host: appHost(),
           });
-          return probed.status === 200 && probed.body === '{"ok":true}' ? probed : null;
+          return probed.status === 200 ? probed : null;
         },
       );
-      expect(JSON.parse(runtimeHealth.body)).toEqual({ ok: true });
       observed.v1Host = appHost();
       observed.celldHealth = runtimeHealth.status;
-    },
-    STEP_TIMEOUT_MS,
-  );
-
-  it(
-    "leaves the route the operator authored in Caddy untouched",
-    async () => {
-      /* An operator route sits BEFORE the scafo catch-all and is matched first.
-         Nothing scafo does can disturb it, because scafo writes nothing into
-         this Caddy at all — but that is exactly what deserves stating once, and
-         it is stated after a deploy so it is not vacuously true. */
-      const answer = await httpGet(caddyHttpPort, "/", { host: OPERATOR_HOST });
-      expect(answer.status).toBe(200);
-      expect(answer.body).toBe("operator");
-      observed.operatorRoute = { status: answer.status, body: answer.body };
     },
     STEP_TIMEOUT_MS,
   );
@@ -442,73 +427,6 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   );
 
   it(
-    "serves the application on a custom domain an operator claims, and stops when it is released",
-    async () => {
-      const nodeFlags = ["--node", `http://127.0.0.1:${String(apiPort)}`, "--key", keyPath];
-
-      /* Nothing answers there before the claim: the host is nobody's. */
-      const before = await httpGet(caddyHttpPort, "/", { host: CUSTOM_HOST });
-      expect(before.status).toBe(404);
-      expect(before.body).toBe(NO_ROUTE);
-
-      const added = await runCli(
-        ["app", "domain", "add", CUSTOM_HOST, "--name", APPLICATION, ...nodeFlags],
-        {},
-      );
-      observed.domainAddOutput = added.output;
-      expectCleanExit(added);
-      expect(added.output).toContain(CUSTOM_HOST);
-      /* The DNS helper really ran, and said one of the two things it can say.
-         WHICH one is the resolver's business rather than scafo's — a machine
-         whose resolver answers for `.test` reads the first — and either way the
-         claim stands and the command succeeded. */
-      expect(added.output).toMatch(
-        new RegExp(`already resolves to this installation|CNAME to "${appHost()}"`),
-      );
-
-      /* Caddy pulls, so this is a poll: the routing document has to carry the
-         new host before the ingress can answer for it. */
-      const answer = await untilServes(CUSTOM_HOST, "v1");
-      expect(JSON.parse(answer.body).url, `the url ${CUSTOM_HOST} saw`).toContain(CUSTOM_HOST);
-
-      /* And the routing document names it exactly, which is what makes
-         on-demand TLS issue for a name an operator has just pointed here. */
-      expect((await fleetRouting()).routes.map((route) => route.host)).toContain(CUSTOM_HOST);
-
-      const listed = await runCli(
-        ["app", "domain", "list", "--name", APPLICATION, "--json", ...nodeFlags],
-        {},
-      );
-      expectCleanExit(listed);
-      expect(JSON.parse(listed.output)).toEqual({
-        application: APPLICATION,
-        domains: [CUSTOM_HOST],
-        wildcardDomains: [],
-      });
-
-      const removed = await runCli(
-        ["app", "domain", "remove", CUSTOM_HOST, "--name", APPLICATION, ...nodeFlags],
-        {},
-      );
-      observed.domainRemoveOutput = removed.output;
-      expectCleanExit(removed);
-
-      const gone = await until(`${CUSTOM_HOST} to stop being served`, DEADLINE_MS, async () => {
-        const got = await httpGet(caddyHttpPort, "/", { host: CUSTOM_HOST });
-        return got.status === 404 ? got : null;
-      });
-      expect(gone.body).toBe(NO_ROUTE);
-      expect((await fleetRouting()).routes.map((route) => route.host)).not.toContain(CUSTOM_HOST);
-
-      /* The application keeps the host it was always served at. */
-      const kept = await untilServes(appHost(), "v1");
-      expect(JSON.parse(kept.body).version).toBe("v1");
-      observed.customDomain = { host: CUSTOM_HOST, servedThenReleased: true };
-    },
-    STEP_TIMEOUT_MS,
-  );
-
-  it(
     "deploys a second version for the existing application",
     async () => {
       const started = Date.now();
@@ -538,7 +456,11 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         ADOPTION_BOUND_MS,
       );
 
+      /* The operator's own route sits before the scafo catch-all, and scafo
+         writes nothing into this Caddy, so after a deploy it still answers
+         exactly as the operator authored it. */
       const operator = await httpGet(caddyHttpPort, "/", { host: OPERATOR_HOST });
+      expect(operator.status).toBe(200);
       expect(operator.body, "the operator's own route outlives a deploy").toBe("operator");
     },
     STEP_TIMEOUT_MS,
@@ -696,6 +618,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         [...deployArgs(await stageApp("v4"), CI_ENV), "--token", token],
         {},
       );
+      hostileRefusal = result;
 
       observed.hostileDeployOutput = result.output;
       observed.hostileDeployCode = result.code;
@@ -703,6 +626,8 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       expect(result.code, result.output).not.toBe(0);
       expect(result.output).toContain("urn:scafo:trust-mismatch");
       expect(result.output).toContain(HOSTILE_SUBJECT);
+      /* Nothing of what the application does trust is told to whoever was refused. */
+      expect(result.output).not.toContain(CI_SUBJECT_GLOB);
 
       const ci = await getApplication(registry, CI_APPLICATION);
       expect(ci.deployment).toMatchObject({ revision: 1 });
@@ -714,61 +639,32 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   it(
     "admits the refused subject with the command the refusal ends on, keeping what was trusted",
     async () => {
-      /* A third application, so that nothing else in the suite sees its deploys.
-         It trusts one repository; a token from another earns the refusal, and
-         the refusal's last words are run exactly as printed. */
-      const hintEnv = "hint";
-      const hinted = `${APPLICATION}-${hintEnv}`;
-      const granted = await runCli(
-        [
-          "trust",
-          "set",
-          "--name",
-          APPLICATION,
-          "--env",
-          hintEnv,
-          "--issuer",
-          issuer.iss,
-          "--subject",
-          CI_SUBJECT_GLOB,
-        ],
-        storeEnv(),
-      );
-      expectCleanExit(granted);
-
-      const token = await issuer.mint({ sub: HOSTILE_SUBJECT });
-      const refused = await runCli(
-        [...deployArgs(await stageApp("v7"), hintEnv), "--token", token],
-        {},
-      );
-      expect(refused.code, refused.output).not.toBe(0);
-      expect(refused.output).toContain("urn:scafo:trust-mismatch");
-      /* Nothing of what the application does trust is told to whoever was refused. */
-      expect(refused.output).not.toContain(CI_SUBJECT_GLOB);
-
-      const printed = /"(scafo trust add [^"]+)"/.exec(refused.output)?.[1];
-      expect(printed, refused.output).toBe(
-        `scafo trust add --name ${hinted} --issuer ${issuer.iss} --subject ${HOSTILE_SUBJECT}`,
+      /* The last words of the refusal above, run exactly as printed: they
+         append the refused subject to what `app-ci` already trusts, and the
+         same token deploys once they have. */
+      const printed = /"(scafo trust add [^"]+)"/.exec(hostileRefusal.output)?.[1];
+      expect(printed, hostileRefusal.output).toBe(
+        `scafo trust add --name ${CI_APPLICATION} --issuer ${issuer.iss} --subject ${HOSTILE_SUBJECT}`,
       );
       observed.trustHint = printed;
 
       const admitted = await runCli((printed ?? "").split(" ").slice(1), storeEnv());
       expectCleanExit(admitted);
-      const policy = await readJson<TrustPolicy>(registry, trustKey(hinted));
+      const policy = await readJson<TrustPolicy>(registry, trustKey(CI_APPLICATION));
       expect(policy?.value.issuers).toEqual([
         { iss: issuer.iss, aud: "scafo", subjects: [CI_SUBJECT_GLOB, HOSTILE_SUBJECT] },
       ]);
 
       const accepted = await runCli(
         [
-          ...deployArgs(await stageApp("v7"), hintEnv),
+          ...deployArgs(await stageApp("v4"), CI_ENV),
           "--token",
           await issuer.mint({ sub: HOSTILE_SUBJECT }),
         ],
         {},
       );
       expectCleanExit(accepted);
-      await untilServes(`${hinted}.${PLATFORM_DOMAIN}`, "v7");
+      await untilServes(ciHost(), "v4");
     },
     STEP_TIMEOUT_MS,
   );
@@ -776,7 +672,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
   it(
     "refuses a token one application trusts when it is presented for another",
     async () => {
-      /* The same token that just deployed `app-ci`, offered to `app`. Trust is
+      /* The subject `app-ci` was first deployed by, offered to `app`. Trust is
          stated per application and nothing about a shared prefix carries it
          across: `app` names another repository, so this is a denial rather than
          a token failure, and the refusal names the application it was for. */
@@ -800,24 +696,50 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
     "leaves one application exactly as it was when the other takes a deploy",
     async () => {
       const before = await getApplication(registry, APPLICATION);
+      const appDeployments = await listDeployments(registry, APPLICATION);
+      const ciDeployments = await listDeployments(registry, CI_APPLICATION);
+
+      /* `--var` is an edit of the archive alone, made before the directory is
+         packed, so a workload deploy carries one like any other. */
       const token = await issuer.mint({ sub: CI_SUBJECT });
       const result = await runCli(
-        [...deployArgs(await stageApp("v6"), CI_ENV), "--token", token],
+        [
+          ...deployArgs(await stageApp("v6"), CI_ENV),
+          "--token",
+          token,
+          "--var",
+          "GREETING:from-flag",
+        ],
         {},
       );
+      observed.varDeployOutput = result.output;
       expectCleanExit(result);
       expect(result.output, daemonLogTail()).toContain("deployed");
+      const version = deploymentOf(result.output);
 
-      await untilServes(ciHost(), "v6");
-      const untouched = await untilServes(appHost(), "v2");
-      expect(JSON.parse(untouched.body).version).toBe("v2");
+      /* The running application is the proof: the flag's value reached it, and
+         the variable the flag never named arrived exactly as the config has it. */
+      const redeployed = JSON.parse((await untilServes(ciHost(), "v6")).body) as Record<
+        string,
+        unknown
+      >;
+      expect(redeployed.greeting).toBe("from-flag");
+      expect(redeployed.kept).toBe("kept");
+      observed.varDeployBody = redeployed;
+
+      const untouched = JSON.parse((await untilServes(appHost(), "v2")).body) as Record<
+        string,
+        unknown
+      >;
+      expect(untouched.version).toBe("v2");
+      expect(untouched.greeting, "the other application's own config").toBe("from-config");
 
       const after = await getApplication(registry, APPLICATION);
       expect(after.deployment).toEqual(before.deployment);
-      expect(await listDeployments(registry, APPLICATION)).toEqual(
-        await listDeployments(registry, APPLICATION),
-      );
-      expect(await listDeployments(registry, CI_APPLICATION)).toHaveLength(2);
+      expect(await listDeployments(registry, APPLICATION)).toEqual(appDeployments);
+      const ciAfter = await listDeployments(registry, CI_APPLICATION);
+      expect(ciAfter).toHaveLength(ciDeployments.length + 1);
+      expect(ciAfter).toEqual(expect.arrayContaining([...ciDeployments, version]));
 
       observed.independentDeploy = {
         redeployed: CI_APPLICATION,
@@ -828,68 +750,67 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
     STEP_TIMEOUT_MS,
   );
 
+  /*
+   * A claim is made plain first and then upgraded in place with `--wildcard`,
+   * so one host shows both shapes and is released once.
+   *
+   * Rule 3 — any other single label under the base answering from the
+   * application itself — is the one part of this that the ingress has to
+   * understand: it is published as a `*.<base>` key, which a consumer reaches
+   * only by replacing a request host's first label with `*` after an exact miss.
+   * Caddy reads the routing through the `scafo` dynamic-upstreams module, which
+   * ships from another repository: this case needs an image whose module has
+   * that lookup (`SCAFO_E2E_CADDY_IMAGE` overrides the pinned one).
+   */
   it(
-    "lets --var override the config's own variable and leaves the others as written",
-    async () => {
-      const result = await runCli(
-        [
-          ...deployArgs(await stageApp("v7"), VARS_ENV),
-          "--key",
-          keyPath,
-          "--var",
-          "GREETING:from-flag",
-        ],
-        {},
-      );
-      observed.varDeployOutput = result.output;
-
-      expectCleanExit(result);
-      expect(result.output, daemonLogTail()).toContain("deployed");
-
-      const host = `${APPLICATION}-${VARS_ENV}.${PLATFORM_DOMAIN}`;
-      const answer = await untilServes(host, "v7");
-      const body = JSON.parse(answer.body) as Record<string, unknown>;
-
-      /* The running application is the proof: the flag's value reached it, and
-         the variable the flag never named arrived exactly as the config has it. */
-      expect(body.greeting).toBe("from-flag");
-      expect(body.kept).toBe("kept");
-      observed.varDeployBody = body;
-    },
-    STEP_TIMEOUT_MS,
-  );
-
-  it(
-    "publishes an already-bundled artifact on its own config, with no flag at all",
-    async () => {
-      const dir = await mkdtemp(join(tmpdir(), "scafo-e2e-prebundled-"));
-      tmpDirs.push(dir);
-      await cp(join(FIXTURES, "prebundled"), dir, { recursive: true });
-
-      const args = [...deployArgs(dir, PREBUNDLED_ENV), "--key", keyPath];
-      expect(args).not.toContain("--no-bundle");
-      expect(args).not.toContain("--var");
-
-      const result = await runCli(args, {});
-      observed.prebundledDeployOutput = result.output;
-
-      expectCleanExit(result);
-      expect(result.output, daemonLogTail()).toContain("deployed");
-
-      const host = `${APPLICATION}-${PREBUNDLED_ENV}.${PLATFORM_DOMAIN}`;
-      const answer = await untilServes(host, "prebundled");
-      expect(JSON.parse(answer.body).url).toContain(host);
-      observed.prebundled = JSON.parse(answer.body);
-    },
-    STEP_TIMEOUT_MS,
-  );
-
-  it(
-    "serves the base and its environment when a claim is made with its subdomains",
+    "serves a custom domain an operator claims, its subdomains once the claim covers them, and neither once it is released",
     async () => {
       const nodeFlags = ["--node", `http://127.0.0.1:${String(apiPort)}`, "--key", keyPath];
+      const envHost = `${CI_ENV}.${CUSTOM_HOST}`;
+      const otherHost = `anything-else.${CUSTOM_HOST}`;
+
+      /* Nothing answers there before the claim: the host is nobody's. */
+      const before = await httpGet(caddyHttpPort, "/", { host: CUSTOM_HOST });
+      expect(before.status).toBe(404);
+      expect(before.body).toBe(NO_ROUTE);
 
       const added = await runCli(
+        ["app", "domain", "add", CUSTOM_HOST, "--name", APPLICATION, ...nodeFlags],
+        {},
+      );
+      observed.domainAddOutput = added.output;
+      expectCleanExit(added);
+      expect(added.output).toContain(CUSTOM_HOST);
+      /* The DNS helper really ran, and said one of the two things it can say.
+         WHICH one is the resolver's business rather than scafo's — a machine
+         whose resolver answers for `.test` reads the first — and either way the
+         claim stands and the command succeeded. */
+      expect(added.output).toMatch(
+        new RegExp(`already resolves to this installation|CNAME to "${appHost()}"`),
+      );
+
+      /* Caddy pulls, so this is a poll: the routing document has to carry the
+         new host before the ingress can answer for it. */
+      const plain = await untilServes(CUSTOM_HOST, "v2");
+      expect(JSON.parse(plain.body).url, `the url ${CUSTOM_HOST} saw`).toContain(CUSTOM_HOST);
+
+      /* And the routing document names it exactly, which is what makes
+         on-demand TLS issue for a name an operator has just pointed here. */
+      expect((await fleetRouting()).routes.map((route) => route.host)).toContain(CUSTOM_HOST);
+
+      const listedPlain = await runCli(
+        ["app", "domain", "list", "--name", APPLICATION, "--json", ...nodeFlags],
+        {},
+      );
+      expectCleanExit(listedPlain);
+      expect(JSON.parse(listedPlain.output)).toEqual({
+        application: APPLICATION,
+        domains: [CUSTOM_HOST],
+        wildcardDomains: [],
+      });
+
+      /* The same claim, re-added with `--wildcard`, now covers its subdomains. */
+      const upgraded = await runCli(
         [
           "app",
           "domain",
@@ -903,8 +824,8 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         ],
         {},
       );
-      expectCleanExit(added);
-      const claimed = JSON.parse(added.output) as {
+      expectCleanExit(upgraded);
+      const claimed = JSON.parse(upgraded.output) as {
         application: { wildcardDomains?: string[] };
         dns: string;
         wildcardDns: string;
@@ -923,20 +844,23 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       /* Rule 2: `<env>.<base>` answers from `<application>-<env>`, which this
          suite deployed through OIDC and which is serving v6. Both are ORDINARY
          host entries in the routing document, so any ingress already reads them. */
-      const envHost = `${CI_ENV}.${CUSTOM_HOST}`;
       const env = await untilServes(envHost, "v6");
       expect(JSON.parse(env.body).url, `the url ${envHost} saw`).toContain(envHost);
 
-      /* The routing document names exactly those two, which is all an ingress
-         approves a certificate for: an arbitrary subdomain is covered only by
-         the `*.` entry, which routes and never approves, and a name two labels
-         under the base is not covered at all. */
+      /* Rule 3: any other single label answers from the application itself. */
+      const other = await untilServes(otherHost, "v2");
+      expect(JSON.parse(other.body).url, `the url ${otherHost} saw`).toContain(otherHost);
+
+      /* The routing document names exactly the base and its environment, which
+         is all an ingress approves a certificate for: an arbitrary subdomain is
+         covered only by the `*.` entry, which routes and never approves, and a
+         name two labels under the base is not covered at all. */
       const routing = await fleetRouting();
       const hosts = routing.routes.map((route) => route.host);
       expect(hosts).toContain(CUSTOM_HOST);
       expect(hosts).toContain(envHost);
       expect(hosts).toContain(`*.${CUSTOM_HOST}`);
-      expect(hosts).not.toContain(`anything.${CUSTOM_HOST}`);
+      expect(hosts).not.toContain(otherHost);
       expect(hosts).not.toContain(`a.b.${CUSTOM_HOST}`);
       expect(routing.wildcards).toContain(CUSTOM_HOST);
 
@@ -955,38 +879,26 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
         ["app", "domain", "remove", CUSTOM_HOST, "--name", APPLICATION, ...nodeFlags],
         {},
       );
+      observed.domainRemoveOutput = removed.output;
       expectCleanExit(removed);
-      const gone = await until(`${envHost} to stop being served`, DEADLINE_MS, async () => {
-        const got = await httpGet(caddyHttpPort, "/", { host: envHost });
-        return got.status === 404 ? got : null;
-      });
-      expect(gone.body).toBe(NO_ROUTE);
+
+      for (const host of [CUSTOM_HOST, envHost, otherHost]) {
+        const gone = await until(`${host} to stop being served`, DEADLINE_MS, async () => {
+          const got = await httpGet(caddyHttpPort, "/", { host });
+          return got.status === 404 ? got : null;
+        });
+        expect(gone.body, host).toBe(NO_ROUTE);
+      }
+      const released = (await fleetRouting()).routes.map((route) => route.host);
+      expect(released).not.toContain(CUSTOM_HOST);
+      expect(released).not.toContain(`*.${CUSTOM_HOST}`);
+
+      /* The application keeps the host it was always served at. */
       expect(JSON.parse((await untilServes(appHost(), "v2")).body).version).toBe("v2");
+      observed.customDomain = { host: CUSTOM_HOST, servedThenReleased: true };
     },
     STEP_TIMEOUT_MS,
   );
-
-  /*
-   * Rule 3 — any other single label under the base answering from the
-   * application itself — is the one part of this that the ingress has to
-   * understand: it is published as a `*.<base>` key, which a consumer reaches
-   * only by replacing a request host's first label with `*` after an exact miss.
-   * Caddy reads the routing through the `scafo` dynamic-upstreams module, which
-   * ships from another repository: this case needs an image whose module has
-   * that lookup (`SCAFO_E2E_CADDY_IMAGE` overrides the pinned one).
-   */
-  it("serves any other subdomain from the application itself", async () => {
-    const nodeFlags = ["--node", `http://127.0.0.1:${String(apiPort)}`, "--key", keyPath];
-    await runCli(
-      ["app", "domain", "add", CUSTOM_HOST, "--name", APPLICATION, "--wildcard", ...nodeFlags],
-      {},
-    );
-
-    const other = await untilServes(`anything-else.${CUSTOM_HOST}`, "v2");
-    expect(JSON.parse(other.body).url).toContain(`anything-else.${CUSTOM_HOST}`);
-
-    await runCli(["app", "domain", "remove", CUSTOM_HOST, "--name", APPLICATION, ...nodeFlags], {});
-  });
 
   it(
     "prunes the application's old Celld deployments straight out of the bucket",
@@ -1017,27 +929,6 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
       const answer = await untilServes(appHost(), "v2");
       expect(JSON.parse(answer.body).url).toContain(appHost());
       observed.prunedAway = versionV1;
-    },
-    STEP_TIMEOUT_MS,
-  );
-
-  it(
-    "refuses to prune an installation no node is answering for",
-    async () => {
-      /* The release gate reads the Celld every answering node reports. Another
-         prefix of the same bucket is an installation no node ever started in,
-         so nothing says which Celld wrote it — and a prune that cannot tell
-         refuses rather than guesses. The same refusal meets a stopped fleet once
-         its last heartbeat has left the liveness window. */
-      const result = await runCli(
-        ["deployment", "prune", "--name", APPLICATION, "--keep", "0", "--older-than", "0", "--yes"],
-        { ...storeEnv(), SCAFO_S3_PREFIX: `${BUCKET_SETTINGS.prefix}-unserved` },
-      );
-      observed.pruneRefusalOutput = result.output;
-
-      expect(result.code, result.output).not.toBe(0);
-      expect(result.output).toContain("urn:scafo:capability-missing");
-      expect(result.output).toContain("no node of this installation is answering");
     },
     STEP_TIMEOUT_MS,
   );

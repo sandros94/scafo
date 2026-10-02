@@ -321,6 +321,27 @@ export function collectLogs(into: string[]): (stream: Readable) => void {
   };
 }
 
+/**
+ * Starts a container whose output `log` collects, and when it never becomes
+ * ready says what it printed. A node that dies at boot otherwise fails its
+ * suite with only the wait strategy's verdict, and on CI nothing else of it is
+ * left to read.
+ */
+export async function startExplained(
+  container: GenericContainer,
+  opts: { log: string[]; what: string },
+): Promise<StartedTestContainer> {
+  try {
+    return await container.start();
+  } catch (error) {
+    const printed = opts.log.join("").slice(-6000) || "(nothing)";
+    throw new Error(
+      `${opts.what} did not start: ${describeFailure(error)}\n--- it printed ---\n${printed}`,
+      { cause: error },
+    );
+  }
+}
+
 export interface CommandResult {
   code: number;
   output: string;

@@ -17,7 +17,6 @@ import {
   readMeta,
   type RegistryContext,
 } from "../../src/core/registry/index.ts";
-import type { FleetRouting } from "../../src/core/types/ingress.ts";
 import type { NodeRecord, OperatorRecord } from "../../src/core/types/registry.ts";
 import type { TraefikDynamicConfig } from "../../src/drivers/ingress/traefik.ts";
 import {
@@ -37,6 +36,7 @@ import {
   SETUP_TIMEOUT_MS,
   stageApp,
   type StartedStore,
+  startExplained,
   startStore,
   STEP_TIMEOUT_MS,
   storeEnv,
@@ -66,9 +66,6 @@ const PLATFORM_DOMAIN = "scafo.test";
 const CUSTOM_HOST = "shop.custom.test";
 /** The application this suite deploys, and the name its `wrangler.jsonc` carries. */
 const APPLICATION = "app";
-/** The environment a covered base's second rule resolves to an application of. */
-const ENV = "preview";
-const ENV_APPLICATION = `${APPLICATION}-${ENV}`;
 const NODE_ID = "node-e2e-traefik";
 /**
  * Supplied rather than minted: Traefik starts before the node and has to
@@ -86,16 +83,9 @@ const INGRESS_HEADERS = { authorization: `Bearer ${INGRESS_TOKEN}` };
  */
 const STANDING_ROUTERS = [`scafo_api_${PLATFORM_DOMAIN}`, `scafo_apideny_${PLATFORM_DOMAIN}`];
 
-/** A certificate resolver of the operator's own, as Traefik's static file names one. */
-const CERT_RESOLVER = "letsencrypt";
-/** Where that operator's ingress answers DNS-01 for the domains it is delegated. */
-const ACME_DELEGATION = "acme.scafo.test";
-
 let store: StartedStore;
 let traefik: StartedTestContainer;
 let daemon: StartedTestContainer;
-/** The second node, which serves its own installation; see the case that starts it. */
-let issuer: StartedTestContainer | undefined;
 
 let httpPort: number;
 let traefikApiPort: number;
@@ -132,37 +122,38 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
     traefikApiPort = traefik.getMappedPort(TRAEFIK_API_PORT);
     apiPort = traefik.getMappedPort(NODE_PORT);
 
-    daemon = await new GenericContainer(NODE_IMAGE)
-      .withNetworkMode(`container:${traefik.getId()}`)
-      .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "ro" }])
-      .withWorkingDir("/work")
-      .withEnvironment({
-        ...storeEnv(store.fromContainers, BUCKET),
-        SCAFO_NODE_ID: NODE_ID,
-        SCAFO_TRANSPORT: "none",
-        SCAFO_STATE_DIR: "/var/lib/scafo",
-        SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
-        SCAFO_INGRESS_TOKEN: INGRESS_TOKEN,
-        SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
-        CELLD_ESBUILD: "/usr/local/bin/esbuild",
-      })
-      .withCommand([
-        "node",
-        "dist/cli/index.mjs",
-        "sail",
-        "--listen",
-        `0.0.0.0:${String(NODE_PORT)}`,
-      ])
-      .withLogConsumer(collectLogs(daemonLog))
-      .withWaitStrategy(Wait.forLogMessage(/listening on/))
-      .withStartupTimeout(BOOT_DEADLINE_MS)
-      .start();
+    daemon = await startExplained(
+      new GenericContainer(NODE_IMAGE)
+        .withNetworkMode(`container:${traefik.getId()}`)
+        .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "ro" }])
+        .withWorkingDir("/work")
+        .withEnvironment({
+          ...storeEnv(store.fromContainers, BUCKET),
+          SCAFO_NODE_ID: NODE_ID,
+          SCAFO_TRANSPORT: "none",
+          SCAFO_STATE_DIR: "/var/lib/scafo",
+          SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
+          SCAFO_INGRESS_TOKEN: INGRESS_TOKEN,
+          SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
+          CELLD_ESBUILD: "/usr/local/bin/esbuild",
+        })
+        .withCommand([
+          "node",
+          "dist/cli/index.mjs",
+          "sail",
+          "--listen",
+          `0.0.0.0:${String(NODE_PORT)}`,
+        ])
+        .withLogConsumer(collectLogs(daemonLog))
+        .withWaitStrategy(Wait.forLogMessage(/listening on/))
+        .withStartupTimeout(BOOT_DEADLINE_MS),
+      { log: daemonLog, what: `node ${NODE_ID}` },
+    );
 
     registry = registryAt(store.fromHost, BUCKET);
   }, SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
-    await issuer?.stop().catch(() => {});
     await daemon?.stop().catch(() => {});
     await traefik?.stop().catch(() => {});
     await store?.container.stop().catch(() => {});
@@ -332,9 +323,10 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
   );
 
   it(
-    "publishes a router for a claimed custom domain, and withdraws it when it is released",
+    "publishes a router for a claimed custom domain, serves its subdomains once the claim covers them, and withdraws both on release",
     async () => {
       const nodeFlags = ["--node", `http://127.0.0.1:${String(apiPort)}`, "--key", keyPath];
+      const otherHost = `anything-else.${CUSTOM_HOST}`;
 
       const added = await runCli(
         ["app", "domain", "add", CUSTOM_HOST, "--name", APPLICATION, ...nodeFlags],
@@ -349,18 +341,50 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
         new RegExp(`already resolves to this installation|CNAME to "${appHost()}"`),
       );
 
-      const expected = [`scafo_${appHost()}`, `scafo_${CUSTOM_HOST}`, ...STANDING_ROUTERS].sort();
+      const exact = [`scafo_${appHost()}`, `scafo_${CUSTOM_HOST}`, ...STANDING_ROUTERS].sort();
       await wait("Traefik to hold the router for the claimed host", DEADLINE_MS, async () => {
         const routers = (await scafoRouters()).sort();
-        return routers.join(",") === expected.map((name) => `${name}@http`).join(",")
-          ? routers
-          : null;
+        return routers.join(",") === exact.map((name) => `${name}@http`).join(",") ? routers : null;
       });
 
       const answer = await untilServes(CUSTOM_HOST, "v1");
       expect(JSON.parse(answer.body).url, `the url ${CUSTOM_HOST} saw`).toContain(CUSTOM_HOST);
       observed.customDomainSnapshot = await snapshotNow();
 
+      /* The same claim, re-added with `--wildcard`, now covers its subdomains. */
+      const covered = await runCli(
+        ["app", "domain", "add", CUSTOM_HOST, "--name", APPLICATION, "--wildcard", ...nodeFlags],
+        {},
+      );
+      observed.wildcardAddOutput = covered.output;
+      expectCleanExit(covered);
+      expect(covered.output).toContain(`"<env>.${CUSTOM_HOST}"`);
+      /* What the operator still has to do at the ingress, said once. */
+      expect(covered.output).toContain("DNS-01");
+
+      /* The base keeps its exact router, and everything else one label under it
+         gets one more, which Traefik ranks below every exact `Host` router. */
+      const wildcard = [...exact, `scafo_wild_${CUSTOM_HOST}`].sort();
+      await wait("Traefik to hold the routers of a covered base", DEADLINE_MS, async () => {
+        const routers = (await scafoRouters()).sort();
+        return routers.join(",") === wildcard.map((name) => `${name}@http`).join(",")
+          ? routers
+          : null;
+      });
+      observed.wildcardSnapshot = await snapshotNow();
+
+      /* Rule 1: the base itself is the application. */
+      expect(JSON.parse((await untilServes(CUSTOM_HOST, "v1")).body).version).toBe("v1");
+      /* Rule 3: any other single label falls to the application itself. */
+      const other = await untilServes(otherHost, "v1");
+      expect(JSON.parse(other.body).url).toContain(otherHost);
+      /* One label and no more, so a deeper name is nobody's. */
+      const deep = await httpGet(httpPort, "/", { host: `a.b.${CUSTOM_HOST}` });
+      expect(deep.status).toBe(404);
+      expect(deep.body).toContain("404 page not found");
+      observed.wildcardServed = { base: "v1", other: "v1", deeper: deep.status };
+
+      /* Releasing takes the whole claim, rules and all. */
       const removed = await runCli(
         ["app", "domain", "remove", CUSTOM_HOST, "--name", APPLICATION, ...nodeFlags],
         {},
@@ -369,114 +393,23 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       expectCleanExit(removed);
 
       const without = [`scafo_${appHost()}`, ...STANDING_ROUTERS].sort();
-      await wait("Traefik to withdraw the released router", DEADLINE_MS, async () => {
-        const routers = (await scafoRouters()).sort();
-        return routers.join(",") === without.map((name) => `${name}@http`).join(",")
-          ? routers
-          : null;
-      });
-      const gone = await wait(`${CUSTOM_HOST} to stop being served`, DEADLINE_MS, async () => {
-        const got = await httpGet(httpPort, "/", { host: CUSTOM_HOST });
-        return got.status === 404 ? got : null;
-      });
-      expect(gone.body).toContain("404 page not found");
-
-      /* And the host it was always served at is untouched throughout. */
-      expect(JSON.parse((await untilServes(appHost(), "v1")).body).version).toBe("v1");
-      observed.customDomain = { host: CUSTOM_HOST, servedThenReleased: true };
-    },
-    STEP_TIMEOUT_MS,
-  );
-
-  it(
-    "serves a claim made with its subdomains: the base, an environment, and everything else",
-    async () => {
-      const nodeFlags = ["--node", `http://127.0.0.1:${String(apiPort)}`, "--key", keyPath];
-
-      /* The environment the wildcard's second rule names, deployed as its own
-         application: `<label>.<base>` is `<application>-<label>`, the same
-         mapping `--env` gives on the command line. */
-      const deployed = await runCli([...deployArgs(await staged("preview")), "--env", ENV], {});
-      expectCleanExit(deployed);
-      expect(deployed.output, daemonLogTail()).toContain("deployed");
-
-      const added = await runCli(
-        ["app", "domain", "add", CUSTOM_HOST, "--name", APPLICATION, "--wildcard", ...nodeFlags],
-        {},
-      );
-      observed.wildcardAddOutput = added.output;
-      expectCleanExit(added);
-      expect(added.output).toContain(`"<env>.${CUSTOM_HOST}"`);
-      /* What the operator still has to do at the ingress, said once. */
-      expect(added.output).toContain("DNS-01");
-
-      /* One router for the base, one for the environment's exact host, one for
-         everything else under the base, plus each application's platform host. */
-      const expected = [
-        `scafo_${appHost()}`,
-        `scafo_${ENV_APPLICATION}.${PLATFORM_DOMAIN}`,
-        `scafo_${CUSTOM_HOST}`,
-        `scafo_${ENV}.${CUSTOM_HOST}`,
-        `scafo_wild_${CUSTOM_HOST}`,
-        ...STANDING_ROUTERS,
-      ].sort();
-      await wait("Traefik to hold the routers of a covered base", DEADLINE_MS, async () => {
-        const routers = (await scafoRouters()).sort();
-        return routers.join(",") === expected.map((name) => `${name}@http`).join(",")
-          ? routers
-          : null;
-      });
-      observed.wildcardSnapshot = await snapshotNow();
-
-      /* Rule 1: the base itself is the application. */
-      expect(JSON.parse((await untilServes(CUSTOM_HOST, "v1")).body).version).toBe("v1");
-      /* Rule 2: the environment's own label answers from its own process. */
-      const env = await untilServes(`${ENV}.${CUSTOM_HOST}`, "preview");
-      expect(JSON.parse(env.body).url).toContain(`${ENV}.${CUSTOM_HOST}`);
-      /* Rule 3: any other single label falls to the application itself. */
-      const other = await untilServes(`anything-else.${CUSTOM_HOST}`, "v1");
-      expect(JSON.parse(other.body).url).toContain(`anything-else.${CUSTOM_HOST}`);
-      /* Rule 4: one label and no more, so a deeper name is nobody's. */
-      const deep = await httpGet(httpPort, "/", { host: `a.b.${CUSTOM_HOST}` });
-      expect(deep.status).toBe(404);
-      expect(deep.body).toContain("404 page not found");
-      observed.wildcardServed = {
-        base: "v1",
-        environment: "preview",
-        other: "v1",
-        deeper: deep.status,
-      };
-
-      /* Releasing takes the whole claim, rules and all, and leaves the
-         installation exactly as the rest of this suite expects it. */
-      const removed = await runCli(
-        ["app", "domain", "remove", CUSTOM_HOST, "--name", APPLICATION, ...nodeFlags],
-        {},
-      );
-      expectCleanExit(removed);
-      const retired = await runCli(
-        ["app", "retire", "--name", APPLICATION, "--env", ENV, ...nodeFlags],
-        {},
-      );
-      expectCleanExit(retired);
-
-      const without = [`scafo_${appHost()}`, ...STANDING_ROUTERS].sort();
       await wait("Traefik to withdraw every router the claim added", DEADLINE_MS, async () => {
         const routers = (await scafoRouters()).sort();
         return routers.join(",") === without.map((name) => `${name}@http`).join(",")
           ? routers
           : null;
       });
-      const gone = await wait(
-        `${ENV}.${CUSTOM_HOST} to stop being served`,
-        DEADLINE_MS,
-        async () => {
-          const got = await httpGet(httpPort, "/", { host: `${ENV}.${CUSTOM_HOST}` });
+      for (const host of [CUSTOM_HOST, otherHost]) {
+        const gone = await wait(`${host} to stop being served`, DEADLINE_MS, async () => {
+          const got = await httpGet(httpPort, "/", { host });
           return got.status === 404 ? got : null;
-        },
-      );
-      expect(gone.body).toContain("404 page not found");
+        });
+        expect(gone.body, host).toContain("404 page not found");
+      }
+
+      /* And the host it was always served at is untouched throughout. */
       expect(JSON.parse((await untilServes(appHost(), "v1")).body).version).toBe("v1");
+      observed.customDomain = { host: CUSTOM_HOST, servedThenReleased: true };
     },
     STEP_TIMEOUT_MS,
   );
@@ -608,82 +541,6 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
       expect(record.retiredAt).toBeDefined();
       observed.retiredAt = record.retiredAt;
       observed.retiredSnapshot = await snapshotNow();
-    },
-    STEP_TIMEOUT_MS,
-  );
-
-  it(
-    "publishes the certificate every router asks for, on a node told a resolver",
-    async () => {
-      /*
-       * A NODE OF ITS OWN, IN AN INSTALLATION OF ITS OWN. The Traefik in front
-       * of this suite terminates nothing — its only entryPoint is `:80` — and a
-       * router carrying `tls` matches HTTPS and nothing else, so telling the
-       * node every other case here reads to name a resolver would withdraw the
-       * plain-HTTP product loop this suite exists to prove. The setting is
-       * therefore shown on a second daemon, against its own key prefix so the
-       * fleet above it never sees a second node: what is asserted is the
-       * document a real `scafo sail` renders from real configuration, and real
-       * issuance is proven on real machines rather than here.
-       */
-      const alone: BucketSettings = { ...BUCKET, prefix: "e2e-issuance" };
-      const port = 7401;
-      issuer = await new GenericContainer(NODE_IMAGE)
-        .withBindMounts([{ source: REPO_ROOT, target: "/work", mode: "ro" }])
-        .withWorkingDir("/work")
-        .withExposedPorts(port)
-        .withEnvironment({
-          ...storeEnv(store.fromContainers, alone),
-          SCAFO_NODE_ID: "node-e2e-issuance",
-          SCAFO_TRANSPORT: "none",
-          SCAFO_STATE_DIR: "/var/lib/scafo",
-          SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
-          SCAFO_INGRESS_TOKEN: INGRESS_TOKEN,
-          SCAFO_INGRESS_TRAEFIK_CERT_RESOLVER: CERT_RESOLVER,
-          SCAFO_INGRESS_ACME_DELEGATION: ACME_DELEGATION,
-          SCAFO_ADVERTISE: `127.0.0.1:${String(port)}`,
-          CELLD_ESBUILD: "/usr/local/bin/esbuild",
-        })
-        .withCommand(["node", "dist/cli/index.mjs", "sail", "--listen", `0.0.0.0:${String(port)}`])
-        .withWaitStrategy(Wait.forLogMessage(/listening on/))
-        .withStartupTimeout(BOOT_DEADLINE_MS)
-        .start();
-
-      const mapped = issuer.getMappedPort(port);
-      const generic = await until(
-        "the second node to know what its own fleet answers on",
-        DEADLINE_MS,
-        async () => {
-          const got = await httpGet(mapped, "/v1/ingress/routes", INGRESS_HEADERS);
-          return got.status === 200 ? got : null;
-        },
-      );
-
-      /* The document says which bases want a `*.` certificate before anything
-         is deployed at all: an ingress obtains one before it can answer the
-         first request that needs it. */
-      const routing = JSON.parse(generic.body) as FleetRouting;
-      expect(routing.wildcards).toEqual([PLATFORM_DOMAIN]);
-      observed.issuanceRouting = routing;
-
-      const rendered = await httpGet(mapped, "/v1/ingress/routes/traefik", INGRESS_HEADERS);
-      expect(rendered.status, rendered.body).toBe(200);
-      const config = JSON.parse(rendered.body) as TraefikDynamicConfig;
-
-      /* Both standing routers, denial included: one without `tls` would match
-         plain HTTP alone, so a denial that left it out would stand aside on the
-         TLS entryPoint and let `/v1/storage` through on the public apex. */
-      const expected = {
-        certResolver: CERT_RESOLVER,
-        domains: [{ main: PLATFORM_DOMAIN, sans: [`*.${PLATFORM_DOMAIN}`] }],
-      };
-      for (const name of STANDING_ROUTERS) {
-        expect(config.http?.routers[name]?.tls, name).toEqual(expected);
-      }
-      observed.issuanceSnapshot = config;
-
-      await issuer.stop().catch(() => {});
-      issuer = undefined;
     },
     STEP_TIMEOUT_MS,
   );

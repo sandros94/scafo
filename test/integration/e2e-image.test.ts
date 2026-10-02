@@ -12,6 +12,7 @@ import {
   readJson,
   type RegistryContext,
 } from "../../src/core/registry/index.ts";
+import type { FleetRouting } from "../../src/core/types/ingress.ts";
 import type { NodeRecord } from "../../src/core/types/registry.ts";
 import {
   BOOT_DEADLINE_MS,
@@ -20,7 +21,6 @@ import {
   type CommandResult,
   DEADLINE_MS,
   deploymentOf,
-  FIXTURES,
   httpGet,
   registryAt,
   REPO_ROOT,
@@ -29,6 +29,7 @@ import {
   SETUP_TIMEOUT_MS,
   stageApp,
   type StartedStore,
+  startExplained,
   startStore,
   STEP_TIMEOUT_MS,
   storeEnv,
@@ -56,15 +57,7 @@ async function pinnedDockerVersion(): Promise<string> {
   return pin;
 }
 
-/**
- * Caddy with both `scafo` modules compiled in; it reads this node rather than
- * being written to. Point the variable at a locally built tag to run against
- * modules that are not released yet.
- */
-const CADDY_IMAGE: string =
-  process.env.SCAFO_E2E_CADDY_IMAGE ?? "ghcr.io/sandros94/scafo-caddy:edge";
-
-/** Supplied, because Caddy starts before the node and polls it from the first second. */
+/** The bearer the routing document is read with, as an ingress would read it. */
 const INGRESS_TOKEN = "e2e-image-ingress-token";
 
 /**
@@ -89,8 +82,6 @@ const PREBUILT_IMAGE: string = process.env.SCAFO_E2E_IMAGE ?? "";
 /** What the container is started from, and what `docker inspect` is asked about. */
 const IMAGE_REF: string = PREBUILT_IMAGE === "" ? IMAGE_TAG : PREBUILT_IMAGE;
 
-const CADDY_HTTP_PORT = 80;
-/** Published on the Caddy container, because the node shares its namespace. */
 const NODE_PORT = 7400;
 
 /** The uid the image's `scafo` user is created with; nothing may run as root. */
@@ -117,10 +108,8 @@ const NODE_ID = "node-e2e-image";
 const STOP_GRACE_S = 50;
 
 let store: StartedStore;
-let caddy: StartedTestContainer;
 let node: StartedTestContainer;
 
-let caddyHttpPort: number;
 let apiPort: number;
 
 let registry: RegistryContext;
@@ -133,7 +122,7 @@ const nodeLog: string[] = [];
 /** Raw observations the report is written from; printed once at the end. */
 const observed: Record<string, unknown> = {};
 
-describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () => {
+describe.skipIf(!E2E)("the node image, run as it ships", () => {
   beforeAll(async () => {
     const started = Date.now();
     const image =
@@ -147,46 +136,34 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
 
     store = await startStore(BUCKET);
 
-    caddy = await new GenericContainer(CADDY_IMAGE)
-      .withCopyFilesToContainer([
-        { source: join(FIXTURES, "caddy.json"), target: "/etc/caddy/config.json" },
-      ])
-      .withEnvironment({ SCAFO_INGRESS_TOKEN: INGRESS_TOKEN })
-      .withCommand(["caddy", "run", "--config", "/etc/caddy/config.json"])
-      .withExposedPorts(CADDY_HTTP_PORT, NODE_PORT)
-      .withWaitStrategy(Wait.forLogMessage(/serving initial configuration/))
-      .withStartupTimeout(BOOT_DEADLINE_MS)
-      .start();
-
-    caddyHttpPort = caddy.getMappedPort(CADDY_HTTP_PORT);
-    apiPort = caddy.getMappedPort(NODE_PORT);
-
-    node = await image
-      .withNetworkMode(`container:${caddy.getId()}`)
-      .withEnvironment({
-        ...storeEnv(store.fromContainers, BUCKET),
-        SCAFO_NODE_ID: NODE_ID,
-        SCAFO_TRANSPORT: "none",
-        SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
-        SCAFO_INGRESS_TOKEN: INGRESS_TOKEN,
-        SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
-        /* In the environment rather than on the command line, because the
+    node = await startExplained(
+      image
+        .withExposedPorts(NODE_PORT)
+        .withEnvironment({
+          ...storeEnv(store.fromContainers, BUCKET),
+          SCAFO_NODE_ID: NODE_ID,
+          SCAFO_TRANSPORT: "none",
+          SCAFO_PLATFORM_DOMAINS: PLATFORM_DOMAIN,
+          SCAFO_INGRESS_TOKEN: INGRESS_TOKEN,
+          SCAFO_ADVERTISE: `127.0.0.1:${String(NODE_PORT)}`,
+          /* In the environment rather than on the command line, because the
            image's healthcheck resolves the listener from the same sources the
            daemon does and a flag is not one of them. */
-        SCAFO_LISTEN: `0.0.0.0:${String(NODE_PORT)}`,
-      })
-      .withCommand(["sail"])
-      .withLogConsumer(collectLogs(nodeLog))
-      .withWaitStrategy(Wait.forLogMessage(/listening on/))
-      .withStartupTimeout(BOOT_DEADLINE_MS)
-      .start();
+          SCAFO_LISTEN: `0.0.0.0:${String(NODE_PORT)}`,
+        })
+        .withCommand(["sail"])
+        .withLogConsumer(collectLogs(nodeLog))
+        .withWaitStrategy(Wait.forLogMessage(/listening on/))
+        .withStartupTimeout(BOOT_DEADLINE_MS),
+      { log: nodeLog, what: `node ${NODE_ID}` },
+    );
+    apiPort = node.getMappedPort(NODE_PORT);
 
     registry = registryAt(store.fromHost, BUCKET);
   }, SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
     await node?.stop().catch(() => {});
-    await caddy?.stop().catch(() => {});
     await store?.container.stop().catch(() => {});
     for (const dir of tmpDirs) await rm(dir, { recursive: true, force: true });
 
@@ -314,7 +291,7 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
   );
 
   it(
-    "takes a deploy from the host CLI and serves it through Caddy",
+    "takes a deploy from the host CLI and serves it from the image's own runtime",
     async () => {
       const dir = await mkdtemp(join(tmpdir(), "scafo-e2e-image-key-"));
       tmpDirs.push(dir);
@@ -349,25 +326,35 @@ describe.skipIf(!E2E)("the node image, in the topology it was packaged for", () 
       deploymentVersion = deploymentOf(deploy.output);
       expect(await listDeployments(registry, APPLICATION)).toContain(deploymentVersion);
 
+      /* Served the way any ingress finds it: the routing document names the
+         host and the upstream that answers it, and that upstream, dialled from
+         inside the node, answers with the deployment just made. The ingress in
+         front is the e2e suite's to prove. */
       const host = `${APPLICATION}.${PLATFORM_DOMAIN}`;
       const answer = await until(`${host} to serve "v1"`, DEADLINE_MS, async () => {
-        const served = await httpGet(caddyHttpPort, "/", { host });
-        return served.status === 200 && served.body.includes(`"v1"`) ? served : null;
+        const routes = await httpGet(apiPort, "/v1/ingress/routes", {
+          authorization: `Bearer ${INGRESS_TOKEN}`,
+        });
+        if (routes.status !== 200) return null;
+        const route = (JSON.parse(routes.body) as FleetRouting).routes.find(
+          (entry) => entry.host === host,
+        );
+        const upstream = route?.upstreams[0]?.address;
+        if (upstream === undefined) return null;
+
+        const served = await node.exec([
+          "node",
+          "-e",
+          `fetch(${JSON.stringify(`http://${upstream}/`)}).then(async (r) => console.log(r.status, await r.text()))`,
+        ]);
+        return served.exitCode === 0 &&
+          served.stdout.startsWith("200 ") &&
+          served.stdout.includes(`"v1"`)
+          ? { upstream, body: served.stdout.slice(4).trim() }
+          : null;
       });
 
-      /* Celld reports healthy shortly after the first request it served. */
-      const runtimeHealth = await until(`${host} to answer celld health`, DEADLINE_MS, async () => {
-        const probed = await httpGet(caddyHttpPort, "/.well-known/celld/health", { host });
-        return probed.status === 200 ? probed : null;
-      });
-      expect(JSON.parse(runtimeHealth.body)).toEqual({ ok: true });
-
-      observed.served = {
-        host,
-        deployment: deploymentVersion,
-        body: answer.body,
-        celldHealth: runtimeHealth.status,
-      };
+      observed.served = { host, deployment: deploymentVersion, ...answer };
     },
     STEP_TIMEOUT_MS,
   );

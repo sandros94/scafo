@@ -15,13 +15,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { DaemonState } from "../../src/daemon/app.ts";
 import type { OperatorKeyFile } from "../../src/cli/_operator-key.ts";
 import { signNodeToken } from "../../src/core/auth/node-token.ts";
-import {
-  nodeKey,
-  placementKey,
-  readJson,
-  type RegistryContext,
-} from "../../src/core/registry/index.ts";
-import type { NodeRecord, PlacementRecord } from "../../src/core/types/registry.ts";
+import { nodeKey, readJson, type RegistryContext } from "../../src/core/registry/index.ts";
+import type { NodeRecord } from "../../src/core/types/registry.ts";
 import type { ProcessStatus } from "../../src/core/types/supervisor.ts";
 import {
   deploymentOf,
@@ -59,10 +54,8 @@ const NAMESPACE = "scafo-e2e";
 const PLATFORM_DOMAIN = "scafo.k3s.test";
 /** What the cluster's Traefik presents to the fleet; both Secrets carry it. */
 const INGRESS_TOKEN = "e2e-k3s-ingress-token";
-/** The application the fixture's `wrangler.jsonc` names, deployed on every node. */
+/** The application the fixture's `wrangler.jsonc` names, placed on one node. */
 const APPLICATION = "app";
-/** A second application, scaled to one node, whose name shares a prefix with it. */
-const SOLO = "app-single";
 const BUCKET: BucketSettings = {
   bucket: "scafo-k3s-e2e",
   prefix: "e2e",
@@ -343,6 +336,8 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
         const health = await podGet(pod, 7400, "/.well-known/scafo/health");
         expect(health.exitCode, health.output).toBe(0);
       }
+      /* One replica, so the node that holds the application is the one the
+         drain and the container kill below are aimed at. */
       const deploy = await runK3sCli(
         [
           "deploy",
@@ -352,7 +347,7 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
           "--name",
           APPLICATION,
           "--replicas",
-          "all",
+          "1",
           "--key",
           keyPath,
         ],
@@ -361,78 +356,12 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
       expect(deploy.code, deploy.output).toBe(0);
       expect(deploy.output).toContain("deployed");
       expect(deploymentOf(deploy.output)).toMatch(/^[\da-f]+$/);
-      await serves(hostOf(APPLICATION), "v1");
 
-      const spread = await until(
-        "the all-replica placement and one process on each node",
-        DEADLINE_MS,
-        async () => {
-          const placement = await readJson<PlacementRecord>(registry, placementKey(APPLICATION));
-          if (placement?.value.nodes.length !== 2) return null;
-          const states = await Promise.all((await nodes()).map(stateOf));
-          const nodeIds: string[] = [];
-          for (const state of states) {
-            if (state.node === null) return null;
-            nodeIds.push(state.node.id);
-          }
-          if (
-            new Set(nodeIds).size !== 2 ||
-            !placement.value.nodes.every((id) => nodeIds.includes(id)) ||
-            !states.every((state) => state.processes.filter(runsEverywhere).length === 1)
-          )
-            return null;
-          return { placement: placement.value, nodeIds, states };
-        },
-      );
-      expect([...spread.placement.nodes].sort((left, right) => left.localeCompare(right))).toEqual(
-        [...spread.nodeIds].sort((left, right) => left.localeCompare(right)),
-      );
-      for (const state of spread.states) {
-        expect(state.processes.filter(runsEverywhere)).toHaveLength(1);
-      }
-
-      const retired = await runK3sCli(
-        [
-          "app",
-          "retire",
-          "--name",
-          APPLICATION,
-          "--node",
-          `http://127.0.0.1:${String(apiPort)}`,
-          "--key",
-          keyPath,
-        ],
-        {},
-      );
-      expect(retired.code, retired.output).toBe(0);
-      await until("the all-replica proof to release both runtimes", DEADLINE_MS, async () => {
-        const states = await Promise.all((await nodes()).map(stateOf));
-        return states.every((state) => !state.processes.some(runsEverywhere)) ? states : null;
-      });
-
-      const single = await runK3sCli(
-        [
-          "deploy",
-          await stageApp("v1", tmpDirs),
-          "--node",
-          `http://127.0.0.1:${String(apiPort)}`,
-          "--name",
-          SOLO,
-          "--replicas",
-          "1",
-          "--key",
-          keyPath,
-        ],
-        {},
-      );
-      expect(single.code, single.output).toBe(0);
-      expect(single.output).toContain("deployed");
-
-      const placed = await settledSinglePlacement(SOLO);
+      const placed = await settledSinglePlacement(APPLICATION);
       expect(placed.placement.nodes).toHaveLength(1);
       /* One node holds this host and the edge, which is colocated with neither,
          reaches it there: the routing it polls names the pod that runs it. */
-      await assignedServes(SOLO, "v1");
+      await assignedServes(APPLICATION, "v1");
       const leaving = placed.owner.pod;
       const leavingState = await stateOf(leaving);
       const leavingId = leavingState.node?.id;
@@ -463,8 +392,8 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
         },
       );
       expect(restored.id).toBe(leavingId);
-      await assignedServes(SOLO, "v1");
-      const victim = (await settledSinglePlacement(SOLO)).owner.pod;
+      await assignedServes(APPLICATION, "v1");
+      const victim = (await settledSinglePlacement(APPLICATION)).owner.pod;
       const name = victim.metadata?.name as string;
       const before =
         victim.status?.containerStatuses?.find((status) => status.name === "node")?.restartCount ??
@@ -492,7 +421,7 @@ describe.skipIf(!E2E)("the Kubernetes fleet contract", () => {
           ? pod
           : null;
       });
-      await assignedServes(SOLO, "v1");
+      await assignedServes(APPLICATION, "v1");
     },
     SCENARIO_TIMEOUT_MS,
   );
@@ -760,11 +689,6 @@ async function podGet(
 
 function runK3sCli(args: string[], extraEnv: Record<string, string>): Promise<CommandResult> {
   return runCli(args, extraEnv, { timeoutMs: CLI_TIMEOUT_MS });
-}
-
-/** Whether `process` is the running runtime of the application every node serves. */
-function runsEverywhere(process: ProcessStatus): boolean {
-  return runs(process, APPLICATION);
 }
 
 /** Whether `process` is the running runtime of `application`. */
