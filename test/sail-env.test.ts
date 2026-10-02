@@ -49,6 +49,24 @@ describe("the deploy process environment", () => {
     expect(runtimeBaseEnv(named)).toEqual({ PATH: "/usr/bin" });
   });
 
+  it("carries the Python runtime cache and the per-file asset limit an operator named to the publish alone", () => {
+    const named = {
+      PATH: "/usr/bin",
+      CELLD_PYTHON_RUNTIME_DIR: "/var/lib/scafo/pyodide",
+      CELLD_MAX_ASSET_FILE_BYTES: "52428800",
+    };
+
+    expect(deployBaseEnv(named)).toEqual(named);
+    expect(runtimeBaseEnv(named)).toEqual({ PATH: "/usr/bin" });
+  });
+
+  it("names no Python runtime cache or asset limit when the daemon was given none", () => {
+    const base = deployBaseEnv({ PATH: "/usr/bin" });
+
+    expect(base).not.toHaveProperty("CELLD_PYTHON_RUNTIME_DIR");
+    expect(base).not.toHaveProperty("CELLD_MAX_ASSET_FILE_BYTES");
+  });
+
   it("names no engine client or platform when the daemon was given none", () => {
     const base = deployBaseEnv({ PATH: "/usr/bin" });
 

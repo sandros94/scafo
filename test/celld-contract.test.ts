@@ -11,7 +11,9 @@ import {
   DEPLOYMENT_FEATURES,
   LEGACY_MANIFEST_SCHEMA_VERSION,
   MANIFEST_SCHEMA_VERSIONS,
+  ROLLING_CELLD_RELEASES,
   VERIFIED_CELLD_RELEASES,
+  rollingReleaseList,
   verifiedReleaseList,
 } from "../src/core/registry/_celld-contract.ts";
 
@@ -81,7 +83,14 @@ describe("what the contract pins", () => {
   });
 
   it("names every release prune was run end to end against", () => {
-    expect(verifiedReleaseList()).toBe("0.5.0, 0.5.1, 0.6.0");
+    expect(verifiedReleaseList()).toBe("0.5.0, 0.5.1, 0.6.0, 0.6.1");
+  });
+
+  it("names every rolling pair upstream declared, each between verified releases", () => {
+    expect(rollingReleaseList()).toBe("0.5.0↔0.5.1, 0.6.0↔0.6.1");
+    for (const set of ROLLING_CELLD_RELEASES) {
+      for (const release of set) expect(VERIFIED_CELLD_RELEASES).toContain(release);
+    }
   });
 
   it("reads an absent manifest schema version as one it knows", () => {
@@ -101,6 +110,7 @@ describe("what the contract pins", () => {
         "sqlite-vec-v1",
         "wasm-v1",
         "workflows-v1",
+        "python-workers-v1",
       ].sort(),
     );
     expect(ASSET_INDEX_SCHEMA_VERSION).toBe(1);

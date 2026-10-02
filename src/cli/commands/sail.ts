@@ -525,10 +525,20 @@ async function runDaemon(flags: Record<string, unknown>): Promise<void> {
  * daemon set them for the publish. Celld reads the last two in `celld deploy`
  * alone — a runtime process reaches its engine through the socket, never the
  * client — so they travel here and not with {@link runtimeBaseEnv}.
+ * `CELLD_PYTHON_RUNTIME_DIR` is where a Python Worker's build keeps the Pyodide
+ * files it downloads, and `CELLD_MAX_ASSET_FILE_BYTES` the per-file asset limit
+ * the build enforces; Celld reads that limit on serving nodes too, which take it
+ * through `runtime.celldEnv` like any other runtime policy.
  */
 export function deployBaseEnv(env: Record<string, string | undefined>): Record<string, string> {
   const base = runtimeBaseEnv(env);
-  for (const name of ["CELLD_ESBUILD", "CELLD_DOCKER", "CELLD_CONTAINER_PLATFORM"]) {
+  for (const name of [
+    "CELLD_ESBUILD",
+    "CELLD_DOCKER",
+    "CELLD_CONTAINER_PLATFORM",
+    "CELLD_PYTHON_RUNTIME_DIR",
+    "CELLD_MAX_ASSET_FILE_BYTES",
+  ]) {
     const value = env[name];
     if (value !== undefined) base[name] = value;
   }
