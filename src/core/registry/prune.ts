@@ -141,6 +141,7 @@ export interface PruneResult {
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L450-L460 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L450-L460 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L456-L466 (v0.6.1)
+ *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L456-L466 (v0.6.2)
  */
 interface DeployPointer {
   version: string;
@@ -321,6 +322,7 @@ async function planImages(
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L878-L885 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L878-L885 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L891-L898 (v0.6.1)
+ *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/deploy.rs#L909-L916 (v0.6.2)
  */
 const ASSET_INDEX_FILE = "assets.json";
 
@@ -387,6 +389,7 @@ function assetIndexProblem(key: string, wrong: string): ScafoError {
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L40-L50 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L40-L50 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L40-L50 (v0.6.1)
+ *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L40-L50 (v0.6.2)
  *
  * Read out of the manifest the format gate already read and verified, never out
  * of the bucket again, and only for a deployment that stays: a reference that
@@ -437,6 +440,7 @@ function manifestProblem(key: string, wrong: string): ScafoError {
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/container.rs#L60-L73 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/container.rs#L60-L73 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/container.rs#L60-L73 (v0.6.1)
+ *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/container.rs#L60-L73 (v0.6.2)
  */
 const IMAGE_REFERENCE_PREFIX = "celld-image:";
 
@@ -447,6 +451,7 @@ const IMAGE_REFERENCE_PREFIX = "celld-image:";
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L809 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L809 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L822 (v0.6.1)
+ *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/deploy.rs#L840 (v0.6.2)
  * REFUSED RATHER THAN READ LOOSELY: a reference this cannot map onto a tar
  * would count as naming nothing, and free exactly the image it runs.
  */
@@ -467,6 +472,7 @@ function imageReferenceKey(reference: unknown): string | undefined {
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/container.rs#L67-L73 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/container.rs#L67-L73 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/container.rs#L67-L73 (v0.6.1)
+ *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/container.rs#L67-L73 (v0.6.2)
  * ANYTHING ELSE UNDER THE PREFIX IS LEFT ALONE, as it is under the blobs': an
  * object this cannot read as a content key is one nothing here can
  * reference-count.
@@ -493,14 +499,17 @@ const IMAGE_SUFFIX = ".tar";
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L390-L397 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L390-L397 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L396-L403 (v0.6.1)
+ *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L396-L403 (v0.6.2)
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L433-L448 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L433-L448 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L433-L448 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L439-L454 (v0.6.1)
+ *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L439-L454 (v0.6.2)
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L742 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L809 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L809 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L822 (v0.6.1)
+ *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/deploy.rs#L840 (v0.6.2)
  */
 const DIGEST_RE = /^[a-f\d]{64}$/;
 
@@ -512,10 +521,12 @@ const DIGEST_RE = /^[a-f\d]{64}$/;
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L433-L448 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L433-L448 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L439-L454 (v0.6.1)
+ *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L439-L454 (v0.6.2)
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L998-L1008 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L1065-L1075 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L1065-L1075 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L1078-L1088 (v0.6.1)
+ *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/deploy.rs#L1096-L1106 (v0.6.2)
  * ANYTHING ELSE UNDER THE PREFIX IS LEFT ALONE: a key this cannot read as a
  * digest is one nothing here can reference-count, and an object of unknown
  * shape is not one to delete on a guess.
@@ -576,6 +587,7 @@ async function assertUnnamed(
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L886-L891 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L886-L891 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L899-L904 (v0.6.1)
+ *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/deploy.rs#L917-L922 (v0.6.2)
  */
 const MANIFEST_FILE = "manifest.json";
 
@@ -694,6 +706,7 @@ async function readPointers(
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L909-L915 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L909-L915 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L922-L928 (v0.6.1)
+ *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/deploy.rs#L940-L946 (v0.6.2)
  */
 const POINTER_FILE = "current.json";
 
@@ -736,6 +749,7 @@ function pointerProblem(key: string, wrong: string): ScafoError {
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L642 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L642 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L651 (v0.6.1)
+ *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/deploy.rs#L669 (v0.6.2)
  */
 async function readDeployments(
   ctx: RegistryContext,
@@ -751,10 +765,12 @@ async function readDeployments(
        https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/container.rs#L67-L73 (v0.5.1)
        https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/container.rs#L67-L73 (v0.6.0)
        https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/container.rs#L67-L73 (v0.6.1)
+       https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/container.rs#L67-L73 (v0.6.2)
        https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L138-L141 (v0.5.0)
        https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L138-L141 (v0.5.1)
        https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L138-L141 (v0.6.0)
-       https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L144-L147 (v0.6.1) */
+       https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L144-L147 (v0.6.1)
+       https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L144-L147 (v0.6.2) */
   const protocols = [deployImagesPrefix(opts.application), deployQueuesPrefix(opts.application)];
 
   for (const key of keys) {
@@ -806,6 +822,7 @@ async function readDeployments(
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L2253-L2266 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L2253-L2266 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L2275-L2288 (v0.6.1)
+ *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/deploy.rs#L2314-L2327 (v0.6.2)
  */
 const SCRIPT_NAME_RE = /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/;
 
@@ -820,10 +837,12 @@ const SCRIPT_NAME_RE = /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/;
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L467-L500 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L467-L500 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L473-L506 (v0.6.1)
+ *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L473-L506 (v0.6.2)
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L570-L575 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L637-L642 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L637-L642 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L646-L651 (v0.6.1)
+ *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/deploy.rs#L664-L669 (v0.6.2)
  */
 const VERSION_RE = /^[a-f\d]{16,64}$/;
 

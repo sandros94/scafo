@@ -83,11 +83,11 @@ describe("what the contract pins", () => {
   });
 
   it("names every release prune was run end to end against", () => {
-    expect(verifiedReleaseList()).toBe("0.5.0, 0.5.1, 0.6.0, 0.6.1");
+    expect(verifiedReleaseList()).toBe("0.5.0, 0.5.1, 0.6.0, 0.6.1, 0.6.2");
   });
 
   it("names every rolling pair upstream declared, each between verified releases", () => {
-    expect(rollingReleaseList()).toBe("0.5.0↔0.5.1, 0.6.0↔0.6.1");
+    expect(rollingReleaseList()).toBe("0.5.0↔0.5.1, 0.6.0↔0.6.1, 0.6.1↔0.6.2");
     for (const set of ROLLING_CELLD_RELEASES) {
       for (const release of set) expect(VERIFIED_CELLD_RELEASES).toContain(release);
     }
