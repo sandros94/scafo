@@ -300,6 +300,18 @@ export async function until<T>(
   }
 }
 
+/**
+ * Prints what a suite observed — timings, verdicts, the lease a Celld release
+ * did or did not recover — as one JSON block after its tests. It WRITES TO
+ * STDOUT DIRECTLY because vitest's default reporter keeps the `console` output
+ * of a passing run, hooks included, to itself: a verdict logged from an
+ * `afterAll` reached nobody, and the run that asked a release the question had
+ * to be repeated with `--disableConsoleIntercept` to read the answer.
+ */
+export function reportObservations(suite: string, observed: Record<string, unknown>): void {
+  process.stdout.write(`\n[${suite}] raw observations\n${JSON.stringify(observed, null, 2)}\n`);
+}
+
 /** A failure as a message, whether or not the thrown value was an `Error`. */
 export function describeFailure(error: unknown): string {
   return error instanceof Error ? error.message : JSON.stringify(error);

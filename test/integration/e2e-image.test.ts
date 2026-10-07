@@ -33,6 +33,7 @@ import {
   startStore,
   STEP_TIMEOUT_MS,
   storeEnv,
+  reportObservations,
   until,
 } from "./_harness.ts";
 
@@ -167,7 +168,7 @@ describe.skipIf(!E2E)("the node image, run as it ships", () => {
     await store?.container.stop().catch(() => {});
     for (const dir of tmpDirs) await rm(dir, { recursive: true, force: true });
 
-    console.log(`\n[e2e-image] raw observations\n${JSON.stringify(observed, null, 2)}`);
+    reportObservations("e2e-image", observed);
   }, SETUP_TIMEOUT_MS);
 
   it(

@@ -41,7 +41,7 @@ import type { FleetRouting } from "../../src/core/types/ingress.ts";
 import type { NodeFailure, NodeRecord } from "../../src/core/types/registry.ts";
 import type { ProcessStatus } from "../../src/core/types/supervisor.ts";
 import { createUns3Store } from "../../src/drivers/store/uns3.ts";
-import { ADOPTION_BOUND_MS, collectLogs, startExplained } from "./_harness.ts";
+import { ADOPTION_BOUND_MS, collectLogs, reportObservations, startExplained } from "./_harness.ts";
 
 const env = process.env;
 const E2E = env.SCAFO_E2E === "1";
@@ -331,7 +331,7 @@ describe.skipIf(!E2E)("two nodes of one installation, end to end", () => {
     }
     for (const dir of tmpDirs) await rm(dir, { recursive: true, force: true });
 
-    console.log(`\n[e2e-multinode] raw observations\n${JSON.stringify(observed, null, 2)}`);
+    reportObservations("e2e-multinode", observed);
   }, SETUP_TIMEOUT_MS);
 
   it(

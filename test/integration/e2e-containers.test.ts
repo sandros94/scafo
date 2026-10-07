@@ -56,6 +56,7 @@ import {
   startExplained,
   startStore,
   storeEnv,
+  reportObservations,
   until,
 } from "./_harness.ts";
 
@@ -343,7 +344,7 @@ describe.skipIf(!E2E || !MOUNTABLE)("container classes, on a node given the host
     observed.cleanup = await cleanUpEngine();
     for (const dir of tmpDirs) await rm(dir, { recursive: true, force: true });
 
-    console.log(`\n[e2e-containers] raw observations\n${JSON.stringify(observed, null, 2)}`);
+    reportObservations("e2e-containers", observed);
   }, SETUP_TIMEOUT_MS);
 
   it(

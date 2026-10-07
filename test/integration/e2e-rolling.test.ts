@@ -61,6 +61,7 @@ import {
   type StartedStore,
   startStore,
   storeEnv,
+  reportObservations,
   until,
 } from "./_harness.ts";
 
@@ -188,7 +189,7 @@ async function tearDownFleet(): Promise<void> {
   await store?.container.stop().catch(() => {});
   for (const dir of tmpDirs) await rm(dir, { recursive: true, force: true });
 
-  console.log(`\n[e2e-rolling] raw observations\n${JSON.stringify(observed, null, 2)}`);
+  reportObservations("e2e-rolling", observed);
 }
 
 describe.skipIf(releases === undefined || !rolling)(

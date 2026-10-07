@@ -40,6 +40,7 @@ import {
   startStore,
   STEP_TIMEOUT_MS,
   storeEnv,
+  reportObservations,
   until,
 } from "./_harness.ts";
 
@@ -159,7 +160,7 @@ describe.skipIf(!E2E)("the single-node product loop through Traefik", () => {
     await store?.container.stop().catch(() => {});
     for (const dir of tmpDirs) await rm(dir, { recursive: true, force: true });
 
-    console.log(`\n[e2e-traefik] raw observations\n${JSON.stringify(observed, null, 2)}`);
+    reportObservations("e2e-traefik", observed);
   }, SETUP_TIMEOUT_MS);
 
   it(

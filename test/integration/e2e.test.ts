@@ -62,6 +62,7 @@ import {
   startStore,
   STEP_TIMEOUT_MS,
   storeEnv as storeEnvFor,
+  reportObservations,
   until as untilPolled,
 } from "./_harness.ts";
 import { startStubIssuer, type StubIssuer } from "./_stub-issuer.ts";
@@ -231,7 +232,7 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
     await store?.container.stop().catch(() => {});
     for (const dir of tmpDirs) await rm(dir, { recursive: true, force: true });
 
-    console.log(`\n[e2e] raw observations\n${JSON.stringify(observed, null, 2)}`);
+    reportObservations("e2e", observed);
   }, SETUP_TIMEOUT_MS);
 
   it(

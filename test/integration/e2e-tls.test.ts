@@ -45,6 +45,7 @@ import {
   startStore,
   STEP_TIMEOUT_MS,
   storeEnv,
+  reportObservations,
   until,
 } from "./_harness.ts";
 
@@ -252,7 +253,7 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
     await network?.stop().catch(() => {});
     for (const dir of tmpDirs) await rm(dir, { recursive: true, force: true });
 
-    console.log(`\n[e2e-tls] raw observations\n${JSON.stringify(observed, null, 2)}`);
+    reportObservations("e2e-tls", observed);
   }, SETUP_TIMEOUT_MS);
 
   it(
