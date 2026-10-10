@@ -1,7 +1,17 @@
 {
   "name": "scafo",
   "version": "0.0.0",
-  "description": "Self-hosted serverless deployment platform for JS apps",
+  "description": "Self-hosted serverless deployment platform for JS apps. Celld made simple.",
+  "keywords": [
+    "celld",
+    "cloudflare-workers",
+    "durable-objects",
+    "javascript",
+    "paas",
+    "self-hosted",
+    "serverless",
+    "typescript"
+  ],
   "license": "Apache-2.0",
   "author": {
     "name": "Sandro Circi",
