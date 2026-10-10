@@ -57,7 +57,7 @@ const E2E = process.env.SCAFO_E2E === "1";
  * that are not released yet.
  */
 const CADDY_IMAGE: string =
-  process.env.SCAFO_E2E_CADDY_IMAGE ?? "ghcr.io/sandros94/scafo-caddy:edge";
+  process.env.SCAFO_E2E_CADDY_IMAGE ?? "ghcr.io/sandros94/scafo-caddy:0.2.1";
 
 /**
  * What the `scafo` dynamic-upstreams module logs about a poll that did not

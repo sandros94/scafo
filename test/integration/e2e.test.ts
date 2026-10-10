@@ -75,7 +75,7 @@ const E2E = process.env.SCAFO_E2E === "1";
  * that are not released yet.
  */
 const CADDY_IMAGE: string =
-  process.env.SCAFO_E2E_CADDY_IMAGE ?? "ghcr.io/sandros94/scafo-caddy:edge";
+  process.env.SCAFO_E2E_CADDY_IMAGE ?? "ghcr.io/sandros94/scafo-caddy:0.2.1";
 
 const CADDY_HTTP_PORT = 80;
 /** Published on the Caddy container, because the daemon shares its namespace. */

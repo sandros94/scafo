@@ -43,7 +43,7 @@ services:
     # from the environment below, keeps certificates in the bucket through the
     # node, issues on demand only for names the fleet routes, and redirects
     # HTTP to HTTPS. `edge` until a release pins the pair.
-    image: ghcr.io/sandros94/scafo-caddy:${SCAFO_CADDY_VERSION:-edge}
+    image: ghcr.io/sandros94/scafo-caddy:${SCAFO_CADDY_VERSION:-0.2.1}
     restart: unless-stopped
     # Caddy reaches the node and the runtimes through shared loopback.
     network_mode: "service:node"

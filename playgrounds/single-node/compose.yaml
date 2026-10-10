@@ -69,7 +69,7 @@ services:
       start_period: 10s
 
   caddy:
-    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:edge}
+    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:0.2.1}
     # Caddy reaches the node and the runtimes through shared loopback.
     network_mode: "service:node"
     depends_on:

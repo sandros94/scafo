@@ -30,10 +30,10 @@ Docker with Compose v2.
 
 ```sh
 docker pull ghcr.io/sandros94/scafo:latest
-docker pull ghcr.io/sandros94/scafo-caddy:edge
+docker pull ghcr.io/sandros94/scafo-caddy:0.2.1
 ```
 
-Each playground uses the released node image and, until a release pins both Caddy modules, the `edge` Caddy image. Set `SCAFO_IMAGE` or `SCAFO_CADDY_IMAGE` in `.env` to test local images. The walkthroughs use the container CLI; a built checkout remains an optional alternative.
+Each playground uses the released node image and the released Caddy image. Set `SCAFO_IMAGE` or `SCAFO_CADDY_IMAGE` in `.env` to test local images. The walkthroughs use the container CLI; a built checkout remains an optional alternative.
 
 The Caddy image includes `caddy.storage.scafo` for TLS material and the `scafo` dynamic-upstreams module for routing. Both read the node's loopback API with the ingress token; neither holds bucket credentials.
 

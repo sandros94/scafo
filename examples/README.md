@@ -15,7 +15,7 @@ The other recipes here put a fleet behind an ingress that is already somebody el
 cp .env.example .env
 ```
 
-Set every blank value. `SCAFO_VERSION` pins the node image; `SCAFO_CADDY_VERSION` defaults to `edge` until a release pins both Caddy modules. Use one bucket/prefix pair only for this fleet.
+Set every blank value. `SCAFO_VERSION` pins the node image; `SCAFO_CADDY_VERSION` pins the Caddy image, a `scafo-caddy` release tag. Use one bucket/prefix pair only for this fleet.
 
 Create a wildcard DNS record such as `*.apps.example.com` pointing at this host, and allow TCP 80/443 plus UDP 443. Caddy obtains ordinary certificates for each claimed hostname through HTTP-01 or TLS-ALPN; wildcard DNS does not require a wildcard certificate or DNS-provider plugin.
 

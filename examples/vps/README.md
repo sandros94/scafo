@@ -34,7 +34,7 @@ SSH_USER=ubuntu
 
 DOMAIN=apps.example.com
 IMAGE=ghcr.io/sandros94/scafo:0.1.0
-CADDY_IMAGE=ghcr.io/sandros94/scafo-caddy:edge-dns
+CADDY_IMAGE=ghcr.io/sandros94/scafo-caddy:0.2.1-dns
 
 SCAFO_S3_ENDPOINT=
 SCAFO_S3_BUCKET=
