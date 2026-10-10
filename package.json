@@ -1,6 +1,6 @@
 {
   "name": "scafo",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "Self-hosted serverless deployment platform for JS apps. Celld made simple.",
   "keywords": [
     "celld",
