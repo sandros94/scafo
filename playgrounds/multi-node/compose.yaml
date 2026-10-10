@@ -68,7 +68,7 @@ services:
       start_period: 10s
 
   caddy-a:
-    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:0.2.1}
+    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:0.2.1@sha256:929453ea8d38eece0da87d9094d64fc738df61eccf249fdd0079846e19126a76}
     # Shared loopback keeps runtime ports private.
     network_mode: "service:node-a"
     depends_on:
@@ -137,7 +137,7 @@ services:
       start_period: 10s
 
   caddy-b:
-    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:0.2.1}
+    image: ${SCAFO_CADDY_IMAGE:-ghcr.io/sandros94/scafo-caddy:0.2.1@sha256:929453ea8d38eece0da87d9094d64fc738df61eccf249fdd0079846e19126a76}
     network_mode: "service:node-b"
     depends_on:
       node-b:
