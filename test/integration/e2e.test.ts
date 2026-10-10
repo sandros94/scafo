@@ -169,16 +169,20 @@ describe.skipIf(!E2E)("the single-node product loop, end to end", () => {
 
     /* Started first, and deliberately before the node it will poll: a Caddy whose
        daemon is not up yet must come up anyway and start routing once it is. */
-    caddy = await new GenericContainer(CADDY_IMAGE)
-      .withCopyFilesToContainer([
-        { source: join(FIXTURES, "caddy.json"), target: "/etc/caddy/config.json" },
-      ])
-      .withEnvironment({ SCAFO_INGRESS_TOKEN: INGRESS_TOKEN })
-      .withCommand(["caddy", "run", "--config", "/etc/caddy/config.json"])
-      .withExposedPorts(CADDY_HTTP_PORT, NODE_PORT)
-      .withWaitStrategy(Wait.forLogMessage(/serving initial configuration/))
-      .withStartupTimeout(BOOT_DEADLINE_MS)
-      .start();
+    const caddyLog: string[] = [];
+    caddy = await startExplained(
+      new GenericContainer(CADDY_IMAGE)
+        .withCopyFilesToContainer([
+          { source: join(FIXTURES, "caddy.json"), target: "/etc/caddy/config.json" },
+        ])
+        .withEnvironment({ SCAFO_INGRESS_TOKEN: INGRESS_TOKEN })
+        .withCommand(["caddy", "run", "--config", "/etc/caddy/config.json"])
+        .withExposedPorts(CADDY_HTTP_PORT, NODE_PORT)
+        .withLogConsumer(collectLogs(caddyLog))
+        .withWaitStrategy(Wait.forLogMessage(/serving initial configuration/))
+        .withStartupTimeout(BOOT_DEADLINE_MS),
+      { log: caddyLog, what: "Caddy" },
+    );
 
     caddyHttpPort = caddy.getMappedPort(CADDY_HTTP_PORT);
     apiPort = caddy.getMappedPort(NODE_PORT);

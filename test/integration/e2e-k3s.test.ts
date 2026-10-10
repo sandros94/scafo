@@ -19,18 +19,19 @@ import { nodeKey, readJson, type RegistryContext } from "../../src/core/registry
 import type { NodeRecord } from "../../src/core/types/registry.ts";
 import type { ProcessStatus } from "../../src/core/types/supervisor.ts";
 import {
+  createBucket,
   deploymentOf,
   describeFailure,
-  type BucketSettings,
-  type CommandResult,
-  createBucket,
   httpGet,
   registryAt,
   REPO_ROOT,
   run,
   runCli,
   stageApp,
+  STORE_IMAGE,
   storeEnv,
+  type BucketSettings,
+  type CommandResult,
   until,
 } from "./_harness.ts";
 
@@ -165,7 +166,7 @@ async function bringUp(): Promise<void> {
           containers: [
             {
               name: "seaweedfs",
-              image: "chrislusf/seaweedfs:4.42",
+              image: STORE_IMAGE,
               args: ["server", "-s3"],
               ports: [{ containerPort: 8333 }],
             },

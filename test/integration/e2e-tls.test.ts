@@ -448,20 +448,24 @@ describe.skipIf(!E2E)("TLS through the node's storage surface, end to end", () =
 async function startCaddy(name: string, alias: string): Promise<Caddy> {
   const log: string[] = [];
 
-  const container = await new GenericContainer(CADDY_IMAGE)
-    .withNetwork(network)
-    .withNetworkAliases(alias)
-    .withCopyContentToContainer([
-      { content: caddyConfig(name), target: CONFIG_IN_CADDY },
-      { content: `${ingressToken}\n`, target: TOKEN_IN_CADDY, mode: 0o600 },
-      { content: directoryRoot, target: DIRECTORY_ROOT_IN_CADDY },
-    ])
-    .withCommand(["caddy", "run", "--config", CONFIG_IN_CADDY])
-    .withExposedPorts(CADDY_HTTPS_PORT)
-    .withLogConsumer(collectLogs(log))
-    .withWaitStrategy(Wait.forLogMessage(/serving initial configuration/))
-    .withStartupTimeout(BOOT_DEADLINE_MS)
-    .start();
+  /* Explained on failure: a Caddy that exits before it serves its configuration
+     says why in its own log, and that is the only place it says it. */
+  const container = await startExplained(
+    new GenericContainer(CADDY_IMAGE)
+      .withNetwork(network)
+      .withNetworkAliases(alias)
+      .withCopyContentToContainer([
+        { content: caddyConfig(name), target: CONFIG_IN_CADDY },
+        { content: `${ingressToken}\n`, target: TOKEN_IN_CADDY, mode: 0o600 },
+        { content: directoryRoot, target: DIRECTORY_ROOT_IN_CADDY },
+      ])
+      .withCommand(["caddy", "run", "--config", CONFIG_IN_CADDY])
+      .withExposedPorts(CADDY_HTTPS_PORT)
+      .withLogConsumer(collectLogs(log))
+      .withWaitStrategy(Wait.forLogMessage(/serving initial configuration/))
+      .withStartupTimeout(BOOT_DEADLINE_MS),
+    { log, what: `Caddy "${name}"` },
+  );
 
   return { name, container, httpsPort: container.getMappedPort(CADDY_HTTPS_PORT), log };
 }

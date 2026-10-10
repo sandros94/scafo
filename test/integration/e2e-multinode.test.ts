@@ -41,7 +41,13 @@ import type { FleetRouting } from "../../src/core/types/ingress.ts";
 import type { NodeFailure, NodeRecord } from "../../src/core/types/registry.ts";
 import type { ProcessStatus } from "../../src/core/types/supervisor.ts";
 import { createUns3Store } from "../../src/drivers/store/uns3.ts";
-import { ADOPTION_BOUND_MS, collectLogs, reportObservations, startExplained } from "./_harness.ts";
+import {
+  ADOPTION_BOUND_MS,
+  collectLogs,
+  reportObservations,
+  startExplained,
+  STORE_IMAGE,
+} from "./_harness.ts";
 
 const env = process.env;
 const E2E = env.SCAFO_E2E === "1";
@@ -55,7 +61,6 @@ const REPO_ROOT = resolve(HERE, "../..");
 const FIXTURES = join(HERE, "_e2e-fixtures");
 const CLI = join(REPO_ROOT, "dist/cli/index.mjs");
 
-const STORE_IMAGE = "chrislusf/seaweedfs:4.42";
 const TRAEFIK_IMAGE = "traefik:v3";
 /** node24 + celld + esbuild; the same image the single-node suite needs. */
 const NODE_IMAGE = "scafo-probe";
