@@ -21,7 +21,7 @@ export const FIXTURES: string = join(HERE, "_e2e-fixtures");
 /** The built CLI, run as an operator's `scafo` would be. */
 export const CLI: string = join(REPO_ROOT, "dist/cli/index.mjs");
 
-export const STORE_IMAGE: string = "chrislusf/seaweedfs:4.42";
+export const STORE_IMAGE: string = "chrislusf/seaweedfs:4.45";
 /**
  * The `probe` target of the repo Dockerfile: node24 with the Celld and esbuild
  * the image ships and no application. Built locally with

@@ -15,7 +15,7 @@ interface StoreSpec {
 
 const STORES: Record<string, StoreSpec> = {
   seaweedfs: {
-    image: "chrislusf/seaweedfs:4.42",
+    image: "chrislusf/seaweedfs:4.45",
     port: 8333,
     command: ["server", "-s3"],
     accessKey: "scafo",
