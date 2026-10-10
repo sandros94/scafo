@@ -41,3 +41,11 @@ Scafo requires Celld 0.5.0 — `scafo sail` runs `celld --version` at start and 
 Celld exposes one current deployment per fleet. Scafo records a monotonic deployment revision, not a selected version; it provides no old-build routing or historical deployment selector. See [Celld issue #181](https://github.com/denoland/celld/issues/181).
 
 Scafo does not add a raw TCP bridge or transparent tunnel around missing Celld APIs. Hostile workload isolation is not available; do not infer it from scopes, deployment separation, or ingress routing.
+
+## Reporting a vulnerability
+
+Report it privately through GitHub: the repository's **Security** tab, _Report a vulnerability_, which opens a draft advisory only the maintainer can read. Do not open an issue or a pull request for it.
+
+Say what you reached, from where, and how to reproduce it — the Scafo and Celld versions, the ingress in front, and whether the node ran with an engine socket or `--network host` — and what you believe the trust model above should have prevented. Findings inside one installation's trust domain (one application reaching another on the same node, a deployer reaching the bucket) are limits documented here rather than vulnerabilities, unless something documented as protected gave way.
+
+The same path serves the ingress modules and the `scafo-caddy` image, from the [scafo-ingress](https://github.com/sandros94/scafo-ingress) repository.
