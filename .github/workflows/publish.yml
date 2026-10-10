@@ -302,6 +302,17 @@ jobs:
           fi
           pnpm compile
 
+      - name: Stage the scripts
+        # The installer and the uninstaller travel with the binaries they
+        # install: `install.sh` fetches `uninstall.sh` from the release it
+        # installs from and places it beside the binaries, so the two can never
+        # disagree about what an install looks like. Checksummed like the rest.
+        run: |
+          set -euo pipefail
+          install -m 0755 scripts/install.sh build/install.sh
+          install -m 0755 scripts/uninstall.sh build/uninstall.sh
+          (cd build && sha256sum install.sh > install.sh.sha256 && sha256sum uninstall.sh > uninstall.sh.sha256)
+
       - name: Verify binaries
         run: |
           set -euo pipefail
@@ -309,6 +320,8 @@ jobs:
           # built it; arm64 is only cross-compiled here.
           ./build/scafo-linux-amd64 --version
           (cd build && sha256sum -c ./*.sha256)
+          sh -n build/install.sh
+          sh -n build/uninstall.sh
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
@@ -316,6 +329,8 @@ jobs:
           name: binaries
           path: |
             build/scafo-linux-*
+            build/install.sh*
+            build/uninstall.sh*
           if-no-files-found: error
           retention-days: ${{ inputs.release-tag != '' && 1 || 30 }}
 

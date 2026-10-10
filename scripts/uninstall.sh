@@ -24,7 +24,9 @@ NODE_UNIT='scafo-node.service'
 INGRESS_UNIT='caddy.service'
 
 # The ingress installs as `caddy` whatever built it; the manifest flavor is report-only.
-BINARIES='scafo celld caddy esbuild'
+# `scafo-uninstall` is this script, installed beside the rest; it goes last, so it
+# is still there for every removal before its own.
+BINARIES='scafo celld caddy esbuild scafo-uninstall'
 
 MANIFEST_NAME='install.manifest'
 
@@ -68,9 +70,10 @@ main() {
 
 usage() {
   cat <<'EOF'
-scafo — undo scripts/install.sh on this host.
+scafo — undo scripts/install.sh on this host. Installed beside the binaries as
+`scafo-uninstall`; the same script is `scripts/uninstall.sh` of the release.
 
-  uninstall.sh [--purge] [--dry-run] [--bin-dir <dir>]
+  scafo-uninstall [--purge] [--dry-run] [--bin-dir <dir>]
 
   --purge           also remove the state directory (/var/lib/scafo — the node
                     identity and the ingress token, which nothing can reissue),
@@ -406,6 +409,10 @@ remove_binaries() {
 # manifest, or none — says only what it is; where its TLS material lives is
 # reported on the state directory, which is where it would actually be.
 binary_note() {
+  [ "$1" != 'scafo-uninstall' ] || {
+    printf 'this uninstaller, the last thing it removes\n'
+    return 0
+  }
   [ "$1" = 'caddy' ] || {
     printf 'executable\n'
     return 0

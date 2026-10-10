@@ -20,7 +20,9 @@
 # Only the stable channel is served here: GitHub releases, latest or pinned by
 # `SCAFO_VERSION`. The edge channel (every commit on main) ships as the
 # `ghcr.io/sandros94/scafo:edge` image, with its binaries kept only as run
-# artifacts; point `SCAFO_INSTALL_BASE` at a mirror of those to install one.
+# artifacts; point `SCAFO_INSTALL_BASE` at a mirror of those to install one. The
+# same base must also serve `uninstall.sh` and `uninstall.sh.sha256`, which every
+# release carries beside its binaries: they are installed as `scafo-uninstall`.
 
 set -eu
 
@@ -83,6 +85,7 @@ main() {
 
   # Verify all downloads before changing the host.
   fetch_scafo
+  fetch_uninstaller
   fetch_celld
   fetch_caddy
   fetch_esbuild
@@ -91,6 +94,8 @@ main() {
   install_binary "${WORK}/celld" 'celld'
   install_binary "${WORK}/caddy" 'caddy'
   install_binary "${WORK}/package/bin/esbuild" 'esbuild'
+  # Last, so a manifest lists it last and an uninstall removes it after the rest.
+  install_binary "${WORK}/scafo-uninstall" 'scafo-uninstall'
 
   if want_units; then
     create_users
@@ -238,16 +243,21 @@ artifact_url() {
   fi
 }
 
-fetch_scafo() {
+# The release every scafo artifact of this install comes from: the binary and
+# the uninstaller are taken from the same base, so they always match.
+release_base() {
   version="${SCAFO_VERSION:-latest}"
   if [ -n "${SCAFO_INSTALL_BASE:-}" ]; then
-    base="$SCAFO_INSTALL_BASE"
+    printf '%s\n' "$SCAFO_INSTALL_BASE"
   elif [ "$version" = 'latest' ]; then
-    base="$DEFAULT_INSTALL_BASE_LATEST"
+    printf '%s\n' "$DEFAULT_INSTALL_BASE_LATEST"
   else
-    base="${DEFAULT_INSTALL_BASE_TAGGED}/v${version}"
+    printf '%s/v%s\n' "$DEFAULT_INSTALL_BASE_TAGGED" "$version"
   fi
+}
 
+fetch_scafo() {
+  base="$(release_base)"
   name="scafo-${OS}-${ARCH}"
   download "${base}/${name}" "${WORK}/scafo"
 
@@ -263,6 +273,24 @@ fetch_scafo() {
   fi
 
   verify "${WORK}/scafo" "$expected" "$name"
+}
+
+# Staged as `${WORK}/scafo-uninstall`: the release's own `scripts/uninstall.sh`,
+# installed beside the binaries so undoing this install needs no download and
+# no checkout, and matches the release that was installed. Verified against the
+# `.sha256` the release publishes beside it, like everything else here.
+fetch_uninstaller() {
+  base="$(release_base)"
+  download "${base}/uninstall.sh" "${WORK}/scafo-uninstall" \
+    "could not download ${base}/uninstall.sh
+
+  Every scafo release carries its uninstaller beside its binaries. A mirror
+  given through SCAFO_INSTALL_BASE must serve uninstall.sh and
+  uninstall.sh.sha256 too."
+  expected="$(download_text "${base}/uninstall.sh.sha256" | cut -d' ' -f1)"
+  [ -n "$expected" ] || die "no checksum for uninstall.sh: nothing at ${base}/uninstall.sh.sha256.
+  Refusing to install an unverified script."
+  verify "${WORK}/scafo-uninstall" "$expected" "uninstall.sh (installed as scafo-uninstall)"
 }
 
 fetch_celld() {
@@ -797,7 +825,7 @@ next_steps() {
     printf '  %-32s the ingress config: where the ingress is told to read\n' "${CONFIG_DIR}/caddy.json"
     printf '  %-32s this node for TLS material and for the routing\n' ''
     printf '  %-32s where Caddy logs what it served, when asked to\n' "${INGRESS_LOG_DIR}/"
-    printf '  %-32s what this run installed, for scripts/uninstall.sh\n' "${STATE_DIR}/install.manifest"
+    printf '  %-32s what this run installed, for scafo-uninstall\n' "${STATE_DIR}/install.manifest"
   fi
 
   printf '\nWHAT THIS INSTALL IS NOT\n\n'
@@ -823,7 +851,8 @@ next_steps() {
   printf '    Then "scafo wg init" writes wg0.conf and prints the wg-quick command.\n'
   printf '    A single node that never leaves loopback needs none of it.\n'
   printf '  * NOTHING WAS STARTED. See NEXT above.\n\n'
-  printf 'UNDOING IT: scripts/uninstall.sh stops and removes all of the above and\n'
+  printf 'UNDOING IT: scafo-uninstall, installed in %s and the same script as\n' "$BIN_DIR"
+  printf 'scripts/uninstall.sh of this release, stops and removes all of the above and\n'
   printf 'KEEPS %s, which holds the one thing nothing can reissue —\n' "$STATE_DIR"
   printf 'this node'\''s key pair. "--purge" takes that too, "--dry-run" only says so.\n'
   printf 'Neither touches the bucket: a node that stops is counted out of placement\n'

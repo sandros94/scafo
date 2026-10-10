@@ -81,7 +81,7 @@ Docker E2E is opt-in; absent Docker skips a suite, not a product failure. A run 
 - Allow at least 50 seconds for node shutdown. Celld's default may take 40; Docker and Kubernetes grace periods must not be shorter. If `CELLD_SHUTDOWN_TOTAL_MS` is larger, give the enclosing grace at least 10 seconds more.
 - WITH `--network host` THE RUNTIME PORT RANGE IS THE HOST'S. A node sharing the host's network namespace draws its pairs from the machine's own port space, where the machine's own services live — which is why the range is settable at both ends (`runtime.portRangeStart`/`runtime.portRangeEnd`) and why every port is bind-probed before it is used rather than assumed free.
 - Caddy/Traefik share the node network namespace to reach loopback application processes. Multi-node Celld peer traffic needs a trusted wider bind.
-- `scripts/install.sh` verifies every download before installation. `scripts/uninstall.sh` preserves `/var/lib/scafo` unless `--purge`; neither mutates the bucket.
+- `scripts/install.sh` verifies every download before installation, and installs the release's own `uninstall.sh` beside the binaries as `scafo-uninstall` (every release attaches both scripts with checksums; a `SCAFO_INSTALL_BASE` mirror must carry them too). `scripts/uninstall.sh` preserves `/var/lib/scafo` unless `--purge`; neither mutates the bucket.
 
 ## Conventions
 
