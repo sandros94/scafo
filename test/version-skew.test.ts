@@ -222,6 +222,28 @@ describe("releases upstream declared may roll", () => {
     }
   });
 
+  it("lets 0.6.2 and 0.6.3 share a fleet, in either direction, and 0.6.1 with neither 0.6.3 nor 0.5.x", () => {
+    /* Celld 0.6.3's release notes: "Upgrading from v0.6.2 can use a rolling
+       update." Nothing was said about 0.6.1, so the step from it is not a
+       roll, pair or no pair in between. */
+    expect(celldReleasesMayShareFleet("0.6.2", "0.6.3")).toBe(true);
+    expect(
+      skewFor([node("node-b", { celld: "0.6.2", serving: serves(APPLICATION) })], "0.6.3"),
+    ).toEqual([]);
+    expect(
+      skewFor([node("node-b", { celld: "0.6.3", serving: serves(APPLICATION) })], "0.6.2"),
+    ).toEqual([]);
+    for (const older of ["0.5.0", "0.5.1", "0.6.0", "0.6.1"]) {
+      expect(celldReleasesMayShareFleet(older, "0.6.3")).toBe(false);
+      expect(
+        skewFor([node("node-b", { celld: older, serving: serves(APPLICATION) })], "0.6.3"),
+      ).toEqual([{ nodeId: "node-b", celld: older }]);
+      expect(
+        skewFor([node("node-b", { celld: "0.6.3", serving: serves(APPLICATION) })], older),
+      ).toEqual([{ nodeId: "node-b", celld: "0.6.3" }]);
+    }
+  });
+
   it("names a node on 0.5.x to a node starting 0.6.1, and the reverse", () => {
     for (const older of ["0.5.0", "0.5.1"]) {
       expect(celldReleasesMayShareFleet(older, "0.6.1")).toBe(false);
@@ -247,7 +269,7 @@ describe("releases upstream declared may roll", () => {
     expect(error.detail).toContain("node-b (celld 0.4.1)");
     expect(error.detail).toContain("node-c (celld unreported)");
     expect(error.detail).toContain(
-      "rolling pairs this build allows: 0.5.0↔0.5.1, 0.6.0↔0.6.1, 0.6.1↔0.6.2)",
+      "rolling pairs this build allows: 0.5.0↔0.5.1, 0.6.0↔0.6.1, 0.6.1↔0.6.2, 0.6.2↔0.6.3)",
     );
     expect(error.detail).toContain("stop every node of this installation");
   });

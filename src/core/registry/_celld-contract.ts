@@ -29,41 +29,48 @@
  *     https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L642 (v0.6.0)
  *     https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L651 (v0.6.1)
  *     https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/deploy.rs#L669 (v0.6.2)
+ *     https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/deploy.rs#L669 (v0.6.3)
  *   `deploy/<script>/<version>/assets.json`
  *     https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L811-L818 (v0.5.0)
  *     https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L878-L885 (v0.5.1)
  *     https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L878-L885 (v0.6.0)
  *     https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L891-L898 (v0.6.1)
  *     https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/deploy.rs#L909-L916 (v0.6.2)
+ *     https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/deploy.rs#L909-L916 (v0.6.3)
  *   `deploy/<script>/<version>/manifest.json`
  *     https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L819-L824 (v0.5.0)
  *     https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L886-L891 (v0.5.1)
  *     https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L886-L891 (v0.6.0)
  *     https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L899-L904 (v0.6.1)
  *     https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/deploy.rs#L917-L922 (v0.6.2)
+ *     https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/deploy.rs#L917-L922 (v0.6.3)
  *   `deploy/<script>/current.json`
  *     https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L842-L847 (v0.5.0)
  *     https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L909-L914 (v0.5.1)
  *     https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L909-L914 (v0.6.0)
  *     https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L922-L927 (v0.6.1)
  *     https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/deploy.rs#L940-L945 (v0.6.2)
+ *     https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/deploy.rs#L940-L945 (v0.6.3)
  *   `deploy/current.json`
  *     https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L848 (v0.5.0)
  *     https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L915 (v0.5.1)
  *     https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L915 (v0.6.0)
  *     https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L928 (v0.6.1)
  *     https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/deploy.rs#L946 (v0.6.2)
+ *     https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/deploy.rs#L946 (v0.6.3)
  *   `deploy-blobs/assets/sha256/<2 hex>/<digest>`
  *     https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L433-L448 (v0.5.0)
  *     https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L433-L448 (v0.5.1)
  *     https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L433-L448 (v0.6.0)
  *     https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L439-L454 (v0.6.1)
  *     https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L439-L454 (v0.6.2)
+ *     https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L439-L454 (v0.6.3)
  *     https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L998-L1008 (v0.5.0)
  *     https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L1065-L1075 (v0.5.1)
  *     https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L1065-L1075 (v0.6.0)
  *     https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L1078-L1088 (v0.6.1)
  *     https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/deploy.rs#L1096-L1106 (v0.6.2)
+ *     https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/deploy.rs#L1096-L1106 (v0.6.3)
  *   `deploy/images/<content key>.tar`, named `celld-image:<content key>` by a
  *   manifest's `containers[].image` and `fence_image`
  *     https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/container.rs#L60-L73 (v0.5.0)
@@ -71,28 +78,33 @@
  *     https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/container.rs#L60-L73 (v0.6.0)
  *     https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/container.rs#L60-L73 (v0.6.1)
  *     https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/container.rs#L60-L73 (v0.6.2)
+ *     https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/container.rs#L60-L73 (v0.6.3)
  *     https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L40-L50 (v0.5.0)
  *     https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L40-L50 (v0.5.1)
  *     https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L40-L50 (v0.6.0)
  *     https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L40-L50 (v0.6.1)
  *     https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L40-L50 (v0.6.2)
+ *     https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L40-L50 (v0.6.3)
  *   `deploy/queues/<queue>/consumer.json`
  *     https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L138-L141 (v0.5.0)
  *     https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L138-L141 (v0.5.1)
  *     https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L138-L141 (v0.6.0)
  *     https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L144-L147 (v0.6.1)
  *     https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L144-L147 (v0.6.2)
+ *     https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L144-L147 (v0.6.3)
  *   `<version>` is the first sixteen hexadecimal characters of a sha256
  *     https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L467-L500 (v0.5.0)
  *     https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L467-L500 (v0.5.1)
  *     https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L467-L500 (v0.6.0)
  *     https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L473-L506 (v0.6.1)
  *     https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L473-L506 (v0.6.2)
+ *     https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L473-L506 (v0.6.3)
  *     https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L570-L575 (v0.5.0)
  *     https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L637-L642 (v0.5.1)
  *     https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L637-L642 (v0.6.0)
  *     https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L646-L651 (v0.6.1)
  *     https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/deploy.rs#L664-L669 (v0.6.2)
+ *     https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/deploy.rs#L664-L669 (v0.6.3)
  *
  * THE WRITE ORDER of that layout, which is what makes a version directory with
  * no `manifest.json` a deploy in flight rather than a format this cannot read:
@@ -104,6 +116,7 @@
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L856-L915 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L869-L928 (v0.6.1)
  *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/deploy.rs#L887-L946 (v0.6.2)
+ *   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/deploy.rs#L887-L946 (v0.6.3)
  *
  * `DeployPointer`, the two `current.json` objects prune reads to know what an
  * application serves; `script_name` is optional, and older named pointers omit it.
@@ -112,6 +125,7 @@
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L450-L460 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L456-L466 (v0.6.1)
  *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L456-L466 (v0.6.2)
+ *   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L456-L466 (v0.6.3)
  */
 
 /**
@@ -125,6 +139,7 @@ export const VERIFIED_CELLD_RELEASES: readonly string[] = [
   "0.6.0",
   "0.6.1",
   "0.6.2",
+  "0.6.3",
 ];
 
 /**
@@ -167,6 +182,16 @@ export const ROLLING_CELLD_RELEASES: readonly (readonly string[])[] = [
      `stub.fetch()`; a rollback to 0.6.1 rolls too. Neither is scafo's to
      enforce. 0.6.0 and 0.6.2 share no set: upstream declared no such step. */
   ["0.6.1", "0.6.2"],
+  /* "Upgrading from v0.6.2 can use a rolling update."
+       https://github.com/denoland/celld/releases/tag/v0.6.3
+       https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/docs/README.md#L545-L550 (v0.6.3)
+     Until every node runs 0.6.3, a 0.6.2 node can still acquire a cell whose
+     ownership record was lost and start it with an empty database, and 0.6.3
+     distrusts the compromised eMudhra CA certificates for outbound TLS, so
+     upstream says to upgrade each node promptly; a rollback to 0.6.2 rolls
+     too. Neither is scafo's to enforce. 0.6.1 and 0.6.3 share no set:
+     upstream declared no such step. */
+  ["0.6.2", "0.6.3"],
 ];
 
 /**
@@ -177,11 +202,13 @@ export const ROLLING_CELLD_RELEASES: readonly (readonly string[])[] = [
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L11-L17 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L11-L17 (v0.6.1)
  *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L11-L17 (v0.6.2)
+ *   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L11-L17 (v0.6.3)
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L588-L589 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L655-L656 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L655-L656 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L665-L666 (v0.6.1)
  *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/deploy.rs#L683-L684 (v0.6.2)
+ *   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/deploy.rs#L683-L684 (v0.6.3)
  */
 export const MANIFEST_SCHEMA_VERSIONS: readonly number[] = [1, 2];
 
@@ -193,6 +220,7 @@ export const MANIFEST_SCHEMA_VERSIONS: readonly number[] = [1, 2];
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L57-L59 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L57-L59 (v0.6.1)
  *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L57-L59 (v0.6.2)
+ *   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L57-L59 (v0.6.3)
  */
 export const LEGACY_MANIFEST_SCHEMA_VERSION: number = 1;
 
@@ -206,11 +234,13 @@ export const LEGACY_MANIFEST_SCHEMA_VERSION: number = 1;
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L61-L76 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L61-L77 (v0.6.1)
  *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L61-L77 (v0.6.2)
+ *   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L61-L77 (v0.6.3)
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L307-L319 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L307-L319 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L307-L319 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L313-L325 (v0.6.1)
  *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L313-L325 (v0.6.2)
+ *   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L313-L325 (v0.6.3)
  *
  * Each value, in upstream's own order:
  *   `assets-v1`     https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L78 (v0.5.0)
@@ -218,54 +248,65 @@ export const LEGACY_MANIFEST_SCHEMA_VERSION: number = 1;
  *                   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L78 (v0.6.0)
  *                   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L79 (v0.6.1)
  *                   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L79 (v0.6.2)
+ *                   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L79 (v0.6.3)
  *   `containers-v1` https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L79-L82 (v0.5.0)
  *                   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L79-L82 (v0.5.1)
  *                   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L79-L82 (v0.6.0)
  *                   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L80-L83 (v0.6.1)
  *                   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L80-L83 (v0.6.2)
+ *                   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L80-L83 (v0.6.3)
  *   `cron-v1`       https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L88-L91 (v0.5.0)
  *                   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L88-L91 (v0.5.1)
  *                   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L88-L91 (v0.6.0)
  *                   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L89-L92 (v0.6.1)
  *                   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L89-L92 (v0.6.2)
+ *                   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L89-L92 (v0.6.3)
  *   `d1-v1`         https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L83-L87 (v0.5.0)
  *                   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L83-L87 (v0.5.1)
  *                   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L83-L87 (v0.6.0)
  *                   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L84-L88 (v0.6.1)
  *                   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L84-L88 (v0.6.2)
+ *                   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L84-L88 (v0.6.3)
  *   `kv-v1`         https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L105-L111 (v0.5.0)
  *                   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L105-L111 (v0.5.1)
  *                   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L105-L111 (v0.6.0)
  *                   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L111-L117 (v0.6.1)
  *                   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L111-L117 (v0.6.2)
+ *                   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L111-L117 (v0.6.3)
  *   `queues-v1`     https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L113-L115 (v0.5.0)
  *                   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L113-L115 (v0.5.1)
  *                   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L113-L115 (v0.6.0)
  *                   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L119-L121 (v0.6.1)
  *                   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L119-L121 (v0.6.2)
+ *                   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L119-L121 (v0.6.3)
  *   `sqlite-vec-v1` https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L97 (v0.5.0)
  *                   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L97 (v0.5.1)
  *                   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L97 (v0.6.0)
  *                   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L98 (v0.6.1)
  *                   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L98 (v0.6.2)
+ *                   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L98 (v0.6.3)
  *   `r2-v1`         https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L92-L96 (v0.5.0)
  *                   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L92-L96 (v0.5.1)
  *                   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L92-L96 (v0.6.0)
  *                   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L93-L97 (v0.6.1)
  *                   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L93-L97 (v0.6.2)
+ *                   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L93-L97 (v0.6.3)
  *   `wasm-v1`       https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L98 (v0.5.0)
  *                   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L98 (v0.5.1)
  *                   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L98 (v0.6.0)
  *                   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L99 (v0.6.1)
  *                   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L99 (v0.6.2)
+ *                   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L99 (v0.6.3)
  *   `workflows-v1`  https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/protocol.rs#L99-L103 (v0.5.0)
  *                   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/protocol.rs#L99-L103 (v0.5.1)
  *                   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L99-L103 (v0.6.0)
  *                   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L105-L109 (v0.6.1)
  *                   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L105-L109 (v0.6.2)
+ *                   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L105-L109 (v0.6.3)
  *   `python-workers-v1`
  *                   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L100-L104 (v0.6.1)
  *                   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L100-L104 (v0.6.2)
+ *                   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L100-L104 (v0.6.3)
  */
 export const DEPLOYMENT_FEATURES: readonly string[] = [
   "assets-v1",
@@ -291,11 +332,13 @@ export const DEPLOYMENT_FEATURES: readonly string[] = [
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/protocol.rs#L382-L388 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/protocol.rs#L388-L394 (v0.6.1)
  *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/protocol.rs#L388-L394 (v0.6.2)
+ *   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/protocol.rs#L388-L394 (v0.6.3)
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/deploy.rs#L2426-L2427 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/deploy.rs#L2624-L2625 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/deploy.rs#L2624-L2625 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/deploy.rs#L2646-L2647 (v0.6.1)
  *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/deploy.rs#L2685-L2686 (v0.6.2)
+ *   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/deploy.rs#L2685-L2686 (v0.6.3)
  */
 export const ASSET_INDEX_SCHEMA_VERSION: number = 1;
 
@@ -309,11 +352,13 @@ export const ASSET_INDEX_SCHEMA_VERSION: number = 1;
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/ownership_store.rs#L932 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/ownership_store.rs#L937 (v0.6.1)
  *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/ownership_store.rs#L937 (v0.6.2)
+ *   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/ownership_store.rs#L984 (v0.6.3)
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/node_log.rs#L496-L498 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/node_log.rs#L523-L525 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/node_log.rs#L523-L525 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/node_log.rs#L523-L525 (v0.6.1)
  *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/node_log.rs#L528-L530 (v0.6.2)
+ *   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/node_log.rs#L528-L530 (v0.6.3)
  *
  * A process that can neither read nor create it never establishes authority and
  * exits, over and over, on the same key:
@@ -322,6 +367,7 @@ export const ASSET_INDEX_SCHEMA_VERSION: number = 1;
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/main.rs#L4645 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/main.rs#L4536 (v0.6.1)
  *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/main.rs#L4620 (v0.6.2)
+ *   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/main.rs#L4620 (v0.6.3)
  *
  * THE MINIMAL SHAPE below is what upstream REQUIRES of that object's JSON —
  * `node` and `expires_ms`, every other field carrying a serde default — so it is
@@ -331,11 +377,13 @@ export const ASSET_INDEX_SCHEMA_VERSION: number = 1;
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/ownership_store.rs#L32-L61 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/ownership_store.rs#L33-L62 (v0.6.1)
  *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/ownership_store.rs#L33-L62 (v0.6.2)
+ *   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/ownership_store.rs#L33-L62 (v0.6.3)
  *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/celld/ownership_store.rs#L179-L197 (v0.5.0)
  *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/celld/ownership_store.rs#L173-L191 (v0.5.1)
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/celld/ownership_store.rs#L173-L191 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/celld/ownership_store.rs#L174-L192 (v0.6.1)
  *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/celld/ownership_store.rs#L174-L192 (v0.6.2)
+ *   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/celld/ownership_store.rs#L174-L192 (v0.6.3)
  */
 export interface CelldNodeLease {
   /**
@@ -346,6 +394,7 @@ export interface CelldNodeLease {
    *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/logic/dead_node_reconciliation.rs#L36-L44 (v0.6.0)
    *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/logic/dead_node_reconciliation.rs#L36-L44 (v0.6.1)
    *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/logic/dead_node_reconciliation.rs#L36-L44 (v0.6.2)
+   *   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/logic/dead_node_reconciliation.rs#L36-L44 (v0.6.3)
    */
   node: string;
   /**
@@ -357,11 +406,13 @@ export interface CelldNodeLease {
    *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/logic/drain.rs#L34-L37 (v0.6.0)
    *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/logic/drain.rs#L34-L37 (v0.6.1)
    *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/logic/drain.rs#L34-L37 (v0.6.2)
+   *   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/logic/drain.rs#L34-L37 (v0.6.3)
    *   https://github.com/denoland/celld/blob/12d5b6333fe52717325addcfe1e99e9fd4f77bcd/crates/logic/dead_node_reconciliation.rs#L36-L44 (v0.5.0)
    *   https://github.com/denoland/celld/blob/42269c121c989c65c0638ab01f368baf18a5f0df/crates/logic/dead_node_reconciliation.rs#L36-L44 (v0.5.1)
    *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/logic/dead_node_reconciliation.rs#L36-L44 (v0.6.0)
    *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/logic/dead_node_reconciliation.rs#L36-L44 (v0.6.1)
    *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/logic/dead_node_reconciliation.rs#L36-L44 (v0.6.2)
+   *   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/logic/dead_node_reconciliation.rs#L36-L44 (v0.6.3)
    */
   expires_ms: number;
 }
@@ -377,6 +428,7 @@ export interface CelldNodeLease {
  *   https://github.com/denoland/celld/blob/bad4649d01f0db84cdc9093527e72e64ca7a14bf/crates/logic/peer.rs#L14-L25 (v0.6.0)
  *   https://github.com/denoland/celld/blob/f2bf648663a610eefde71f3547ad61e9b896b1f0/crates/logic/peer.rs#L14-L25 (v0.6.1)
  *   https://github.com/denoland/celld/blob/90b43017241f81189453d326d05948f388b34652/crates/logic/peer.rs#L14-L25 (v0.6.2)
+ *   https://github.com/denoland/celld/blob/8702f6d186c77698dbfb30cf29e3b1922a88f008/crates/logic/peer.rs#L14-L25 (v0.6.3)
  */
 export const CELLD_NODE_NAME_RE: RegExp = /^(?!\.{1,2}$)[A-Za-z\d_.-]{1,128}$/;
 
